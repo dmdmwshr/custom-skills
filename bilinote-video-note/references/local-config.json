@@ -1,0 +1,57 @@
+{
+  "skill_name": "bilinote-video-note",
+  "backend_base_url": "http://127.0.0.1:8483",
+  "backend_result_dir": "D:\\Program_Files\\BiliNote\\backend\\note_results",
+  "supported_platforms": [
+    "bilibili",
+    "douyin"
+  ],
+  "default_request": {
+    "quality": "medium",
+    "style": "minimal",
+    "link": true,
+    "screenshot": false,
+    "video_understanding": false,
+    "format": [],
+    "provider_id": "openai",
+    "model_name": "gpt-5.4"
+  },
+  "poll_interval_seconds": 5,
+  "timeout_seconds": 1800,
+  "note_roots": {
+    "bilibili": "D:\\12070\\Documents\\workspaces\\Obsidian仓库\\日常工作记录\\30_Knowledge (知识)\\01_领域\\AI工具链\\BiliNote视频笔记\\bilibili",
+    "douyin": "D:\\12070\\Documents\\workspaces\\Obsidian仓库\\日常工作记录\\30_Knowledge (知识)\\01_领域\\AI工具链\\BiliNote视频笔记\\douyin"
+  },
+  "attachment_roots": {
+    "bilibili": "D:\\12070\\Documents\\workspaces\\Obsidian仓库\\日常工作记录\\80_Attachments (附件)\\04_来源与摘录\\bilinote-video-note\\bilibili",
+    "douyin": "D:\\12070\\Documents\\workspaces\\Obsidian仓库\\日常工作记录\\80_Attachments (附件)\\04_来源与摘录\\bilinote-video-note\\douyin"
+  },
+  "skill_doc_note_path": "D:\\12070\\Documents\\workspaces\\Obsidian仓库\\日常工作记录\\30_Knowledge (知识)\\01_领域\\AI工具链\\BiliNote视频知识提取Skill（bilinote-video-note）.md",
+  "frontmatter_defaults": {
+    "type": "source",
+    "status": "active",
+    "area_link": "[[领域 - AI工具链]]",
+    "related_links": [
+      "[[领域 - AI工具链]]",
+      "[[skill管理与更新（skill-updater）]]",
+      "[[BiliNote视频知识提取Skill（bilinote-video-note）]]"
+    ],
+    "tags": [
+      "video",
+      "bilinote",
+      "skill",
+      "bilinote-video-note"
+    ]
+  },
+  "graphiti_groups": {
+    "skill_management": "skill-management",
+    "workflow_ingest": "workflow-content-ingest"
+  },
+  "notes": [
+    "正文笔记与附件目录分离保存。",
+    "默认只支持 bilibili 和 douyin。",
+    "默认模型固定为 openai/gpt-5.4，但允许调用时覆盖。",
+    "source_id 优先取 audio_meta.video_id，取不到时回退到规范化 URL 哈希。",
+    "转写全文与任务 JSON 不直接写入正文。"
+  ]
+}

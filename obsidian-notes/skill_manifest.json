@@ -1,0 +1,14 @@
+{
+  "skill_name": "obsidian-notes",
+  "skill_version": "1.0.0",
+  "supported_memory_system_versions": [],
+  "required_vault_id": "",
+  "required_entrypoints": [],
+  "required_generated_files": [],
+  "required_skill_files": [
+    "SKILL.md",
+    "skill_manifest.json",
+    "references/vault-discovery.json",
+    "agents/openai.yaml"
+  ]
+}

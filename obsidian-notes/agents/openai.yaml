@@ -1,0 +1,4 @@
+version: 1
+display_name: Obsidian Notes
+short_description: Read, search, and write local Obsidian notes.
+default_prompt: Read, search, organize, or update Obsidian notes, links, and attachments without treating Obsidian as the primary memory system.

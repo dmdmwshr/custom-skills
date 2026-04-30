@@ -1,0 +1,24 @@
+{
+  "target_vault_role": "notes",
+  "target_vault_display_name": "主笔记",
+  "target_vault_aliases": [
+    "主笔记",
+    "日常工作记录"
+  ],
+  "preferred_vault_root": "D:\\12070\\Documents\\workspaces\\Obsidian仓库\\日常工作记录",
+  "retained_note_roots": [
+    "30_Knowledge (知识)",
+    "80_Attachments (附件)"
+  ],
+  "required_markers": [
+    "30_Knowledge (知识)",
+    "80_Attachments (附件)"
+  ],
+  "discovery_order": [
+    "cwd_or_parent_marker_match",
+    "known_vault_path",
+    "obsidian_global_config_candidates",
+    "user_confirmation_if_ambiguous"
+  ],
+  "notes": "旧的 vault_identity、AI_读取入口、AI查询路由和 memory_cli 入口已不再依赖。"
+}

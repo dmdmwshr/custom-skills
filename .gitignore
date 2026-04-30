@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Runtime/output artifacts
+output/
+outputs/
+tmp/
+temp/
+logs/
+*.log
+
+# Local editor state
+.idea/
+.vscode/

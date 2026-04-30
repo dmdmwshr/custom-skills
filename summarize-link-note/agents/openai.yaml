@@ -1,0 +1,4 @@
+version: 1
+display_name: Summarize Link Note
+short_description: Convert normal web links into Markdown note drafts with summarize CLI.
+default_prompt: Convert a normal webpage or article URL into a Markdown note draft with summarize CLI, save it into the fixed summarize output directory, and do not use this skill for PDFs.

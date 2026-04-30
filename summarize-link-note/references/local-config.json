@@ -1,0 +1,17 @@
+{
+  "cli": "summarize",
+  "config_path": "C:\\Users\\12070\\.summarize\\config.json",
+  "output_dir": "D:\\12070\\Documents\\workspaces\\summarize-output",
+  "default_mode": "summary-markdown",
+  "excluded_inputs": [
+    "pdf"
+  ],
+  "notes": [
+    "默认把普通网页和文章 URL 总结成 Markdown 笔记",
+    "本机 summarize 已配置 FIRECRAWL_API_KEY，普通网页会优先走 Firecrawl 抽取后再总结",
+    "PDF 交给现有 PDF 专用流程",
+    "如果后续要写入 Obsidian，再配合 obsidian-notes 和 obsidian-markdown",
+    "浏览器扩展或插件 ID 不参与本 skill 的 CLI 配置",
+    "如果用户明确要原文 Markdown，再切回 --extract --format md"
+  ]
+}

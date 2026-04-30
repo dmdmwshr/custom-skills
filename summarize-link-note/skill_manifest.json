@@ -1,0 +1,15 @@
+{
+  "skill_name": "summarize-link-note",
+  "skill_version": "1.0.0",
+  "supported_memory_system_versions": [],
+  "required_vault_id": "",
+  "required_entrypoints": [],
+  "required_generated_files": [],
+  "required_skill_files": [
+    "SKILL.md",
+    "skill_manifest.json",
+    "agents/openai.yaml",
+    "references/local-config.json",
+    "scripts/save-url-to-md.ps1"
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "FlClash Proxy Safe Toggle"
+  short_description: "Safely pause or resume FlClash proxy. Never close the app while proxy is still active."
+  default_prompt: "Inspect FlClash state, then safely pause or resume the proxy through the in-app control without breaking network access."
