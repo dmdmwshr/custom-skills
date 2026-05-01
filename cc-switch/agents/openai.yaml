@@ -1,0 +1,7 @@
+interface:
+  display_name: "CC Switch"
+  short_description: "Manage cc-switch skill repository sources."
+  default_prompt: "Use $cc-switch to list, add, update, or remove cc-switch skill repository sources safely."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,18 @@
+{
+  "skill_name": "cc-switch",
+  "skill_version": "1.0.0",
+  "x-custom-skill": true,
+  "x-managed-by": "cc-switch",
+  "x-source-repo": "dmdmwshr/custom-skills",
+  "x-edit-policy": "edit-source-repo-only",
+  "supported_memory_system_versions": [],
+  "required_vault_id": "",
+  "required_entrypoints": [],
+  "required_generated_files": [],
+  "required_skill_files": [
+    "SKILL.md",
+    "skill_manifest.json",
+    "agents/openai.yaml",
+    "scripts/skill-repos.py"
+  ]
+}

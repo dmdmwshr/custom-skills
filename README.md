@@ -8,6 +8,7 @@ Official and third-party skills remain managed by cc-switch repository sources.
 ## Included skills
 
 - bilinote-video-note
+- cc-switch
 - drawio-local
 - flclash-proxy-toggle
 - mineru-local
