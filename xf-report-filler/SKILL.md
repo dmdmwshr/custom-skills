@@ -1,6 +1,10 @@
 ---
 name: "xf-report-filler"
 description: "根据长文本批量自动填报《消防产品专项监督抽查卷评查记录表》空表，或从旧表格读取提取修改数据重新生成。"
+x-custom-skill: true
+x-managed-by: cc-switch
+x-source-repo: dmdmwshr/custom-skills
+x-edit-policy: edit-source-repo-only
 ---
 
 # 消防成绩表全场景批量自动化填报 (xf-report-filler v5)

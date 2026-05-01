@@ -1,6 +1,10 @@
 ---
 name: obsidian-notes
 description: 用于在本机 Obsidian 仓库中查询、读取和写入保留笔记。仅处理 `30_Knowledge (知识)` 与 `80_Attachments (附件)` 下的正文、双链、附件和导航。
+x-custom-skill: true
+x-managed-by: cc-switch
+x-source-repo: dmdmwshr/custom-skills
+x-edit-policy: edit-source-repo-only
 ---
 
 # Obsidian Notes

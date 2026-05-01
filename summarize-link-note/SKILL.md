@@ -1,6 +1,10 @@
 ---
 name: summarize-link-note
 description: 当用户提供普通网页、文章 URL，并明确要求提取为笔记、转为 Markdown、保存为 `.md` 或先转成笔记草稿时使用。默认调用本机 `summarize` CLI 以总结模式生成 Markdown 笔记，固定输出到 `D:\12070\Documents\workspaces\summarize-output`。PDF 不使用本 skill，因为 PDF 已有其他专用转换流程。
+x-custom-skill: true
+x-managed-by: cc-switch
+x-source-repo: dmdmwshr/custom-skills
+x-edit-policy: edit-source-repo-only
 ---
 
 # Summarize Link Note

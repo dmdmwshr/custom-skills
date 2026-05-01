@@ -1,6 +1,10 @@
 ---
 name: flclash-proxy-toggle
 description: 在 Windows 桌面上安全检查、暂停、恢复 FlClash 代理，并验证当前代理状态。用于用户提到 FlClash、暂停代理、恢复代理、关闭代理、开启代理、恢复直连、恢复正常网络或确认代理是否已停用等场景。仅在需要操作 FlClash 桌面应用本身时使用，不用于泛化网络排障。
+x-custom-skill: true
+x-managed-by: cc-switch
+x-source-repo: dmdmwshr/custom-skills
+x-edit-policy: edit-source-repo-only
 ---
 
 # FlClash Proxy Toggle

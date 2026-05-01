@@ -1,6 +1,10 @@
 ---
 name: mineru-local
 description: 仅在 Zerox 转 Markdown 效果不佳，或者用户明确要求时，使用 D:\Program_Files\MinerU-Docker 的 Docker 高精度 MinerU 作为备份方案。适用于长篇预算标准、正文夹大量表格、需要 hybrid-auto-engine 兜底的场景。不要再使用已退役的 D:\Program_Files\MinerU 本地 pipeline 安装。
+x-custom-skill: true
+x-managed-by: cc-switch
+x-source-repo: dmdmwshr/custom-skills
+x-edit-policy: edit-source-repo-only
 ---
 
 # MinerU Local

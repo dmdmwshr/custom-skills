@@ -1,6 +1,10 @@
 ---
 name: bilinote-video-note
 description: 当用户要求把 B 站或抖音视频提取为知识笔记、写入 Obsidian、保留视频来源区分、降低 token 消耗、明确要求使用 BiliNote 固定脚本，或只贴出 bilibili / douyin 视频链接希望直接处理时使用。默认调用本机 BiliNote 后端生成笔记，再用固定 PowerShell 脚本落库到 Obsidian。
+x-custom-skill: true
+x-managed-by: cc-switch
+x-source-repo: dmdmwshr/custom-skills
+x-edit-policy: edit-source-repo-only
 ---
 
 # BiliNote Video Note

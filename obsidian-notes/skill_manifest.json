@@ -1,6 +1,10 @@
 {
   "skill_name": "obsidian-notes",
   "skill_version": "1.0.0",
+  "x-custom-skill": true,
+  "x-managed-by": "cc-switch",
+  "x-source-repo": "dmdmwshr/custom-skills",
+  "x-edit-policy": "edit-source-repo-only",
   "supported_memory_system_versions": [],
   "required_vault_id": "",
   "required_entrypoints": [],

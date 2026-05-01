@@ -1,6 +1,10 @@
 ---
 name: zerox-local
 description: 默认优先使用本机安装在 D:\Program_Files\zerox 的 Zerox，把 PDF、Office 文档、文本、HTML、表格和常见图片转换为 Markdown。适用于需要优先走 Zerox 做文档转 Markdown、检查其模型端点状态、运行转换并读取输出结果的场景。
+x-custom-skill: true
+x-managed-by: cc-switch
+x-source-repo: dmdmwshr/custom-skills
+x-edit-policy: edit-source-repo-only
 ---
 
 # Zerox Local

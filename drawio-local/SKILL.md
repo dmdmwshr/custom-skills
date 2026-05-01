@@ -1,6 +1,10 @@
 ---
 name: drawio-local
 description: Use this skill when the user wants to create or update flowcharts, architecture diagrams, swimlanes, org charts, sequence diagrams, mind maps, or native `.drawio` files on this machine.
+x-custom-skill: true
+x-managed-by: cc-switch
+x-source-repo: dmdmwshr/custom-skills
+x-edit-policy: edit-source-repo-only
 ---
 
 # drawio-local
