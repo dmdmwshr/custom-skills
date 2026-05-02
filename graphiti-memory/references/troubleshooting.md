@@ -37,11 +37,13 @@ $OutputEncoding = [Console]::OutputEncoding
 - 使用 `scripts/list-graphiti-tools.ps1` 列工具。
 - 确认 endpoint 使用 `http://127.0.0.1:8010/mcp`。
 - Streamable HTTP 需要先 `initialize`，再带 `mcp-session-id` 调 `tools/list`。
+- `list-graphiti-tools.ps1` 只是 MCP 工具清单对照脚本；日常记忆读写仍优先使用 `scripts/graphiti_cli.py`。
 
 常见问题：
 
 - `406 Not Acceptable`：缺少 `Accept: application/json, text/event-stream`。
 - `404 Not Found`：endpoint 路径或尾斜杠处理不一致；使用脚本里固定地址。
+- Windows PowerShell 5.1 直接用 `curl.exe --data $JsonString` 发送 JSON 时可能丢失引号，导致 JSON-RPC `Parse error`；脚本应通过 UTF-8 临时文件和 `--data-binary "@file"` 发送请求。
 - 工具名不匹配：以当前 `tools/list` 输出为准，不凭旧文档猜测。
 
 ## 3. 依赖层
