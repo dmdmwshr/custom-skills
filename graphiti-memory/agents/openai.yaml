@@ -1,0 +1,4 @@
+version: 1
+display_name: Graphiti Memory
+short_description: Use and troubleshoot the local Graphiti memory system.
+default_prompt: Query, write, validate, or troubleshoot the local Graphiti memory system with strict safeguards for destructive operations.
