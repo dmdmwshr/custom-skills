@@ -1,6 +1,6 @@
 ---
 name: cc-switch
-description: 用于管理本机 CC Switch 桌面应用相关的 skills 仓库源、同步来源和 SQLite 记录，包括查询、添加、启停、改分支和删除 skill_repos；当前以桌面应用和随附 SQLite 脚本为准，不依赖旧 CLI shim。
+description: 用于管理本机 CC Switch 桌面应用相关的 skills 仓库源、同步来源和 SQLite 记录，包括自建 skill 修改同步、新建安装提示、删除清理、仓库源查询、启停和排障；当前以桌面应用和随附 SQLite 脚本为准，不依赖旧 CLI shim。
 x-custom-skill: true
 x-managed-by: cc-switch
 x-source-repo: dmdmwshr/custom-skills
@@ -18,6 +18,7 @@ x-edit-policy: edit-source-repo-only
 - 启用或停用已有仓库源。
 - 修改已有仓库源的分支。
 - 删除仓库源，并在删除前列出关联 skills。
+- 管理自建 skills 的修改同步、新建安装提示、删除清理和多客户端启用状态核对。
 - 排查 CC Switch 桌面应用、settings、数据库、同步来源、仓库源和安装副本状态。
 
 ## 硬规则
@@ -30,6 +31,12 @@ x-edit-policy: edit-source-repo-only
 6. 不直接修改 `C:\Users\12070\.cc-switch\skills\<skill-name>` 安装副本；自建 skill 内容只改 `C:\Users\12070\.cc-switch\skills\自建skills` 源仓库。
 7. 不为 `cc-switch` 的零散子功能新建独立 skill；后续 cc-switch 管理功能集中维护在本 skill 内。
 8. `C:\Users\12070\.local\bin\cc-switch.cmd` 是旧 CLI shim，指向已不存在的 `D:\Program_Files\CC-Switch-CLI\current\cc-switch.exe`；不得把它作为可用 `cc-switch` 入口。
+
+## 自建 skill 生命周期
+
+- 修改已安装的自建 skill：只改 `C:\Users\12070\.cc-switch\skills\自建skills\<skill-name>` 源仓库；保持 `name` 与目录名不变；提交并推送后，通过 CC Switch 桌面应用同步或刷新，让 `C:\Users\12070\.cc-switch\skills\<skill-name>` 安装副本自动更新；随后验证安装副本内容、`skills` 表的 `content_hash` / 时间戳和 `enabled_claude`、`enabled_codex`、`enabled_gemini`、`enabled_opencode`、`enabled_hermes` 状态。
+- 新建自建 skill：先在源仓库新建、提交并推送；默认不替用户强行安装，提示用户通过 CC Switch 桌面应用手动安装；安装后再查询 `skills` 表，核对来源、目录、hash 和多客户端启用状态。
+- 删除自建 skill：源仓库目录和 CC 安装侧一起处理；先查 `skills` 表确认该 skill 是否来自 `repo_owner=dmdmwshr` 且 `repo_name=custom-skills`，列出影响；通过 CC Switch 桌面应用卸载或删除安装副本；必要时先备份数据库，再清理对应 `skills` 记录。单删某个 skill 时不要删除 `skill_repos` 中的 `dmdmwshr/custom-skills` 仓库源，除非用户明确要求删除整个自建源。
 
 ## 默认流程
 
