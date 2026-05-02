@@ -255,17 +255,22 @@ def cmd_list_groups(args: argparse.Namespace) -> dict[str, Any]:
 def cmd_list_profiles(args: argparse.Namespace) -> dict[str, Any]:
     registry = load_yaml(REGISTRY_PATH)
     profiles = (registry.get("model_profiles") or {}).get(args.kind) or {}
+    current = (registry.get("current_profiles") or {}).get(args.kind)
     return {
         "message": "profiles retrieved",
         "kind": args.kind,
-        "current": (registry.get("current_profiles") or {}).get(args.kind),
+        "current": current,
         "items": [
             {
                 "profile": name,
                 "enabled": bool(raw.get("enabled", False)) if isinstance(raw, dict) else False,
                 "provider": raw.get("provider") if isinstance(raw, dict) else None,
                 "model": raw.get("model") if isinstance(raw, dict) else None,
+                "upstream": raw.get("upstream") if isinstance(raw, dict) else None,
                 "api_url": (raw.get("api_url") or raw.get("api_url_env")) if isinstance(raw, dict) else None,
+                "tested_at": raw.get("tested_at") if isinstance(raw, dict) else None,
+                "test_status": raw.get("test_status") if isinstance(raw, dict) else None,
+                "current": name == current,
                 "notes": raw.get("notes", raw.get("purpose", "")) if isinstance(raw, dict) else "",
             }
             for name, raw in profiles.items()
@@ -283,7 +288,7 @@ def upstream_items(registry: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "provider": "openai_compatible",
             "api_url": "https://api.deepseek.com",
             "models_url": "https://api.deepseek.com/v1/models",
-            "api_key_env": "OPENAI_API_KEY",
+            "api_key_env": "DEEPSEEK_API_KEY",
             "profile_prefix": "deepseek",
             "notes": "DeepSeek OpenAI-compatible endpoint.",
         },
@@ -292,7 +297,7 @@ def upstream_items(registry: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "provider": "openai_compatible",
             "api_url": "https://sub2api.meifu.zzxhlyj.top",
             "models_url": "https://sub2api.meifu.zzxhlyj.top/v1/models",
-            "api_key_env": "OPENAI_API_KEY",
+            "api_key_env": "SUB2API_API_KEY",
             "profile_prefix": "sub2api",
             "notes": "GPT-compatible relay endpoint.",
         },
@@ -381,6 +386,16 @@ def cmd_add_model_profile(args: argparse.Namespace) -> dict[str, Any]:
     profile_name = args.profile or _profile_name_for(args.upstream, args.model)
     profiles_root = registry.setdefault("model_profiles", {})
     profiles = profiles_root.setdefault(args.kind, {})
+    existing = _find_profile_by_upstream_model(profiles, args.upstream, args.model)
+    if existing and not args.profile and not args.update:
+        return {
+            "message": "model profile already exists",
+            "ok": True,
+            "existing": True,
+            "kind": args.kind,
+            "profile": existing[0],
+            "profile_data": existing[1],
+        }
     if profile_name in profiles and not args.update:
         raise SystemExit(f"Profile already exists: {args.kind}/{profile_name}. Use --update to replace metadata.")
     target = _test_target_from_upstream(upstream, args.model, kind=args.kind)
@@ -405,6 +420,27 @@ def cmd_add_model_profile(args: argparse.Namespace) -> dict[str, Any]:
     save_yaml(REGISTRY_PATH, registry)
     _maybe_render_summary_after_change()
     return {"message": "model profile added", "ok": True, "backup": backup, **preview}
+
+
+def cmd_delete_model_profile(args: argparse.Namespace) -> dict[str, Any]:
+    registry = load_yaml(REGISTRY_PATH)
+    current = (registry.get("current_profiles") or {}).get(args.kind)
+    if current == args.profile:
+        raise SystemExit(f"Cannot delete current {args.kind} profile: {args.profile}. Switch to another profile first.")
+    profiles = (registry.get("model_profiles") or {}).get(args.kind) or {}
+    if args.profile not in profiles:
+        raise SystemExit(f"Unknown {args.kind} profile: {args.profile}")
+    deleted = profiles[args.profile]
+    preview = {"kind": args.kind, "profile": args.profile, "deleted": deleted}
+    if args.dry_run:
+        return {"message": "dry run; profile not deleted", **preview}
+    if not args.yes:
+        raise SystemExit("delete-model-profile writes registry. Re-run with --yes or use --dry-run.")
+    backup = _backup_selected_files("delete-model-profile", [REGISTRY_PATH])
+    del profiles[args.profile]
+    save_yaml(REGISTRY_PATH, registry)
+    _maybe_render_summary_after_change()
+    return {"message": "model profile deleted", "backup": backup, **preview}
 
 
 def cmd_switch_profile(args: argparse.Namespace) -> dict[str, Any]:
@@ -664,6 +700,15 @@ def _public_upstream(raw: dict[str, Any]) -> dict[str, Any]:
 def _profile_name_for(upstream_name: str, model: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", model.strip()).strip("-").lower()
     return f"{upstream_name}-{slug}" if not slug.startswith(f"{upstream_name}-") else slug
+
+
+def _find_profile_by_upstream_model(profiles: dict[str, Any], upstream: str, model: str) -> tuple[str, dict[str, Any]] | None:
+    for name, raw in profiles.items():
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("upstream") == upstream and raw.get("model") == model:
+            return str(name), raw
+    return None
 
 
 def _normalize_api_url(url: str | None) -> str:
@@ -1160,6 +1205,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_model.add_argument("--dry-run", action="store_true")
     add_model.add_argument("--yes", action="store_true")
     add_model.set_defaults(func=cmd_add_model_profile)
+
+    delete_model = sub.add_parser("delete-model-profile")
+    add_format_arg(delete_model)
+    delete_model.add_argument("--kind", choices=["graphiti_llm", "daemon_assistant", "reranker"], required=True)
+    delete_model.add_argument("--profile", required=True)
+    delete_model.add_argument("--dry-run", action="store_true")
+    delete_model.add_argument("--yes", action="store_true")
+    delete_model.set_defaults(func=cmd_delete_model_profile)
 
     switch = sub.add_parser("switch-profile")
     add_format_arg(switch)
