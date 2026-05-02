@@ -14,6 +14,8 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ GRAPHITI_MCP_DIR = Path(r"D:\Program_Files\graphiti\mcp_server")
 GRAPHITI_VENV_PYTHON = GRAPHITI_MCP_DIR / ".venv" / "Scripts" / "python.exe"
 GRAPHITI_CONFIG_PATH = GRAPHITI_MCP_DIR / "config" / "config-docker-neo4j.yaml"
 GRAPHITI_ENV_PATH = GRAPHITI_MCP_DIR / ".env"
+REGISTRY_PATH = GRAPHITI_MCP_DIR / "config" / "memory-registry.yaml"
 
 SECRET_PATTERNS = [
     re.compile(r"(sk-[A-Za-z0-9_\-]{12,})"),
@@ -211,6 +214,70 @@ def raw_yaml_graphiti_section() -> dict[str, Any]:
     return raw.get("graphiti") or {}
 
 
+def load_registry() -> dict[str, Any]:
+    try:
+        import yaml
+    except Exception:
+        return {}
+    if not REGISTRY_PATH.exists():
+        return {}
+    try:
+        return yaml.safe_load(REGISTRY_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def registered_group_ids(registry: dict[str, Any], *, include_archived: bool = True) -> set[str]:
+    rows = registry.get("groups") or []
+    ids: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if include_archived or row.get("status", "active") == "active":
+            group_id = row.get("group_id")
+            if group_id:
+                ids.add(str(group_id))
+    return ids
+
+
+def is_group_registered_or_allowed(registry: dict[str, Any], group_id: str) -> bool:
+    if not registry:
+        return True
+    if group_id in registered_group_ids(registry, include_archived=True):
+        return True
+    prefixes = (registry.get("group_policy") or {}).get("allow_unregistered_prefixes") or []
+    return any(group_id.startswith(str(prefix)) for prefix in prefixes)
+
+
+def validate_group_ids(groups: list[str], registry: dict[str, Any], *, allow_unregistered: bool = False) -> None:
+    if allow_unregistered or not registry:
+        return
+    policy = (registry.get("group_policy") or {}).get("unknown_group_write", "deny")
+    unknown = [group for group in groups if not is_group_registered_or_allowed(registry, group)]
+    if unknown and policy == "deny":
+        known = sorted(registered_group_ids(registry, include_archived=True))
+        raise SystemExit(
+            "Unregistered group_id is not allowed by memory registry: "
+            f"{', '.join(unknown)}. Register it with memory_registry.py add-group or rerun with "
+            "--allow-unregistered-group for an explicit one-off override. Known groups: "
+            f"{', '.join(known)}"
+        )
+
+
+def registry_status_summary(registry: dict[str, Any]) -> dict[str, Any]:
+    if not registry:
+        return {"path": str(REGISTRY_PATH), "loaded": False}
+    return {
+        "path": str(REGISTRY_PATH),
+        "loaded": True,
+        "updated_at": registry.get("updated_at"),
+        "current_profiles": registry.get("current_profiles") or {},
+        "groups": sorted(registered_group_ids(registry, include_archived=True)),
+        "group_policy": registry.get("group_policy") or {},
+        "reranker_policy": registry.get("reranker_policy") or {},
+    }
+
+
 def build_edge_types(modules: dict[str, Any]) -> tuple[dict[str, type[Any]] | None, dict[tuple[str, str], list[str]] | None]:
     section = raw_yaml_graphiti_section()
     edge_configs = section.get("edge_types") or []
@@ -347,11 +414,106 @@ async def retry_async(label: str, attempts: int, func):
     raise last_exc
 
 
+def item_text_for_rerank(item: dict[str, Any]) -> str:
+    candidates = [
+        item.get("fact"),
+        item.get("name"),
+        item.get("summary"),
+        item.get("description"),
+        item.get("content"),
+    ]
+    attributes = item.get("attributes")
+    if isinstance(attributes, dict):
+        candidates.extend([attributes.get("fact"), attributes.get("name"), attributes.get("summary")])
+    text = "\n".join(str(value) for value in candidates if value)
+    if text:
+        return text
+    return json.dumps(item, ensure_ascii=False, default=str)
+
+
+def heuristic_rerank(query: str, items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    query_terms = [term.lower() for term in re.findall(r"[\w\u4e00-\u9fff]+", query) if len(term) > 1]
+    ranked = []
+    for index, item in enumerate(items):
+        text = item_text_for_rerank(item).lower()
+        score = 0.0
+        for term in query_terms:
+            if term in text:
+                score += 1.0
+        score += max(0.0, 1.0 - index / max(len(items), 1)) * 0.05
+        copy = dict(item)
+        copy["rerank_score"] = round(score, 4)
+        copy["rerank_method"] = "heuristic"
+        ranked.append((score, -index, copy))
+    ranked.sort(reverse=True, key=lambda row: (row[0], row[1]))
+    return [row[2] for row in ranked[:limit]]
+
+
+def ollama_rerank(query: str, items: list[dict[str, Any]], profile: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    api_url = str(profile.get("api_url") or "http://127.0.0.1:11434").rstrip("/")
+    model = str(profile.get("model") or "")
+    if not model:
+        raise RuntimeError("reranker profile does not define model")
+    ranked = []
+    for index, item in enumerate(items):
+        text = item_text_for_rerank(item)[:4000]
+        prompt = (
+            "请只输出 0 到 1 之间的小数，表示候选内容对查询的相关性。\n"
+            f"查询：{query}\n"
+            f"候选：{text}\n"
+            "相关性分数："
+        )
+        body = json.dumps(
+            {"model": model, "prompt": prompt, "stream": False, "options": {"temperature": 0}},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{api_url}/api/generate",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+            raw_score = str(payload.get("response", "0")).strip()
+            match = re.search(r"0(?:\.\d+)?|1(?:\.0+)?", raw_score)
+            score = float(match.group(0)) if match else 0.0
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError(f"ollama reranker failed: {redact(str(exc))}") from exc
+        copy = dict(item)
+        copy["rerank_score"] = round(max(0.0, min(1.0, score)), 4)
+        copy["rerank_method"] = f"ollama:{model}"
+        ranked.append((copy["rerank_score"], -index, copy))
+    ranked.sort(reverse=True, key=lambda row: (row[0], row[1]))
+    return [row[2] for row in ranked[:limit]]
+
+
+def apply_rerank(query: str, items: list[dict[str, Any]], args: argparse.Namespace, registry: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not getattr(args, "rerank", False):
+        return items, {"enabled": False}
+    limit = int(getattr(args, "rerank_limit", 10) or 10)
+    profile_name = getattr(args, "rerank_profile", None) or ((registry.get("reranker_policy") or {}).get("default_profile")) or "disabled"
+    profiles = (((registry.get("model_profiles") or {}).get("reranker") or {}))
+    profile = profiles.get(profile_name) or {}
+    provider = str(profile.get("provider") or "none")
+    if profile_name == "disabled" or provider == "none":
+        ranked = heuristic_rerank(query, items, limit)
+        return ranked, {"enabled": True, "profile": profile_name, "provider": "heuristic", "note": "registry reranker is disabled; used local heuristic rerank"}
+    if provider == "ollama":
+        ranked = ollama_rerank(query, items, profile, limit)
+        return ranked, {"enabled": True, "profile": profile_name, "provider": provider, "model": profile.get("model")}
+    ranked = heuristic_rerank(query, items, limit)
+    return ranked, {"enabled": True, "profile": profile_name, "provider": "heuristic", "note": f"provider {provider} not implemented in CLI rerank; used heuristic"}
+
+
 async def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
     runtime = GraphitiRuntime()
+    registry = load_registry()
     info: dict[str, Any] = {
         "config_path": str(GRAPHITI_CONFIG_PATH),
         "env_path": str(GRAPHITI_ENV_PATH),
+        "registry": registry_status_summary(registry),
         "llm": {
             "provider": runtime.cfg.llm.provider,
             "model": runtime.cfg.llm.model,
@@ -407,6 +569,7 @@ async def cmd_doctor(args: argparse.Namespace) -> dict[str, Any]:
 async def cmd_episodes(args: argparse.Namespace) -> dict[str, Any]:
     async with GraphitiRuntime() as rt:
         groups = parse_group_ids(args.group_id, args.group_ids, rt.group_id)
+        validate_group_ids(groups, load_registry(), allow_unregistered=getattr(args, "allow_unregistered_group", False))
         episodes = await rt.modules["EpisodicNode"].get_by_group_ids(rt.client.driver, groups, limit=args.limit)
         items = [
             ep.model_dump(exclude={"entity_edges"} if not args.include_edges else set())
@@ -424,6 +587,7 @@ async def cmd_add(args: argparse.Namespace) -> dict[str, Any]:
 
     async with GraphitiRuntime() as rt:
         group_id = args.group_id or rt.group_id
+        validate_group_ids([group_id], load_registry(), allow_unregistered=getattr(args, "allow_unregistered_group", False))
         result = await retry_async(
             "add_episode",
             args.retries,
@@ -460,25 +624,32 @@ async def cmd_add(args: argparse.Namespace) -> dict[str, Any]:
 
 async def cmd_search_facts(args: argparse.Namespace) -> dict[str, Any]:
     async with GraphitiRuntime() as rt:
+        registry = load_registry()
         groups = parse_group_ids(args.group_id, args.group_ids, rt.group_id)
+        validate_group_ids(groups, registry, allow_unregistered=getattr(args, "allow_unregistered_group", False))
+        recall_limit = max(args.limit, int(getattr(args, "rerank_recall_limit", 30) or 30)) if getattr(args, "rerank", False) else args.limit
         edges = await retry_async(
             "search_facts",
             args.retries,
             lambda: rt.client.search(
                 query=args.query,
                 group_ids=groups,
-                num_results=args.limit,
+                num_results=recall_limit,
                 center_node_uuid=args.center_node_uuid,
             ),
         )
         items = [format_fact_result_safe(edge) for edge in edges]
-        return {"message": "facts retrieved", "group_ids": groups, "items": items}
+        items, rerank_info = apply_rerank(args.query, items, args, registry)
+        return {"message": "facts retrieved", "group_ids": groups, "rerank": rerank_info, "items": items[: args.limit if not getattr(args, "rerank", False) else len(items)]}
 
 
 async def cmd_search_nodes(args: argparse.Namespace) -> dict[str, Any]:
     async with GraphitiRuntime() as rt:
+        registry = load_registry()
         groups = parse_group_ids(args.group_id, args.group_ids, rt.group_id)
+        validate_group_ids(groups, registry, allow_unregistered=getattr(args, "allow_unregistered_group", False))
         filters = rt.modules["SearchFilters"](node_labels=args.entity_type or None)
+        recall_limit = max(args.limit, int(getattr(args, "rerank_recall_limit", 30) or 30)) if getattr(args, "rerank", False) else args.limit
         results = await retry_async(
             "search_nodes",
             args.retries,
@@ -489,9 +660,10 @@ async def cmd_search_nodes(args: argparse.Namespace) -> dict[str, Any]:
                 search_filter=filters,
             ),
         )
-        nodes = (results.nodes or [])[: args.limit]
+        nodes = (results.nodes or [])[: recall_limit]
         items = [format_node_result_safe(node) for node in nodes]
-        return {"message": "nodes retrieved", "group_ids": groups, "items": items}
+        items, rerank_info = apply_rerank(args.query, items, args, registry)
+        return {"message": "nodes retrieved", "group_ids": groups, "rerank": rerank_info, "items": items[: args.limit if not getattr(args, "rerank", False) else len(items)]}
 
 
 async def cmd_get_edge(args: argparse.Namespace) -> dict[str, Any]:
@@ -539,12 +711,48 @@ async def cmd_smoke(args: argparse.Namespace) -> dict[str, Any]:
         query="Graphiti skill CLI smoke test",
         group_id=args.group_id,
         group_ids=None,
+        allow_unregistered_group=getattr(args, "allow_unregistered_group", False),
         limit=5,
+        rerank=False,
+        rerank_profile=None,
+        rerank_recall_limit=30,
+        rerank_limit=10,
         center_node_uuid=None,
         retries=args.retries,
     )
     facts = await cmd_search_facts(facts_args)
     return {"write": result, "facts": facts}
+
+
+async def cmd_reranker_status(args: argparse.Namespace) -> dict[str, Any]:
+    registry = load_registry()
+    profiles = ((registry.get("model_profiles") or {}).get("reranker") or {}) if registry else {}
+    policy = (registry.get("reranker_policy") or {}) if registry else {}
+    return {
+        "registry_path": str(REGISTRY_PATH),
+        "registry_loaded": bool(registry),
+        "policy": policy,
+        "current_profile": (registry.get("current_profiles") or {}).get("reranker") if registry else None,
+        "profiles": profiles,
+        "note": "Reranker is external to Graphiti core in this skill. Disabled means Graphiti hybrid/RRF ordering is returned unchanged unless --rerank is explicitly used.",
+    }
+
+
+async def cmd_reranker_test(args: argparse.Namespace) -> dict[str, Any]:
+    registry = load_registry()
+    sample_items = [
+        {"name": "Graphiti skill CLI", "summary": "本地 CLI 支持 group_id、同步写入、查询 facts 和 nodes。"},
+        {"name": "Unrelated UI note", "summary": "页面使用 details 折叠展示长内容。"},
+        {"name": "Reranker profile", "summary": "外置 reranker 默认关闭，可用 Ollama bge reranker profile。"},
+    ]
+    namespace = argparse.Namespace(
+        rerank=True,
+        rerank_profile=args.rerank_profile,
+        rerank_limit=args.limit,
+        rerank_recall_limit=len(sample_items),
+    )
+    ranked, info = apply_rerank(args.query, sample_items, namespace, registry)
+    return {"query": args.query, "rerank": info, "items": ranked}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -566,11 +774,23 @@ def build_parser() -> argparse.ArgumentParser:
     smoke = sub.add_parser("smoke")
     add_format_arg(smoke)
     smoke.add_argument("--group-id")
+    smoke.add_argument("--allow-unregistered-group", action="store_true")
     smoke.add_argument("--name")
     smoke.add_argument("--body")
     smoke.add_argument("--verify-limit", type=int, default=20)
     smoke.add_argument("--retries", type=int, default=4)
     smoke.set_defaults(func=cmd_smoke)
+
+    reranker_status = sub.add_parser("reranker-status")
+    add_format_arg(reranker_status)
+    reranker_status.set_defaults(func=cmd_reranker_status)
+
+    reranker_test = sub.add_parser("reranker-test")
+    add_format_arg(reranker_test)
+    reranker_test.add_argument("--query", default="Graphiti CLI group reranker")
+    reranker_test.add_argument("--rerank-profile")
+    reranker_test.add_argument("--limit", type=int, default=3)
+    reranker_test.set_defaults(func=cmd_reranker_test)
 
     add = sub.add_parser("add")
     add_format_arg(add)
@@ -578,6 +798,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--body")
     add.add_argument("--body-file")
     add.add_argument("--group-id")
+    add.add_argument("--allow-unregistered-group", action="store_true")
     add.add_argument("--source", default="text", choices=["text", "json", "message"])
     add.add_argument("--source-description", default="graphiti-memory skill CLI")
     add.add_argument("--exclude-entity-type", action="append")
@@ -592,6 +813,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_format_arg(episodes)
     episodes.add_argument("--group-id")
     episodes.add_argument("--group-ids")
+    episodes.add_argument("--allow-unregistered-group", action="store_true")
     episodes.add_argument("--limit", type=int, default=10)
     episodes.add_argument("--include-edges", action="store_true")
     episodes.set_defaults(func=cmd_episodes)
@@ -601,7 +823,12 @@ def build_parser() -> argparse.ArgumentParser:
     facts.add_argument("--query", required=True)
     facts.add_argument("--group-id")
     facts.add_argument("--group-ids")
+    facts.add_argument("--allow-unregistered-group", action="store_true")
     facts.add_argument("--limit", type=int, default=10)
+    facts.add_argument("--rerank", action="store_true")
+    facts.add_argument("--rerank-profile")
+    facts.add_argument("--rerank-recall-limit", type=int, default=30)
+    facts.add_argument("--rerank-limit", type=int, default=10)
     facts.add_argument("--center-node-uuid")
     facts.add_argument("--retries", type=int, default=3)
     facts.set_defaults(func=cmd_search_facts)
@@ -611,7 +838,12 @@ def build_parser() -> argparse.ArgumentParser:
     nodes.add_argument("--query", required=True)
     nodes.add_argument("--group-id")
     nodes.add_argument("--group-ids")
+    nodes.add_argument("--allow-unregistered-group", action="store_true")
     nodes.add_argument("--limit", type=int, default=10)
+    nodes.add_argument("--rerank", action="store_true")
+    nodes.add_argument("--rerank-profile")
+    nodes.add_argument("--rerank-recall-limit", type=int, default=30)
+    nodes.add_argument("--rerank-limit", type=int, default=10)
     nodes.add_argument("--entity-type", action="append")
     nodes.add_argument("--retries", type=int, default=3)
     nodes.set_defaults(func=cmd_search_nodes)
