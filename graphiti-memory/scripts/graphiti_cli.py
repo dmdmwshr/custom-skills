@@ -34,6 +34,17 @@ SECRET_PATTERNS = [
 ]
 
 
+class SystemExitWithPayload(Exception):
+    def __init__(self, payload: dict[str, Any], code: int = 1):
+        super().__init__(str(payload.get("error") or payload.get("message") or "command failed"))
+        self.payload = payload
+        self.code = code
+
+
+class RegistryGroupError(ValueError):
+    pass
+
+
 def ensure_utf8() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -128,6 +139,65 @@ def format_fact_result_safe(edge: Any) -> dict[str, Any]:
     return safe_model_dump(edge, exclude={"fact_embedding"})
 
 
+def classify_graphiti_error(exc_or_text: Any) -> dict[str, Any]:
+    raw_text = str(exc_or_text)
+    text = raw_text.lower()
+    signals: list[str] = []
+    error_type = type(exc_or_text).__name__ if not isinstance(exc_or_text, str) else "Error"
+    category = "unknown"
+    retryable = False
+
+    if isinstance(exc_or_text, RegistryGroupError):
+        error_type = "registry_group_error"
+        category = "registry"
+        signals.append("registry_denied_group")
+        retryable = False
+    elif "property values can only be of primitive types" in text or "cyphertypeerror" in text or "map{" in text:
+        error_type = "graphiti_cypher_type_error"
+        category = "graphiti_structured_property"
+        signals.append("neo4j_rejected_non_primitive_property")
+        retryable = False
+    elif "target entity not found in nodes" in text or "source entity not found in nodes" in text:
+        error_type = "graphiti_extraction_error"
+        category = "graphiti_extraction"
+        signals.append("edge_references_missing_extracted_entity")
+        retryable = False
+    elif any(marker in text for marker in ("unregistered group_id", "group_id is not registered", "unknown_group_write")):
+        error_type = "registry_group_error"
+        category = "registry"
+        signals.append("registry_denied_group")
+        retryable = False
+    elif any(marker in text for marker in ("winerror 10061", "connection refused", "failed to establish connection", "serviceunavailable", "neo4j", "bolt")):
+        error_type = "neo4j_unavailable"
+        category = "backend_unavailable"
+        signals.append("database_or_backend_unavailable")
+        retryable = True
+    elif any(marker in text for marker in ("rate limit", "429", "timeout", "timed out", "deepseek", "openai", "llm", "model", "max_tokens")):
+        error_type = "llm_error"
+        category = "llm"
+        signals.append("llm_or_openai_compatible_error")
+        retryable = any(marker in text for marker in ("rate limit", "429", "500", "502", "503", "504", "timeout", "timed out"))
+    else:
+        error_type = error_type or "unknown"
+        category = "unknown"
+
+    map_match = re.search(r"Map\{[^}]{0,360}\}", raw_text)
+    if map_match:
+        signals.append("map_property_excerpt_available")
+
+    diagnostic = {
+        "message": redact(raw_text[:2000]),
+        "signals": signals,
+        "map_property_excerpt": redact(map_match.group(0)) if map_match else None,
+    }
+    return {
+        "type": error_type,
+        "category": category,
+        "retryable": retryable,
+        "diagnostic": diagnostic,
+    }
+
+
 def load_dotenv_file(path: Path) -> None:
     if not path.exists():
         return
@@ -199,7 +269,6 @@ def build_entity_types(cfg: Any, modules: dict[str, Any]) -> dict[str, type[Any]
             name,
             __base__=base_model,
             __doc__=description,
-            description=(str, field(default="", description="Only use information mentioned in the context.")),
         )
     return entity_types
 
@@ -257,12 +326,13 @@ def validate_group_ids(groups: list[str], registry: dict[str, Any], *, allow_unr
     unknown = [group for group in groups if not is_group_registered_or_allowed(registry, group)]
     if unknown and policy == "deny":
         known = sorted(registered_group_ids(registry, include_archived=True))
-        raise SystemExit(
+        message = (
             "Unregistered group_id is not allowed by memory registry: "
             f"{', '.join(unknown)}. Register it with memory_registry.py add-group or rerun with "
             "--allow-unregistered-group for an explicit one-off override. Known groups: "
             f"{', '.join(known)}"
         )
+        raise RegistryGroupError(message)
 
 
 def registry_status_summary(registry: dict[str, Any]) -> dict[str, Any]:
@@ -299,7 +369,6 @@ def build_edge_types(modules: dict[str, Any]) -> tuple[dict[str, type[Any]] | No
             name,
             __base__=base_model,
             __doc__=description,
-            fact=(str, field(default="", description=description or "Relationship fact.")),
         )
 
     edge_type_map: dict[tuple[str, str], list[str]] = {}
@@ -504,6 +573,47 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
     return dot / (left_norm * right_norm)
 
 
+def write_readiness_from_status(status: dict[str, Any]) -> dict[str, Any]:
+    registry = status.get("registry") or {}
+    graphiti = status.get("graphiti") or {}
+    neo4j = status.get("neo4j") or {}
+    llm = status.get("llm") or {}
+    embedder = status.get("embedder") or {}
+    entity_types = graphiti.get("entity_types") or []
+    edge_types = graphiti.get("edge_types") or []
+    edge_type_map = graphiti.get("edge_type_map") or {}
+    checks = [
+        {"name": "registry_loaded", "ok": bool(registry.get("loaded")), "details": registry},
+        {"name": "registered_default_group", "ok": graphiti.get("group_id") in set(registry.get("groups") or []), "group_id": graphiti.get("group_id")},
+        {"name": "neo4j_reachable", "ok": bool(neo4j.get("ok")), "details": neo4j},
+        {"name": "llm_configured", "ok": bool(llm.get("provider") and llm.get("model")), "details": llm},
+        {
+            "name": "embedder_configured",
+            "ok": bool(embedder.get("provider") and embedder.get("model") and embedder.get("dimensions")),
+            "details": embedder,
+        },
+        {
+            "name": "entity_types_loaded",
+            "ok": isinstance(entity_types, list) and len(entity_types) > 0,
+            "count": len(entity_types) if isinstance(entity_types, list) else 0,
+        },
+        {
+            "name": "edge_type_map_valid",
+            "ok": isinstance(edge_type_map, dict),
+            "edge_type_count": len(edge_types) if isinstance(edge_types, list) else 0,
+            "map_count": len(edge_type_map) if isinstance(edge_type_map, dict) else 0,
+        },
+    ]
+    return {
+        "ok": all(bool(item.get("ok")) for item in checks),
+        "checks": checks,
+        "non_primitive_property_guard": {
+            "enabled": True,
+            "strategy": "custom entity/edge types are used for classification only; generated attribute models contain no custom fields",
+        },
+    }
+
+
 def apply_rerank(query: str, items: list[dict[str, Any]], args: argparse.Namespace, registry: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not getattr(args, "rerank", False):
         return items, {"enabled": False}
@@ -576,8 +686,25 @@ async def cmd_doctor(args: argparse.Namespace) -> dict[str, Any]:
         status = await cmd_status(args)
         checks.append({"name": "graphiti_core_status", "ok": True, "details": status})
     except Exception as exc:
-        checks.append({"name": "graphiti_core_status", "ok": False, "error": str(exc)})
-    return {"ok": all(item["ok"] for item in checks), "checks": checks}
+        status = None
+        checks.append({"name": "graphiti_core_status", "ok": False, "error": str(exc), "classification": classify_graphiti_error(exc)})
+    write_readiness = write_readiness_from_status(status) if isinstance(status, dict) else {"ok": False, "checks": []}
+    return {
+        "ok": all(item["ok"] for item in checks) and bool(write_readiness.get("ok")),
+        "checks": checks,
+        "write_readiness": write_readiness,
+        "error_classification_support": {
+            "enabled": True,
+            "types": [
+                "graphiti_cypher_type_error",
+                "graphiti_extraction_error",
+                "neo4j_unavailable",
+                "llm_error",
+                "registry_group_error",
+                "unknown",
+            ],
+        },
+    }
 
 
 async def cmd_episodes(args: argparse.Namespace) -> dict[str, Any]:
@@ -602,23 +729,34 @@ async def cmd_add(args: argparse.Namespace) -> dict[str, Any]:
     async with GraphitiRuntime() as rt:
         group_id = args.group_id or rt.group_id
         validate_group_ids([group_id], load_registry(), allow_unregistered=getattr(args, "allow_unregistered_group", False))
-        result = await retry_async(
-            "add_episode",
-            args.retries,
-            lambda: rt.client.add_episode(
-                name=args.name,
-                episode_body=body,
-                source_description=args.source_description,
-                reference_time=datetime.now(timezone.utc),
-                source=episode_type(args.source, rt.modules),
-                group_id=group_id,
-                entity_types=rt.entity_types,
-                excluded_entity_types=args.exclude_entity_type or None,
-                edge_types=rt.edge_types,
-                edge_type_map=rt.edge_type_map,
-                custom_extraction_instructions=args.custom_extraction_instructions,
-            ),
-        )
+        try:
+            result = await retry_async(
+                "add_episode",
+                args.retries,
+                lambda: rt.client.add_episode(
+                    name=args.name,
+                    episode_body=body,
+                    source_description=args.source_description,
+                    reference_time=datetime.now(timezone.utc),
+                    source=episode_type(args.source, rt.modules),
+                    group_id=group_id,
+                    entity_types=rt.entity_types,
+                    excluded_entity_types=args.exclude_entity_type or None,
+                    edge_types=rt.edge_types,
+                    edge_type_map=rt.edge_type_map,
+                    custom_extraction_instructions=args.custom_extraction_instructions,
+                ),
+            )
+        except Exception as exc:
+            classification = classify_graphiti_error(exc)
+            payload = {
+                "message": "episode write failed",
+                "group_id": group_id,
+                "name": args.name,
+                "error": classification["diagnostic"]["message"],
+                **classification,
+            }
+            raise SystemExitWithPayload(payload, code=1)
         payload = {
             "message": "episode written",
             "group_id": group_id,
@@ -898,10 +1036,14 @@ def main() -> int:
         result = asyncio.run(args.func(args))
         emit(result, args.format)
         return 0
+    except SystemExitWithPayload as exc:
+        emit(exc.payload, args.format)
+        return exc.code
     except SystemExit:
         raise
     except Exception as exc:
-        emit({"error": str(exc), "type": type(exc).__name__}, args.format)
+        classification = classify_graphiti_error(exc)
+        emit({"error": classification["diagnostic"]["message"], **classification}, args.format)
         return 1
 
 
