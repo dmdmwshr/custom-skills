@@ -1,7 +1,7 @@
 interface:
   display_name: "CC Switch"
   short_description: "Manage cc-switch skill repository sources."
-  default_prompt: "Use $cc-switch to list, add, update, or remove cc-switch skill repository sources safely."
+  default_prompt: "Use $cc-switch to manage CC Switch Desktop skill repository sources with the bundled SQLite scripts; do not rely on old CLI shims."
 
 policy:
   allow_implicit_invocation: true
