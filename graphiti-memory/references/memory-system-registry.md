@@ -1,6 +1,6 @@
 # 记忆系统情况清单
 
-- 生成时间：2026-05-02T14:02:28+00:00
+- 生成时间：2026-05-02T14:09:31+00:00
 - Registry：`D:\Program_Files\graphiti\mcp_server\config\memory-registry.yaml`
 - Runtime YAML：`D:\Program_Files\graphiti\mcp_server\config\config-docker-neo4j.yaml`
 
