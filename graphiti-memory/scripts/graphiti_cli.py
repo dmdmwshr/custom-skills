@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import math
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -449,44 +450,58 @@ def heuristic_rerank(query: str, items: list[dict[str, Any]], limit: int) -> lis
     return [row[2] for row in ranked[:limit]]
 
 
-def ollama_rerank(query: str, items: list[dict[str, Any]], profile: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+def ollama_embedding_rerank(query: str, items: list[dict[str, Any]], profile: dict[str, Any], limit: int) -> list[dict[str, Any]]:
     api_url = str(profile.get("api_url") or "http://127.0.0.1:11434").rstrip("/")
     model = str(profile.get("model") or "")
     if not model:
         raise RuntimeError("reranker profile does not define model")
+    texts = [query, *[item_text_for_rerank(item)[:4000] for item in items]]
+    body = json.dumps({"model": model, "input": texts}, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        f"{api_url}/api/embed",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"ollama embedding reranker failed: {redact(str(exc))}") from exc
+
+    embeddings = payload.get("embeddings")
+    if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+        raise RuntimeError(f"ollama embedding reranker returned invalid embeddings: {redact(str(payload)[:500])}")
+    query_embedding = _coerce_embedding(embeddings[0])
     ranked = []
-    for index, item in enumerate(items):
-        text = item_text_for_rerank(item)[:4000]
-        prompt = (
-            "请只输出 0 到 1 之间的小数，表示候选内容对查询的相关性。\n"
-            f"查询：{query}\n"
-            f"候选：{text}\n"
-            "相关性分数："
-        )
-        body = json.dumps(
-            {"model": model, "prompt": prompt, "stream": False, "options": {"temperature": 0}},
-            ensure_ascii=False,
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            f"{api_url}/api/generate",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                payload = json.loads(response.read().decode("utf-8", errors="replace"))
-            raw_score = str(payload.get("response", "0")).strip()
-            match = re.search(r"0(?:\.\d+)?|1(?:\.0+)?", raw_score)
-            score = float(match.group(0)) if match else 0.0
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
-            raise RuntimeError(f"ollama reranker failed: {redact(str(exc))}") from exc
+    for index, (item, embedding) in enumerate(zip(items, embeddings[1:])):
+        score = _cosine_similarity(query_embedding, _coerce_embedding(embedding))
         copy = dict(item)
-        copy["rerank_score"] = round(max(0.0, min(1.0, score)), 4)
-        copy["rerank_method"] = f"ollama:{model}"
+        copy["rerank_score"] = round(score, 6)
+        copy["rerank_method"] = f"ollama-embedding:{model}"
         ranked.append((copy["rerank_score"], -index, copy))
     ranked.sort(reverse=True, key=lambda row: (row[0], row[1]))
     return [row[2] for row in ranked[:limit]]
+
+
+def _coerce_embedding(value: Any) -> list[float]:
+    if not isinstance(value, list):
+        raise RuntimeError("embedding value is not a list")
+    try:
+        return [float(item) for item in value]
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("embedding value contains non-numeric items") from exc
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right) or not left:
+        raise RuntimeError("embedding dimensions do not match")
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return dot / (left_norm * right_norm)
 
 
 def apply_rerank(query: str, items: list[dict[str, Any]], args: argparse.Namespace, registry: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -500,11 +515,10 @@ def apply_rerank(query: str, items: list[dict[str, Any]], args: argparse.Namespa
     if profile_name == "disabled" or provider == "none":
         ranked = heuristic_rerank(query, items, limit)
         return ranked, {"enabled": True, "profile": profile_name, "provider": "heuristic", "note": "registry reranker is disabled; used local heuristic rerank"}
-    if provider == "ollama":
-        ranked = ollama_rerank(query, items, profile, limit)
+    if provider == "ollama_embedding":
+        ranked = ollama_embedding_rerank(query, items, profile, limit)
         return ranked, {"enabled": True, "profile": profile_name, "provider": provider, "model": profile.get("model")}
-    ranked = heuristic_rerank(query, items, limit)
-    return ranked, {"enabled": True, "profile": profile_name, "provider": "heuristic", "note": f"provider {provider} not implemented in CLI rerank; used heuristic"}
+    raise RuntimeError(f"reranker provider is not implemented: {provider}")
 
 
 async def cmd_status(args: argparse.Namespace) -> dict[str, Any]:

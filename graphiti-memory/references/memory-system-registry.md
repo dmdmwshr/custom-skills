@@ -1,6 +1,6 @@
 # 记忆系统情况清单
 
-- 生成时间：2026-05-02T08:32:11+00:00
+- 生成时间：2026-05-02T09:09:48+00:00
 - Registry：`D:\Program_Files\graphiti\mcp_server\config\memory-registry.yaml`
 - Runtime YAML：`D:\Program_Files\graphiti\mcp_server\config\config-docker-neo4j.yaml`
 
@@ -9,7 +9,7 @@
 - Graphiti LLM：`deepseek-v4-flash`（profile: `deepseek-v4-flash`）
 - Embedding：`nomic-embed-text:latest`（profile: `ollama-nomic-embed-text`）
 - Daemon assistant：`deepseek-v4-flash`
-- Reranker：`disabled`，启用：`False`
+- Reranker：`ollama-bge-reranker-v2-m3`，启用：`True`
 - 默认 group：`${GRAPHITI_GROUP_ID:main}`
 
 ## Groups
