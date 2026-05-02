@@ -14,6 +14,8 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ REGISTRY_PATH = GRAPHITI_MCP_DIR / "config" / "memory-registry.yaml"
 SUMMARY_PATH = Path(__file__).resolve().parent.parent / "references" / "memory-system-registry.md"
 BACKUP_DIR = GRAPHITI_MCP_DIR / "config" / "registry-backups"
 DEFAULT_DAEMON_CONFIG_PATH = Path(r"D:\Program_Files\graphiti-memory-daemon\config.yaml")
+MODEL_TEST_TIMEOUT_SECONDS = 45
 
 SECRET_PATTERNS = [
     re.compile(r"(sk-[A-Za-z0-9_\-]{12,})"),
@@ -270,6 +273,140 @@ def cmd_list_profiles(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def upstream_items(registry: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    upstreams = registry.setdefault("model_upstreams", {})
+    if not isinstance(upstreams, dict):
+        raise SystemExit("model_upstreams must be a mapping in registry")
+    defaults = {
+        "deepseek": {
+            "enabled": True,
+            "provider": "openai_compatible",
+            "api_url": "https://api.deepseek.com",
+            "models_url": "https://api.deepseek.com/v1/models",
+            "api_key_env": "OPENAI_API_KEY",
+            "profile_prefix": "deepseek",
+            "notes": "DeepSeek OpenAI-compatible endpoint.",
+        },
+        "sub2api": {
+            "enabled": True,
+            "provider": "openai_compatible",
+            "api_url": "https://sub2api.meifu.zzxhlyj.top",
+            "models_url": "https://sub2api.meifu.zzxhlyj.top/v1/models",
+            "api_key_env": "OPENAI_API_KEY",
+            "profile_prefix": "sub2api",
+            "notes": "GPT-compatible relay endpoint.",
+        },
+        "ollama": {
+            "enabled": True,
+            "provider": "ollama",
+            "api_url": "http://127.0.0.1:11434",
+            "models_url": "http://127.0.0.1:11434/api/tags",
+            "api_key": "ollama",
+            "profile_prefix": "ollama",
+            "notes": "Local Ollama endpoint.",
+        },
+    }
+    for name, raw in defaults.items():
+        upstreams.setdefault(name, raw)
+    return {str(name): dict(raw) for name, raw in upstreams.items() if isinstance(raw, dict)}
+
+
+def cmd_list_upstreams(args: argparse.Namespace) -> dict[str, Any]:
+    registry = load_yaml(REGISTRY_PATH)
+    return {
+        "message": "upstreams retrieved",
+        "items": [
+            {"name": name, **_public_upstream(raw)}
+            for name, raw in upstream_items(registry).items()
+        ],
+    }
+
+
+def cmd_refresh_models(args: argparse.Namespace) -> dict[str, Any]:
+    registry = load_yaml(REGISTRY_PATH)
+    upstreams = upstream_items(registry)
+    names = [args.upstream] if args.upstream else list(upstreams)
+    items: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for name in names:
+        raw = upstreams.get(name)
+        if not raw:
+            errors.append({"upstream": name, "error": "unknown upstream"})
+            continue
+        try:
+            models = _discover_upstream_models(name, raw)
+            for model in models:
+                items.append({"upstream": name, "model": model, "provider": raw.get("provider"), "api_url": raw.get("api_url")})
+        except Exception as exc:
+            errors.append({"upstream": name, "error": redact(str(exc))})
+    return {
+        "message": "models refreshed",
+        "items": items,
+        "errors": errors,
+        "refreshed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+def cmd_test_model(args: argparse.Namespace) -> dict[str, Any]:
+    registry = load_yaml(REGISTRY_PATH)
+    if args.profile:
+        profile = _profile_by_kind(registry, args.kind, args.profile)
+        target = _test_target_from_profile(profile)
+        profile_name = args.profile
+    else:
+        if not args.upstream or not args.model:
+            raise SystemExit("test-model requires either --profile or both --upstream and --model")
+        upstream = upstream_items(registry).get(args.upstream)
+        if not upstream:
+            raise SystemExit(f"Unknown upstream: {args.upstream}")
+        target = _test_target_from_upstream(upstream, args.model, kind=args.kind)
+        profile_name = _profile_name_for(args.upstream, args.model)
+    result = _test_model_target(target, prompt=args.prompt)
+    return {
+        "message": "model test completed",
+        "ok": bool(result.get("ok")),
+        "kind": args.kind,
+        "profile": profile_name,
+        "target": redact({key: value for key, value in target.items() if key != "api_key"}),
+        "result": result,
+    }
+
+
+def cmd_add_model_profile(args: argparse.Namespace) -> dict[str, Any]:
+    registry = load_yaml(REGISTRY_PATH)
+    upstreams = upstream_items(registry)
+    upstream = upstreams.get(args.upstream)
+    if not upstream:
+        raise SystemExit(f"Unknown upstream: {args.upstream}")
+    profile_name = args.profile or _profile_name_for(args.upstream, args.model)
+    profiles_root = registry.setdefault("model_profiles", {})
+    profiles = profiles_root.setdefault(args.kind, {})
+    if profile_name in profiles and not args.update:
+        raise SystemExit(f"Profile already exists: {args.kind}/{profile_name}. Use --update to replace metadata.")
+    target = _test_target_from_upstream(upstream, args.model, kind=args.kind)
+    test_result = _test_model_target(target, prompt=args.prompt)
+    profile = _profile_from_upstream(args.kind, args.upstream, upstream, args.model, test_result)
+    preview = {
+        "kind": args.kind,
+        "profile": profile_name,
+        "upstream": args.upstream,
+        "model": args.model,
+        "test": test_result,
+        "profile_data": profile,
+    }
+    if not test_result.get("ok"):
+        return {"message": "model test failed; profile not added", "ok": False, **preview}
+    if args.dry_run:
+        return {"message": "dry run; profile not added", "ok": True, **preview}
+    if not args.yes:
+        raise SystemExit("add-model-profile writes registry. Re-run with --yes or use --dry-run.")
+    backup = _backup_selected_files("add-model-profile", [REGISTRY_PATH])
+    profiles[profile_name] = profile
+    save_yaml(REGISTRY_PATH, registry)
+    _maybe_render_summary_after_change()
+    return {"message": "model profile added", "ok": True, "backup": backup, **preview}
+
+
 def cmd_switch_profile(args: argparse.Namespace) -> dict[str, Any]:
     if args.kind != "graphiti_llm":
         raise SystemExit("switch-profile currently supports --kind graphiti_llm only; daemon/reranker profiles are changed in daemon config/registry policy.")
@@ -284,17 +421,30 @@ def cmd_switch_profile(args: argparse.Namespace) -> dict[str, Any]:
         "provider": llm.get("provider"),
         "model": llm.get("model"),
         "api_url": (((llm.get("providers") or {}).get(llm.get("provider")) or {}).get("api_url")),
+        "api_key": (((llm.get("providers") or {}).get(llm.get("provider")) or {}).get("api_key")),
     }
     after = {
         "provider": profile.get("provider", before.get("provider")),
         "model": profile.get("model", before.get("model")),
         "api_url": profile.get("api_url") or (f"${{{profile.get('api_url_env')}}}" if profile.get("api_url_env") else before.get("api_url")),
+        "api_key": profile.get("api_key") or (f"${{{profile.get('api_key_env')}}}" if profile.get("api_key_env") else before.get("api_key")),
     }
     diff = {"kind": args.kind, "profile": args.profile, "before": before, "after": after}
-    if args.dry_run:
-        return {"message": "dry run; runtime YAML not changed", "diff": diff}
+    test = None
+    if args.test_first or args.prepare_only:
+        test = _test_model_target(_test_target_from_profile(profile))
+        diff["test"] = test
+        if not test.get("ok"):
+            return {"message": "model test failed; runtime YAML not changed", "ok": False, "diff": diff}
+    if args.dry_run or args.prepare_only:
+        return {"message": "dry run; runtime YAML not changed", "ok": True, "diff": diff, "prepared": bool(args.prepare_only)}
     if not args.yes:
         raise SystemExit("switch-profile changes runtime YAML and registry. Re-run with --yes or use --dry-run.")
+    if args.test_first and test is None:
+        test = _test_model_target(_test_target_from_profile(profile))
+        diff["test"] = test
+        if not test.get("ok"):
+            return {"message": "model test failed; runtime YAML not changed", "ok": False, "diff": diff}
 
     backup = _backup_runtime_files("switch-profile")
     llm["provider"] = after["provider"]
@@ -303,11 +453,34 @@ def cmd_switch_profile(args: argparse.Namespace) -> dict[str, Any]:
     provider_cfg = providers.setdefault(after["provider"], {})
     if after["api_url"]:
         provider_cfg["api_url"] = after["api_url"]
+    if after["api_key"]:
+        provider_cfg["api_key"] = after["api_key"]
     current = registry.setdefault("current_profiles", {})
     current[args.kind] = args.profile
     _save_runtime_yaml(runtime)
     save_yaml(REGISTRY_PATH, registry)
-    return {"message": "profile switched", "backup": backup, "diff": diff}
+    return {"message": "profile switched", "ok": True, "backup": backup, "diff": diff}
+
+
+def cmd_apply_profile_switch(args: argparse.Namespace) -> dict[str, Any]:
+    if args.kind == "graphiti_llm":
+        switch_args = argparse.Namespace(kind=args.kind, profile=args.profile, dry_run=False, prepare_only=False, test_first=True, yes=args.yes)
+        return cmd_switch_profile(switch_args)
+    if args.kind == "daemon_assistant":
+        switch_args = argparse.Namespace(profile=args.profile, config=args.config, enabled=args.enabled, dry_run=False, yes=args.yes)
+        return cmd_switch_daemon_profile(switch_args)
+    if args.kind == "reranker":
+        switch_args = argparse.Namespace(
+            profile=args.profile,
+            config=args.config,
+            enabled=args.enabled,
+            recall_limit=args.recall_limit,
+            output_limit=args.output_limit,
+            dry_run=False,
+            yes=args.yes,
+        )
+        return cmd_switch_reranker_profile(switch_args)
+    raise SystemExit(f"Unsupported kind: {args.kind}")
 
 
 def cmd_rollback_profile(args: argparse.Namespace) -> dict[str, Any]:
@@ -480,6 +653,203 @@ def _profile_by_kind(registry: dict[str, Any], kind: str, profile_name: str) -> 
     return profile
 
 
+def _public_upstream(raw: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: ("***REDACTED***" if is_secret_key(key) else value)
+        for key, value in raw.items()
+        if key not in {"api_key"}
+    }
+
+
+def _profile_name_for(upstream_name: str, model: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", model.strip()).strip("-").lower()
+    return f"{upstream_name}-{slug}" if not slug.startswith(f"{upstream_name}-") else slug
+
+
+def _normalize_api_url(url: str | None) -> str:
+    text = (url or "").strip().rstrip("/")
+    if not text:
+        raise ValueError("api_url is required")
+    if text.endswith("/v1"):
+        return text[:-3]
+    return text
+
+
+def _openai_models_url(api_url: str | None, explicit: str | None = None) -> str:
+    if explicit:
+        return _resolve_env_template(explicit)
+    return f"{_normalize_api_url(api_url)}/v1/models"
+
+
+def _openai_chat_url(api_url: str | None) -> str:
+    return f"{_normalize_api_url(api_url)}/v1/chat/completions"
+
+
+def _profile_from_upstream(kind: str, upstream_name: str, upstream: dict[str, Any], model: str, test_result: dict[str, Any]) -> dict[str, Any]:
+    provider = upstream.get("runtime_provider") or ("openai" if kind == "graphiti_llm" else upstream.get("provider", "openai_compatible"))
+    if kind == "reranker" and upstream_name == "ollama":
+        provider = "ollama_embedding"
+    profile: dict[str, Any] = {
+        "enabled": True,
+        "provider": provider,
+        "model": model,
+        "upstream": upstream_name,
+        "tested_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "test_status": "ok" if test_result.get("ok") else "failed",
+    }
+    if upstream.get("api_url_env"):
+        profile["api_url_env"] = upstream.get("api_url_env")
+    elif upstream.get("api_url"):
+        if upstream_name == "ollama" and kind == "graphiti_llm":
+            profile["api_url"] = f"{_normalize_api_url(str(upstream.get('api_url')))}/v1"
+        else:
+            profile["api_url"] = str(upstream.get("api_url"))
+    if upstream.get("api_key_env"):
+        profile["api_key_env"] = upstream.get("api_key_env")
+    if upstream.get("api_key") and not upstream.get("api_key_env"):
+        profile["api_key"] = upstream.get("api_key")
+    if kind == "daemon_assistant":
+        profile["purpose"] = "常驻服务会话 turn 摘要、长期记忆候选提取和冲突解释。"
+    elif kind == "reranker":
+        profile["notes"] = "外置 reranker profile；由 daemon/skill 在 Graphiti 召回后执行。"
+    else:
+        profile["notes"] = f"{upstream_name} upstream profile, added after model test."
+    return profile
+
+
+def _test_target_from_upstream(upstream: dict[str, Any], model: str, *, kind: str | None = None) -> dict[str, Any]:
+    provider = upstream.get("provider", "openai_compatible")
+    if kind == "reranker" and upstream.get("provider") == "ollama":
+        provider = "ollama_embedding"
+    return {
+        "provider": provider,
+        "model": model,
+        "api_url": _env_or_profile_value(upstream, "api_url"),
+        "api_key": _env_or_profile_value(upstream, "api_key"),
+        "api_key_env": upstream.get("api_key_env"),
+    }
+
+
+def _test_target_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    provider = profile.get("provider", "openai_compatible")
+    if profile.get("upstream") == "ollama" and provider == "openai":
+        provider = "openai_compatible"
+    return {
+        "provider": provider,
+        "model": profile.get("model"),
+        "api_url": _env_or_profile_value(profile, "api_url"),
+        "api_key": _env_or_profile_value(profile, "api_key"),
+        "api_key_env": profile.get("api_key_env"),
+    }
+
+
+def _discover_upstream_models(name: str, upstream: dict[str, Any]) -> list[str]:
+    provider = str(upstream.get("provider", "")).lower()
+    if name == "ollama" or provider == "ollama":
+        return _discover_ollama_models(str(upstream.get("models_url") or f"{_normalize_api_url(str(upstream.get('api_url')))}/api/tags"))
+    api_url = _env_or_profile_value(upstream, "api_url") or str(upstream.get("api_url") or "")
+    url = _openai_models_url(str(api_url), str(upstream.get("models_url") or "") or None)
+    headers = {"Accept": "application/json"}
+    api_key = _env_or_profile_value(upstream, "api_key")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload = _http_json("GET", url, headers=headers)
+    data = payload.get("data", []) if isinstance(payload, dict) else []
+    models = []
+    for item in data:
+        if isinstance(item, dict) and item.get("id"):
+            models.append(str(item["id"]))
+    return sorted(set(models))
+
+
+def _discover_ollama_models(url: str) -> list[str]:
+    payload = _http_json("GET", url, headers={"Accept": "application/json"})
+    models = []
+    for item in payload.get("models", []) if isinstance(payload, dict) else []:
+        if isinstance(item, dict) and item.get("name"):
+            models.append(str(item["name"]))
+    return sorted(set(models))
+
+
+def _test_model_target(target: dict[str, Any], *, prompt: str = "Return OK as JSON.") -> dict[str, Any]:
+    provider = str(target.get("provider", "openai_compatible")).lower()
+    model = str(target.get("model") or "").strip()
+    if not model:
+        return {"ok": False, "error": "model is required"}
+    try:
+        if provider == "ollama_embedding":
+            return _test_ollama_embedding_model(target, prompt=prompt)
+        if provider in {"ollama", "ollama_embedding"} and not str(target.get("api_url", "")).rstrip("/").endswith("/v1"):
+            return _test_ollama_model(target, prompt=prompt)
+        return _test_openai_compatible_model(target, prompt=prompt)
+    except Exception as exc:
+        return {"ok": False, "error": redact(str(exc)), "type": type(exc).__name__}
+
+
+def _test_openai_compatible_model(target: dict[str, Any], *, prompt: str) -> dict[str, Any]:
+    url = _openai_chat_url(str(target.get("api_url") or ""))
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if target.get("api_key"):
+        headers["Authorization"] = f"Bearer {target['api_key']}"
+    body = {
+        "model": target["model"],
+        "messages": [
+            {"role": "system", "content": "You are a connectivity test. Reply with compact JSON."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 32,
+        "temperature": 0,
+    }
+    payload = _http_json("POST", url, headers=headers, body=body)
+    choices = payload.get("choices", []) if isinstance(payload, dict) else []
+    text = ""
+    if choices and isinstance(choices[0], dict):
+        text = ((choices[0].get("message") or {}).get("content") or "").strip()
+    return {"ok": True, "endpoint": url, "response_preview": text[:160]}
+
+
+def _test_ollama_model(target: dict[str, Any], *, prompt: str) -> dict[str, Any]:
+    base = _normalize_api_url(str(target.get("api_url") or "http://127.0.0.1:11434"))
+    url = f"{base}/api/generate"
+    body = {"model": target["model"], "prompt": prompt, "stream": False, "options": {"num_predict": 24, "temperature": 0}}
+    payload = _http_json("POST", url, headers={"Content-Type": "application/json", "Accept": "application/json"}, body=body)
+    text = str(payload.get("response", "")).strip() if isinstance(payload, dict) else ""
+    return {"ok": True, "endpoint": url, "response_preview": text[:160]}
+
+
+def _test_ollama_embedding_model(target: dict[str, Any], *, prompt: str) -> dict[str, Any]:
+    base = _normalize_api_url(str(target.get("api_url") or "http://127.0.0.1:11434"))
+    url = f"{base}/api/embed"
+    body = {"model": target["model"], "input": [prompt, "Graphiti memory daemon reranker test"]}
+    payload = _http_json("POST", url, headers={"Content-Type": "application/json", "Accept": "application/json"}, body=body)
+    embeddings = payload.get("embeddings", []) if isinstance(payload, dict) else []
+    if not embeddings:
+        return {"ok": False, "endpoint": url, "error": "Ollama returned no embeddings"}
+    first = embeddings[0]
+    dimensions = len(first) if isinstance(first, list) else 0
+    return {"ok": dimensions > 0, "endpoint": url, "dimensions": dimensions}
+
+
+def _http_json(method: str, url: str, *, headers: dict[str, str], body: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=MODEL_TEST_TIMEOUT_SECONDS) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code}: {redact(raw[:800])}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(redact(str(exc))) from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON from {url}: {raw[:400]}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Expected JSON object from {url}")
+    return payload
+
+
 def _env_or_profile_value(profile: dict[str, Any], key: str) -> Any:
     if key in profile:
         return profile.get(key)
@@ -487,6 +857,17 @@ def _env_or_profile_value(profile: dict[str, Any], key: str) -> Any:
     if env_key:
         return os.environ.get(str(env_key)) or _dotenv_value(GRAPHITI_MCP_DIR / ".env", str(env_key))
     return None
+
+
+def _resolve_env_template(value: str) -> str:
+    pattern = re.compile(r"\$\{([^}:]+)(?::([^}]+))?\}")
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        default = match.group(2) or ""
+        return os.environ.get(name) or _dotenv_value(GRAPHITI_MCP_DIR / ".env", name) or default
+
+    return pattern.sub(replace, value)
 
 
 def _dotenv_value(path: Path, key: str) -> str | None:
@@ -750,13 +1131,56 @@ def build_parser() -> argparse.ArgumentParser:
     profiles.add_argument("--kind", choices=["graphiti_llm", "graphiti_embedder", "daemon_assistant", "reranker"], required=True)
     profiles.set_defaults(func=cmd_list_profiles)
 
+    upstreams = sub.add_parser("list-upstreams")
+    add_format_arg(upstreams)
+    upstreams.set_defaults(func=cmd_list_upstreams)
+
+    refresh_models = sub.add_parser("refresh-models")
+    add_format_arg(refresh_models)
+    refresh_models.add_argument("--upstream")
+    refresh_models.set_defaults(func=cmd_refresh_models)
+
+    test_model = sub.add_parser("test-model")
+    add_format_arg(test_model)
+    test_model.add_argument("--kind", choices=["graphiti_llm", "daemon_assistant", "reranker"], default="graphiti_llm")
+    test_model.add_argument("--profile")
+    test_model.add_argument("--upstream")
+    test_model.add_argument("--model")
+    test_model.add_argument("--prompt", default="Return OK as JSON.")
+    test_model.set_defaults(func=cmd_test_model)
+
+    add_model = sub.add_parser("add-model-profile")
+    add_format_arg(add_model)
+    add_model.add_argument("--kind", choices=["graphiti_llm", "daemon_assistant", "reranker"], required=True)
+    add_model.add_argument("--upstream", required=True)
+    add_model.add_argument("--model", required=True)
+    add_model.add_argument("--profile")
+    add_model.add_argument("--prompt", default="Return OK as JSON.")
+    add_model.add_argument("--update", action="store_true")
+    add_model.add_argument("--dry-run", action="store_true")
+    add_model.add_argument("--yes", action="store_true")
+    add_model.set_defaults(func=cmd_add_model_profile)
+
     switch = sub.add_parser("switch-profile")
     add_format_arg(switch)
     switch.add_argument("--kind", choices=["graphiti_llm"], required=True)
     switch.add_argument("--profile", required=True)
     switch.add_argument("--dry-run", action="store_true")
+    switch.add_argument("--test-first", action="store_true")
+    switch.add_argument("--prepare-only", action="store_true")
     switch.add_argument("--yes", action="store_true")
     switch.set_defaults(func=cmd_switch_profile)
+
+    apply_switch = sub.add_parser("apply-profile-switch")
+    add_format_arg(apply_switch)
+    apply_switch.add_argument("--kind", choices=["graphiti_llm", "daemon_assistant", "reranker"], required=True)
+    apply_switch.add_argument("--profile", required=True)
+    apply_switch.add_argument("--config", default=str(DEFAULT_DAEMON_CONFIG_PATH))
+    apply_switch.add_argument("--enabled", type=_parse_bool_arg)
+    apply_switch.add_argument("--recall-limit", type=int)
+    apply_switch.add_argument("--output-limit", type=int)
+    apply_switch.add_argument("--yes", action="store_true")
+    apply_switch.set_defaults(func=cmd_apply_profile_switch)
 
     daemon_switch = sub.add_parser("switch-daemon-profile")
     add_format_arg(daemon_switch)
