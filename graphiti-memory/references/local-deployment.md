@@ -30,8 +30,8 @@
 ## 模型和依赖
 
 - LLM provider: `openai`
-- LLM model: `gpt-5.4-mini`
-- LLM endpoint: `${OPENAI_API_URL}`
+- LLM model: `deepseek-v4-flash`
+- LLM endpoint: `${OPENAI_API_URL}`，当前指向 DeepSeek OpenAI-compatible endpoint
 - Embedder provider: `openai`
 - Embedder model: `nomic-embed-text:latest`
 - Embedder endpoint: `${OLLAMA_OPENAI_API_URL}`
@@ -57,3 +57,4 @@
 - `add_memory` 异步入队，不能把返回 queued 视为摄取完成。
 - 本机 Graphiti 源码目录可能存在本地改动；维护前必须先查看 `git status`。
 - 不要把 `.env` 中的 API key、Neo4j 密码等秘密写入笔记或回复。
+- 健康检查脚本应以 runtime YAML + `.env` 为事实源动态读取 LLM 和 embedding 模型，不应硬编码旧模型名。
