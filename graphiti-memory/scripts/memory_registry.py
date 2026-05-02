@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -24,6 +25,7 @@ GRAPHITI_CONFIG_PATH = GRAPHITI_MCP_DIR / "config" / "config-docker-neo4j.yaml"
 REGISTRY_PATH = GRAPHITI_MCP_DIR / "config" / "memory-registry.yaml"
 SUMMARY_PATH = Path(__file__).resolve().parent.parent / "references" / "memory-system-registry.md"
 BACKUP_DIR = GRAPHITI_MCP_DIR / "config" / "registry-backups"
+DEFAULT_DAEMON_CONFIG_PATH = Path(r"D:\Program_Files\graphiti-memory-daemon\config.yaml")
 
 SECRET_PATTERNS = [
     re.compile(r"(sk-[A-Za-z0-9_\-]{12,})"),
@@ -120,6 +122,26 @@ def save_yaml(path: Path, data: dict[str, Any]) -> None:
         raise SystemExit(f"PyYAML is required to write registry YAML: {exc}") from exc
     path.parent.mkdir(parents=True, exist_ok=True)
     data["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    rendered = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)
+    path.write_text(rendered, encoding="utf-8")
+
+
+def load_any_yaml(path: Path, *, label: str = "YAML") -> dict[str, Any]:
+    try:
+        import yaml
+    except Exception as exc:
+        raise SystemExit(f"PyYAML is required to read {label}: {exc}") from exc
+    if not path.exists():
+        raise SystemExit(f"{label} file not found: {path}")
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def save_any_yaml(path: Path, data: dict[str, Any]) -> None:
+    try:
+        import yaml
+    except Exception as exc:
+        raise SystemExit(f"PyYAML is required to write YAML: {exc}") from exc
+    path.parent.mkdir(parents=True, exist_ok=True)
     rendered = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)
     path.write_text(rendered, encoding="utf-8")
 
@@ -290,22 +312,28 @@ def cmd_switch_profile(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_rollback_profile(args: argparse.Namespace) -> dict[str, Any]:
     backup_root = BACKUP_DIR / args.backup_id
-    runtime_backup = backup_root / GRAPHITI_CONFIG_PATH.name
-    registry_backup = backup_root / REGISTRY_PATH.name
-    if not runtime_backup.exists() or not registry_backup.exists():
+    targets = _backup_restore_targets(backup_root)
+    if not targets:
         raise SystemExit(f"Backup not found or incomplete: {backup_root}")
     if args.dry_run:
         return {
             "message": "dry run; no files restored",
             "backup": str(backup_root),
-            "restore": [str(GRAPHITI_CONFIG_PATH), str(REGISTRY_PATH)],
+            "restore": [{"from": str(src), "to": str(dst)} for src, dst in targets],
         }
     if not args.yes:
-        raise SystemExit("rollback-profile restores runtime YAML and registry. Re-run with --yes or use --dry-run.")
-    safety = _backup_runtime_files("pre-rollback")
-    shutil.copy2(runtime_backup, GRAPHITI_CONFIG_PATH)
-    shutil.copy2(registry_backup, REGISTRY_PATH)
-    return {"message": "profile rollback restored", "backup": str(backup_root), "safety_backup": safety}
+        raise SystemExit("rollback-profile restores backed up config files. Re-run with --yes or use --dry-run.")
+    safety = _backup_selected_files("pre-rollback", [dst for _src, dst in targets])
+    for source, target in targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    _maybe_render_summary_after_change()
+    return {
+        "message": "profile rollback restored",
+        "backup": str(backup_root),
+        "safety_backup": safety,
+        "restored": [{"from": str(src), "to": str(dst)} for src, dst in targets],
+    }
 
 
 def cmd_add_group(args: argparse.Namespace) -> dict[str, Any]:
@@ -390,12 +418,268 @@ def _backup_runtime_files(reason: str) -> dict[str, str]:
     backup_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(GRAPHITI_CONFIG_PATH, backup_dir / GRAPHITI_CONFIG_PATH.name)
     shutil.copy2(REGISTRY_PATH, backup_dir / REGISTRY_PATH.name)
+    _write_backup_manifest(backup_dir, [GRAPHITI_CONFIG_PATH, REGISTRY_PATH])
     return {"id": backup_dir.name, "path": str(backup_dir)}
+
+
+def _backup_selected_files(reason: str, files: list[Path]) -> dict[str, str]:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = BACKUP_DIR / f"{stamp}-{reason}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[Path] = []
+    for path in files:
+        if path.exists():
+            shutil.copy2(path, backup_dir / path.name)
+            copied.append(path)
+    _write_backup_manifest(backup_dir, copied)
+    return {"id": backup_dir.name, "path": str(backup_dir)}
+
+
+def _write_backup_manifest(backup_dir: Path, files: list[Path]) -> None:
+    manifest = {
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "files": [{"name": path.name, "original_path": str(path)} for path in files],
+    }
+    (backup_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _backup_restore_targets(backup_root: Path) -> list[tuple[Path, Path]]:
+    manifest_path = backup_root / "manifest.json"
+    targets: list[tuple[Path, Path]] = []
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Invalid backup manifest: {manifest_path}: {exc}") from exc
+        for item in manifest.get("files", []):
+            if not isinstance(item, dict):
+                continue
+            backup_file = backup_root / str(item.get("name", ""))
+            original = Path(str(item.get("original_path", "")))
+            if backup_file.exists() and str(original):
+                targets.append((backup_file, original))
+        if targets:
+            return targets
+    inferred = [
+        (backup_root / GRAPHITI_CONFIG_PATH.name, GRAPHITI_CONFIG_PATH),
+        (backup_root / REGISTRY_PATH.name, REGISTRY_PATH),
+        (backup_root / DEFAULT_DAEMON_CONFIG_PATH.name, DEFAULT_DAEMON_CONFIG_PATH),
+    ]
+    return [(src, dst) for src, dst in inferred if src.exists()]
+
+
+def _daemon_config_path(args: argparse.Namespace) -> Path:
+    return Path(args.config or DEFAULT_DAEMON_CONFIG_PATH)
+
+
+def _profile_by_kind(registry: dict[str, Any], kind: str, profile_name: str) -> dict[str, Any]:
+    profiles = (registry.get("model_profiles") or {}).get(kind) or {}
+    profile = profiles.get(profile_name)
+    if not isinstance(profile, dict):
+        raise SystemExit(f"Unknown {kind} profile: {profile_name}")
+    return profile
+
+
+def _env_or_profile_value(profile: dict[str, Any], key: str) -> Any:
+    if key in profile:
+        return profile.get(key)
+    env_key = profile.get(f"{key}_env")
+    if env_key:
+        return os.environ.get(str(env_key)) or _dotenv_value(GRAPHITI_MCP_DIR / ".env", str(env_key))
+    return None
+
+
+def _dotenv_value(path: Path, key: str) -> str | None:
+    if not path.exists():
+        return None
+    prefix = f"{key}="
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or not line.startswith(prefix):
+            continue
+        value = line[len(prefix) :].strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        return value
+    return None
+
+
+def _require_real_change(args: argparse.Namespace, description: str) -> None:
+    if args.dry_run:
+        return
+    if not args.yes:
+        raise SystemExit(f"{description} changes daemon config and registry. Re-run with --yes or use --dry-run.")
+
+
+def _maybe_render_summary_after_change() -> None:
+    namespace = argparse.Namespace(verify_runtime=False)
+    cmd_render_summary(namespace)
+
+
+def cmd_switch_daemon_profile(args: argparse.Namespace) -> dict[str, Any]:
+    registry = load_yaml(REGISTRY_PATH)
+    profile = _profile_by_kind(registry, "daemon_assistant", args.profile)
+    config_path = _daemon_config_path(args)
+    daemon_config = load_any_yaml(config_path, label="daemon config")
+    assistant = daemon_config.setdefault("assistant_model", {})
+    before = {
+        "enabled": assistant.get("enabled"),
+        "provider": assistant.get("provider"),
+        "profile": assistant.get("profile"),
+        "model": assistant.get("model"),
+        "api_url": assistant.get("api_url"),
+        "api_key_env": assistant.get("api_key_env"),
+    }
+    after = {
+        "enabled": bool(args.enabled) if args.enabled is not None else bool(assistant.get("enabled", False)),
+        "provider": profile.get("provider", before.get("provider")),
+        "profile": args.profile,
+        "model": profile.get("model", before.get("model")),
+        "api_url": _env_or_profile_value(profile, "api_url") or before.get("api_url"),
+        "api_key_env": profile.get("api_key_env", before.get("api_key_env")),
+    }
+    diff = {
+        "kind": "daemon_assistant",
+        "profile": args.profile,
+        "config_path": str(config_path),
+        "before": before,
+        "after": after,
+        "note": "只修改常驻服务 config.yaml 与 registry current_profiles，不修改 Graphiti runtime YAML。",
+    }
+    if args.dry_run:
+        return {"message": "dry run; daemon config and registry not changed", "diff": diff}
+    _require_real_change(args, "switch-daemon-profile")
+    backup = _backup_selected_files("switch-daemon-profile", [config_path, REGISTRY_PATH])
+    assistant.update(after)
+    current = registry.setdefault("current_profiles", {})
+    current["daemon_assistant"] = args.profile
+    daemon_policy = registry.setdefault("daemon_policy", {})
+    daemon_policy["assistant_enabled"] = after["enabled"]
+    save_any_yaml(config_path, daemon_config)
+    save_yaml(REGISTRY_PATH, registry)
+    _maybe_render_summary_after_change()
+    return {"message": "daemon assistant profile switched", "backup": backup, "diff": diff}
+
+
+def cmd_switch_reranker_profile(args: argparse.Namespace) -> dict[str, Any]:
+    registry = load_yaml(REGISTRY_PATH)
+    profile = _profile_by_kind(registry, "reranker", args.profile)
+    config_path = _daemon_config_path(args)
+    daemon_config = load_any_yaml(config_path, label="daemon config")
+    reranker = daemon_config.setdefault("reranker", {})
+    policy = registry.setdefault("reranker_policy", {})
+    before = {
+        "enabled": reranker.get("enabled"),
+        "profile": reranker.get("profile"),
+        "recall_limit": reranker.get("recall_limit"),
+        "output_limit": reranker.get("output_limit"),
+        "registry_enabled": policy.get("enabled"),
+        "registry_default_profile": policy.get("default_profile"),
+    }
+    after_enabled = bool(profile.get("enabled", False)) if args.enabled is None else bool(args.enabled)
+    after = {
+        "enabled": after_enabled,
+        "profile": args.profile,
+        "recall_limit": args.recall_limit if args.recall_limit is not None else int(policy.get("recall_limit", reranker.get("recall_limit", 30))),
+        "output_limit": args.output_limit if args.output_limit is not None else int(policy.get("output_limit", reranker.get("output_limit", 10))),
+        "registry_enabled": after_enabled,
+        "registry_default_profile": args.profile,
+    }
+    diff = {
+        "kind": "reranker",
+        "profile": args.profile,
+        "provider": profile.get("provider"),
+        "model": profile.get("model"),
+        "config_path": str(config_path),
+        "before": before,
+        "after": after,
+        "note": "只修改常驻服务 reranker 配置与 registry policy，不修改 Graphiti core。",
+    }
+    if args.dry_run:
+        return {"message": "dry run; daemon config and registry not changed", "diff": diff}
+    _require_real_change(args, "switch-reranker-profile")
+    backup = _backup_selected_files("switch-reranker-profile", [config_path, REGISTRY_PATH])
+    reranker["enabled"] = after["enabled"]
+    reranker["profile"] = after["profile"]
+    reranker["recall_limit"] = after["recall_limit"]
+    reranker["output_limit"] = after["output_limit"]
+    current = registry.setdefault("current_profiles", {})
+    current["reranker"] = args.profile
+    policy["enabled"] = after["registry_enabled"]
+    policy["default_profile"] = after["registry_default_profile"]
+    policy["recall_limit"] = after["recall_limit"]
+    policy["output_limit"] = after["output_limit"]
+    save_any_yaml(config_path, daemon_config)
+    save_yaml(REGISTRY_PATH, registry)
+    _maybe_render_summary_after_change()
+    return {"message": "reranker profile switched", "backup": backup, "diff": diff}
+
+
+def cmd_set_reranker_enabled(args: argparse.Namespace) -> dict[str, Any]:
+    registry = load_yaml(REGISTRY_PATH)
+    config_path = _daemon_config_path(args)
+    daemon_config = load_any_yaml(config_path, label="daemon config")
+    reranker = daemon_config.setdefault("reranker", {})
+    policy = registry.setdefault("reranker_policy", {})
+    enabled = args.enabled.lower() == "true"
+    before = {"daemon_enabled": reranker.get("enabled"), "registry_enabled": policy.get("enabled")}
+    after = {"daemon_enabled": enabled, "registry_enabled": enabled}
+    diff = {
+        "kind": "reranker_enabled",
+        "config_path": str(config_path),
+        "before": before,
+        "after": after,
+        "note": "只启用/关闭外置 rerank；不修改 Graphiti core。",
+    }
+    if args.dry_run:
+        return {"message": "dry run; daemon config and registry not changed", "diff": diff}
+    _require_real_change(args, "set-reranker-enabled")
+    backup = _backup_selected_files("set-reranker-enabled", [config_path, REGISTRY_PATH])
+    reranker["enabled"] = enabled
+    policy["enabled"] = enabled
+    save_any_yaml(config_path, daemon_config)
+    save_yaml(REGISTRY_PATH, registry)
+    _maybe_render_summary_after_change()
+    return {"message": "reranker enabled flag changed", "backup": backup, "diff": diff}
+
+
+def _runtime_registry_warnings(registry: dict[str, Any], runtime: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    current = registry.get("current_profiles") or {}
+    llm_profile_name = current.get("graphiti_llm")
+    if llm_profile_name:
+        profile = ((registry.get("model_profiles") or {}).get("graphiti_llm") or {}).get(llm_profile_name) or {}
+        llm = runtime.get("llm") or {}
+        if isinstance(profile, dict):
+            if profile.get("model") and llm.get("model") != profile.get("model"):
+                warnings.append(f"Graphiti LLM runtime model={llm.get('model')} 与 registry profile {llm_profile_name} model={profile.get('model')} 不一致")
+            if profile.get("provider") and llm.get("provider") != profile.get("provider"):
+                warnings.append(f"Graphiti LLM runtime provider={llm.get('provider')} 与 registry profile {llm_profile_name} provider={profile.get('provider')} 不一致")
+    embedder_profile_name = current.get("graphiti_embedder")
+    if embedder_profile_name:
+        profile = ((registry.get("model_profiles") or {}).get("graphiti_embedder") or {}).get(embedder_profile_name) or {}
+        embedder = runtime.get("embedder") or {}
+        if isinstance(profile, dict):
+            if profile.get("model") and embedder.get("model") != profile.get("model"):
+                warnings.append(f"Embedding runtime model={embedder.get('model')} 与 registry profile {embedder_profile_name} model={profile.get('model')} 不一致")
+            if profile.get("provider") and embedder.get("provider") != profile.get("provider"):
+                warnings.append(f"Embedding runtime provider={embedder.get('provider')} 与 registry profile {embedder_profile_name} provider={profile.get('provider')} 不一致")
+    return warnings
+
+
+def _parse_bool_arg(value: str) -> bool:
+    lowered = str(value).strip().lower()
+    if lowered in {"1", "true", "yes", "y", "on", "enabled"}:
+        return True
+    if lowered in {"0", "false", "no", "n", "off", "disabled"}:
+        return False
+    raise argparse.ArgumentTypeError("expected true/false")
 
 
 def cmd_render_summary(args: argparse.Namespace) -> dict[str, Any]:
     registry = load_yaml(REGISTRY_PATH)
     runtime = runtime_summary()
+    runtime_warnings = _runtime_registry_warnings(registry, runtime) if getattr(args, "verify_runtime", False) else []
     groups = group_items(registry, include_archived=True)
     current = registry.get("current_profiles") or {}
     lines = [
@@ -435,9 +719,13 @@ def cmd_render_summary(args: argparse.Namespace) -> dict[str, Any]:
             "- 常驻服务写入后端为 skill CLI，MCP 仅用于兼容状态与排故。",
         ]
     )
+    if runtime_warnings:
+        lines.extend(["", "## Runtime 校验警告", ""])
+        for warning in runtime_warnings:
+            lines.append(f"- {warning}")
     SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
     SUMMARY_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return {"message": "summary rendered", "path": str(SUMMARY_PATH)}
+    return {"message": "summary rendered", "path": str(SUMMARY_PATH), "runtime_warnings": runtime_warnings}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -470,6 +758,34 @@ def build_parser() -> argparse.ArgumentParser:
     switch.add_argument("--yes", action="store_true")
     switch.set_defaults(func=cmd_switch_profile)
 
+    daemon_switch = sub.add_parser("switch-daemon-profile")
+    add_format_arg(daemon_switch)
+    daemon_switch.add_argument("--profile", required=True)
+    daemon_switch.add_argument("--config", default=str(DEFAULT_DAEMON_CONFIG_PATH))
+    daemon_switch.add_argument("--enabled", type=_parse_bool_arg)
+    daemon_switch.add_argument("--dry-run", action="store_true")
+    daemon_switch.add_argument("--yes", action="store_true")
+    daemon_switch.set_defaults(func=cmd_switch_daemon_profile)
+
+    reranker_switch = sub.add_parser("switch-reranker-profile")
+    add_format_arg(reranker_switch)
+    reranker_switch.add_argument("--profile", required=True)
+    reranker_switch.add_argument("--config", default=str(DEFAULT_DAEMON_CONFIG_PATH))
+    reranker_switch.add_argument("--enabled", type=_parse_bool_arg)
+    reranker_switch.add_argument("--recall-limit", type=int)
+    reranker_switch.add_argument("--output-limit", type=int)
+    reranker_switch.add_argument("--dry-run", action="store_true")
+    reranker_switch.add_argument("--yes", action="store_true")
+    reranker_switch.set_defaults(func=cmd_switch_reranker_profile)
+
+    reranker_enabled = sub.add_parser("set-reranker-enabled")
+    add_format_arg(reranker_enabled)
+    reranker_enabled.add_argument("--enabled", choices=["true", "false"], required=True)
+    reranker_enabled.add_argument("--config", default=str(DEFAULT_DAEMON_CONFIG_PATH))
+    reranker_enabled.add_argument("--dry-run", action="store_true")
+    reranker_enabled.add_argument("--yes", action="store_true")
+    reranker_enabled.set_defaults(func=cmd_set_reranker_enabled)
+
     rollback = sub.add_parser("rollback-profile")
     add_format_arg(rollback)
     rollback.add_argument("--backup-id", required=True)
@@ -501,6 +817,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     render = sub.add_parser("render-summary")
     add_format_arg(render)
+    render.add_argument("--verify-runtime", action="store_true")
     render.set_defaults(func=cmd_render_summary)
     return parser
 
