@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ GRAPHITI_VENV_PYTHON = GRAPHITI_MCP_DIR / ".venv" / "Scripts" / "python.exe"
 GRAPHITI_CONFIG_PATH = GRAPHITI_MCP_DIR / "config" / "config-docker-neo4j.yaml"
 REGISTRY_PATH = GRAPHITI_MCP_DIR / "config" / "memory-registry.yaml"
 SUMMARY_PATH = Path(__file__).resolve().parent.parent / "references" / "memory-system-registry.md"
+BACKUP_DIR = GRAPHITI_MCP_DIR / "config" / "registry-backups"
 
 SECRET_PATTERNS = [
     re.compile(r"(sk-[A-Za-z0-9_\-]{12,})"),
@@ -225,6 +227,87 @@ def cmd_list_groups(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def cmd_list_profiles(args: argparse.Namespace) -> dict[str, Any]:
+    registry = load_yaml(REGISTRY_PATH)
+    profiles = (registry.get("model_profiles") or {}).get(args.kind) or {}
+    return {
+        "message": "profiles retrieved",
+        "kind": args.kind,
+        "current": (registry.get("current_profiles") or {}).get(args.kind),
+        "items": [
+            {
+                "profile": name,
+                "enabled": bool(raw.get("enabled", False)) if isinstance(raw, dict) else False,
+                "provider": raw.get("provider") if isinstance(raw, dict) else None,
+                "model": raw.get("model") if isinstance(raw, dict) else None,
+                "api_url": (raw.get("api_url") or raw.get("api_url_env")) if isinstance(raw, dict) else None,
+                "notes": raw.get("notes", raw.get("purpose", "")) if isinstance(raw, dict) else "",
+            }
+            for name, raw in profiles.items()
+        ],
+    }
+
+
+def cmd_switch_profile(args: argparse.Namespace) -> dict[str, Any]:
+    if args.kind != "graphiti_llm":
+        raise SystemExit("switch-profile currently supports --kind graphiti_llm only; daemon/reranker profiles are changed in daemon config/registry policy.")
+    registry = load_yaml(REGISTRY_PATH)
+    profiles = (registry.get("model_profiles") or {}).get(args.kind) or {}
+    profile = profiles.get(args.profile)
+    if not isinstance(profile, dict):
+        raise SystemExit(f"Unknown {args.kind} profile: {args.profile}")
+    runtime = load_runtime_yaml()
+    llm = runtime.setdefault("llm", {})
+    before = {
+        "provider": llm.get("provider"),
+        "model": llm.get("model"),
+        "api_url": (((llm.get("providers") or {}).get(llm.get("provider")) or {}).get("api_url")),
+    }
+    after = {
+        "provider": profile.get("provider", before.get("provider")),
+        "model": profile.get("model", before.get("model")),
+        "api_url": profile.get("api_url") or (f"${{{profile.get('api_url_env')}}}" if profile.get("api_url_env") else before.get("api_url")),
+    }
+    diff = {"kind": args.kind, "profile": args.profile, "before": before, "after": after}
+    if args.dry_run:
+        return {"message": "dry run; runtime YAML not changed", "diff": diff}
+    if not args.yes:
+        raise SystemExit("switch-profile changes runtime YAML and registry. Re-run with --yes or use --dry-run.")
+
+    backup = _backup_runtime_files("switch-profile")
+    llm["provider"] = after["provider"]
+    llm["model"] = after["model"]
+    providers = llm.setdefault("providers", {})
+    provider_cfg = providers.setdefault(after["provider"], {})
+    if after["api_url"]:
+        provider_cfg["api_url"] = after["api_url"]
+    current = registry.setdefault("current_profiles", {})
+    current[args.kind] = args.profile
+    _save_runtime_yaml(runtime)
+    save_yaml(REGISTRY_PATH, registry)
+    return {"message": "profile switched", "backup": backup, "diff": diff}
+
+
+def cmd_rollback_profile(args: argparse.Namespace) -> dict[str, Any]:
+    backup_root = BACKUP_DIR / args.backup_id
+    runtime_backup = backup_root / GRAPHITI_CONFIG_PATH.name
+    registry_backup = backup_root / REGISTRY_PATH.name
+    if not runtime_backup.exists() or not registry_backup.exists():
+        raise SystemExit(f"Backup not found or incomplete: {backup_root}")
+    if args.dry_run:
+        return {
+            "message": "dry run; no files restored",
+            "backup": str(backup_root),
+            "restore": [str(GRAPHITI_CONFIG_PATH), str(REGISTRY_PATH)],
+        }
+    if not args.yes:
+        raise SystemExit("rollback-profile restores runtime YAML and registry. Re-run with --yes or use --dry-run.")
+    safety = _backup_runtime_files("pre-rollback")
+    shutil.copy2(runtime_backup, GRAPHITI_CONFIG_PATH)
+    shutil.copy2(registry_backup, REGISTRY_PATH)
+    return {"message": "profile rollback restored", "backup": str(backup_root), "safety_backup": safety}
+
+
 def cmd_add_group(args: argparse.Namespace) -> dict[str, Any]:
     registry = load_yaml(REGISTRY_PATH)
     group_id = args.group_id.strip()
@@ -289,11 +372,25 @@ def _append_runtime_graphiti_type(*, section_name: str, type_name: str, descript
     if dry_run:
         return {"message": "dry run; runtime YAML not changed", **preview}
     rows.append(new_row)
-    rendered = yaml.safe_dump(raw, allow_unicode=True, sort_keys=False, width=120)
     backup = GRAPHITI_CONFIG_PATH.with_suffix(f".yaml.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
     backup.write_text(GRAPHITI_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8")
-    GRAPHITI_CONFIG_PATH.write_text(rendered, encoding="utf-8")
+    _save_runtime_yaml(raw)
     return {"message": f"{section_name} added", "backup": str(backup), **preview}
+
+
+def _save_runtime_yaml(data: dict[str, Any]) -> None:
+    import yaml
+
+    GRAPHITI_CONFIG_PATH.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120), encoding="utf-8")
+
+
+def _backup_runtime_files(reason: str) -> dict[str, str]:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = BACKUP_DIR / f"{stamp}-{reason}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(GRAPHITI_CONFIG_PATH, backup_dir / GRAPHITI_CONFIG_PATH.name)
+    shutil.copy2(REGISTRY_PATH, backup_dir / REGISTRY_PATH.name)
+    return {"id": backup_dir.name, "path": str(backup_dir)}
 
 
 def cmd_render_summary(args: argparse.Namespace) -> dict[str, Any]:
@@ -359,6 +456,26 @@ def build_parser() -> argparse.ArgumentParser:
     add_format_arg(groups)
     groups.add_argument("--include-archived", action="store_true")
     groups.set_defaults(func=cmd_list_groups)
+
+    profiles = sub.add_parser("list-profiles")
+    add_format_arg(profiles)
+    profiles.add_argument("--kind", choices=["graphiti_llm", "graphiti_embedder", "daemon_assistant", "reranker"], required=True)
+    profiles.set_defaults(func=cmd_list_profiles)
+
+    switch = sub.add_parser("switch-profile")
+    add_format_arg(switch)
+    switch.add_argument("--kind", choices=["graphiti_llm"], required=True)
+    switch.add_argument("--profile", required=True)
+    switch.add_argument("--dry-run", action="store_true")
+    switch.add_argument("--yes", action="store_true")
+    switch.set_defaults(func=cmd_switch_profile)
+
+    rollback = sub.add_parser("rollback-profile")
+    add_format_arg(rollback)
+    rollback.add_argument("--backup-id", required=True)
+    rollback.add_argument("--dry-run", action="store_true")
+    rollback.add_argument("--yes", action="store_true")
+    rollback.set_defaults(func=cmd_rollback_profile)
 
     add_group = sub.add_parser("add-group")
     add_format_arg(add_group)

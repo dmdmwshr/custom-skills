@@ -62,6 +62,10 @@ Registry CLI：
 
 - `python scripts/memory_registry.py status`: 查看 runtime 配置、当前 profile、group 策略和 daemon/reranker 策略。
 - `python scripts/memory_registry.py list-groups`: 查看可写入 group。
+- `python scripts/memory_registry.py list-profiles --kind graphiti_llm`: 查看模型 profile 和当前选择。
+- `python scripts/memory_registry.py switch-profile --kind graphiti_llm --profile openai-gpt --dry-run`: 预览 Graphiti LLM profile 切换 diff，不改文件。
+- `python scripts/memory_registry.py switch-profile --kind graphiti_llm --profile openai-gpt --yes`: 执行 profile 切换，会备份 runtime YAML 与 registry；执行前必须确认。
+- `python scripts/memory_registry.py rollback-profile --backup-id "<backup-id>" --dry-run`: 预览回滚 runtime YAML 与 registry。
 - `python scripts/memory_registry.py add-group --group-id project-xxx --description "..."`
 - `python scripts/memory_registry.py add-entity-type --name "..." --description "..." --dry-run`
 - `python scripts/memory_registry.py add-edge-type --name "..." --description "..." --dry-run`
@@ -112,6 +116,7 @@ python .\scripts\memory_registry.py render-summary
 
 - LLM、embedding、Neo4j、默认 `group_id` 和 `entity_types` 均以 `D:\Program_Files\graphiti\mcp_server\config\config-docker-neo4j.yaml` 为事实源。
 - group、profile、reranker、daemon assistant 和治理策略以 `D:\Program_Files\graphiti\mcp_server\config\memory-registry.yaml` 为事实源。
+- Graphiti LLM profile 切换优先用 `memory_registry.py switch-profile --dry-run` 预览，再用 `--yes` 执行；执行会写入 `config\registry-backups\<timestamp>-switch-profile` 备份，必要时用 `rollback-profile` 回滚。
 - `entity_types` 从 YAML 动态生成 Pydantic 类型并传入 Graphiti core。
 - 可在 YAML 的 `graphiti` 段落增加 `edge_types` 和 `edge_type_map`，CLI 会读取并传入 `add_episode`；配置错误时 `doctor` 应显示明确错误。
 - 模型切换必须通过 profile 设计生成 diff、健康检查和可回滚变更；不要手工多处散改。
