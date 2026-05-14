@@ -21,6 +21,11 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import writer
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 
 PRODUCT_ORDER = ["江阴", "宜兴", "梁溪", "锡山", "惠山", "滨湖", "新吴", "经开"]
 OFFICE_ORDER = ["梁溪", "锡山", "惠山", "滨湖", "新吴", "江阴", "宜兴", "经开"]
