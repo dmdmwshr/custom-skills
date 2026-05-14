@@ -1,6 +1,8 @@
 import os
 import sys
 import json
+import argparse
+from datetime import datetime
 
 CELL_MAPPING = {
     # 只映射空白的地方
@@ -24,6 +26,15 @@ CELL_MAPPING = {
 def auto_calculate_scores(record):
     """自动遍历扣分项，计算合计扣分和实际得分"""
     total_deduction = 0.0
+    fields = record.get("fields", {})
+    score_override = record.get("score_override", fields.get("score_override"))
+
+    if record.get("no_case"):
+        if "fields" not in record:
+            record["fields"] = {}
+        record["fields"]["合计扣分"] = "10"
+        record["fields"]["实际得分"] = "0"
+        return
     
     # 解析基本要素扣分
     basic_elements = record.get("基本要素", {})
@@ -58,12 +69,20 @@ def auto_calculate_scores(record):
             except ValueError:
                 pass
 
-    # 填充结果到 fields 中
     if "fields" not in record:
         record["fields"] = {}
-        
-    record["fields"]["合计扣分"] = str(round(total_deduction, 1))
-    record["fields"]["实际得分"] = str(round(10.0 - total_deduction, 1))
+
+    if score_override not in (None, ""):
+        try:
+            actual_score = float(score_override)
+            total_deduction = max(0.0, 10.0 - actual_score)
+        except ValueError:
+            actual_score = 10.0 - total_deduction
+    else:
+        actual_score = 10.0 - total_deduction
+
+    record["fields"]["合计扣分"] = str(round(total_deduction, 1)).rstrip("0").rstrip(".")
+    record["fields"]["实际得分"] = str(round(actual_score, 1)).rstrip("0").rstrip(".")
 
 def safe_write(cell, text):
     """安全锁机制：只在单元格内容完全为空时才执行写入，防止挤占原有字和撑爆排版"""
@@ -153,19 +172,19 @@ def process_single_record(word_app, template_path, output_doc, output_pdf, recor
                 
         # 另存为 Doc
         doc.SaveAs(output_doc)
-        print(f"✅ Generated DOC: {os.path.basename(output_doc)}")
+        print(f"Generated DOC: {os.path.basename(output_doc)}")
         
         # 另存为 PDF (只为了给 AI 验证用)
         if output_pdf:
             doc.ExportAsFixedFormat(output_pdf, 17)
-            print(f"✅ Generated PDF: {os.path.basename(output_pdf)}")
+            print(f"Generated PDF: {os.path.basename(output_pdf)}")
             
     except Exception as e:
-        print(f"❌ Error processing record: {e}")
+        print(f"Error processing record: {e}")
     finally:
         doc.Close(False)
 
-def batch_process(template_doc, batch_json_path, output_dir):
+def batch_process(template_doc, batch_json_path, output_dir, month=None, export_pdf=True):
     with open(batch_json_path, 'r', encoding='utf-8') as f:
         batch_data = json.load(f)
 
@@ -188,11 +207,13 @@ def batch_process(template_doc, batch_json_path, output_dir):
     word.Visible = False
     
     try:
-        from datetime import datetime
-        from dateutil.relativedelta import relativedelta
-        # 计算上一个月的月份数字
-        last_month = (datetime.now() - relativedelta(months=1)).month
-        
+        if month is None:
+            # 兼容旧行为：未显式传入月份时，仍按系统上一个月份生成文件名。
+            current_month = datetime.now().month
+            last_month = 12 if current_month == 1 else current_month - 1
+        else:
+            last_month = int(month)
+
         for idx, record in enumerate(batch_data):
             # 获取用户填入的被检查单位，比如 "滨湖大队" -> 提取 "滨湖大队"
             # 无论 json 里写了什么，我们都强制按照标准规范重新推导或覆盖文件名
@@ -205,15 +226,25 @@ def batch_process(template_doc, batch_json_path, output_dir):
             safe_name = "".join([c for c in formatted_name if c not in '\\/:*?"<>|']).rstrip()
             
             out_doc = os.path.abspath(os.path.join(output_dir, f"{safe_name}.doc"))
-            out_pdf = os.path.abspath(os.path.join(output_dir, f"{safe_name}.pdf"))
+            out_pdf = os.path.abspath(os.path.join(output_dir, f"{safe_name}.pdf")) if export_pdf else None
             
             process_single_record(word, os.path.abspath(template_doc), out_doc, out_pdf, record, default_fields)
     finally:
         word.Quit()
 
 if __name__ == "__main__":
-    if len(sys.argv) < 4:
-        print("Usage: python writer.py <empty_template.doc> <batch_data.json> <output_dir>")
-        sys.exit(1)
-        
-    batch_process(sys.argv[1], sys.argv[2], sys.argv[3])
+    parser = argparse.ArgumentParser(description="批量生成消防产品档案质量明细表。")
+    parser.add_argument("template_doc", help="空白 .doc 模板路径")
+    parser.add_argument("batch_data_json", help="批量 JSON 数据路径")
+    parser.add_argument("output_dir", help="输出目录")
+    parser.add_argument("--month", type=int, help="显式指定文件名中的月份，例如 5")
+    parser.add_argument("--no-pdf", action="store_true", help="不额外导出 PDF")
+    args = parser.parse_args()
+
+    batch_process(
+        args.template_doc,
+        args.batch_data_json,
+        args.output_dir,
+        month=args.month,
+        export_pdf=not args.no_pdf,
+    )
