@@ -1,11 +1,13 @@
 import argparse
 import copy
+import hashlib
 import json
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from docx import Document
@@ -33,6 +35,16 @@ CASE_ORDER = ["江阴", "宜兴", "梁溪", "锡山", "惠山", "滨湖", "新�
 PERSON_SCORE_COLUMNS = list(range(28, 36))  # AB:AI
 REPORT_TITLE_FONT = "方正黑体_GBK"
 REPORT_BODY_FONT = "方正楷体_GBK"
+MONTHLY_TEMPLATE_MANIFEST = SKILL_DIR / "resources" / "monthly_templates" / "manifest.json"
+MONITOR_HISTORY_PATH = SKILL_DIR / "resources" / "history" / "monitor_report_history.json"
+MONTHLY_TEMPLATE_KEYS = {
+    "product_archive_detail",
+    "product_summary",
+    "personal_stats",
+    "office_record",
+    "case_scores",
+    "monthly_report",
+}
 
 
 class HumanReviewRequired(RuntimeError):
@@ -82,6 +94,61 @@ def copy_output(src, dst, force=False):
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
     return dst
+
+
+def sha256_text(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def utc_now_text():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def make_month_key(year, month):
+    return f"{int(year):04d}-{int(month):02d}"
+
+
+def load_monthly_template_manifest(manifest_path=MONTHLY_TEMPLATE_MANIFEST):
+    manifest_path = Path(manifest_path)
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"月度模板 manifest 不存在：{manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    base_dir = manifest_path.parent
+    templates = {}
+    for item in manifest.get("templates", []):
+        key = item.get("key")
+        if key not in MONTHLY_TEMPLATE_KEYS:
+            continue
+        if item.get("reserved") or not item.get("used_in_monthly_register"):
+            continue
+        path = base_dir / item["file"]
+        require_path(path, f"月度模板 {key}")
+        templates[key] = path
+    missing = sorted(MONTHLY_TEMPLATE_KEYS - set(templates))
+    if missing:
+        raise FileNotFoundError("月度模板 manifest 缺少必要模板：" + "、".join(missing))
+    return templates, str(manifest_path)
+
+
+def load_external_templates(template_dir):
+    template_dir = require_path(template_dir, "外部模板目录")
+    templates = {
+        "product_archive_detail": find_one(template_dir, ["02_消防产品档案质量明细表模板.doc", "（模板）消防产品档案质量明细表.doc"], "消防产品档案质量明细表模板"),
+        "product_summary": find_one(template_dir, ["03_产品监督成绩总表模板.xlsx", "（模板）产品监督成绩总表.xlsx"], "产品监督成绩总表模板"),
+        "personal_stats": find_one(template_dir, ["04_个人执法统计表模板.xlsx", "（模板）个人执法统计表*.xlsx"], "个人执法统计表模板"),
+        "office_record": find_one(template_dir, ["05_科室月考核情况记录表模板.xlsx", "（模板）科室月考核情况记录表.xlsx"], "科室月考核情况记录表模板"),
+        "case_scores": find_one(template_dir, ["06_消防执法质量个案成绩模板.xls", "(模板-成绩汇总)消防监督管理系统消防执法质量（个案成绩）.xls"], "消防执法质量个案成绩模板"),
+        "monthly_report": find_one(template_dir, ["07_月度通报模板.doc", "(样例)xxxx年x月通报.doc"], "月度通报模板"),
+    }
+    return templates, str(template_dir)
+
+
+def load_monthly_templates(template_dir=None):
+    if template_dir:
+        templates, source = load_external_templates(template_dir)
+        return templates, {"mode": "external", "source": source}
+    templates, source = load_monthly_template_manifest()
+    return templates, {"mode": "skill", "source": source}
 
 
 def parse_deduction_value(line):
@@ -548,20 +615,178 @@ def extract_monitor_report_section(report_path):
         shutil.rmtree(out_dir, ignore_errors=True)
 
 
-def collect_monitor_report_history(workspace_root, current_report_path=None):
+def parse_report_month(report_path, default_year=None):
+    text = str(report_path)
+    match = re.search(r"(\d{4})年(\d{1,2})月通报\.doc", Path(report_path).name)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    match = re.search(r"(\d{1,2})月", text)
+    if match and default_year:
+        return int(default_year), int(match.group(1))
+    return None, None
+
+
+def extract_monitor_brigades(section):
+    selected = []
+    used = set()
+    for match in re.finditer(r"([\u4e00-\u9fff]{2})大队", section):
+        short = match.group(1)
+        if short not in CASE_ORDER or short in used:
+            continue
+        selected.append({"short": short, "大队": f"{short}大队"})
+        used.add(short)
+    return selected
+
+
+def load_monitor_history(path=MONITOR_HISTORY_PATH):
+    path = Path(path)
+    if not path.exists():
+        return {"version": 1, "records": []}
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    data.setdefault("version", 1)
+    data.setdefault("records", [])
+    return data
+
+
+def normalize_history_record(record):
+    normalized = copy.deepcopy(record)
+    normalized.pop("updated_at", None)
+    return normalized
+
+
+def history_record_action(history, record):
+    for existing in history.get("records", []):
+        if existing.get("month_key") == record.get("month_key"):
+            return "unchanged" if normalize_history_record(existing) == normalize_history_record(record) else "replace"
+    return "add"
+
+
+def upsert_history_record(history, record):
+    records = history.setdefault("records", [])
+    for index, existing in enumerate(records):
+        if existing.get("month_key") == record.get("month_key"):
+            if normalize_history_record(existing) == normalize_history_record(record):
+                return "unchanged"
+            records[index] = record
+            return "replace"
+    records.append(record)
+    records.sort(key=lambda item: item.get("month_key", ""))
+    return "add"
+
+
+def save_monitor_history_if_changed(history, path=MONITOR_HISTORY_PATH):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new_text = json.dumps(history, ensure_ascii=False, indent=2) + "\n"
+    if path.exists() and path.read_text(encoding="utf-8-sig") == new_text:
+        return False
+    path.write_text(new_text, encoding="utf-8")
+    return True
+
+
+def build_scanned_history_records(workspace_root, current_report_path=None, default_year=None):
     workspace_root = Path(workspace_root)
     current_resolved = str(Path(current_report_path).resolve()).lower() if current_report_path else ""
-    counts = {}
+    records = {}
     for report_path in workspace_root.glob("*月/*通报.doc"):
         if report_path.name.startswith("~$"):
             continue
         if current_resolved and str(report_path.resolve()).lower() == current_resolved:
             continue
+        year, month = parse_report_month(report_path, default_year=default_year)
+        if not year or not month:
+            continue
         section = extract_monitor_report_section(report_path)
-        for match in re.finditer(r"([\u4e00-\u9fff]{2})大队", section):
-            short = match.group(1)
-            counts[short] = counts.get(short, 0) + 1
+        selected = extract_monitor_brigades(section)
+        if not selected:
+            continue
+        month_key = make_month_key(year, month)
+        records[month_key] = {
+            "year": year,
+            "month": month,
+            "month_key": month_key,
+            "report_file": str(report_path),
+            "report_section_hash": sha256_text(section.strip()),
+            "selected_cases": [
+                {
+                    "rank": index,
+                    "brigade": item["short"],
+                    "brigade_name": item["大队"],
+                }
+                for index, item in enumerate(selected, 1)
+            ],
+            "source": "scanned_existing",
+        }
+    return records
+
+
+def effective_history_records(history, scanned_records):
+    records = {item.get("month_key"): item for item in history.get("records", []) if item.get("month_key")}
+    for month_key, record in scanned_records.items():
+        records.setdefault(month_key, record)
+    return records
+
+
+def monitor_history_counts(records_by_month, exclude_month_key=None):
+    counts = {}
+    for month_key, record in records_by_month.items():
+        if month_key == exclude_month_key:
+            continue
+        for item in record.get("selected_cases", []):
+            short = item.get("brigade") or brigade_short(item.get("brigade_name"))
+            if short:
+                counts[short] = counts.get(short, 0) + 1
     return counts
+
+
+def build_generated_history_record(year, month, report_output, monitor_text, selected_cases, monitor_scores):
+    return {
+        "year": int(year),
+        "month": int(month),
+        "month_key": make_month_key(year, month),
+        "report_file": str(Path(report_output)),
+        "report_section_hash": sha256_text(monitor_text.strip()),
+        "selected_cases": [
+            {
+                "rank": index,
+                "brigade": item["short"],
+                "brigade_name": item["大队"],
+                "contact": item["联系人"],
+                "unit": item["单位"],
+                "case_score": item["score"],
+                "brigade_avg": monitor_scores.get(item["short"], {}).get("avg"),
+            }
+            for index, item in enumerate(selected_cases, 1)
+        ],
+        "source": "generated",
+        "updated_at": utc_now_text(),
+    }
+
+
+def prepare_monitor_history(workspace_root, year, month, current_report_path=None):
+    history = load_monitor_history()
+    scanned = build_scanned_history_records(workspace_root, current_report_path, default_year=year)
+    records = effective_history_records(history, scanned)
+    current_key = make_month_key(year, month)
+    return history, scanned, monitor_history_counts(records, exclude_month_key=current_key)
+
+
+def update_monitor_history(history, scanned_records, current_record):
+    changed_actions = []
+    existing_keys = {item.get("month_key") for item in history.get("records", [])}
+    for month_key in sorted(scanned_records):
+        if month_key in existing_keys:
+            continue
+        record = copy.deepcopy(scanned_records[month_key])
+        record["updated_at"] = utc_now_text()
+        action = upsert_history_record(history, record)
+        if action != "unchanged":
+            changed_actions.append({"month_key": month_key, "action": action, "source": "scanned_existing"})
+    current_action = upsert_history_record(history, current_record)
+    if current_action != "unchanged":
+        changed_actions.append({"month_key": current_record["month_key"], "action": current_action, "source": "generated"})
+    written = save_monitor_history_if_changed(history)
+    return {"written": written, "actions": changed_actions, "current_action": current_action}
 
 
 def select_monitor_report_cases(monitor_details, monitor_scores=None, history_counts=None):
@@ -700,7 +925,7 @@ def write_report_doc(template_path, output_path, product_records, monitor_detail
         word.Quit()
 
 
-def generate_product_docs(product_records, product_output_dir, year, month, force):
+def generate_product_docs(product_records, product_output_dir, year, month, force, template_path=None):
     if product_output_dir.exists() and force:
         for path in product_output_dir.glob("*产品监督档案.doc"):
             path.unlink()
@@ -711,7 +936,7 @@ def generate_product_docs(product_records, product_output_dir, year, month, forc
         batch_path = Path(handle.name)
     try:
         writer.batch_process(
-            SKILL_DIR / "resources" / "空表.doc",
+            template_path or (SKILL_DIR / "resources" / "空表.doc"),
             batch_path,
             product_output_dir,
             month=month,
@@ -726,24 +951,42 @@ def generate_product_docs(product_records, product_output_dir, year, month, forc
 
 def run(args):
     month_dir = require_path(args.month_dir, "月份目录")
+    templates, template_info = load_monthly_templates(args.template_dir)
     product_register = find_one(month_dir, [f"*{args.month}月*产品巡查底册*.docx", "*产品巡查底册*.docx"], "产品巡查底册")
     network_dir = find_one(month_dir, ["*联网监测基础信息考评明细表"], "联网监测明细目录")
     network_stats = require_path(network_dir / "联网监测统计表.xls", "联网监测统计表")
     base_info = find_one(month_dir, ["*基础信息考评截图*.xls"], "基础信息考评截图")
-    personal_template = find_one(month_dir, ["（模板）个人执法统计表*.xlsx", "个人执法统计表*.xlsx"], "个人执法统计表模板")
+    personal_template = templates["personal_stats"]
     report_output = month_dir / f"{args.year}年{args.month}月通报.doc"
 
     product_records = parse_product_register(product_register)
     monitor_scores = read_monitor_scores(network_stats)
     monitor_details = read_monitor_details(base_info, monitor_scores)
     validate_person_matches(personal_template, product_records, monitor_details)
-    history_counts = collect_monitor_report_history(month_dir.parent, current_report_path=report_output)
+    history, scanned_history, history_counts = prepare_monitor_history(
+        month_dir.parent,
+        args.year,
+        args.month,
+        current_report_path=report_output,
+    )
+    selected_cases = select_monitor_report_cases(monitor_details, monitor_scores, history_counts)
 
     if args.dry_run:
         product_text, monitor_text = build_report_sections(product_records, monitor_details, monitor_scores, history_counts)
+        current_record = build_generated_history_record(
+            args.year,
+            args.month,
+            report_output,
+            monitor_text,
+            selected_cases,
+            monitor_scores,
+        )
+        history_action = "disabled" if args.no_history_update else history_record_action(history, current_record)
+        backfill_months = sorted(key for key in scanned_history if key not in {item.get("month_key") for item in history.get("records", [])})
         print(
             json.dumps(
                 {
+                    "template_source": template_info,
                     "products": [
                         {
                             "大队": item["大队"],
@@ -757,7 +1000,12 @@ def run(args):
                     ],
                     "monitor_avg": {k: v["avg"] for k, v in monitor_scores.items()},
                     "monitor_report_history_counts": history_counts,
-                    "monitor_report_cases": select_monitor_report_cases(monitor_details, monitor_scores, history_counts),
+                    "monitor_report_history_source": {
+                        "path": str(MONITOR_HISTORY_PATH),
+                        "scanned_missing_months": backfill_months,
+                    },
+                    "history_record_would_update": history_action,
+                    "monitor_report_cases": selected_cases,
                     "report_text_quality": {
                         "product": validate_text_quality("消防产品通报", product_text),
                         "monitor": validate_text_quality("联网监测通报", monitor_text),
@@ -769,12 +1017,12 @@ def run(args):
         )
         return
 
-    product_dir = month_dir / f"{args.month}月消防产品监督成绩"
+    product_dir = month_dir / f"{args.year}年{args.month}月消防产品监督成绩"
     if personal_template.resolve() == (month_dir / f"个人执法统计表{args.year}{args.month:02d}.xlsx").resolve():
         raise FileNotFoundError("月份目录缺少个人执法统计表模板，不能用已生成成品覆盖自身")
-    generate_product_docs(product_records, product_dir, args.year, args.month, args.force)
+    generate_product_docs(product_records, product_dir, args.year, args.month, args.force, templates["product_archive_detail"])
     write_product_summary(
-        month_dir / "（模板）产品监督成绩总表.xlsx",
+        templates["product_summary"],
         product_dir / "产品监督成绩总表.xlsx",
         product_records,
         args.force,
@@ -788,21 +1036,21 @@ def run(args):
         args.force,
     )
     write_office_record(
-        month_dir / "（模板）科室月考核情况记录表.xlsx",
+        templates["office_record"],
         month_dir / f"{args.month}月科室月考核情况记录表.xlsx",
         product_records,
         monitor_details,
         args.force,
     )
     write_case_scores(
-        month_dir / "(模板-成绩汇总)消防监督管理系统消防执法质量（个案成绩）.xls",
+        templates["case_scores"],
         month_dir / f"消防监督管理系统消防执法质量（{args.month}月个案成绩）.xls",
         product_records,
         monitor_scores,
         args.force,
     )
     write_report_doc(
-        month_dir / "(样例)xxxx年x月通报.doc",
+        templates["monthly_report"],
         report_output,
         product_records,
         monitor_details,
@@ -810,8 +1058,21 @@ def run(args):
         monitor_scores,
         history_counts,
     )
+    product_text, monitor_text = build_report_sections(product_records, monitor_details, monitor_scores, history_counts)
+    current_record = build_generated_history_record(
+        args.year,
+        args.month,
+        report_output,
+        monitor_text,
+        selected_cases,
+        monitor_scores,
+    )
+    history_update = {"written": False, "actions": [], "current_action": "disabled"}
+    if not args.no_history_update:
+        history_update = update_monitor_history(history, scanned_history, current_record)
 
     summary = {
+        "template_source": template_info,
         "product_dir": str(product_dir),
         "product_scores": {item["short"]: item["score"] for item in product_records},
         "monitor_avg": {k: v["avg"] for k, v in monitor_scores.items()},
@@ -823,9 +1084,10 @@ def run(args):
                 "单位": item["单位"],
                 "score": item["score"],
             }
-            for item in select_monitor_report_cases(monitor_details, monitor_scores, history_counts)
+            for item in selected_cases
         ],
         "monitor_report_history_counts": history_counts,
+        "monitor_report_history_update": history_update,
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
@@ -837,6 +1099,8 @@ def main():
     parser.add_argument("--month", type=int, required=True, help="月份，例如 5")
     parser.add_argument("--force", action="store_true", help="覆盖已生成的同名成品文件")
     parser.add_argument("--dry-run", action="store_true", help="只解析并输出数据，不写入文件")
+    parser.add_argument("--template-dir", help="临时覆盖月度模板目录；默认使用 skill 内 resources/monthly_templates")
+    parser.add_argument("--no-history-update", action="store_true", help="生成文件但不更新联网通报历史台账")
     args = parser.parse_args()
     try:
         run(args)
