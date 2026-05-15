@@ -48,6 +48,7 @@ MONTHLY_TEMPLATE_KEYS = {
 }
 ALLOWED_DEDUCTION_VALUES = {0.1, 0.2, 0.5, 1.0}
 DESCRIPTION_WARN_LENGTH = 30
+NO_UNQUALIFIED_PRODUCT_CASE_TEXT = "本月无不合格消防产品案卷，产品成绩记0分"
 
 
 class HumanReviewRequired(RuntimeError):
@@ -718,7 +719,7 @@ def write_personal_stats(template_path, output_path, product_records, monitor_de
 
 def product_office_text(item):
     if item["no_case"]:
-        return f"{item['大队']}本月无消防产品监督检查案卷，产品成绩按0分登记。"
+        return f"{item['大队']}{NO_UNQUALIFIED_PRODUCT_CASE_TEXT}。"
     lines = [f"{item['题名']}产品监督检查中有以下错误"]
     for idx, err in enumerate(item["errors"], start=1):
         lines.append(f"{idx}、{clean_error_line(err)}")
@@ -1043,7 +1044,7 @@ def build_report_sections(product_records, monitor_details, monitor_scores=None,
     product_sentences = []
     for item in product_records:
         if item["no_case"]:
-            product_sentences.append(f"{item['大队']}本月无不合格消防产品案卷，产品成绩记0分")
+            product_sentences.append(f"{item['大队']}{NO_UNQUALIFIED_PRODUCT_CASE_TEXT}")
         else:
             errors = "，".join(clean_error_line(err) for err in item["errors"] if clean_error_line(err))
             product_sentences.append(f"{item['大队']}{item['立卷人']}承办的{item['题名']}，{errors}")
