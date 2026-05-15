@@ -1078,6 +1078,11 @@ def apply_report_fonts(doc):
         paragraph.Range.Font.Name = font_name
         paragraph.Range.Font.NameFarEast = font_name
         paragraph.Range.Font.Bold = -1 if is_title else 0
+        if is_title:
+            paragraph.Format.FirstLineIndent = 0
+            paragraph.Format.CharacterUnitFirstLineIndent = 0
+        else:
+            paragraph.Format.CharacterUnitFirstLineIndent = 2
 
 
 def write_report_doc(template_path, output_path, product_records, monitor_details, force, monitor_scores=None, history_counts=None):
