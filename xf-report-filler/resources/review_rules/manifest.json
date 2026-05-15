@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "description": "原版《消防产品专项监督抽查卷评查规则》核对依据。用于月度登记流程中的 3.x 扣分上限校验和人工核对，不作为新的自动评分草案。",
+  "source_directory": "C:\\Users\\12070\\Desktop\\5月产品成绩登记\\产品监督条线信息",
+  "files": [
+    {
+      "key": "review_rules_docx",
+      "file": "消防产品专项监督抽查卷评查规则.docx",
+      "source_path": "C:\\Users\\12070\\Desktop\\5月产品成绩登记\\产品监督条线信息\\消防产品专项监督抽查卷评查规则.docx",
+      "sha256": "1B97B2E603A6D9EC8816AA56118449DEEC4E3EFCF7A8136E00A62F98123D00A4",
+      "usage": "人工核对原文"
+    },
+    {
+      "key": "review_rules_js",
+      "file": "消防产品专项监督抽查卷评查规则.js",
+      "source_path": "C:\\Users\\12070\\Desktop\\5月产品成绩登记\\产品监督条线信息\\消防产品专项监督抽查卷评查规则.js",
+      "sha256": "178E340753696723BF3A1BD6A3AA21634A4D5DA54A9C6ED2B545179035A7D603",
+      "usage": "脚本读取 3.1-3.15 maxScore 做扣分上限校验"
+    }
+  ]
+}

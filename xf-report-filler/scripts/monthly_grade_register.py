@@ -37,6 +37,7 @@ REPORT_TITLE_FONT = "方正黑体_GBK"
 REPORT_BODY_FONT = "方正楷体_GBK"
 MONTHLY_TEMPLATE_MANIFEST = SKILL_DIR / "resources" / "monthly_templates" / "manifest.json"
 MONITOR_HISTORY_PATH = SKILL_DIR / "resources" / "history" / "monitor_report_history.json"
+REVIEW_RULES_JS = SKILL_DIR / "resources" / "review_rules" / "消防产品专项监督抽查卷评查规则.js"
 MONTHLY_TEMPLATE_KEYS = {
     "product_archive_detail",
     "product_summary",
@@ -45,12 +46,20 @@ MONTHLY_TEMPLATE_KEYS = {
     "case_scores",
     "monthly_report",
 }
+ALLOWED_DEDUCTION_VALUES = {0.1, 0.2, 0.5, 1.0}
+DESCRIPTION_WARN_LENGTH = 30
 
 
 class HumanReviewRequired(RuntimeError):
     def __init__(self, issues):
         self.issues = issues
         super().__init__("人员信息需要人工核对")
+
+
+class ProductScoreReviewRequired(RuntimeError):
+    def __init__(self, guard):
+        self.guard = guard
+        super().__init__("产品底册评分需要人工核对")
 
 
 def norm_text(value):
@@ -162,6 +171,59 @@ def parse_general_index(line):
     return int(match.group(1)) if match else None
 
 
+def has_detail_marker(text):
+    text = str(text or "")
+    return any(marker in text for marker in ("（", "(", "ps：", "PS：", "ps:", "PS:"))
+
+
+def strip_detail_text(text):
+    text = re.sub(r"（[^）]*）", "", text)
+    text = re.sub(r"\([^)]*\)", "", text)
+    text = re.split(r"\bps\s*[:：]", text, maxsplit=1, flags=re.IGNORECASE)[0]
+    return text.strip(" ；;，,、")
+
+
+def normalize_broad_description(text):
+    raw = clean_error_line(text)
+    broad = strip_detail_text(raw)
+    compact = norm_text(raw)
+
+    if "消防产品监督检查记录" in compact or "监督检查记录" in compact:
+        if any(keyword in compact for keyword in ("不规范", "缺失", "备注", "空白", "市场准入", "产品所在部位")):
+            return "消防产品监督检查记录填写不规范"
+    if "现场检查判定不合格通知书" in compact or "消防现场检查不合格通知书" in compact:
+        return "消防产品现场检查判定不合格通知书填写不规范"
+    if "质量监督抽查抽样单" in compact or "抽样单" in compact:
+        return "消防产品质量监督抽查抽样单填写不规范"
+    if ("责令限期改正通知书" in compact or "限期改正通知书" in compact or "限改" in compact) and any(
+        keyword in compact for keyword in ("具体问题", "规格型号", "生产企业", "编号", "填写不完整", "填写不规范", "记载不规范", "违法行为")
+    ):
+        return "责令限期改正通知书填写不规范"
+    if any(keyword in compact for keyword in ("审批表", "呈请", "办案部门意见")):
+        return "审批材料缺失"
+    if any(keyword in compact for keyword in ("授权委托书", "法人证明", "营业执照", "型试检验报告", "型式检验报告")):
+        return "非特定文书或附件材料缺失"
+    if "照片" in compact:
+        return "照片证据不完整"
+    if "送达" in compact:
+        return "送达材料填写不规范"
+    if any(keyword in compact for keyword in ("上传", "系统", "附件错传", "材料上传错误")):
+        return "系统上传材料不规范"
+    return broad or raw
+
+
+def unique_join(parts):
+    result = []
+    seen = set()
+    for part in parts:
+        text = str(part or "").strip(" ；;，,")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return "；".join(result)
+
+
 def clean_error_line(line):
     text = str(line or "").strip()
     text = re.sub(r"^\d+\s*[、.．]\s*", "", text)
@@ -195,7 +257,9 @@ def parse_product_register(path):
             "立卷人": "",
             "检查人": "",
             "errors": [],
+            "archive_errors": [],
             "deductions": [],
+            "parse_issues": [],
             "score": None,
             "no_case": False,
         }
@@ -214,16 +278,29 @@ def parse_product_register(path):
             elif line.startswith("扣分"):
                 value = parse_deduction_value(line)
                 general_index = parse_general_index(line)
-                if pending_error and value is not None and general_index is not None:
+                if pending_error:
+                    broad_description = normalize_broad_description(pending_error)
                     record["errors"].append(pending_error)
-                    record["deductions"].append(
-                        {
-                            "general_index": general_index,
-                            "value": value,
-                            "line": line,
-                            "description": pending_error,
-                        }
-                    )
+                    record["archive_errors"].append(broad_description)
+                    if value is not None and general_index is not None:
+                        record["deductions"].append(
+                            {
+                                "general_index": general_index,
+                                "value": value,
+                                "line": line,
+                                "description": pending_error,
+                                "detail_description": pending_error,
+                                "broad_description": broad_description,
+                            }
+                        )
+                    else:
+                        record["parse_issues"].append(
+                            {
+                                "description": pending_error,
+                                "line": line,
+                                "message": "扣分行缺少可解析的 3.x 条款或分值",
+                            }
+                        )
                 pending_error = None
             else:
                 cleaned = clean_error_line(line)
@@ -231,6 +308,7 @@ def parse_product_register(path):
                     pending_error = cleaned
         if pending_error:
             record["errors"].append(pending_error)
+            record["archive_errors"].append(normalize_broad_description(pending_error))
 
         if not record["题名"] and not record["编号"] and not record["立卷人"]:
             record["no_case"] = True
@@ -282,11 +360,127 @@ def build_product_batch(product_records, year, month):
                 current_score = record["一般要素"][key].get("扣分情况", "")
                 current_desc = record["一般要素"][key].get("扣分说明", "")
                 new_score = deduction["value"] + (float(current_score) if current_score else 0.0)
-                descriptions = [x for x in [current_desc, deduction["description"]] if x]
+                descriptions = [current_desc, deduction.get("broad_description") or deduction["description"]]
                 record["一般要素"][key]["扣分情况"] = score_text(new_score)
-                record["一般要素"][key]["扣分说明"] = "；".join(descriptions)
+                record["一般要素"][key]["扣分说明"] = unique_join(descriptions)
         batch.append(record)
     return batch
+
+
+def load_review_rule_limits(path=REVIEW_RULES_JS):
+    path = require_path(path, "消防产品专项监督抽查卷评查规则 JS")
+    text = path.read_text(encoding="utf-8-sig")
+    match = re.search(r"const\s+\w+\s*=\s*(\{.*?\})\s*;\s*module\.exports", text, flags=re.S)
+    if not match:
+        raise ValueError(f"无法解析评查规则 JS：{path}")
+    data = json.loads(match.group(1))
+    limits = {}
+
+    def visit(node):
+        if isinstance(node, dict):
+            code = str(node.get("code", ""))
+            if re.fullmatch(r"3\.\d+", code) and node.get("maxScore") is not None:
+                limits[int(code.split(".", 1)[1])] = float(node["maxScore"])
+            for child in node.get("children", []):
+                visit(child)
+        elif isinstance(node, list):
+            for item in node:
+                visit(item)
+
+    visit(data.get("sections", []))
+    missing = [idx for idx in range(1, 16) if idx not in limits]
+    if missing:
+        raise ValueError("评查规则 JS 缺少一般要素上限：" + "、".join(f"3.{idx}" for idx in missing))
+    return limits
+
+
+def validate_product_score_guard(product_records):
+    limits = load_review_rule_limits()
+    blocking = []
+    warnings = []
+    for record in product_records:
+        if record["no_case"]:
+            continue
+        short = record["short"]
+        totals = {}
+        for issue in record.get("parse_issues", []):
+            blocking.append(
+                {
+                    "大队": record["大队"],
+                    "题名": record["题名"],
+                    "type": "parse_error",
+                    "message": issue["message"],
+                    "description": issue["description"],
+                    "line": issue["line"],
+                }
+            )
+        for deduction in record["deductions"]:
+            index = deduction["general_index"]
+            value = float(deduction["value"])
+            totals[index] = totals.get(index, 0.0) + value
+            if index not in limits:
+                blocking.append(
+                    {
+                        "大队": record["大队"],
+                        "题名": record["题名"],
+                        "type": "unknown_general_index",
+                        "message": f"扣分条款 3.{index} 不存在，无法落格",
+                        "description": deduction["description"],
+                    }
+                )
+            if round(value, 2) not in ALLOWED_DEDUCTION_VALUES:
+                warnings.append(
+                    {
+                        "大队": record["大队"],
+                        "题名": record["题名"],
+                        "type": "non_standard_single_value",
+                        "message": f"单项扣分 {score_text(value)} 不是 0.1/0.2/0.5/1，仅提示人工复核",
+                        "description": deduction["description"],
+                    }
+                )
+            if not has_detail_marker(deduction["detail_description"]):
+                warnings.append(
+                    {
+                        "大队": record["大队"],
+                        "题名": record["题名"],
+                        "type": "missing_detail_marker",
+                        "message": "错误描述未使用括号或 ps 标注具体问题",
+                        "description": deduction["description"],
+                    }
+                )
+            broad = deduction.get("broad_description", "")
+            if len(broad) > DESCRIPTION_WARN_LENGTH or "，" in broad or "、" in broad:
+                warnings.append(
+                    {
+                        "大队": record["大队"],
+                        "题名": record["题名"],
+                        "type": "broad_description_too_specific",
+                        "message": "宽泛描述偏长或包含字段堆叠，仅提示人工复核",
+                        "broad_description": broad,
+                        "description": deduction["description"],
+                    }
+                )
+        for index, total in totals.items():
+            if index in limits and total > limits[index] + 1e-9:
+                blocking.append(
+                    {
+                        "大队": record["大队"],
+                        "题名": record["题名"],
+                        "type": "general_limit_exceeded",
+                        "message": f"3.{index} 扣分合计 {score_text(total)} 超过原规则上限 {score_text(limits[index])}",
+                    }
+                )
+        general_total = sum(float(item["value"]) for item in record["deductions"])
+        if general_total > 5 + 1e-9:
+            blocking.append(
+                {
+                    "大队": record["大队"],
+                    "题名": record["题名"],
+                    "type": "general_total_exceeded",
+                    "message": f"一般要素扣分合计 {score_text(general_total)} 超过 5 分上限",
+                }
+            )
+    return {"blocking_issues": blocking, "warnings": warnings}
 
 
 def find_soffice():
@@ -849,7 +1043,7 @@ def build_report_sections(product_records, monitor_details, monitor_scores=None,
     product_sentences = []
     for item in product_records:
         if item["no_case"]:
-            product_sentences.append(f"{item['大队']}本月无消防产品监督检查案卷，产品成绩记0分")
+            product_sentences.append(f"{item['大队']}本月无不合格消防产品案卷，产品成绩记0分")
         else:
             errors = "，".join(clean_error_line(err) for err in item["errors"] if clean_error_line(err))
             product_sentences.append(f"{item['大队']}{item['立卷人']}承办的{item['题名']}，{errors}")
@@ -960,6 +1154,9 @@ def run(args):
     report_output = month_dir / f"{args.year}年{args.month}月通报.doc"
 
     product_records = parse_product_register(product_register)
+    product_score_guard = validate_product_score_guard(product_records)
+    if product_score_guard["blocking_issues"]:
+        raise ProductScoreReviewRequired(product_score_guard)
     monitor_scores = read_monitor_scores(network_stats)
     monitor_details = read_monitor_details(base_info, monitor_scores)
     validate_person_matches(personal_template, product_records, monitor_details)
@@ -995,9 +1192,11 @@ def run(args):
                             "score": item["score"],
                             "no_case": item["no_case"],
                             "errors": item["errors"],
+                            "archive_errors": item["archive_errors"],
                         }
                         for item in product_records
                     ],
+                    "product_score_guard": product_score_guard,
                     "monitor_avg": {k: v["avg"] for k, v in monitor_scores.items()},
                     "monitor_report_history_counts": history_counts,
                     "monitor_report_history_source": {
@@ -1075,6 +1274,7 @@ def run(args):
         "template_source": template_info,
         "product_dir": str(product_dir),
         "product_scores": {item["short"]: item["score"] for item in product_records},
+        "product_score_guard": product_score_guard,
         "monitor_avg": {k: v["avg"] for k, v in monitor_scores.items()},
         "personal_warnings": personal_warnings,
         "monitor_report_cases": [
@@ -1104,6 +1304,19 @@ def main():
     args = parser.parse_args()
     try:
         run(args)
+    except ProductScoreReviewRequired as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "product_score_review_required",
+                    "message": "产品底册扣分超过原版评查规则上限或无法落格，已暂停任务，请人工核对。",
+                    "product_score_guard": exc.guard,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        raise SystemExit(2)
     except HumanReviewRequired as exc:
         print(
             json.dumps(

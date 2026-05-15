@@ -1,4 +1,121 @@
 {
   "version": 1,
-  "records": []
+  "records": [
+    {
+      "year": 2026,
+      "month": 1,
+      "month_key": "2026-01",
+      "report_file": "C:\\Users\\12070\\Desktop\\5月产品成绩登记\\2月\\2026年1月通报.doc",
+      "report_section_hash": "ca97ee5faecd6e08de42343c4b3d60f16ff88a5efe457c9933a0d51e761ddfed",
+      "selected_cases": [
+        {
+          "rank": 1,
+          "brigade": "梁溪",
+          "brigade_name": "梁溪大队"
+        },
+        {
+          "rank": 2,
+          "brigade": "滨湖",
+          "brigade_name": "滨湖大队"
+        },
+        {
+          "rank": 3,
+          "brigade": "经开",
+          "brigade_name": "经开大队"
+        }
+      ],
+      "source": "scanned_existing",
+      "updated_at": "2026-05-15T08:23:57Z"
+    },
+    {
+      "year": 2026,
+      "month": 3,
+      "month_key": "2026-03",
+      "report_file": "C:\\Users\\12070\\Desktop\\5月产品成绩登记\\3月\\3、2026年3月通报.doc",
+      "report_section_hash": "81944095c5a2a72a56b38e1579ea3f95a3cec072d76f4c7ec1a49b0f4ab71040",
+      "selected_cases": [
+        {
+          "rank": 1,
+          "brigade": "惠山",
+          "brigade_name": "惠山大队"
+        },
+        {
+          "rank": 2,
+          "brigade": "滨湖",
+          "brigade_name": "滨湖大队"
+        },
+        {
+          "rank": 3,
+          "brigade": "经开",
+          "brigade_name": "经开大队"
+        }
+      ],
+      "source": "scanned_existing",
+      "updated_at": "2026-05-15T08:23:57Z"
+    },
+    {
+      "year": 2026,
+      "month": 4,
+      "month_key": "2026-04",
+      "report_file": "C:\\Users\\12070\\Desktop\\5月产品成绩登记\\4月\\1、2026年4月通报.doc",
+      "report_section_hash": "49fe18bf0405b7c07aaec5a04c73d703fd6d31aa29d16b972779907cb65b3d88",
+      "selected_cases": [
+        {
+          "rank": 1,
+          "brigade": "江阴",
+          "brigade_name": "江阴大队"
+        },
+        {
+          "rank": 2,
+          "brigade": "宜兴",
+          "brigade_name": "宜兴大队"
+        },
+        {
+          "rank": 3,
+          "brigade": "梁溪",
+          "brigade_name": "梁溪大队"
+        }
+      ],
+      "source": "scanned_existing",
+      "updated_at": "2026-05-15T08:23:57Z"
+    },
+    {
+      "year": 2026,
+      "month": 5,
+      "month_key": "2026-05",
+      "report_file": "C:\\Users\\12070\\Desktop\\5月产品成绩登记\\5月\\2026年5月通报.doc",
+      "report_section_hash": "e49b38e716b6a1f1445550c9635fb07d92f1f8525dcf02e98742cb3e77d1e10d",
+      "selected_cases": [
+        {
+          "rank": 1,
+          "brigade": "滨湖",
+          "brigade_name": "滨湖大队",
+          "contact": "曹云皓",
+          "unit": "无锡国家工业设计园产业集团有限公司（渔港商业地块）",
+          "case_score": 9.4,
+          "brigade_avg": 9.53
+        },
+        {
+          "rank": 2,
+          "brigade": "经开",
+          "brigade_name": "经开大队",
+          "contact": "巫超",
+          "unit": "无锡市自然资源和规划局无锡经济开发区分局（经开区政务服务中心不动产登记分中心）",
+          "case_score": 9.4,
+          "brigade_avg": 9.58
+        },
+        {
+          "rank": 3,
+          "brigade": "江阴",
+          "brigade_name": "江阴大队",
+          "contact": "周阳",
+          "unit": "江阴市申港街道沪光宾馆",
+          "case_score": 9.5,
+          "brigade_avg": 9.59
+        }
+      ],
+      "source": "generated",
+      "updated_at": "2026-05-15T08:23:57Z"
+    }
+  ]
 }
