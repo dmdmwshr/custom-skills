@@ -184,10 +184,38 @@ def strip_detail_text(text):
     return text.strip(" ；;，,、")
 
 
+def match_product_doc_labels(compact):
+    labels = []
+    doc_markers = [
+        ("责令限期改正通知书", "责令限期改正通知书"),
+        ("限期改正通知书", "责令限期改正通知书"),
+        ("限改", "责令限期改正通知书"),
+        ("现场检查判定不合格通知书", "消防产品现场检查判定不合格通知书"),
+        ("现场检查判定不合格", "消防产品现场检查判定不合格通知书"),
+        ("检验结果通知书", "消防产品质量检验结果通知书"),
+        ("质量监督抽查抽样单", "消防产品质量监督抽查抽样单"),
+        ("抽样单", "消防产品质量监督抽查抽样单"),
+        ("监督检查记录", "消防产品监督检查记录"),
+        ("通报函", "通报函"),
+    ]
+    seen = set()
+    for marker, label in doc_markers:
+        if marker in compact and label not in seen:
+            labels.append(label)
+            seen.add(label)
+    return labels
+
+
 def normalize_broad_description(text):
     raw = clean_error_line(text)
     broad = strip_detail_text(raw)
     compact = norm_text(raw)
+    doc_labels = match_product_doc_labels(compact)
+
+    if any(keyword in compact for keyword in ("审批表", "呈请", "办案部门意见")):
+        if len(doc_labels) == 1:
+            return f"{doc_labels[0]}审批材料缺失"
+        return "审批材料缺失"
 
     if "消防产品监督检查记录" in compact or "监督检查记录" in compact:
         if any(keyword in compact for keyword in ("不规范", "缺失", "备注", "空白", "市场准入", "产品所在部位")):
@@ -200,10 +228,8 @@ def normalize_broad_description(text):
         keyword in compact for keyword in ("具体问题", "规格型号", "生产企业", "编号", "填写不完整", "填写不规范", "记载不规范", "违法行为")
     ):
         return "责令限期改正通知书填写不规范"
-    if any(keyword in compact for keyword in ("审批表", "呈请", "办案部门意见")):
-        return "审批材料缺失"
     if any(keyword in compact for keyword in ("授权委托书", "法人证明", "营业执照", "型试检验报告", "型式检验报告")):
-        return "非特定文书或附件材料缺失"
+        return "附件材料缺失"
     if "照片" in compact:
         return "照片证据不完整"
     if "送达" in compact:
@@ -223,6 +249,18 @@ def unique_join(parts):
         seen.add(text)
         result.append(text)
     return "；".join(result)
+
+
+def unique_text_list(parts):
+    result = []
+    seen = set()
+    for part in parts:
+        text = str(part or "").strip(" ；;，,")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def clean_error_line(line):
@@ -720,10 +758,24 @@ def write_personal_stats(template_path, output_path, product_records, monitor_de
 def product_office_text(item):
     if item["no_case"]:
         return f"{item['大队']}{NO_UNQUALIFIED_PRODUCT_CASE_TEXT}。"
-    lines = [f"{item['题名']}产品监督检查中有以下错误"]
-    for idx, err in enumerate(item["errors"], start=1):
-        lines.append(f"{idx}、{clean_error_line(err)}")
+    broad_issues = unique_text_list(item.get("archive_errors", []))
+    if not broad_issues:
+        broad_issues = ["案卷材料规范性问题"]
+    lines = [f"{item['题名']}产品监督检查中存在以下问题"]
+    for idx, issue in enumerate(broad_issues, start=1):
+        lines.append(f"{idx}、{issue}")
     return "\n".join(lines)
+
+
+def product_report_sentence(item):
+    if item["no_case"]:
+        return f"{item['大队']}{NO_UNQUALIFIED_PRODUCT_CASE_TEXT}"
+    broad_issues = unique_text_list(item.get("archive_errors", []))
+    if not broad_issues:
+        broad_issues = ["案卷材料规范性问题"]
+    issues_text = "、".join(broad_issues)
+    suffix = "" if len(broad_issues) == 1 else "等问题"
+    return f"{item['大队']}{item['立卷人']}承办的{item['题名']}存在{issues_text}{suffix}"
 
 
 def monitor_office_text(short, details):
@@ -1043,11 +1095,7 @@ def assert_report_text_quality(product_text, monitor_text):
 def build_report_sections(product_records, monitor_details, monitor_scores=None, history_counts=None):
     product_sentences = []
     for item in product_records:
-        if item["no_case"]:
-            product_sentences.append(f"{item['大队']}{NO_UNQUALIFIED_PRODUCT_CASE_TEXT}")
-        else:
-            errors = "，".join(clean_error_line(err) for err in item["errors"] if clean_error_line(err))
-            product_sentences.append(f"{item['大队']}{item['立卷人']}承办的{item['题名']}，{errors}")
+        product_sentences.append(product_report_sentence(item))
     product_text = "；".join(product_sentences) + "。"
 
     monitor_sentences = []
@@ -1211,6 +1259,19 @@ def run(args):
                     },
                     "history_record_would_update": history_action,
                     "monitor_report_cases": selected_cases,
+                    "product_result_preview": [
+                        {
+                            "大队": item["大队"],
+                            "broad_issues": unique_text_list(item.get("archive_errors", [])),
+                            "office_record_text": product_office_text(item),
+                            "report_sentence": product_report_sentence(item),
+                        }
+                        for item in product_records
+                    ],
+                    "report_text_preview": {
+                        "product": product_text,
+                        "monitor": monitor_text,
+                    },
                     "report_text_quality": {
                         "product": validate_text_quality("消防产品通报", product_text),
                         "monitor": validate_text_quality("联网监测通报", monitor_text),
