@@ -48,7 +48,7 @@ MONTHLY_TEMPLATE_KEYS = {
 }
 ALLOWED_DEDUCTION_VALUES = {0.1, 0.2, 0.5, 1.0}
 DESCRIPTION_WARN_LENGTH = 30
-NO_UNQUALIFIED_PRODUCT_CASE_TEXT = "本月无不合格消防产品案卷，产品成绩记0分"
+NO_UNQUALIFIED_PRODUCT_CASE_TEXT = "本月未完成不合格消防产品案卷"
 
 
 class HumanReviewRequired(RuntimeError):
