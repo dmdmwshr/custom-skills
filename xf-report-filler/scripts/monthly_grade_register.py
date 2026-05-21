@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from docx import Document
@@ -49,6 +49,8 @@ MONTHLY_TEMPLATE_KEYS = {
 ALLOWED_DEDUCTION_VALUES = {0.1, 0.2, 0.5, 1.0}
 DESCRIPTION_WARN_LENGTH = 30
 NO_UNQUALIFIED_PRODUCT_CASE_TEXT = "本月未完成不合格消防产品案卷"
+YEAR_MONTH_PATTERN = re.compile(r"(\d{4})年(\d{1,2})月")
+MONTH_ONLY_PATTERN = re.compile(r"(\d{1,2})月")
 
 
 class HumanReviewRequired(RuntimeError):
@@ -61,6 +63,12 @@ class ProductScoreReviewRequired(RuntimeError):
     def __init__(self, guard):
         self.guard = guard
         super().__init__("产品底册评分需要人工核对")
+
+
+class HistoryMonthConflict(RuntimeError):
+    def __init__(self, issues):
+        self.issues = issues
+        super().__init__("历史台账月份存在冲突")
 
 
 def norm_text(value):
@@ -116,6 +124,80 @@ def utc_now_text():
 
 def make_month_key(year, month):
     return f"{int(year):04d}-{int(month):02d}"
+
+
+def previous_month(year, month):
+    year = int(year)
+    month = int(month)
+    if month == 1:
+        return year - 1, 12
+    return year, month - 1
+
+
+def build_score_month_info(registration_year, registration_month, source):
+    score_year, score_month = previous_month(registration_year, registration_month)
+    return {
+        "registration_year": int(registration_year),
+        "registration_month": int(registration_month),
+        "registration_month_key": make_month_key(registration_year, registration_month),
+        "score_year": score_year,
+        "score_month": score_month,
+        "score_month_key": make_month_key(score_year, score_month),
+        "source": source,
+    }
+
+
+def extract_registration_month_from_text(text, default_year=None):
+    text = str(text or "")
+    match = YEAR_MONTH_PATTERN.search(text)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    match = MONTH_ONLY_PATTERN.search(text)
+    if match and default_year is not None:
+        return int(default_year), int(match.group(1))
+    return None
+
+
+def resolve_registration_month(path_like=None, default_year=None, fallback_date=None, allow_runtime_fallback=True):
+    if path_like:
+        path = Path(path_like)
+        resolved = extract_registration_month_from_text(path.name, default_year=default_year)
+        if resolved:
+            return {
+                "registration_year": resolved[0],
+                "registration_month": resolved[1],
+                "source": "filename",
+            }
+        for part in reversed(path.parts[:-1]):
+            resolved = extract_registration_month_from_text(part, default_year=default_year)
+            if resolved:
+                return {
+                    "registration_year": resolved[0],
+                    "registration_month": resolved[1],
+                    "source": "folder",
+                }
+    if not allow_runtime_fallback:
+        raise ValueError(f"无法从路径识别登记月份：{path_like}")
+    fallback_date = fallback_date or date.today()
+    return {
+        "registration_year": int(fallback_date.year),
+        "registration_month": int(fallback_date.month),
+        "source": "runtime",
+    }
+
+
+def resolve_score_month(path_like=None, default_year=None, fallback_date=None, allow_runtime_fallback=True):
+    registration = resolve_registration_month(
+        path_like,
+        default_year=default_year,
+        fallback_date=fallback_date,
+        allow_runtime_fallback=allow_runtime_fallback,
+    )
+    return build_score_month_info(
+        registration["registration_year"],
+        registration["registration_month"],
+        registration["source"],
+    )
 
 
 def load_monthly_template_manifest(manifest_path=MONTHLY_TEMPLATE_MANIFEST):
@@ -862,15 +944,9 @@ def extract_monitor_report_section(report_path):
         shutil.rmtree(out_dir, ignore_errors=True)
 
 
-def parse_report_month(report_path, default_year=None):
-    text = str(report_path)
-    match = re.search(r"(\d{4})年(\d{1,2})月通报\.doc", Path(report_path).name)
-    if match:
-        return int(match.group(1)), int(match.group(2))
-    match = re.search(r"(\d{1,2})月", text)
-    if match and default_year:
-        return int(default_year), int(match.group(1))
-    return None, None
+def parse_report_month(report_path, default_year=None, fallback_date=None):
+    info = resolve_score_month(report_path, default_year=default_year, fallback_date=fallback_date)
+    return info["score_year"], info["score_month"]
 
 
 def extract_monitor_brigades(section):
@@ -885,14 +961,73 @@ def extract_monitor_brigades(section):
     return selected
 
 
+def migrate_history_record_month(record):
+    migrated = copy.deepcopy(record)
+    info = resolve_score_month(
+        record.get("report_file"),
+        default_year=record.get("year"),
+        allow_runtime_fallback=False,
+    )
+    migrated["year"] = info["score_year"]
+    migrated["month"] = info["score_month"]
+    migrated["month_key"] = info["score_month_key"]
+    return migrated, info
+
+
+def migrate_monitor_history_records(history):
+    version = history.get("version", 1)
+    migrated_records = []
+    actions = []
+    seen = {}
+    for index, record in enumerate(history.get("records", [])):
+        migrated, info = migrate_history_record_month(record)
+        month_key = migrated["month_key"]
+        if month_key in seen:
+            raise HistoryMonthConflict(
+                [
+                    {
+                        "month_key": month_key,
+                        "existing_report_file": seen[month_key].get("report_file"),
+                        "conflicting_report_file": migrated.get("report_file"),
+                    }
+                ]
+            )
+        seen[month_key] = migrated
+        if (
+            record.get("year") != migrated["year"]
+            or record.get("month") != migrated["month"]
+            or record.get("month_key") != migrated["month_key"]
+        ):
+            actions.append(
+                {
+                    "index": index,
+                    "report_file": migrated.get("report_file"),
+                    "from": {
+                        "year": record.get("year"),
+                        "month": record.get("month"),
+                        "month_key": record.get("month_key"),
+                    },
+                    "to": {
+                        "year": migrated["year"],
+                        "month": migrated["month"],
+                        "month_key": migrated["month_key"],
+                    },
+                    "source": info["source"],
+                }
+            )
+        migrated_records.append(migrated)
+    migrated_records.sort(key=lambda item: item.get("month_key", ""))
+    return {"version": version, "records": migrated_records}, actions
+
+
 def load_monitor_history(path=MONITOR_HISTORY_PATH):
     path = Path(path)
     if not path.exists():
-        return {"version": 1, "records": []}
+        return {"version": 1, "records": []}, []
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     data.setdefault("version", 1)
     data.setdefault("records", [])
-    return data
+    return migrate_monitor_history_records(data)
 
 
 def normalize_history_record(record):
@@ -931,7 +1066,7 @@ def save_monitor_history_if_changed(history, path=MONITOR_HISTORY_PATH):
     return True
 
 
-def build_scanned_history_records(workspace_root, current_report_path=None, default_year=None):
+def build_scanned_history_records(workspace_root, current_report_path=None, default_year=None, fallback_date=None):
     workspace_root = Path(workspace_root)
     current_resolved = str(Path(current_report_path).resolve()).lower() if current_report_path else ""
     records = {}
@@ -940,14 +1075,24 @@ def build_scanned_history_records(workspace_root, current_report_path=None, defa
             continue
         if current_resolved and str(report_path.resolve()).lower() == current_resolved:
             continue
-        year, month = parse_report_month(report_path, default_year=default_year)
-        if not year or not month:
-            continue
+        month_info = resolve_score_month(report_path, default_year=default_year, fallback_date=fallback_date)
+        year = month_info["score_year"]
+        month = month_info["score_month"]
         section = extract_monitor_report_section(report_path)
         selected = extract_monitor_brigades(section)
         if not selected:
             continue
         month_key = make_month_key(year, month)
+        if month_key in records:
+            raise HistoryMonthConflict(
+                [
+                    {
+                        "month_key": month_key,
+                        "existing_report_file": records[month_key].get("report_file"),
+                        "conflicting_report_file": str(report_path),
+                    }
+                ]
+            )
         records[month_key] = {
             "year": year,
             "month": month,
@@ -986,11 +1131,12 @@ def monitor_history_counts(records_by_month, exclude_month_key=None):
     return counts
 
 
-def build_generated_history_record(year, month, report_output, monitor_text, selected_cases, monitor_scores):
+def build_generated_history_record(registration_year, registration_month, report_output, monitor_text, selected_cases, monitor_scores):
+    month_info = build_score_month_info(registration_year, registration_month, "argument")
     return {
-        "year": int(year),
-        "month": int(month),
-        "month_key": make_month_key(year, month),
+        "year": month_info["score_year"],
+        "month": month_info["score_month"],
+        "month_key": month_info["score_month_key"],
         "report_file": str(Path(report_output)),
         "report_section_hash": sha256_text(monitor_text.strip()),
         "selected_cases": [
@@ -1010,12 +1156,17 @@ def build_generated_history_record(year, month, report_output, monitor_text, sel
     }
 
 
-def prepare_monitor_history(workspace_root, year, month, current_report_path=None):
-    history = load_monitor_history()
-    scanned = build_scanned_history_records(workspace_root, current_report_path, default_year=year)
+def prepare_monitor_history(workspace_root, default_year, current_month_info, current_report_path=None, fallback_date=None):
+    history, migration_actions = load_monitor_history()
+    scanned = build_scanned_history_records(
+        workspace_root,
+        current_report_path,
+        default_year=default_year,
+        fallback_date=fallback_date,
+    )
     records = effective_history_records(history, scanned)
-    current_key = make_month_key(year, month)
-    return history, scanned, monitor_history_counts(records, exclude_month_key=current_key)
+    current_key = current_month_info["score_month_key"]
+    return history, scanned, monitor_history_counts(records, exclude_month_key=current_key), migration_actions
 
 
 def update_monitor_history(history, scanned_records, current_record):
@@ -1199,6 +1350,7 @@ def generate_product_docs(product_records, product_output_dir, year, month, forc
 
 def run(args):
     month_dir = require_path(args.month_dir, "月份目录")
+    current_month_info = build_score_month_info(args.year, args.month, "argument")
     templates, template_info = load_monthly_templates(args.template_dir)
     product_register = find_one(month_dir, [f"*{args.month}月*产品巡查底册*.docx", "*产品巡查底册*.docx"], "产品巡查底册")
     network_dir = find_one(month_dir, ["*联网监测基础信息考评明细表"], "联网监测明细目录")
@@ -1214,10 +1366,10 @@ def run(args):
     monitor_scores = read_monitor_scores(network_stats)
     monitor_details = read_monitor_details(base_info, monitor_scores)
     validate_person_matches(personal_template, product_records, monitor_details)
-    history, scanned_history, history_counts = prepare_monitor_history(
+    history, scanned_history, history_counts, history_migration = prepare_monitor_history(
         month_dir.parent,
         args.year,
-        args.month,
+        current_month_info,
         current_report_path=report_output,
     )
     selected_cases = select_monitor_report_cases(monitor_details, monitor_scores, history_counts)
@@ -1238,6 +1390,17 @@ def run(args):
             json.dumps(
                 {
                     "template_source": template_info,
+                    "registration_month": {
+                        "year": current_month_info["registration_year"],
+                        "month": current_month_info["registration_month"],
+                        "month_key": current_month_info["registration_month_key"],
+                    },
+                    "score_month": {
+                        "year": current_month_info["score_year"],
+                        "month": current_month_info["score_month"],
+                        "month_key": current_month_info["score_month_key"],
+                        "source": current_month_info["source"],
+                    },
                     "products": [
                         {
                             "大队": item["大队"],
@@ -1255,6 +1418,7 @@ def run(args):
                     "monitor_report_history_counts": history_counts,
                     "monitor_report_history_source": {
                         "path": str(MONITOR_HISTORY_PATH),
+                        "migrated_records": history_migration,
                         "scanned_missing_months": backfill_months,
                     },
                     "history_record_would_update": history_action,
@@ -1339,6 +1503,17 @@ def run(args):
 
     summary = {
         "template_source": template_info,
+        "registration_month": {
+            "year": current_month_info["registration_year"],
+            "month": current_month_info["registration_month"],
+            "month_key": current_month_info["registration_month_key"],
+        },
+        "score_month": {
+            "year": current_month_info["score_year"],
+            "month": current_month_info["score_month"],
+            "month_key": current_month_info["score_month_key"],
+            "source": current_month_info["source"],
+        },
         "product_dir": str(product_dir),
         "product_scores": {item["short"]: item["score"] for item in product_records},
         "product_score_guard": product_score_guard,
@@ -1354,6 +1529,7 @@ def run(args):
             for item in selected_cases
         ],
         "monitor_report_history_counts": history_counts,
+        "monitor_report_history_migration": history_migration,
         "monitor_report_history_update": history_update,
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -1390,6 +1566,19 @@ def main():
                 {
                     "status": "human_review_required",
                     "message": "个人成绩登记涉及未在表格出现的人员，已暂停任务，请人工核对。",
+                    "issues": exc.issues,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        raise SystemExit(2)
+    except HistoryMonthConflict as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "history_month_conflict",
+                    "message": "联网通报历史月份在前推后发生冲突，已暂停任务，请人工核对。",
                     "issues": exc.issues,
                 },
                 ensure_ascii=False,
