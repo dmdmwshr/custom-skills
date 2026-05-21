@@ -99,12 +99,13 @@ python scripts/flclash_state.py
 
 ### OKX 路由切换快捷流程
 
-用于 OKX 延迟测试时，按以下目标执行：
+用于 OKX 延迟测试时，按项目要求选择目标。`OKX` 组虽然通常包含 `链式代理`，但首轮正式网络基线默认只测试三条路径：
 
 1. `OKX -> DIRECT`
 2. `OKX -> Meifu`
 3. `OKX -> CN2`
-4. `OKX -> 链式代理`
+
+只有用户明确要求测试链路叠加、住宅出口或故障兜底时，才额外测试 `OKX -> 链式代理`。
 
 每次切换后先记录当前状态，再运行短验证。`-Route direct/meifu/cn2/chain` 只是报告标签，真实路径由 FlClash `OKX` 组当前选择决定。
 
