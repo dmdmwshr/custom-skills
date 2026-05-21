@@ -1,6 +1,6 @@
 ---
 name: flclash-proxy-toggle
-description: 在 Windows 桌面上安全检查、暂停、恢复 FlClash 代理，并验证当前代理状态。用于用户提到 FlClash、暂停代理、恢复代理、关闭代理、开启代理、恢复直连、恢复正常网络或确认代理是否已停用等场景。仅在需要操作 FlClash 桌面应用本身时使用，不用于泛化网络排障。
+description: 在 Windows 桌面上安全检查、暂停、恢复 FlClash 代理，切换 FlClash 策略组节点，并验证当前代理或 OKX 路由状态。用于用户提到 FlClash、暂停代理、恢复代理、关闭代理、开启代理、恢复直连、切换 OKX/DIRECT/Meifu/CN2/链式代理、确认代理状态或排查 OKX WebSocket 断连等场景。仅在需要操作 FlClash 桌面应用本身时使用，不用于泛化网络排障。
 x-custom-skill: true
 x-managed-by: cc-switch
 x-source-repo: dmdmwshr/custom-skills
@@ -9,7 +9,7 @@ x-edit-policy: edit-source-repo-only
 
 # FlClash Proxy Toggle
 
-通过 FlClash 桌面窗口安全暂停或恢复代理。先检查当前状态，再执行单一步骤，最后回读验证。
+通过 FlClash 桌面窗口安全暂停、恢复代理或切换策略组节点。先检查当前状态，再执行单一步骤，最后回读验证。
 
 ## 硬规则
 
@@ -18,12 +18,33 @@ x-edit-policy: edit-source-repo-only
 3. 用户想“关闭代理”时，优先点击右下角暂停/启动按钮，不要先关闭窗口。
 4. 只有在已经暂停代理，或用户明确要求彻底退出且已确认当前状态安全时，才允许关闭应用窗口。
 5. 不确定当前状态时，先检查，不猜测。
+6. 切换策略组节点前，先确认目标组名和候选节点存在；不要把 `代理出口`、`OpenAI`、`OKX` 等不同策略组混用。
+7. 读取 FlClash 配置、缓存或订阅文件时，只输出元数据；不要输出订阅 URL、节点服务器、密码、UUID、private key、short id、Cookie 或代理凭据。
+8. OKX 延迟测试阶段只切换路由和运行公开 REST/WebSocket 探针；不要触发真实交易，也不要读取或输出 OKX 私钥。
 
 ## 工具优先级
 
 - 优先用桌面级只读工具确认状态：`list_apps`、`list_windows`、`take_ax_snapshot`、`take_screenshot`、`Snapshot`
-- 执行操作时优先：聚焦窗口 -> 抓当前窗口截图 -> 单击
+- 执行操作时优先：聚焦窗口 -> 抓 FlClash 窗口截图或无障碍树 -> 单击
+- 如果 Clash external controller 可用，优先用本机 API 读取和切换策略组；如果不可用，再使用 FlClash UI 自动化
 - 不依赖浏览器自动化
+
+## 本机只读诊断脚本
+
+需要先红acted 了解 FlClash 状态时，在本 skill 目录运行：
+
+```powershell
+python scripts/flclash_state.py
+```
+
+脚本只输出：
+
+- FlClash 进程是否存在
+- `mixed-port`、`external-controller`、TUN/system proxy 这类运行元数据
+- `OKX`、`CN2`、`Meifu`、`链式代理` 等策略组候选节点名称
+- 本机常见 controller 端口是否可达
+
+脚本不得输出订阅 URL、代理节点服务器、账号、密码、UUID、私钥、OKX API key 或任何可复用凭据。
 
 ## 状态判断
 
@@ -42,8 +63,50 @@ x-edit-policy: edit-source-repo-only
 1. 无障碍树可能只暴露右下角按钮的计时文本，不会直接暴露“暂停”或“启动”字样。
 2. 判断按钮状态时，优先看截图中的图标形状，其次再看计时器和网络检测 IP。
 3. 点击右下角按钮时，优先点击按钮左侧图标区域，不要优先点击右侧时间文本；时间文本区域可能不稳定或不触发状态切换。
+4. 代理页顶部通常有 `代理出口`、`OpenAI`、`OKX`、`CN2`、`Meifu`、`链式代理` 标签；当前标签下方会显示一排节点卡片。
+5. `OKX` 组的候选项通常是 `DIRECT`、`Meifu`、`CN2`、`链式代理`、`代理出口`。截图或无障碍树中卡片可能显示为 `名称 + Selector(...)`。
+6. 右上角刷新、测试或更多按钮没有稳定文字标签；切换节点时不要误点这些按钮。
 
 ## 工作流
+
+### 检查 FlClash 状态
+
+1. 运行 `python scripts/flclash_state.py` 获取红acted 状态。
+2. 如果 `external_controller` 非空且 controller 端口可达，优先走 Clash API：
+   - `GET /proxies` 读取策略组与当前选择
+   - `PUT /proxies/{group}`，请求体 `{"name":"<target>"}` 切换节点
+3. 如果 controller 不可达或配置为空，走 UI 路径。
+4. 使用 UI 工具时尽量限定到 `FlClash` 窗口，避免截图或无障碍树捕获其他窗口中的密钥、聊天或文档。
+
+### 切换策略组节点
+
+适用于 `OKX`、`代理出口`、`OpenAI`、`CN2`、`Meifu`、`链式代理` 等 FlClash 策略组。
+
+1. 先明确目标，例如 `OKX -> Meifu`。
+2. 运行只读诊断脚本，确认目标组和目标候选项存在。
+3. 尝试 API 切换；只有在 controller 可达且目标组存在时使用 API。
+4. API 不可用时使用 UI：
+   - 聚焦 `FlClash`
+   - 进入左侧 `代理`
+   - 点击顶部目标组标签，如 `OKX`
+   - 点击目标节点卡片，如 `Meifu`
+   - 回读 FlClash 窗口无障碍树或截图，确认目标卡片处于选中态或显示为当前选择
+5. 切换后做短验证：
+   - 公共 REST：`https://www.okx.com/api/v5/public/time`
+   - WebSocket Upgrade：`wss://ws.okx.com:8443/ws/v5/public`
+   - 对 OKX 量化项目，必要时再运行 60 秒公开探针
+6. 如果目标节点不存在，停止并报告当前可用候选项，不要随意切到近似名称。
+
+### OKX 路由切换快捷流程
+
+用于 OKX 延迟测试时，按以下目标执行：
+
+1. `OKX -> DIRECT`
+2. `OKX -> Meifu`
+3. `OKX -> CN2`
+4. `OKX -> 链式代理`
+
+每次切换后先记录当前状态，再运行短验证。`-Route direct/meifu/cn2/chain` 只是报告标签，真实路径由 FlClash `OKX` 组当前选择决定。
 
 ### 暂停代理
 
@@ -91,9 +154,27 @@ x-edit-policy: edit-source-repo-only
 3. 不要只因为进程还在就认定代理仍然开启；必须结合按钮图标、计时器和网络状态一起判断。
 4. 不要在状态模糊时连续乱点多个开关。
 5. 不要把“暂停代理”和“关闭应用”混成一步。
+6. 不要在未确认目标策略组的情况下修改订阅、云服务器配置或节点配置。
+7. 不要把 OKX WebSocket 断连直接归咎于 OKX 服务端；先区分本机 TUN、当前策略组选择、代理出口和服务器公网出口。
+
+## OKX WebSocket 断连排查判断
+
+当 REST 正常但 WebSocket 报 `SSLEOFError`、TLS handshake timeout 或 Upgrade 失败时，按以下顺序定位：
+
+1. 确认 `OKX` 组当前选择：`DIRECT`、`Meifu`、`CN2`、`链式代理` 或 `代理出口`。
+2. 确认 `ws.okx.com:8443` TCP 是否可达；TCP 可达不代表 WebSocket 可用。
+3. 分别测试不显式代理和 `127.0.0.1:<mixed-port>` 代理下的 WebSocket Upgrade。
+4. 如果服务器出口可直接返回 `101 Switching Protocols`，而本机失败，优先怀疑本机当前策略组选择、TUN 接管、fake-ip 或本机 FlClash 生成配置。
+5. 如果所有本机路径都失败，把证据写入项目报告，建议服务器侧核对：
+   - FlClash 生成配置为何清空 `external-controller`
+   - 是否需要显式添加 `DOMAIN-SUFFIX,ws.okx.com,OKX`
+   - 代理链路是否允许 `8443` 上的 TLS/WebSocket
+   - OKX 相关规则是否位于 `RULE-SET,gfw` 和 `china-domain` 之前
 
 ## 输出约定
 
 1. 先说明当前状态判断，再说明执行了什么动作。
 2. 动作后必须回读验证，不要只报告“已点击”。
 3. 如果因为安全规则拒绝直接关闭应用，要明确说明原因：代理运行时直接关掉 `FlClash` 可能导致没有网络。
+4. 切换策略组时输出 `组名 -> 目标节点`、验证方式和验证结果。
+5. 诊断 OKX 断连时输出证据链，不输出任何密钥或代理凭据。
