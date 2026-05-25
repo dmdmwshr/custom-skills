@@ -12,6 +12,7 @@ REQUIRED_KEYS = [
     "project_no",
     "unit_name",
     "unit_address",
+    "nominal_producers",
     "case_handler",
     "inspector",
     "inspection_date",
@@ -93,6 +94,14 @@ def validate_cases(
             errors.append(f"{prefix} products 必须是字符串数组")
         elif not [v for v in products if v.strip()]:
             warnings.append(f"{prefix} products 为空，写表时消防产品会留空标红")
+
+        nominal_producers = case.get("nominal_producers")
+        if not isinstance(nominal_producers, list) or not all(isinstance(v, str) for v in nominal_producers):
+            errors.append(f"{prefix} nominal_producers 必须是字符串数组")
+        elif not [v for v in nominal_producers if v.strip()]:
+            warnings.append(f"{prefix} nominal_producers 为空，写表时标称生产者会留空标红")
+        elif isinstance(products, list) and len([v for v in products if text(v)]) != len([v for v in nominal_producers if text(v)]):
+            warnings.append(f"{prefix} products 与 nominal_producers 数量不一致，请人工核对换行对应关系")
 
         source_files = case.get("source_files")
         if not isinstance(source_files, list) or not all(isinstance(v, str) for v in source_files):

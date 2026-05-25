@@ -19,28 +19,29 @@ from validate_extractions import ALLOWED_VALUES, load_cases, validate_cases
 RED_FILL = PatternFill(fill_type="solid", fgColor="FFFFC7CE")
 NO_FILL = PatternFill(fill_type=None)
 
-FIELD_COLUMNS = {
-    "unit_name": "B",
-    "project_no": "C",
-    "unit_address": "D",
-    "case_handler": "E",
-    "inspector": "F",
-    "inspection_month": "G",
-    "products_text": "H",
-    "station_or_team": "I",
-    "method": "J",
-    "qualified": "K",
-    "case_type": "L",
-    "online_sale": "M",
+FIELD_HEADERS = {
+    "unit_name": ("单位名称",),
+    "project_no": ("项目编号",),
+    "unit_address": ("单位地址",),
+    "nominal_producers_text": ("标称生产者",),
+    "case_handler": ("立卷人",),
+    "inspector": ("检查人",),
+    "inspection_month": ("检查时间",),
+    "products_text": ("消防产品",),
+    "station_or_team": ("是否为微型消防站或快速处置队",),
+    "method": ("现场判定或抽样送检",),
+    "qualified": ("是否合格",),
+    "case_type": ("是否为行案/刑案", "是否为行案刑案"),
+    "online_sale": ("是否为网售",),
 }
 
-VALIDATION_COLUMNS = {
-    "G": [f"{i}月" for i in range(1, 13)],
-    "I": ["微型消防站", "快速处置队", "否"],
-    "J": ["现场判定", "抽样送检"],
-    "K": ["合格", "不合格"],
-    "L": ["刑案", "行案", "否"],
-    "M": ["是", "否"],
+VALIDATION_VALUES = {
+    "inspection_month": [f"{i}月" for i in range(1, 13)],
+    "station_or_team": ["微型消防站", "快速处置队", "否"],
+    "method": ["现场判定", "抽样送检"],
+    "qualified": ["合格", "不合格"],
+    "case_type": ["刑案", "行案", "否"],
+    "online_sale": ["是", "否"],
 }
 
 ROLE_VALUES = {"案卷清单", "检查记录表", "其他附件"}
@@ -51,6 +52,10 @@ def text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def normalize(value: Any) -> str:
+    return re.sub(r"\s+", "", text(value))
 
 
 def parse_month(value: str) -> str:
@@ -82,10 +87,10 @@ def parse_iso_date(value: str) -> str:
     return "未知日期"
 
 
-def products_text(products: Any) -> str:
-    if not isinstance(products, list):
+def list_text(values: Any) -> str:
+    if not isinstance(values, list):
         return ""
-    return "\n".join(text(item) for item in products if text(item))
+    return "\n".join(text(item) for item in values if text(item))
 
 
 def sanitize_filename_part(value: str, fallback: str = "未命名") -> str:
@@ -94,6 +99,31 @@ def sanitize_filename_part(value: str, fallback: str = "未命名") -> str:
     if not cleaned:
         cleaned = fallback
     return cleaned[:80]
+
+
+def header_map(ws: Any) -> dict[str, int]:
+    mapping: dict[str, int] = {}
+    for cell in ws[1]:
+        value = normalize(cell.value)
+        if value:
+            mapping[value] = cell.column
+    return mapping
+
+
+def find_header_column(ws: Any, candidates: tuple[str, ...]) -> int:
+    mapping = header_map(ws)
+    normalized_candidates = [normalize(candidate) for candidate in candidates]
+    for candidate in normalized_candidates:
+        if candidate in mapping:
+            return mapping[candidate]
+    for header, column in mapping.items():
+        if any(candidate and candidate in header for candidate in normalized_candidates):
+            return column
+    raise ValueError(f"{ws.title} 缺少表头：{'/'.join(candidates)}")
+
+
+def field_columns(ws: Any) -> dict[str, int]:
+    return {field: find_header_column(ws, headers) for field, headers in FIELD_HEADERS.items()}
 
 
 def allowed_or_blank(field: str, value: Any, warnings: list[str], project_no: str) -> str:
@@ -107,16 +137,17 @@ def allowed_or_blank(field: str, value: Any, warnings: list[str], project_no: st
     return candidate
 
 
-def find_project_row(ws: Any, project_no: str) -> int | None:
+def find_project_row(ws: Any, project_col: int, project_no: str) -> int | None:
     for row in range(2, ws.max_row + 1):
-        if text(ws[f"C{row}"].value) == project_no:
+        if text(ws.cell(row, project_col).value) == project_no:
             return row
     return None
 
 
-def first_empty_row(ws: Any) -> int | None:
+def first_empty_row(ws: Any, columns: dict[str, int]) -> int | None:
+    data_cols = [columns[key] for key in FIELD_HEADERS if key != "project_no"]
     for row in range(2, ws.max_row + 1):
-        if all(text(ws[f"{col}{row}"].value) == "" for col in "BCDEFGHIJKLM"):
+        if all(text(ws.cell(row, col).value) == "" for col in data_cols):
             return row
     return None
 
@@ -135,7 +166,17 @@ def copy_row_style(ws: Any, source_row: int, target_row: int) -> None:
             target.protection = copy(source.protection)
 
 
-def append_row(ws: Any) -> int:
+def extend_data_validations(ws: Any, row: int, columns: dict[str, int]) -> None:
+    if not ws.data_validations:
+        return
+    for dv in ws.data_validations.dataValidation:
+        formula = text(dv.formula1)
+        for field, values in VALIDATION_VALUES.items():
+            if all(value in formula for value in values):
+                dv.add(ws.cell(row, columns[field]).coordinate)
+
+
+def append_row(ws: Any, columns: dict[str, int]) -> int:
     target_row = ws.max_row + 1
     copy_row_style(ws, ws.max_row, target_row)
     previous_serial = ws.cell(target_row - 1, 1).value
@@ -144,18 +185,8 @@ def append_row(ws: Any) -> int:
     except Exception:
         serial = target_row - 1
     ws.cell(target_row, 1).value = serial
-    extend_data_validations(ws, target_row)
+    extend_data_validations(ws, target_row, columns)
     return target_row
-
-
-def extend_data_validations(ws: Any, row: int) -> None:
-    if not ws.data_validations:
-        return
-    for dv in ws.data_validations.dataValidation:
-        formula = text(dv.formula1)
-        for col, values in VALIDATION_COLUMNS.items():
-            if all(value in formula for value in values):
-                dv.add(f"{col}{row}")
 
 
 def target_values(case: dict[str, Any], warnings: list[str]) -> dict[str, str]:
@@ -164,10 +195,11 @@ def target_values(case: dict[str, Any], warnings: list[str]) -> dict[str, str]:
         "unit_name": text(case.get("unit_name")),
         "project_no": project_no,
         "unit_address": text(case.get("unit_address")),
+        "nominal_producers_text": list_text(case.get("nominal_producers")),
         "case_handler": text(case.get("case_handler")),
         "inspector": text(case.get("inspector")),
         "inspection_month": parse_month(text(case.get("inspection_date"))),
-        "products_text": products_text(case.get("products")),
+        "products_text": list_text(case.get("products")),
         "station_or_team": allowed_or_blank("station_or_team", case.get("station_or_team"), warnings, project_no),
         "method": allowed_or_blank("method", case.get("method"), warnings, project_no),
         "qualified": allowed_or_blank("qualified", case.get("qualified"), warnings, project_no),
@@ -185,10 +217,10 @@ def set_cell_value(cell: Any, value: str) -> None:
         cell.fill = copy(RED_FILL)
 
 
-def update_case_row(ws: Any, row: int, case: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+def update_case_row(ws: Any, row: int, columns: dict[str, int], case: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
     values = target_values(case, warnings)
-    for key, col in FIELD_COLUMNS.items():
-        set_cell_value(ws[f"{col}{row}"], values[key])
+    for key, value in values.items():
+        set_cell_value(ws.cell(row, columns[key]), value)
     return {
         "project_no": values["project_no"],
         "row": row,
@@ -272,19 +304,20 @@ def main() -> int:
     if args.brigade not in wb.sheetnames:
         raise ValueError(f"工作簿中未找到工作表：{args.brigade}")
     ws = wb[args.brigade]
+    columns = field_columns(ws)
 
     updated: list[dict[str, Any]] = []
     for case in cases:
         project_no = text(case.get("project_no"))
-        row = find_project_row(ws, project_no)
+        row = find_project_row(ws, columns["project_no"], project_no)
         operation = "update"
         if row is None:
-            row = first_empty_row(ws)
+            row = first_empty_row(ws, columns)
             operation = "insert"
         if row is None:
-            row = append_row(ws)
+            row = append_row(ws, columns)
             operation = "append"
-        info = update_case_row(ws, row, case, warnings)
+        info = update_case_row(ws, row, columns, case, warnings)
         info["operation"] = operation
         updated.append(info)
 
