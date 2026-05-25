@@ -17,6 +17,7 @@ from openpyxl.styles import PatternFill
 from validate_extractions import ALLOWED_VALUES, load_cases, validate_cases
 
 RED_FILL = PatternFill(fill_type="solid", fgColor="FFFFC7CE")
+YELLOW_FILL = PatternFill(fill_type="solid", fgColor="FFFFFF00")
 NO_FILL = PatternFill(fill_type=None)
 
 FIELD_HEADERS = {
@@ -220,7 +221,10 @@ def set_cell_value(cell: Any, value: str) -> None:
 def update_case_row(ws: Any, row: int, columns: dict[str, int], case: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
     values = target_values(case, warnings)
     for key, value in values.items():
-        set_cell_value(ws.cell(row, columns[key]), value)
+        cell = ws.cell(row, columns[key])
+        set_cell_value(cell, value)
+        if key == "case_type" and value == "行案" and bool(case.get("case_type_review")):
+            cell.fill = copy(YELLOW_FILL)
     return {
         "project_no": values["project_no"],
         "row": row,

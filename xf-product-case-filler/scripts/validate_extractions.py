@@ -134,6 +134,9 @@ def validate_cases(
         if not isinstance(missing_fields, list) or not all(isinstance(v, str) for v in missing_fields):
             errors.append(f"{prefix} missing_fields 必须是字符串数组")
 
+        if "case_type_review" in case and not isinstance(case.get("case_type_review"), bool):
+            errors.append(f"{prefix} case_type_review 必须是布尔值")
+
         source_set = set(source_files if isinstance(source_files, list) else [])
         for file_name in source_set:
             if image_dir is not None and not _check_file_exists(image_dir, file_name):
