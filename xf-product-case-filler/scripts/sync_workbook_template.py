@@ -12,6 +12,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.datavalidation import DataValidationList
 
 
@@ -32,6 +33,10 @@ def header_col(ws: Any, header: str) -> int | None:
         if value == target or target in value:
             return cell.column
     return None
+
+
+def header_values(ws: Any) -> list[str]:
+    return [text(ws.cell(1, col).value) for col in range(1, ws.max_column + 1)]
 
 
 def sheet_has_data(ws: Any) -> bool:
@@ -73,6 +78,22 @@ def copy_data_validations(source_ws: Any, target_ws: Any) -> None:
     target_ws.data_validations = DataValidationList()
     for dv in source_ws.data_validations.dataValidation:
         target_ws.add_data_validation(copy(dv))
+    ensure_phase_validation(target_ws)
+
+
+def ensure_phase_validation(ws: Any) -> None:
+    phase_col = header_col(ws, "初查/复查")
+    if not phase_col:
+        return
+    letter = get_column_letter(phase_col)
+    formula = '"初查,复查"'
+    for dv in ws.data_validations.dataValidation:
+        if text(dv.formula1) == formula:
+            dv.add(f"{letter}2:{letter}1048576")
+            return
+    dv = DataValidation(type="list", formula1=formula, allow_blank=True)
+    ws.add_data_validation(dv)
+    dv.add(f"{letter}2:{letter}1048576")
 
 
 def copy_merged_cells(source_ws: Any, target_ws: Any) -> None:
@@ -104,28 +125,24 @@ def overwrite_empty_sheet(source_ws: Any, target_ws: Any) -> None:
     copy_data_validations(source_ws, target_ws)
 
 
-def insert_nominal_producer_column(source_ws: Any, target_ws: Any) -> bool:
-    if header_col(target_ws, "标称生产者"):
-        return False
-    address_col = header_col(target_ws, "单位地址")
-    if not address_col:
-        raise ValueError(f"{target_ws.title} 未找到 单位地址 列，无法插入 标称生产者")
-    insert_at = address_col + 1
-    source_col = header_col(source_ws, "标称生产者")
-    if not source_col:
-        raise ValueError(f"{source_ws.title} 未找到 标称生产者 列")
-    target_ws.insert_cols(insert_at)
-    target_ws.column_dimensions[get_column_letter(insert_at)].width = source_ws.column_dimensions[get_column_letter(source_col)].width
-    for row in range(1, max(source_ws.max_row, target_ws.max_row) + 1):
-        source = source_ws.cell(row, source_col)
-        target = target_ws.cell(row, insert_at)
-        copy_cell_format(source, target)
-        target.value = "标称生产者" if row == 1 else None
-    return True
+def insert_missing_template_columns(source_ws: Any, target_ws: Any) -> list[str]:
+    inserted: list[str] = []
+    for source_col, header in enumerate(header_values(source_ws), start=1):
+        if not header or header_col(target_ws, header):
+            continue
+        target_ws.insert_cols(source_col)
+        target_ws.column_dimensions[get_column_letter(source_col)].width = source_ws.column_dimensions[get_column_letter(source_col)].width
+        for row in range(1, max(source_ws.max_row, target_ws.max_row) + 1):
+            source = source_ws.cell(row, source_col)
+            target = target_ws.cell(row, source_col)
+            copy_cell_format(source, target)
+            target.value = header if row == 1 else None
+        inserted.append(header)
+    return inserted
 
 
 def sync_non_empty_sheet(source_ws: Any, target_ws: Any) -> bool:
-    changed = insert_nominal_producer_column(source_ws, target_ws)
+    inserted_headers = insert_missing_template_columns(source_ws, target_ws)
     max_col = source_ws.max_column
     copy_dimensions(source_ws, target_ws, max_col, max(source_ws.max_row, target_ws.max_row))
     for col in range(1, max_col + 1):
@@ -137,7 +154,7 @@ def sync_non_empty_sheet(source_ws: Any, target_ws: Any) -> bool:
         for col in range(1, max_col + 1):
             copy_cell_format(source_ws.cell(min(row, source_ws.max_row), col), target_ws.cell(row, col))
     copy_data_validations(source_ws, target_ws)
-    return changed
+    return bool(inserted_headers)
 
 
 def parse_args() -> argparse.Namespace:
@@ -159,8 +176,11 @@ def main() -> int:
     source_ws = wb[args.template]
     if not header_col(source_ws, "标称生产者"):
         raise ValueError(f"{args.template} 缺少 标称生产者 表头")
+    if not header_col(source_ws, "初查/复查"):
+        raise ValueError(f"{args.template} 缺少 初查/复查 表头")
+    ensure_phase_validation(source_ws)
 
-    targets = args.targets or [name for name in wb.sheetnames if name != args.template]
+    targets = args.targets or [name for name in wb.sheetnames if name != args.template and name.endswith("大队")]
     result: list[dict[str, Any]] = []
     for name in targets:
         if name not in wb.sheetnames:
@@ -173,7 +193,7 @@ def main() -> int:
             status = "overwritten_empty_template"
         else:
             inserted = sync_non_empty_sheet(source_ws, target_ws)
-            status = "inserted_nominal_producer" if inserted else "synced_existing"
+            status = "inserted_missing_columns" if inserted else "synced_existing"
         result.append({"sheet": name, "status": status})
 
     backup_path = None

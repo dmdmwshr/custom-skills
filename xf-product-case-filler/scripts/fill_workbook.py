@@ -23,11 +23,12 @@ NO_FILL = PatternFill(fill_type=None)
 FIELD_HEADERS = {
     "unit_name": ("单位名称",),
     "project_no": ("项目编号",),
+    "inspection_phase": ("初查/复查", "初查复查"),
     "unit_address": ("单位地址",),
     "nominal_producers_text": ("标称生产者",),
     "case_handler": ("立卷人",),
     "inspector": ("检查人",),
-    "inspection_month": ("检查时间",),
+    "inspection_date": ("检查时间",),
     "products_text": ("消防产品",),
     "station_or_team": ("是否为微型消防站或快速处置队",),
     "method": ("现场判定或抽样送检",),
@@ -37,7 +38,7 @@ FIELD_HEADERS = {
 }
 
 VALIDATION_VALUES = {
-    "inspection_month": [f"{i}月" for i in range(1, 13)],
+    "inspection_phase": ["初查", "复查"],
     "station_or_team": ["微型消防站", "快速处置队", "否"],
     "method": ["现场判定", "抽样送检"],
     "qualified": ["合格", "不合格"],
@@ -59,21 +60,18 @@ def normalize(value: Any) -> str:
     return re.sub(r"\s+", "", text(value))
 
 
-def parse_month(value: str) -> str:
+def parse_full_date(value: str) -> str:
     value = text(value)
     if not value:
         return ""
     match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", value)
     if match:
-        return f"{int(match.group(2))}月"
+        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
     match = re.search(r"\d{4}年(\d{1,2})月\d{1,2}日", value)
     if match:
-        return f"{int(match.group(1))}月"
-    match = re.search(r"(^|\D)(\d{1,2})月", value)
-    if match:
-        month = int(match.group(2))
-        if 1 <= month <= 12:
-            return f"{month}月"
+        full_match = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", value)
+        if full_match:
+            return f"{int(full_match.group(1)):04d}-{int(full_match.group(2)):02d}-{int(full_match.group(3)):02d}"
     return ""
 
 
@@ -100,6 +98,10 @@ def sanitize_filename_part(value: str, fallback: str = "未命名") -> str:
     if not cleaned:
         cleaned = fallback
     return cleaned[:80]
+
+
+def compact_filename_text(value: str) -> str:
+    return re.sub(r"\s+", "", text(value))
 
 
 def header_map(ws: Any) -> dict[str, int]:
@@ -138,9 +140,11 @@ def allowed_or_blank(field: str, value: Any, warnings: list[str], project_no: st
     return candidate
 
 
-def find_project_row(ws: Any, project_col: int, project_no: str) -> int | None:
+def find_case_row(ws: Any, project_col: int, phase_col: int, project_no: str, phase: str) -> int | None:
     for row in range(2, ws.max_row + 1):
-        if text(ws.cell(row, project_col).value) == project_no:
+        row_project_no = text(ws.cell(row, project_col).value)
+        row_phase = text(ws.cell(row, phase_col).value) or "初查"
+        if row_project_no == project_no and row_phase == phase:
             return row
     return None
 
@@ -192,19 +196,25 @@ def append_row(ws: Any, columns: dict[str, int]) -> int:
 
 def target_values(case: dict[str, Any], warnings: list[str]) -> dict[str, str]:
     project_no = text(case.get("project_no"))
+    phase = allowed_or_blank("inspection_phase", case.get("inspection_phase") or "初查", warnings, project_no) or "初查"
+    qualified = allowed_or_blank("qualified", case.get("qualified"), warnings, project_no)
+    case_type = allowed_or_blank("case_type", case.get("case_type"), warnings, project_no)
+    if phase == "复查" and qualified == "不合格":
+        case_type = "行案"
     return {
         "unit_name": text(case.get("unit_name")),
         "project_no": project_no,
+        "inspection_phase": phase,
         "unit_address": text(case.get("unit_address")),
         "nominal_producers_text": list_text(case.get("nominal_producers")),
         "case_handler": text(case.get("case_handler")),
         "inspector": text(case.get("inspector")),
-        "inspection_month": parse_month(text(case.get("inspection_date"))),
+        "inspection_date": "" if phase == "复查" else parse_full_date(text(case.get("inspection_date"))),
         "products_text": list_text(case.get("products")),
         "station_or_team": allowed_or_blank("station_or_team", case.get("station_or_team"), warnings, project_no),
         "method": allowed_or_blank("method", case.get("method"), warnings, project_no),
-        "qualified": allowed_or_blank("qualified", case.get("qualified"), warnings, project_no),
-        "case_type": allowed_or_blank("case_type", case.get("case_type"), warnings, project_no),
+        "qualified": qualified,
+        "case_type": case_type,
         "online_sale": allowed_or_blank("online_sale", case.get("online_sale"), warnings, project_no),
     }
 
@@ -223,7 +233,7 @@ def update_case_row(ws: Any, row: int, columns: dict[str, int], case: dict[str, 
     for key, value in values.items():
         cell = ws.cell(row, columns[key])
         set_cell_value(cell, value)
-        if key == "case_type" and value == "行案" and bool(case.get("case_type_review")):
+        if key == "case_type" and value == "行案" and (bool(case.get("case_type_review")) or text(case.get("inspection_phase")) == "复查"):
             cell.fill = copy(YELLOW_FILL)
     return {
         "project_no": values["project_no"],
@@ -253,21 +263,74 @@ def resolve_source_file(image_dir: Path, file_name: str) -> Path:
     return path
 
 
-def rename_case_images(image_dir: Path, case: dict[str, Any]) -> list[dict[str, str]]:
+def rename_case_images(image_dir: Path, cases: list[dict[str, Any]]) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
-    date_part = parse_iso_date(text(case.get("inspection_date")))
-    unit_part = sanitize_filename_part(text(case.get("unit_name")), "未知单位")
-    roles = case.get("file_roles") if isinstance(case.get("file_roles"), dict) else {}
+    project_dates: dict[str, str] = {}
+    project_units: dict[str, str] = {}
+    jobs: dict[Path, dict[str, str]] = {}
+    project_source_paths: dict[str, set[Path]] = {}
 
-    for file_name in case.get("source_files", []):
-        source = resolve_source_file(image_dir, file_name)
-        role = roles.get(file_name, "其他附件")
+    for case in cases:
+        project_no = text(case.get("project_no"))
+        phase = text(case.get("inspection_phase")) or "初查"
+        if project_no and phase == "初查":
+            project_dates[project_no] = parse_iso_date(text(case.get("inspection_date")))
+        if project_no and text(case.get("unit_name")):
+            project_units[project_no] = text(case.get("unit_name"))
+
+    for case in cases:
+        project_no = text(case.get("project_no"))
+        roles = case.get("file_roles") if isinstance(case.get("file_roles"), dict) else {}
+        for file_name in case.get("source_files", []):
+            source = resolve_source_file(image_dir, file_name)
+            role = roles.get(file_name, "其他附件")
+            resolved = source.resolve() if source.exists() else source
+            project_source_paths.setdefault(project_no, set()).add(resolved)
+            if resolved not in jobs:
+                jobs[resolved] = {
+                    "source": str(source),
+                    "project_no": project_no,
+                    "role": role,
+                }
+
+    for project_no, current_sources in project_source_paths.items():
+        if not project_no:
+            continue
+        for existing in image_dir.glob(f"*_{project_no}_*"):
+            if existing.resolve() not in current_sources:
+                existing.unlink()
+                results.append({"source": str(existing), "status": "deleted_old_project_image"})
+        unit_part = sanitize_filename_part(project_units.get(project_no, ""), "")
+        if unit_part:
+            unit_marker = compact_filename_text(unit_part)
+            for existing in image_dir.iterdir():
+                if not existing.is_file():
+                    continue
+                if existing.resolve() in current_sources:
+                    continue
+                name_text = compact_filename_text(existing.name)
+                if project_no in name_text:
+                    continue
+                if unit_marker not in name_text:
+                    continue
+                if not any(role in name_text for role in ROLE_VALUES):
+                    continue
+                existing.unlink()
+                results.append({"source": str(existing), "status": "deleted_legacy_project_image"})
+
+    for job in jobs.values():
+        project_no = job["project_no"]
+        source = Path(job["source"])
+        role = job["role"]
         if role not in ROLE_VALUES:
             role = "其他附件"
         if not source.exists():
             results.append({"source": str(source), "status": "missing"})
             continue
-        target_name = f"{date_part}_{unit_part}_{role}{source.suffix.lower()}"
+        date_part = project_dates.get(project_no, "未知日期")
+        unit_part = sanitize_filename_part(project_units.get(project_no, ""), "未知单位")
+        project_part = sanitize_filename_part(project_no, "未知项目")
+        target_name = f"{date_part}_{project_part}_{unit_part}_{role}{source.suffix.lower()}"
         raw_target = source.with_name(target_name)
         if source.resolve() == raw_target.resolve():
             results.append({"source": str(source), "target": str(raw_target), "status": "unchanged"})
@@ -278,6 +341,64 @@ def rename_case_images(image_dir: Path, case: dict[str, Any]) -> list[dict[str, 
     return results
 
 
+def sort_data_rows(ws: Any, columns: dict[str, int]) -> None:
+    project_col = columns["project_no"]
+    phase_col = columns["inspection_phase"]
+    date_col = columns["inspection_date"]
+    rows: list[dict[str, Any]] = []
+    for row in range(2, ws.max_row + 1):
+        project_no = text(ws.cell(row, project_col).value)
+        if not project_no:
+            continue
+        row_cells: list[dict[str, Any]] = []
+        for col in range(1, ws.max_column + 1):
+            cell = ws.cell(row, col)
+            row_cells.append({
+                "value": cell.value,
+                "font": copy(cell.font),
+                "fill": copy(cell.fill),
+                "border": copy(cell.border),
+                "alignment": copy(cell.alignment),
+                "number_format": cell.number_format,
+                "protection": copy(cell.protection),
+            })
+        rows.append({
+            "source_row": row,
+            "project_no": project_no,
+            "phase": text(ws.cell(row, phase_col).value) or "初查",
+            "date": text(ws.cell(row, date_col).value),
+            "cells": row_cells,
+        })
+    initial_dates: dict[str, str] = {}
+    for item in rows:
+        if item["phase"] == "初查" and item["date"]:
+            initial_dates[item["project_no"]] = item["date"]
+    rows.sort(key=lambda item: (
+        initial_dates.get(item["project_no"], item["date"] or "9999-12-31"),
+        item["project_no"],
+        0 if item["phase"] == "初查" else 1,
+        item["source_row"],
+    ))
+    for offset, item in enumerate(rows, start=2):
+        for col, state in enumerate(item["cells"], start=1):
+            cell = ws.cell(offset, col)
+            cell.value = state["value"]
+            cell.font = copy(state["font"])
+            cell.fill = copy(state["fill"])
+            cell.border = copy(state["border"])
+            cell.alignment = copy(state["alignment"])
+            cell.number_format = state["number_format"]
+            cell.protection = copy(state["protection"])
+        ws.cell(offset, 1).value = offset - 1
+    first_blank = len(rows) + 2
+    field_cols = set(columns.values())
+    for row in range(first_blank, ws.max_row + 1):
+        ws.cell(row, 1).value = row - 1
+        for col in field_cols:
+            ws.cell(row, col).value = None
+            ws.cell(row, col).fill = copy(NO_FILL)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="更新产品案卷数据工作簿并原地重命名截图。")
     parser.add_argument("--workbook", required=True, type=Path, help="产品案卷数据.xlsx")
@@ -286,6 +407,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extractions", required=True, type=Path, help="抽取结果 JSON")
     parser.add_argument("--dry-run", action="store_true", help="只校验并模拟写入，不保存工作簿、不重命名截图")
     parser.add_argument("--skip-rename", action="store_true", help="只更新工作簿，不重命名截图")
+    parser.add_argument("--no-sort", action="store_true", help="不按日期和初查/复查重排数据行")
     return parser.parse_args()
 
 
@@ -313,7 +435,8 @@ def main() -> int:
     updated: list[dict[str, Any]] = []
     for case in cases:
         project_no = text(case.get("project_no"))
-        row = find_project_row(ws, columns["project_no"], project_no)
+        phase = text(case.get("inspection_phase")) or "初查"
+        row = find_case_row(ws, columns["project_no"], columns["inspection_phase"], project_no, phase)
         operation = "update"
         if row is None:
             row = first_empty_row(ws, columns)
@@ -324,6 +447,8 @@ def main() -> int:
         info = update_case_row(ws, row, columns, case, warnings)
         info["operation"] = operation
         updated.append(info)
+    if not args.no_sort:
+        sort_data_rows(ws, columns)
 
     backup_path = None
     renamed: list[dict[str, str]] = []
@@ -334,8 +459,7 @@ def main() -> int:
         shutil.copy2(args.workbook, backup_path)
         wb.save(args.workbook)
         if not args.skip_rename:
-            for case in cases:
-                renamed.extend(rename_case_images(args.image_dir, case))
+            renamed.extend(rename_case_images(args.image_dir, cases))
 
     result = {
         "status": "ok",

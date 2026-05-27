@@ -10,6 +10,7 @@ from typing import Any
 
 REQUIRED_KEYS = [
     "project_no",
+    "inspection_phase",
     "unit_name",
     "unit_address",
     "nominal_producers",
@@ -29,6 +30,7 @@ REQUIRED_KEYS = [
 ]
 
 ALLOWED_VALUES = {
+    "inspection_phase": {"初查", "复查"},
     "station_or_team": {"微型消防站", "快速处置队", "否"},
     "method": {"现场判定", "抽样送检"},
     "qualified": {"合格", "不合格"},
@@ -74,20 +76,28 @@ def validate_cases(
 ) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
-    seen_projects: set[str] = set()
+    seen_project_phases: set[tuple[str, str]] = set()
+    cases_by_project: dict[str, list[dict[str, Any]]] = {}
 
     for index, case in enumerate(cases, start=1):
         prefix = f"第 {index} 个案件"
         for key in REQUIRED_KEYS:
+            if key == "inspection_phase":
+                continue
             if key not in case:
                 errors.append(f"{prefix} 缺少字段：{key}")
 
         project_no = text(case.get("project_no"))
+        phase = text(case.get("inspection_phase")) or "初查"
+        case["inspection_phase"] = phase
         if not project_no:
             errors.append(f"{prefix} 缺少项目编号 project_no")
-        elif project_no in seen_projects:
-            errors.append(f"{prefix} 项目编号重复：{project_no}")
-        seen_projects.add(project_no)
+        else:
+            key = (project_no, phase)
+            if key in seen_project_phases:
+                errors.append(f"{prefix} 项目编号和初查/复查重复：{project_no}/{phase}")
+            seen_project_phases.add(key)
+            cases_by_project.setdefault(project_no, []).append(case)
 
         products = case.get("products")
         if not isinstance(products, list) or not all(isinstance(v, str) for v in products):
@@ -121,14 +131,17 @@ def validate_cases(
                 errors.append(f"{prefix} {field} 值不在允许范围内：{value}")
 
         date_value = text(case.get("inspection_date"))
-        if date_value and not (
-            FULL_DATE_RE.match(date_value)
-            or CN_DATE_RE.match(date_value)
-            or MONTH_RE.match(date_value)
-        ):
-            warnings.append(f"{prefix} inspection_date 不是可识别日期或月份：{date_value}")
-        if not date_value:
-            warnings.append(f"{prefix} inspection_date 为空，截图重命名将使用 未知日期")
+        if phase == "复查":
+            if date_value:
+                warnings.append(f"{prefix} 复查行 inspection_date 将按规则写空标红：{date_value}")
+        else:
+            if date_value and not (FULL_DATE_RE.match(date_value) or CN_DATE_RE.match(date_value)):
+                if MONTH_RE.match(date_value):
+                    warnings.append(f"{prefix} inspection_date 仍是月份，写表时会留空标红：{date_value}")
+                else:
+                    warnings.append(f"{prefix} inspection_date 不是可识别完整日期：{date_value}")
+            if not date_value:
+                warnings.append(f"{prefix} 初查行 inspection_date 为空，写表和截图重命名将使用 未知日期")
 
         missing_fields = case.get("missing_fields")
         if not isinstance(missing_fields, list) or not all(isinstance(v, str) for v in missing_fields):
@@ -147,6 +160,17 @@ def validate_cases(
                 warnings.append(f"{prefix} file_roles 包含未列入 source_files 的文件：{file_name}")
             if role not in ROLE_VALUES:
                 errors.append(f"{prefix} file_roles 的角色不合法：{file_name}={role}")
+
+    for project_no, project_cases in cases_by_project.items():
+        phases = {text(case.get("inspection_phase")) or "初查" for case in project_cases}
+        if len(project_cases) > 2:
+            errors.append(f"{project_no}: 同一项目编号最多只能有 初查/复查 两行")
+        if "复查" in phases:
+            initial = next((case for case in project_cases if (text(case.get("inspection_phase")) or "初查") == "初查"), None)
+            if initial is None:
+                errors.append(f"{project_no}: 存在复查行但缺少初查行")
+            elif text(initial.get("qualified")) != "不合格":
+                errors.append(f"{project_no}: 只有初查不合格才允许生成复查行")
 
     return {
         "status": "ok" if not errors else "errors_found",
