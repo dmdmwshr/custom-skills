@@ -1,4 +1,4 @@
 interface:
   display_name: "消防产品案卷填表"
-  short_description: "从案卷截图抽取字段，更新月度 Excel、处理初查/复查、标黄行案复核并重命名截图。"
-  default_prompt: "Use $xf-product-case-filler to extract 消防产品案卷截图信息，补充标称生产者，按项目编号和初查/复查更新产品案卷数据.xlsx，检查时间写完整日期，遇到[罚]/罚字/行政处罚线索或复查不合格默认行案并标黄，并按检查日期、项目编号和单位名称重命名已处理截图。"
+  short_description: "从案卷截图抽取字段，更新月度 Excel、处理初查/复查、复查不合格项目标行案并重命名截图。"
+  default_prompt: "Use $xf-product-case-filler to extract 消防产品案卷截图信息，补充标称生产者，按项目编号和初查/复查更新产品案卷数据.xlsx，检查时间写完整日期；只有同一项目存在复查且复查不合格时，初查和复查两行才写行案并标黄；[罚]/罚字/行政处罚线索不参与自动行案判定；按检查日期、项目编号和单位名称重命名已处理截图。"

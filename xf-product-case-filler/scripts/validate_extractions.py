@@ -163,6 +163,11 @@ def validate_cases(
 
     for project_no, project_cases in cases_by_project.items():
         phases = {text(case.get("inspection_phase")) or "初查" for case in project_cases}
+        has_failed_recheck = any(
+            (text(case.get("inspection_phase")) or "初查") == "复查"
+            and text(case.get("qualified")) == "不合格"
+            for case in project_cases
+        )
         if len(project_cases) > 2:
             errors.append(f"{project_no}: 同一项目编号最多只能有 初查/复查 两行")
         if "复查" in phases:
@@ -171,6 +176,10 @@ def validate_cases(
                 errors.append(f"{project_no}: 存在复查行但缺少初查行")
             elif text(initial.get("qualified")) != "不合格":
                 errors.append(f"{project_no}: 只有初查不合格才允许生成复查行")
+        for case in project_cases:
+            if text(case.get("case_type")) == "行案" and not has_failed_recheck:
+                phase = text(case.get("inspection_phase")) or "初查"
+                errors.append(f"{project_no}/{phase}: 只有复查不合格项目才允许 case_type 写 行案")
 
     return {
         "status": "ok" if not errors else "errors_found",

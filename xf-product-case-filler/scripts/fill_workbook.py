@@ -194,13 +194,28 @@ def append_row(ws: Any, columns: dict[str, int]) -> int:
     return target_row
 
 
-def target_values(case: dict[str, Any], warnings: list[str]) -> dict[str, str]:
+def failed_recheck_projects(cases: list[dict[str, Any]]) -> set[str]:
+    return {
+        text(case.get("project_no"))
+        for case in cases
+        if (text(case.get("inspection_phase")) or "初查") == "复查"
+        and text(case.get("qualified")) == "不合格"
+        and text(case.get("project_no"))
+    }
+
+
+def target_values(case: dict[str, Any], warnings: list[str], failed_rechecks: set[str]) -> dict[str, str]:
     project_no = text(case.get("project_no"))
     phase = allowed_or_blank("inspection_phase", case.get("inspection_phase") or "初查", warnings, project_no) or "初查"
     qualified = allowed_or_blank("qualified", case.get("qualified"), warnings, project_no)
     case_type = allowed_or_blank("case_type", case.get("case_type"), warnings, project_no)
-    if phase == "复查" and qualified == "不合格":
+    if case_type == "刑案":
+        pass
+    elif project_no in failed_rechecks:
         case_type = "行案"
+    elif case_type == "行案":
+        warnings.append(f"{project_no}: 未发现复查不合格，case_type=行案 已按规则改为 否")
+        case_type = "否"
     return {
         "unit_name": text(case.get("unit_name")),
         "project_no": project_no,
@@ -228,12 +243,19 @@ def set_cell_value(cell: Any, value: str) -> None:
         cell.fill = copy(RED_FILL)
 
 
-def update_case_row(ws: Any, row: int, columns: dict[str, int], case: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
-    values = target_values(case, warnings)
+def update_case_row(
+    ws: Any,
+    row: int,
+    columns: dict[str, int],
+    case: dict[str, Any],
+    warnings: list[str],
+    failed_rechecks: set[str],
+) -> dict[str, Any]:
+    values = target_values(case, warnings, failed_rechecks)
     for key, value in values.items():
         cell = ws.cell(row, columns[key])
         set_cell_value(cell, value)
-        if key == "case_type" and value == "行案" and (bool(case.get("case_type_review")) or text(case.get("inspection_phase")) == "复查"):
+        if key == "case_type" and value == "行案" and values["project_no"] in failed_rechecks:
             cell.fill = copy(YELLOW_FILL)
     return {
         "project_no": values["project_no"],
@@ -431,6 +453,7 @@ def main() -> int:
         raise ValueError(f"工作簿中未找到工作表：{args.brigade}")
     ws = wb[args.brigade]
     columns = field_columns(ws)
+    failed_rechecks = failed_recheck_projects(cases)
 
     updated: list[dict[str, Any]] = []
     for case in cases:
@@ -444,7 +467,7 @@ def main() -> int:
         if row is None:
             row = append_row(ws, columns)
             operation = "append"
-        info = update_case_row(ws, row, columns, case, warnings)
+        info = update_case_row(ws, row, columns, case, warnings, failed_rechecks)
         info["operation"] = operation
         updated.append(info)
     if not args.no_sort:
