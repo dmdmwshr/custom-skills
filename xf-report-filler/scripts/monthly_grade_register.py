@@ -313,6 +313,12 @@ def strip_detail_text(text):
     return text.strip(" ；;，,、")
 
 
+def public_product_description(text):
+    raw = clean_error_line(text)
+    public = clean_error_line(strip_detail_text(raw))
+    return public or raw
+
+
 def match_product_doc_labels(compact):
     labels = []
     doc_markers = [
@@ -336,6 +342,10 @@ def match_product_doc_labels(compact):
 
 
 def normalize_broad_description(text):
+    return public_product_description(text)
+
+
+def classify_product_description(text):
     raw = clean_error_line(text)
     broad = strip_detail_text(raw)
     compact = norm_text(raw)
@@ -1104,7 +1114,10 @@ def product_detail_leak_issues_for_records(product_records):
             "archive_errors": "\n".join(item.get("archive_errors", [])),
         }
         for raw_error in item.get("errors", []):
+            expected_raw_public = public_product_description(raw_error)
             for fragment in product_detail_fragments(raw_error):
+                if fragment == expected_raw_public:
+                    continue
                 for field, output_text in output_texts.items():
                     if fragment and fragment in output_text:
                         issues.append(
@@ -1117,6 +1130,19 @@ def product_detail_leak_issues_for_records(product_records):
                                 "message": "产品底册括号内或 ps 细节进入了对外输出文本",
                             }
                         )
+        expected_public = unique_text_list(public_product_description(raw_error) for raw_error in item.get("errors", []))
+        actual_public = unique_text_list(item.get("archive_errors", []))
+        if expected_public != actual_public:
+            issues.append(
+                {
+                    "type": "product_public_description_mismatch",
+                    "大队": item.get("大队"),
+                    "案卷": item.get("题名"),
+                    "expected": expected_public,
+                    "actual": actual_public,
+                    "message": "产品公开描述必须严格使用底册括号前文本，不允许用括号内细节做语义归类",
+                }
+            )
     return issues
 
 

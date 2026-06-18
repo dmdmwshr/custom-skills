@@ -160,6 +160,19 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
         self.assertTrue(mgr.is_blank_product_template_item(mgr.clean_error_line("3、（）"), "扣分："))
         self.assertFalse(mgr.is_blank_product_template_item("责令限期改正通知书填写不规范", "扣分：3.2 0.1分"))
 
+    def test_product_public_description_uses_text_before_parentheses(self):
+        cases = {
+            "卷内应有的某文书缺失（缺少责令限期改正通知书审批表、证据保全清单）": "卷内应有的某文书缺失",
+            "复查现场照片不齐全（缺少门头）": "复查现场照片不齐全",
+            "缺授权委托书（缺授权委托书）": "缺授权委托书",
+            "消防产品监督检查记录记录不规范（备注栏未填写）": "消防产品监督检查记录记录不规范",
+            "责令限期改正通知书填写不规范 ps：具体问题不能进通报": "责令限期改正通知书填写不规范",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(mgr.public_product_description(raw), expected)
+                self.assertEqual(mgr.normalize_broad_description(raw), expected)
+
     def test_validate_person_matches_allows_missing_monitor_contact(self):
         with tempfile.TemporaryDirectory() as tmp:
             template = Path(tmp) / "个人执法统计表模板.xlsx"
@@ -199,6 +212,21 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
         issues = mgr.product_detail_leak_issues_for_records([leaked])
         self.assertEqual(issues[0]["type"], "product_detail_leak")
         self.assertEqual(issues[0]["fragment"], "具体问题不能进通报")
+
+    def test_product_public_description_guard_detects_semantic_detail_rewrite(self):
+        record = {
+            "大队": "滨湖大队",
+            "short": "滨湖",
+            "题名": "测试案卷",
+            "立卷人": "张三",
+            "no_case": False,
+            "errors": ["卷内应有的某文书缺失（缺少责令限期改正通知书审批表、证据保全清单）"],
+            "archive_errors": ["责令限期改正通知书审批材料缺失"],
+        }
+        issues = mgr.product_detail_leak_issues_for_records([record])
+        mismatch = [item for item in issues if item["type"] == "product_public_description_mismatch"]
+        self.assertEqual(mismatch[0]["expected"], ["卷内应有的某文书缺失"])
+        self.assertEqual(mismatch[0]["actual"], ["责令限期改正通知书审批材料缺失"])
 
     def test_write_personal_stats_marks_product_person_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
