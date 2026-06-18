@@ -34,6 +34,29 @@ class SyncMonthlyTemplatesTests(unittest.TestCase):
             self.assertTrue(result["ok"], result["blockers"])
             self.assertEqual(result["actions"][0]["src"], str(library / syncer.TEMPLATES[0]["file"]))
 
+    def test_work_report_template_prefers_bulletin_skeleton(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template_dir = Path(tmp) / "模板文件"
+            library = template_dir / "_编号模板库"
+            skeleton_dir = template_dir / "X月通报"
+            library.mkdir(parents=True)
+            skeleton_dir.mkdir(parents=True)
+            for item in syncer.TEMPLATES:
+                (library / item["file"]).write_bytes(f"library:{item['file']}".encode("utf-8"))
+            skeleton = skeleton_dir / syncer.WORK_REPORT_SKELETON
+            skeleton.write_bytes(b"skeleton")
+
+            result = syncer.run(
+                argparse.Namespace(
+                    dry_run=True,
+                    apply=False,
+                    template_dir=str(template_dir),
+                )
+            )
+
+            work_report_action = next(action for action in result["actions"] if action["dst"].endswith(syncer.WORK_REPORT_NUMBERED))
+            self.assertEqual(work_report_action["src"], str(skeleton))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
 TARGET_DIR = SKILL_DIR / "resources" / "monthly_templates"
 DEFAULT_TEMPLATE_DIR = Path(r"E:\文件夹\1、工作\2、产品，科技，联网检测\1、产品监督\模板文件")
+SKELETON_DIR_NAME = "X月通报"
+WORK_REPORT_SKELETON = "X月重点工作完成情况上报表（应急通信与消防科技）.xls"
+WORK_REPORT_NUMBERED = "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls"
 
 TEMPLATES = [
     {
@@ -106,6 +109,15 @@ def resolve_source_dir(template_dir):
     return template_dir
 
 
+def source_file_for(template_dir, source_dir, filename):
+    template_dir = Path(template_dir)
+    if filename == WORK_REPORT_NUMBERED:
+        skeleton = template_dir / SKELETON_DIR_NAME / WORK_REPORT_SKELETON
+        if skeleton.exists():
+            return skeleton
+    return Path(source_dir) / filename
+
+
 def sha256_file(path):
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -125,7 +137,7 @@ def run(args):
     manifest_items = []
 
     for item in TEMPLATES:
-        source = source_dir / item["file"]
+        source = source_file_for(args.template_dir, source_dir, item["file"])
         target = TARGET_DIR / item["file"]
         if not source.exists():
             blockers.append({"message": "模板源文件不存在", "path": str(source)})

@@ -272,10 +272,14 @@ def organize_template_model(template_dir, actions, blockers, apply):
         )
 
     for item in BULLETIN_ROOT_TEMPLATE_MAP:
+        skeleton_target = skeleton_dir / item["skeleton"]
+        if skeleton_target.exists():
+            actions.append({"kind": "bulletin_skeleton_present", "status": "skip_exists", "path": str(skeleton_target)})
+            continue
         source = template_source_for(template_dir, item["library"])
         copy_if_missing(
             source,
-            skeleton_dir / item["skeleton"],
+            skeleton_target,
             actions,
             blockers,
             apply,
@@ -322,6 +326,18 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
     for item in BULLETIN_ROOT_TEMPLATE_MAP:
         source = skeleton_source_for(template_dir, item)
         target_name = item["target"].format(year=bulletin_year, month=bulletin_month)
+        pending_target = bulletin_dir / f"{PENDING_PREFIX}{target_name}"
+        if pending_target.exists():
+            actions.append(
+                {
+                    "kind": "copy_bulletin_root_file",
+                    "status": "skip_pending_target_exists",
+                    "src": str(source),
+                    "dst": str(bulletin_dir / target_name),
+                    "pending": str(pending_target),
+                }
+            )
+            continue
         copy_if_missing(
             source,
             bulletin_dir / target_name,

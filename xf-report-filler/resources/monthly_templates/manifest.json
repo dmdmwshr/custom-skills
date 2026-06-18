@@ -1,7 +1,7 @@
 {
   "version": 2,
   "source_directory": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库",
-  "generated_at": "2026-06-18T02:49:27Z",
+  "generated_at": "2026-06-18T06:10:40Z",
   "templates": [
     {
       "key": "product_register",
@@ -100,8 +100,8 @@
       "used_in_monthly_register": false,
       "reserved": true,
       "original_name": "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
-      "sha256": "AA788910B74158BA2D560DAE67BB316B783FCB403A5ABE94A04D9A83820201D3"
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报\\X月重点工作完成情况上报表（应急通信与消防科技）.xls",
+      "sha256": "704909A42625A6FFC71E5F6D48CB9963FA8D4B563CE05CBF0B1A6D62A5F5153C"
     }
   ],
   "excluded_source_files": [

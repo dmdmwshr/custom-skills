@@ -66,6 +66,38 @@ class MonthlyFileOrganizerTests(unittest.TestCase):
                 )
             )
 
+    def test_bulletin_dry_run_skips_unprefixed_when_pending_root_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            template_dir = base / "模板文件"
+            bulletin_dir = base / "26年" / "6月通报"
+            (bulletin_dir / "5月巡查").mkdir(parents=True)
+            write_fake_templates(template_dir)
+            (bulletin_dir / "【待补】2026年6月消防产品监督统计表.xls").write_bytes(b"pending")
+
+            result = organizer.run(
+                argparse.Namespace(
+                    dry_run=True,
+                    apply=False,
+                    bulletin_dir=str(bulletin_dir),
+                    bulletin_year=2026,
+                    bulletin_month=6,
+                    score_year=2026,
+                    score_month=5,
+                    template_dir=str(template_dir),
+                )
+            )
+
+            self.assertTrue(result["ok"], result["blockers"])
+            self.assertTrue(
+                any(
+                    action["kind"] == "copy_bulletin_root_file"
+                    and action["status"] == "skip_pending_target_exists"
+                    and action["pending"].endswith("【待补】2026年6月消防产品监督统计表.xls")
+                    for action in result["actions"]
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
