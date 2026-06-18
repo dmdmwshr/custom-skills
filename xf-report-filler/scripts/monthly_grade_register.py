@@ -1498,8 +1498,24 @@ def generate_product_docs(product_records, product_output_dir, year, month, forc
             pass
 
 
+def build_output_files(month_dir, year, month, include_score_office_record=False):
+    month_dir = Path(month_dir)
+    product_dir = month_dir / f"{year}年{month}月消防产品监督成绩"
+    output_files = {
+        "product_dir": str(product_dir),
+        "product_summary": str(product_dir / "产品监督成绩总表.xlsx"),
+        "personal_stats": str(month_dir / f"{year}年{month}月个人执法统计表.xlsx"),
+        "case_scores": str(month_dir / f"{year}年{month}月消防监督管理系统消防执法质量（个案成绩）.xls"),
+        "monthly_report": str(month_dir / f"{year}年{month}月通报.doc"),
+    }
+    if include_score_office_record:
+        output_files["office_record"] = str(month_dir / f"{year}年{month}月科室月考核情况记录表.xlsx")
+    return output_files
+
+
 def run(args):
     month_dir = require_path(args.month_dir, "月份目录")
+    include_score_office_record = getattr(args, "include_score_office_record", False)
     current_month_info = build_score_month_info(args.year, args.month, "argument")
     templates, template_info = load_monthly_templates(args.template_dir)
     product_register = find_one(month_dir, [f"*{args.month}月*产品巡查底册*.docx", "*产品巡查底册*.docx"], "产品巡查底册")
@@ -1512,6 +1528,7 @@ def run(args):
     personal_output = month_dir / f"{args.year}年{args.month}月个人执法统计表.xlsx"
     office_output = month_dir / f"{args.year}年{args.month}月科室月考核情况记录表.xlsx"
     case_scores_output = month_dir / f"{args.year}年{args.month}月消防监督管理系统消防执法质量（个案成绩）.xls"
+    output_files = build_output_files(month_dir, args.year, args.month, include_score_office_record)
 
     product_records = parse_product_register(product_register)
     product_score_guard = validate_product_score_guard(product_records)
@@ -1563,14 +1580,8 @@ def run(args):
                         "network_stats": str(network_stats),
                         "base_info": str(base_info),
                     },
-                    "output_files": {
-                        "product_dir": str(product_dir),
-                        "product_summary": str(product_dir / "产品监督成绩总表.xlsx"),
-                        "personal_stats": str(personal_output),
-                        "office_record": str(office_output),
-                        "case_scores": str(case_scores_output),
-                        "monthly_report": str(report_output),
-                    },
+                    "output_files": output_files,
+                    "include_score_office_record": include_score_office_record,
                     "registration_month": {
                         "year": current_month_info["registration_year"],
                         "month": current_month_info["registration_month"],
@@ -1649,13 +1660,14 @@ def run(args):
         args.month,
         args.force,
     )
-    write_office_record(
-        templates["office_record"],
-        office_output,
-        product_records,
-        monitor_details,
-        args.force,
-    )
+    if include_score_office_record:
+        write_office_record(
+            templates["office_record"],
+            office_output,
+            product_records,
+            monitor_details,
+            args.force,
+        )
     write_case_scores(
         templates["case_scores"],
         case_scores_output,
@@ -1694,14 +1706,8 @@ def run(args):
             "network_stats": str(network_stats),
             "base_info": str(base_info),
         },
-        "output_files": {
-            "product_dir": str(product_dir),
-            "product_summary": str(product_dir / "产品监督成绩总表.xlsx"),
-            "personal_stats": str(personal_output),
-            "office_record": str(office_output),
-            "case_scores": str(case_scores_output),
-            "monthly_report": str(report_output),
-        },
+        "output_files": output_files,
+        "include_score_office_record": include_score_office_record,
         "registration_month": {
             "year": current_month_info["registration_year"],
             "month": current_month_info["registration_month"],
@@ -1745,6 +1751,11 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只解析并输出数据，不写入文件")
     parser.add_argument("--template-dir", help="临时覆盖月度模板目录；默认使用 skill 内 resources/monthly_templates")
     parser.add_argument("--no-history-update", action="store_true", help="生成文件但不更新联网通报历史台账")
+    parser.add_argument(
+        "--include-score-office-record",
+        action="store_true",
+        help="兼容旧流程：在巡查/成绩目录内额外生成成绩月份科室月考核情况记录表",
+    )
     args = parser.parse_args()
     try:
         run(args)

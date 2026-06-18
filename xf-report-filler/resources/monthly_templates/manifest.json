@@ -1,7 +1,7 @@
 {
   "version": 2,
-  "source_directory": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件",
-  "generated_at": "2026-06-18T02:23:03Z",
+  "source_directory": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库",
+  "generated_at": "2026-06-18T02:49:27Z",
   "templates": [
     {
       "key": "product_register",
@@ -10,7 +10,7 @@
       "used_in_monthly_register": false,
       "reserved": false,
       "original_name": "01_产品巡查底册模板.docx",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\01_产品巡查底册模板.docx",
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\01_产品巡查底册模板.docx",
       "sha256": "09494CF92C990F8CDCDDA60066896193FB4A23FDCFDF2AD0B21F7D3BD6669F6F"
     },
     {
@@ -20,7 +20,7 @@
       "used_in_monthly_register": true,
       "reserved": false,
       "original_name": "02_消防产品档案质量明细表模板.doc",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\02_消防产品档案质量明细表模板.doc",
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\02_消防产品档案质量明细表模板.doc",
       "sha256": "DFE71B4A062E6986ACB6B14CE6C8DBCECFFD73D2D3A6ED60B5D196DE1CFB3B66"
     },
     {
@@ -30,7 +30,7 @@
       "used_in_monthly_register": true,
       "reserved": false,
       "original_name": "03_产品监督成绩总表模板.xlsx",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\03_产品监督成绩总表模板.xlsx",
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\03_产品监督成绩总表模板.xlsx",
       "sha256": "E13B7CE483C3A45422668E9098499168E5A53AA19C583018A64DAFF98CC82285"
     },
     {
@@ -40,7 +40,7 @@
       "used_in_monthly_register": true,
       "reserved": false,
       "original_name": "04_个人执法统计表模板.xlsx",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\04_个人执法统计表模板.xlsx",
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\04_个人执法统计表模板.xlsx",
       "sha256": "70D84D1AD336BB2724BDC1EA5A90743EA35B6516EC8E3C5DBA242BC330FC90B6"
     },
     {
@@ -50,7 +50,7 @@
       "used_in_monthly_register": true,
       "reserved": false,
       "original_name": "05_科室月考核情况记录表模板.xlsx",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\05_科室月考核情况记录表模板.xlsx",
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\05_科室月考核情况记录表模板.xlsx",
       "sha256": "E6A1C39A5395367957EC5E289358ED33B957714E8E979B8FA16B6798C29106FA"
     },
     {
@@ -60,7 +60,7 @@
       "used_in_monthly_register": true,
       "reserved": false,
       "original_name": "06_消防执法质量个案成绩模板.xls",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\06_消防执法质量个案成绩模板.xls",
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\06_消防执法质量个案成绩模板.xls",
       "sha256": "62FABF0ADAD26BAE2FEFF933FFB69BDA170DBA806F497AE9DDB87A067CF0AC00"
     },
     {
@@ -70,7 +70,7 @@
       "used_in_monthly_register": true,
       "reserved": false,
       "original_name": "07_月度通报模板.doc",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\07_月度通报模板.doc",
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\07_月度通报模板.doc",
       "sha256": "D9CBD03DFAA95724D78D96905B68FD8C4A902FF4AC42A5AE88ED42CCCE2C33E0"
     },
     {
@@ -80,7 +80,7 @@
       "used_in_monthly_register": false,
       "reserved": true,
       "original_name": "08_每月消防产品监督统计表空表模板.xls",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\08_每月消防产品监督统计表空表模板.xls",
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\08_每月消防产品监督统计表空表模板.xls",
       "sha256": "01264F29D22E64532C1250CC3C4AAF2409E2BF298C6C04653511B18F18B98D6C"
     },
     {
@@ -90,7 +90,7 @@
       "used_in_monthly_register": false,
       "reserved": true,
       "original_name": "09_消防产品监督统计表工作检查模板.xls",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\09_消防产品监督统计表工作检查模板.xls",
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\09_消防产品监督统计表工作检查模板.xls",
       "sha256": "5023051663837626A2843A0E66FDB1DA6FABD825DC68E36699DF0735D9DD0364"
     },
     {
@@ -100,7 +100,7 @@
       "used_in_monthly_register": false,
       "reserved": true,
       "original_name": "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
       "sha256": "AA788910B74158BA2D560DAE67BB316B783FCB403A5ABE94A04D9A83820201D3"
     }
   ],

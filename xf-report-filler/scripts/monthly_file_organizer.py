@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ SKILL_TEMPLATE_DIR = SKILL_DIR / "resources" / "monthly_templates"
 DEFAULT_WORK_ROOT = Path(r"E:\文件夹\1、工作\2、产品，科技，联网检测\1、产品监督")
 DEFAULT_MAY_DIR = DEFAULT_WORK_ROOT / "26年" / "5月通报"
 DEFAULT_JUNE_MONTH_DIR = DEFAULT_WORK_ROOT / "26年" / "6月通报" / "5月巡查"
+DEFAULT_BULLETIN_DIR = DEFAULT_WORK_ROOT / "26年" / "6月通报"
 DEFAULT_TEMPLATE_DIR = DEFAULT_WORK_ROOT / "模板文件"
 
 PENDING_PREFIX = "【待补】"
@@ -61,6 +63,44 @@ MAY_TEMPLATE_SOURCES = {
         "5月重点工作完成情况上报表（应急通信与消防科技）.xls",
     ): "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
 }
+
+NUMBERED_TEMPLATE_NAMES = [
+    "01_产品巡查底册模板.docx",
+    "02_消防产品档案质量明细表模板.doc",
+    "03_产品监督成绩总表模板.xlsx",
+    "04_个人执法统计表模板.xlsx",
+    "05_科室月考核情况记录表模板.xlsx",
+    "06_消防执法质量个案成绩模板.xls",
+    "07_月度通报模板.doc",
+    "08_每月消防产品监督统计表空表模板.xls",
+    "09_消防产品监督统计表工作检查模板.xls",
+    "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
+    "90_消防产品档案质量明细表样例数据.doc",
+]
+
+NUMBERED_TEMPLATE_CANDIDATES = {
+    name: [name] for name in NUMBERED_TEMPLATE_NAMES
+}
+for old_name, new_name in TEMPLATE_RENAMES.items():
+    NUMBERED_TEMPLATE_CANDIDATES.setdefault(new_name, [new_name]).append(old_name)
+
+BULLETIN_ROOT_TEMPLATE_MAP = [
+    {
+        "library": "05_科室月考核情况记录表模板.xlsx",
+        "skeleton": "X月科室月考核情况记录表.xlsx",
+        "target": "{year}年{month}月科室月考核情况记录表.xlsx",
+    },
+    {
+        "library": "09_消防产品监督统计表工作检查模板.xls",
+        "skeleton": "X月消防产品监督统计表.xls",
+        "target": "{year}年{month}月消防产品监督统计表.xls",
+    },
+    {
+        "library": "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
+        "skeleton": "X月重点工作完成情况上报表（应急通信与消防科技）.xls",
+        "target": "{year}年{month}月重点工作完成情况上报表（应急通信与消防科技）.xls",
+    },
+]
 
 JUNE_TEMPLATE_COPY_NAMES = set(TEMPLATE_RENAMES) | {
     "（模板）产品监督成绩总表.xlsx",
@@ -136,6 +176,174 @@ def copy_if_missing(src, dst, actions, blockers, apply, root, kind):
     if apply:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+
+
+def delete_file_if_exists(path, actions, blockers, apply, root, kind):
+    path = Path(path)
+    if not path.exists():
+        return
+    if not path.is_file():
+        add_blocker(blockers, "目标不是文件，拒绝删除", path=path)
+        return
+    if not is_under(path, root):
+        add_blocker(blockers, "路径越界，已拒绝删除", path=path, root=root)
+        return
+    digest = sha256_file(path)
+    actions.append({"kind": kind, "status": "planned" if not apply else "done", "path": str(path), "sha256": digest})
+    if apply:
+        path.unlink()
+
+
+def ensure_dir(path, actions, apply, kind):
+    path = Path(path)
+    if path.exists():
+        actions.append({"kind": kind, "status": "skip_exists", "path": str(path)})
+        return
+    actions.append({"kind": kind, "status": "planned" if not apply else "done", "path": str(path)})
+    if apply:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def common_root(*paths):
+    resolved = [str(Path(path).resolve()) for path in paths]
+    return Path(os.path.commonpath(resolved))
+
+
+def numbered_template_dir(template_dir):
+    return Path(template_dir) / "_编号模板库"
+
+
+def skeleton_template_dir(template_dir):
+    return Path(template_dir) / "X月通报"
+
+
+def find_first_existing(paths):
+    for path in paths:
+        path = Path(path)
+        if path.exists():
+            return path
+    return None
+
+
+def template_source_for(template_dir, filename):
+    template_dir = Path(template_dir)
+    library_dir = numbered_template_dir(template_dir)
+    candidates = [library_dir / filename]
+    for candidate_name in NUMBERED_TEMPLATE_CANDIDATES.get(filename, [filename]):
+        candidates.append(template_dir / candidate_name)
+    return find_first_existing(candidates) or candidates[0]
+
+
+def skeleton_source_for(template_dir, item):
+    template_dir = Path(template_dir)
+    skeleton = skeleton_template_dir(template_dir) / item["skeleton"]
+    if skeleton.exists():
+        return skeleton
+    return template_source_for(template_dir, item["library"])
+
+
+def organize_template_model(template_dir, actions, blockers, apply):
+    template_dir = Path(template_dir)
+    library_dir = numbered_template_dir(template_dir)
+    skeleton_dir = skeleton_template_dir(template_dir)
+
+    ensure_dir(library_dir, actions, apply, "ensure_numbered_template_library")
+    ensure_dir(skeleton_dir, actions, apply, "ensure_bulletin_skeleton_dir")
+    ensure_dir(skeleton_dir / "上月巡查", actions, apply, "ensure_bulletin_skeleton_patrol_dir")
+    archive_office_locks(template_dir, actions, blockers, apply)
+
+    for filename in NUMBERED_TEMPLATE_NAMES:
+        if (library_dir / filename).exists():
+            actions.append({"kind": "numbered_template_present", "status": "skip_exists", "path": str(library_dir / filename)})
+            continue
+        candidates = [template_dir / name for name in NUMBERED_TEMPLATE_CANDIDATES.get(filename, [filename])]
+        source = find_first_existing(candidates)
+        if source is None:
+            add_blocker(blockers, "编号模板源文件不存在", target=library_dir / filename)
+            continue
+        move_or_rename(
+            source,
+            library_dir / filename,
+            actions,
+            blockers,
+            apply,
+            template_dir,
+            "move_template_to_numbered_library",
+        )
+
+    for item in BULLETIN_ROOT_TEMPLATE_MAP:
+        source = template_source_for(template_dir, item["library"])
+        copy_if_missing(
+            source,
+            skeleton_dir / item["skeleton"],
+            actions,
+            blockers,
+            apply,
+            template_dir,
+            "copy_bulletin_skeleton_template",
+        )
+
+
+def normalize_score_source_names(score_dir, score_year, score_month, actions, blockers, apply):
+    score_dir = Path(score_dir)
+    product_normal_name = f"{score_year}年{score_month}月产品巡查底册（不发）.docx"
+    base_info_normal_name = f"{score_year}年{score_month}月基础信息考评截图（不发）.xls"
+    network_dir = score_dir / f"{score_year}年{score_month}月联网监测基础信息考评明细表"
+
+    product_target = score_dir / product_normal_name
+    product_old_names = [
+        f"{PENDING_PREFIX}（{score_month}月）产品巡查底册（不发）.docx",
+        f"（{score_month}月）产品巡查底册（不发）.docx",
+        f"（{score_month}月）产品巡查底册.docx",
+        f"{score_month}月产品巡查底册（不发）.docx",
+    ]
+    for old_name in product_old_names:
+        move_or_rename(score_dir / old_name, product_target, actions, blockers, apply, score_dir, "score_product_register_rename")
+
+    base_info_target = score_dir / base_info_normal_name
+    base_info_old_paths = [
+        score_dir / f"{PENDING_PREFIX}{score_month}月基础信息考评截图（不发）.xls",
+        score_dir / f"{score_month}月基础信息考评截图（不发）.xls",
+        network_dir / f"{score_month}月基础信息考评截图.xls",
+    ]
+    for old_path in base_info_old_paths:
+        move_or_rename(old_path, base_info_target, actions, blockers, apply, score_dir, "score_base_info_move")
+
+
+def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_year, score_month, template_dir, actions, blockers, apply):
+    bulletin_dir = Path(bulletin_dir)
+    template_dir = Path(template_dir)
+    operation_root = common_root(bulletin_dir, template_dir)
+    score_dir = bulletin_dir / f"{score_month}月巡查"
+
+    ensure_dir(bulletin_dir, actions, apply, "ensure_bulletin_dir")
+    ensure_dir(score_dir, actions, apply, "ensure_score_patrol_dir")
+
+    for item in BULLETIN_ROOT_TEMPLATE_MAP:
+        source = skeleton_source_for(template_dir, item)
+        target_name = item["target"].format(year=bulletin_year, month=bulletin_month)
+        copy_if_missing(
+            source,
+            bulletin_dir / target_name,
+            actions,
+            blockers,
+            apply,
+            operation_root,
+            "copy_bulletin_root_file",
+        )
+
+    wrong_score_office = score_dir / f"{score_year}年{score_month}月科室月考核情况记录表.xlsx"
+    delete_file_if_exists(
+        wrong_score_office,
+        actions,
+        blockers,
+        apply,
+        bulletin_dir,
+        "delete_wrong_score_office_record",
+    )
+
+    archive_june_template_copies(score_dir, numbered_template_dir(template_dir), actions, blockers, apply)
+    normalize_score_source_names(score_dir, score_year, score_month, actions, blockers, apply)
 
 
 def collect_known_template_hashes(template_dir):
@@ -328,13 +536,32 @@ def run(args):
     blockers = []
     apply = args.apply
 
-    organize_may_dir(args.may_dir, actions, blockers, apply)
-    organize_template_dir(args.template_dir, actions, blockers, apply)
-    supplement_template_dir_from_may(args.may_dir, args.template_dir, actions, blockers, apply)
-    organize_june_dir(args.june_month_dir, actions, blockers, apply, args.template_dir)
+    organize_template_model(args.template_dir, actions, blockers, apply)
+    instantiate_bulletin_dir(
+        args.bulletin_dir,
+        args.bulletin_year,
+        args.bulletin_month,
+        args.score_year,
+        args.score_month,
+        args.template_dir,
+        actions,
+        blockers,
+        apply,
+    )
 
     return {
         "mode": "apply" if apply else "dry-run",
+        "bulletin": {
+            "dir": str(Path(args.bulletin_dir)),
+            "year": args.bulletin_year,
+            "month": args.bulletin_month,
+        },
+        "score": {
+            "year": args.score_year,
+            "month": args.score_month,
+            "dir": str(Path(args.bulletin_dir) / f"{args.score_month}月巡查"),
+        },
+        "template_dir": str(Path(args.template_dir)),
         "actions": actions,
         "blockers": blockers,
         "ok": not blockers,
@@ -342,12 +569,15 @@ def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="整理月度产品成绩登记目录并标注缺漏。")
+    parser = argparse.ArgumentParser(description="按通报月份目录模型整理月度产品成绩登记目录。")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true", help="只预览动作，不修改文件")
-    mode.add_argument("--apply", action="store_true", help="执行重命名、移动和缺漏标红")
-    parser.add_argument("--may-dir", default=str(DEFAULT_MAY_DIR))
-    parser.add_argument("--june-month-dir", default=str(DEFAULT_JUNE_MONTH_DIR))
+    mode.add_argument("--apply", action="store_true", help="执行安全重命名、移动、复制和指定误生成文件删除")
+    parser.add_argument("--bulletin-dir", default=str(DEFAULT_BULLETIN_DIR), help="通报月份目录，例如 ...\\26年\\6月通报")
+    parser.add_argument("--bulletin-year", type=int, default=2026, help="通报目录年份")
+    parser.add_argument("--bulletin-month", type=int, default=6, help="通报目录月份")
+    parser.add_argument("--score-year", type=int, default=2026, help="巡查/成绩所属年份")
+    parser.add_argument("--score-month", type=int, default=5, help="巡查/成绩所属月份")
     parser.add_argument("--template-dir", default=str(DEFAULT_TEMPLATE_DIR))
     args = parser.parse_args()
     result = run(args)

@@ -98,6 +98,14 @@ EXCLUDED = [
 ]
 
 
+def resolve_source_dir(template_dir):
+    template_dir = Path(template_dir)
+    numbered_dir = template_dir / "_编号模板库"
+    if numbered_dir.exists():
+        return numbered_dir
+    return template_dir
+
+
 def sha256_file(path):
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -111,7 +119,7 @@ def utc_now_text():
 
 
 def run(args):
-    source_dir = Path(args.template_dir)
+    source_dir = resolve_source_dir(args.template_dir)
     actions = []
     blockers = []
     manifest_items = []

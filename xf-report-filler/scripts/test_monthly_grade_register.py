@@ -210,6 +210,20 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
         self.assertEqual(scores["惠山"]["avg"], 9.7)
         self.assertEqual(mgr.read_monitor_scores.last_warnings[0]["raw_avg"], 97.2)
 
+    def test_default_output_files_do_not_include_score_office_record(self):
+        outputs = mgr.build_output_files(Path(r"C:\workspace\6月通报\5月巡查"), 2026, 5)
+        self.assertNotIn("office_record", outputs)
+        self.assertEqual(outputs["monthly_report"], r"C:\workspace\6月通报\5月巡查\2026年5月通报.doc")
+
+    def test_legacy_output_files_include_score_office_record_when_enabled(self):
+        outputs = mgr.build_output_files(
+            Path(r"C:\workspace\6月通报\5月巡查"),
+            2026,
+            5,
+            include_score_office_record=True,
+        )
+        self.assertEqual(outputs["office_record"], r"C:\workspace\6月通报\5月巡查\2026年5月科室月考核情况记录表.xlsx")
+
 
 if __name__ == "__main__":
     unittest.main()
