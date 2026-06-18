@@ -17,6 +17,7 @@
     "case_data": {
       "path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\26年\\26年产品案卷信息收集\\产品案卷数据.xlsx",
       "required_for": [
+        "bulletin_root_pending",
         "bulletin_root_final_audit"
       ]
     },
@@ -199,19 +200,25 @@
     }
   ],
   "pending_rules": {
+    "spreadsheet_pending_style": {
+      "fill_color": "FFFF0000",
+      "font_color": "FF000000",
+      "meaning": "表格待最终确认只用红色底色标记，不把单元格值改成【待补】。"
+    },
     "office_product_timeliness": {
       "label": "产品工作实效",
       "header_row": 2,
       "label_column": 3,
       "brigade_columns": "from_header",
-      "value": "【待补】",
-      "font_color": "red"
+      "value_source": "work_plan_tasks_and_case_counts",
+      "pending_style": "spreadsheet_pending_style"
     },
     "product_stats_required_counts": {
       "brigade_column": 1,
       "target_column": 2,
-      "value": "【待补】（{staff_count}）",
-      "font_color": "red"
+      "pending_columns": "B:H",
+      "value": "（{staff_count}）",
+      "pending_style": "spreadsheet_pending_style"
     },
     "work_report_tech_and_product": {
       "completed_cells": "J3:J10",
@@ -220,9 +227,36 @@
         "K3:K10",
         "O3:R10"
       ],
-      "pending_value": "【待补】",
-      "font_color": "red"
+      "tech_need_column": "K",
+      "product_columns": "O:R",
+      "pending_style": "spreadsheet_pending_style"
     }
+  },
+  "case_data_mapping": {
+    "date_column": "检查时间（以产品检查记录表登记时间为准）",
+    "project_column": "项目编号",
+    "micro_column": "是否为微型消防站或快速处置队",
+    "judge_type_column": "现场判定或抽样送检",
+    "qualified_column": "是否合格",
+    "case_type_column": "是否为行案/刑案",
+    "product_stats_audit": {
+      "B": "unique_projects",
+      "D": "unqualified_rows",
+      "E": "sample_rows",
+      "F": "micro_rows",
+      "G": "administrative_case_year"
+    },
+    "manual_review_columns": {
+      "C": "责令限期改正通知书份数无法仅凭产品案卷数据稳定核对。",
+      "H": "光伏、锂离子电池等相关企业与消防处置力量配备次数需人工核对。"
+    }
+  },
+  "personal_stats_rules": {
+    "product_score_column": "AA",
+    "mismatch_marker": "待核对",
+    "mismatch_fill_color": "FFFF0000",
+    "mismatch_font_color": "FF000000",
+    "mismatch_comment_prefix": "产品底册立卷人未在个人执法统计表中找到"
   },
   "validation_rules": {
     "case_window": "previous_month_26_to_current_month_25",

@@ -12,7 +12,8 @@ from pathlib import Path
 
 from docx import Document
 from openpyxl import load_workbook
-from openpyxl.styles import Alignment
+from openpyxl.comments import Comment
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -22,6 +23,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import writer
+import monthly_workflow
 import template_resolver
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -53,6 +55,10 @@ NO_UNQUALIFIED_PRODUCT_CASE_TEXT = "本月未完成不合格消防产品案卷"
 INVALID_MONITOR_CONTACTS = {"消防机构", "机构联系人", "联系人"}
 YEAR_MONTH_PATTERN = re.compile(r"(\d{4})年(\d{1,2})月")
 MONTH_ONLY_PATTERN = re.compile(r"(\d{1,2})月")
+WORKFLOW_CONFIG = monthly_workflow.load_config()
+PERSONAL_RULES = WORKFLOW_CONFIG.get("personal_stats_rules", {})
+PENDING_FILL_RGB = PERSONAL_RULES.get("mismatch_fill_color", "FFFF0000")
+PENDING_FONT_RGB = PERSONAL_RULES.get("mismatch_font_color", "FF000000")
 
 
 class HumanReviewRequired(RuntimeError):
@@ -890,7 +896,7 @@ def read_monitor_details(base_info_path, monitor_scores):
     return details
 
 
-def validate_person_matches(template_path, product_records, monitor_details):
+def collect_person_match_issues(template_path, product_records, monitor_details):
     workbook = load_workbook(template_path)
     ws = workbook.active
     person_index = build_person_index(ws)
@@ -932,6 +938,11 @@ def validate_person_matches(template_path, product_records, monitor_details):
                 }
             )
 
+    return issues
+
+
+def validate_person_matches(template_path, product_records, monitor_details):
+    issues = collect_person_match_issues(template_path, product_records, monitor_details)
     if issues:
         raise HumanReviewRequired(issues)
     return True
@@ -961,8 +972,49 @@ def build_person_index(ws):
     return index
 
 
+def build_brigade_rows(ws):
+    rows = {}
+    for row in range(6, ws.max_row + 1):
+        value = ws.cell(row, 1).value
+        if value not in (None, ""):
+            short = brigade_short(value)
+            if short:
+                rows[short] = row
+    return rows
+
+
+def mark_personal_product_mismatches(ws, issues):
+    product_issues = [item for item in issues if item.get("type") == "product"]
+    if not product_issues:
+        return []
+    brigade_rows = build_brigade_rows(ws)
+    changed = []
+    by_short = {}
+    for issue in product_issues:
+        by_short.setdefault(brigade_short(issue.get("大队")), []).append(issue)
+    fill = PatternFill(fill_type="solid", fgColor=PENDING_FILL_RGB)
+    font = Font(color=PENDING_FONT_RGB)
+    for short, items in by_short.items():
+        row = brigade_rows.get(short)
+        if not row:
+            continue
+        cell = ws.cell(row, 27)
+        names = unique_text_list(item.get("姓名") for item in items)
+        names_text = "、".join(names)
+        cell.value = f"{PERSONAL_RULES.get('mismatch_marker', '待核对')}：{names_text}"
+        cell.fill = fill
+        cell.font = font
+        comment_lines = [
+            PERSONAL_RULES.get("mismatch_comment_prefix", "产品底册立卷人未在个人执法统计表中找到"),
+            *[f"{item.get('大队')} {item.get('姓名')}：{item.get('案卷')}" for item in items],
+        ]
+        cell.comment = Comment("\n".join(comment_lines), "xf-report-filler")
+        changed.append({"大队": f"{short}大队", "cell": cell.coordinate, "names": names})
+    return changed
+
+
 def write_personal_stats(template_path, output_path, product_records, monitor_details, month, force):
-    validate_person_matches(template_path, product_records, monitor_details)
+    match_issues = collect_person_match_issues(template_path, product_records, monitor_details)
     copy_output(template_path, output_path, force=force)
     workbook = load_workbook(output_path)
     ws = workbook.active
@@ -983,6 +1035,9 @@ def write_personal_stats(template_path, output_path, product_records, monitor_de
             ws.cell(row, 27).value = item["score"]
         else:
             warnings.append(f"个人统计表未找到产品立卷人：{item['大队']} {item['立卷人']}")
+    mismatch_marks = mark_personal_product_mismatches(ws, match_issues)
+    for item in mismatch_marks:
+        warnings.append(f"已在个人执法统计表标记待核对：{item['大队']} {item['cell']} {'、'.join(item['names'])}")
 
     next_col_by_person = {}
     for detail in monitor_details:
@@ -1026,6 +1081,43 @@ def product_report_sentence(item):
     issues_text = "、".join(broad_issues)
     suffix = "" if len(broad_issues) == 1 else "等问题"
     return f"{item['大队']}{item['立卷人']}承办的{item['题名']}存在{issues_text}{suffix}"
+
+
+def product_detail_fragments(text):
+    fragments = []
+    for match in re.finditer(r"[（(]([^（）()]{2,})[）)]", str(text or "")):
+        fragment = match.group(1).strip()
+        if fragment:
+            fragments.append(fragment)
+    ps_part = re.split(r"\bps\s*[:：]", str(text or ""), maxsplit=1, flags=re.IGNORECASE)
+    if len(ps_part) > 1 and ps_part[1].strip():
+        fragments.append(ps_part[1].strip())
+    return fragments
+
+
+def product_detail_leak_issues_for_records(product_records):
+    issues = []
+    for item in product_records:
+        output_texts = {
+            "office_record_text": product_office_text(item),
+            "report_sentence": product_report_sentence(item),
+            "archive_errors": "\n".join(item.get("archive_errors", [])),
+        }
+        for raw_error in item.get("errors", []):
+            for fragment in product_detail_fragments(raw_error):
+                for field, output_text in output_texts.items():
+                    if fragment and fragment in output_text:
+                        issues.append(
+                            {
+                                "type": "product_detail_leak",
+                                "大队": item.get("大队"),
+                                "案卷": item.get("题名"),
+                                "field": field,
+                                "fragment": fragment,
+                                "message": "产品底册括号内或 ps 细节进入了对外输出文本",
+                            }
+                        )
+    return issues
 
 
 def monitor_office_text(short, details):
@@ -1555,13 +1647,10 @@ def run(args):
     monitor_scores = read_monitor_scores(network_stats)
     monitor_details = read_monitor_details(base_info, monitor_scores)
     contact_warnings = monitor_contact_warnings(monitor_details)
-    person_match_issues = []
-    try:
-        validate_person_matches(personal_template, product_records, monitor_details)
-    except HumanReviewRequired as exc:
-        if not args.dry_run:
-            raise
-        person_match_issues = exc.issues
+    person_match_issues = collect_person_match_issues(personal_template, product_records, monitor_details)
+    product_detail_leak_issues = product_detail_leak_issues_for_records(product_records)
+    if product_detail_leak_issues and not args.dry_run:
+        raise HumanReviewRequired(product_detail_leak_issues)
     history, scanned_history, history_counts, history_migration = prepare_monitor_history(
         month_dir.parent,
         args.year,
@@ -1624,6 +1713,7 @@ def run(args):
                         for item in product_records
                     ],
                     "product_score_guard": product_score_guard,
+                    "product_detail_leak_issues": product_detail_leak_issues,
                     "person_match_issues": person_match_issues,
                     "monitor_contact_warnings": contact_warnings,
                     "monitor_score_warnings": read_monitor_scores.last_warnings,

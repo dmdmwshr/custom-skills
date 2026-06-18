@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -182,6 +182,58 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
                     }
                 ],
             )
+
+    def test_product_detail_leak_guard_detects_parenthetical_detail(self):
+        clean_record = {
+            "大队": "梁溪大队",
+            "short": "梁溪",
+            "题名": "测试案卷",
+            "立卷人": "张三",
+            "no_case": False,
+            "errors": ["责令限期改正通知书填写不规范（具体问题不能进通报）"],
+            "archive_errors": ["责令限期改正通知书填写不规范"],
+        }
+        self.assertEqual(mgr.product_detail_leak_issues_for_records([clean_record]), [])
+        leaked = copy.deepcopy(clean_record)
+        leaked["archive_errors"] = ["责令限期改正通知书填写不规范（具体问题不能进通报）"]
+        issues = mgr.product_detail_leak_issues_for_records([leaked])
+        self.assertEqual(issues[0]["type"], "product_detail_leak")
+        self.assertEqual(issues[0]["fragment"], "具体问题不能进通报")
+
+    def test_write_personal_stats_marks_product_person_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template = Path(tmp) / "个人执法统计表模板.xlsx"
+            output = Path(tmp) / "2026年5月个人执法统计表.xlsx"
+            workbook = Workbook()
+            ws = workbook.active
+            ws.cell(6, 1).value = "梁溪大队"
+            ws.cell(6, 2).value = "张三"
+            workbook.save(template)
+
+            warnings = mgr.write_personal_stats(
+                template,
+                output,
+                [
+                    {
+                        "short": "梁溪",
+                        "大队": "梁溪大队",
+                        "立卷人": "李四",
+                        "题名": "测试案卷",
+                        "score": 9.5,
+                        "no_case": False,
+                    }
+                ],
+                [],
+                5,
+                force=True,
+            )
+            wb = load_workbook(output)
+            ws = wb.active
+            self.assertIn("待核对", ws.cell(6, 27).value)
+            self.assertIn("李四", ws.cell(6, 27).value)
+            self.assertEqual(ws.cell(6, 27).fill.fgColor.rgb, "FFFF0000")
+            self.assertIsNotNone(ws.cell(6, 27).comment)
+            self.assertTrue(any("未找到产品立卷人" in item for item in warnings))
 
     def test_read_monitor_scores_recomputes_avg_over_10(self):
         class FakeCell:

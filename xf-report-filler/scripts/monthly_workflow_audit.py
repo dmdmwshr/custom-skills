@@ -3,6 +3,10 @@ import json
 import sys
 from pathlib import Path
 
+import xlrd
+from openpyxl import load_workbook
+
+import monthly_grade_register as grade_register
 import monthly_workflow as workflow
 import template_resolver
 
@@ -64,6 +68,36 @@ def existing_status(path):
     return {"path": str(path), "exists": path.exists(), "is_dir": path.is_dir() if path.exists() else False}
 
 
+def scan_pending_text(path, marker="【待补】"):
+    path = Path(path)
+    if not path.exists() or path.is_dir():
+        return []
+    hits = []
+    if path.suffix.lower() == ".xlsx":
+        workbook = load_workbook(path, data_only=False, read_only=True)
+        for sheet in workbook.worksheets:
+            for row in sheet.iter_rows():
+                for cell in row:
+                    if marker in str(cell.value or ""):
+                        hits.append({"path": str(path), "sheet": sheet.title, "cell": cell.coordinate, "value": str(cell.value)})
+    elif path.suffix.lower() == ".xls":
+        book = xlrd.open_workbook(str(path))
+        for sheet in book.sheets():
+            for row in range(sheet.nrows):
+                for col in range(sheet.ncols):
+                    value = sheet.cell_value(row, col)
+                    if marker in str(value or ""):
+                        hits.append({"path": str(path), "sheet": sheet.name, "row": row + 1, "column": col + 1, "value": str(value)})
+    return hits
+
+
+def adopted_template_path(template_result, key):
+    for status in template_result["statuses"]:
+        if status["key"] == key and status.get("adopted_path"):
+            return Path(status["adopted_path"])
+    return None
+
+
 def run(args):
     config = workflow.load_config()
     bulletin_dir = Path(args.bulletin_dir)
@@ -83,6 +117,7 @@ def run(args):
     case_data = Path(args.case_data) if args.case_data else workflow.data_source_path("case_data", config)
 
     root_files = {}
+    pending_text_hits = []
     for item in workflow.bulletin_root_map(config):
         normal = bulletin_dir / workflow.root_file_name(item, args.bulletin_year, args.bulletin_month, pending=False, config=config)
         pending = bulletin_dir / workflow.root_file_name(item, args.bulletin_year, args.bulletin_month, pending=True, config=config)
@@ -91,6 +126,9 @@ def run(args):
             "normal": existing_status(normal),
             "pending": existing_status(pending),
         }
+        for path in [normal, pending]:
+            if path.exists():
+                pending_text_hits.extend(scan_pending_text(path))
 
     grade_outputs = {
         key: existing_status(path)
@@ -123,6 +161,26 @@ def run(args):
         if not path or not Path(path).exists():
             blockers.append({"message": f"{label}不存在", "path": str(path) if path else ""})
 
+    for hit in pending_text_hits:
+        warnings.append({"message": "根层表仍包含单元格文本【待补】，应改为红底标记并保留/预填业务值。", **hit})
+
+    product_detail_leaks = []
+    person_match_issues = []
+    if product_register and Path(product_register).exists():
+        try:
+            product_records = grade_register.parse_product_register(product_register)
+            product_detail_leaks = grade_register.product_detail_leak_issues_for_records(product_records)
+            if network_stats and Path(network_stats).exists() and base_info and Path(base_info).exists():
+                personal_template = adopted_template_path(template_result, "personal_stats")
+                if personal_template and personal_template.exists():
+                    monitor_scores = grade_register.read_monitor_scores(network_stats)
+                    monitor_details = grade_register.read_monitor_details(base_info, monitor_scores)
+                    person_match_issues = grade_register.collect_person_match_issues(personal_template, product_records, monitor_details)
+        except Exception as exc:
+            warnings.append({"message": "审计产品/个人统计风险时失败", "error": str(exc)})
+    warnings.extend(product_detail_leaks)
+    warnings.extend(person_match_issues)
+
     all_blockers = blockers + template_result["blockers"]
     return {
         "ok": not all_blockers,
@@ -131,6 +189,7 @@ def run(args):
             "year": args.bulletin_year,
             "month": args.bulletin_month,
             "root_files": root_files,
+            "pending_text_hits": pending_text_hits,
         },
         "score": {
             "dir": str(score_dir),
