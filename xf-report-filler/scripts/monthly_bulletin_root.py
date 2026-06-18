@@ -10,6 +10,9 @@ from pathlib import Path
 import xlrd
 from openpyxl import load_workbook
 from openpyxl.styles import Font
+from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
+
+import monthly_workflow as workflow
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -17,33 +20,16 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 
-DEFAULT_WORK_ROOT = Path(r"E:\文件夹\1、工作\2、产品，科技，联网检测")
-DEFAULT_TEMPLATE_DIR = DEFAULT_WORK_ROOT / "1、产品监督" / "模板文件"
-DEFAULT_WORK_PLAN = DEFAULT_WORK_ROOT / "2026年-产品、科技工作计划.xls"
-DEFAULT_CASE_DATA = DEFAULT_WORK_ROOT / "1、产品监督" / "26年" / "26年产品案卷信息收集" / "产品案卷数据.xlsx"
+CONFIG = workflow.load_config()
+DEFAULT_TEMPLATE_DIR = workflow.template_root(CONFIG)
+DEFAULT_WORK_PLAN = workflow.data_source_path("work_plan", CONFIG)
+DEFAULT_CASE_DATA = workflow.data_source_path("case_data", CONFIG)
 
-PENDING_PREFIX = "【待补】"
+PENDING_PREFIX = CONFIG["naming"]["pending_prefix"]
 RED_RGB = "FFFF0000"
 BLACK_RGB = "FF000000"
 
-ROOT_FILES = [
-    {
-        "key": "office_record",
-        "skeleton": "X月科室月考核情况记录表.xlsx",
-        "target": "{year}年{month}月科室月考核情况记录表.xlsx",
-    },
-    {
-        "key": "product_stats",
-        "skeleton": "X月消防产品监督统计表.xls",
-        "target": "{year}年{month}月消防产品监督统计表.xls",
-    },
-    {
-        "key": "work_report",
-        "skeleton": "X月重点工作完成情况上报表（应急通信与消防科技）.xls",
-        "target": "{year}年{month}月重点工作完成情况上报表（应急通信与消防科技）.xls",
-        "numbered": "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
-    },
-]
+ROOT_FILES = workflow.bulletin_root_map(CONFIG)
 
 BRIGADE_ORDER = ["梁溪大队", "锡山大队", "惠山大队", "滨湖大队", "新吴大队", "江阴大队", "宜兴大队", "经开大队"]
 BRIGADE_ALIASES = {"轨交大队": "轨道交通大队"}
@@ -116,11 +102,18 @@ def root_file_paths(bulletin_dir, year, month):
 
 
 def product_stats_pending_value(staff_count):
-    return f"{PENDING_PREFIX}（{staff_count}）"
+    template = CONFIG["pending_rules"]["product_stats_required_counts"]["value"]
+    return template.format(staff_count=staff_count)
 
 
 def work_report_pending_cells():
-    return [f"K{row}" for row in range(3, 11)] + [f"{col}{row}" for row in range(3, 11) for col in ["O", "P", "Q", "R"]]
+    cells = []
+    for cell_range in CONFIG["pending_rules"]["work_report_tech_and_product"]["pending_cells"]:
+        min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+        for row in range(min_row, max_row + 1):
+            for col in range(min_col, max_col + 1):
+                cells.append(f"{get_column_letter(col)}{row}")
+    return cells
 
 
 def skeleton_path(template_dir, item):
@@ -386,15 +379,16 @@ def mark_pending_office(path):
     workbook = load_workbook(path)
     changed = []
     red_font = Font(color=RED_RGB)
+    rule = CONFIG["pending_rules"]["office_product_timeliness"]
     for sheet in workbook.worksheets:
         header = {}
         for col in range(1, sheet.max_column + 1):
-            value = sheet.cell(2, col).value
+            value = sheet.cell(rule["header_row"], col).value
             if value:
                 header[normalize_brigade(value)] = col
         target_row = None
         for row in range(1, sheet.max_row + 1):
-            if sheet.cell(row, 3).value == "产品工作实效":
+            if sheet.cell(row, rule["label_column"]).value == rule["label"]:
                 target_row = row
                 break
         if target_row is None:
@@ -404,7 +398,7 @@ def mark_pending_office(path):
             if not col:
                 continue
             cell = sheet.cell(target_row, col)
-            cell.value = PENDING_PREFIX
+            cell.value = rule["value"]
             cell.font = red_font
             changed.append({"sheet": sheet.title, "cell": cell.coordinate, "value": cell.value})
     workbook.save(path)
@@ -447,18 +441,22 @@ def mark_pending_product_stats(path, staff_counts):
 def mark_pending_work_report(path):
     excel = excel_com()
     changed = []
+    rule = CONFIG["pending_rules"]["work_report_tech_and_product"]
     try:
         workbook = excel.Workbooks.Open(str(Path(path).resolve()))
         try:
             sheet = workbook.Worksheets(1)
-            for row in range(3, 11):
-                sheet.Cells(row, 10).Value = "已完成"
-                sheet.Cells(row, 10).Font.Color = 0
-                for col in [11, 15, 16, 17, 18]:
-                    cell = sheet.Cells(row, col)
-                    cell.Value = PENDING_PREFIX
-                    cell.Font.Color = 255
-                    changed.append({"sheet": sheet.Name, "row": row, "col": col, "value": str(cell.Value)})
+            min_col, min_row, max_col, max_row = range_boundaries(rule["completed_cells"])
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
+                    sheet.Cells(row, col).Value = rule["completed_value"]
+                    sheet.Cells(row, col).Font.Color = 0
+            for cell_ref in work_report_pending_cells():
+                row, col = coordinate_to_tuple(cell_ref)
+                cell = sheet.Cells(row, col)
+                cell.Value = rule["pending_value"]
+                cell.Font.Color = 255
+                changed.append({"sheet": sheet.Name, "row": row, "col": col, "value": str(cell.Value)})
             workbook.Save()
         finally:
             workbook.Close(SaveChanges=True)

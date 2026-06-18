@@ -22,6 +22,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import writer
+import template_resolver
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -258,12 +259,29 @@ def load_external_templates(template_dir):
     return templates, str(template_dir)
 
 
-def load_monthly_templates(template_dir=None):
-    if template_dir:
-        templates, source = load_external_templates(template_dir)
-        return templates, {"mode": "external", "source": source}
-    templates, source = load_monthly_template_manifest()
-    return templates, {"mode": "skill", "source": source}
+def load_monthly_templates(template_dir=None, allow_snapshot_fallback=False):
+    resolved = template_resolver.resolve_templates(
+        template_dir=template_dir,
+        include_reserved=False,
+        allow_snapshot_fallback=allow_snapshot_fallback,
+    )
+    if resolved["blockers"]:
+        messages = [
+            f"{item['template_id']} {item['file']}: {item['message']} ({item['external_path']})"
+            for item in resolved["blockers"]
+        ]
+        raise FileNotFoundError("月度模板外部事实源不可用：" + "；".join(messages))
+    templates = {key: path for key, path in resolved["templates"].items() if key in MONTHLY_TEMPLATE_KEYS}
+    missing = sorted(MONTHLY_TEMPLATE_KEYS - set(templates))
+    if missing:
+        raise FileNotFoundError("月度模板缺少必要模板：" + "、".join(missing))
+    return templates, {
+        "mode": "external_authoritative",
+        "template_dir": str(Path(template_dir)) if template_dir else None,
+        "policy": "external_template_source_is_authoritative; skill_snapshot_is_for_hash_verification",
+        "warnings": resolved["warnings"],
+        "statuses": resolved["statuses"],
+    }
 
 
 def parse_deduction_value(line):
@@ -1517,7 +1535,7 @@ def run(args):
     month_dir = require_path(args.month_dir, "月份目录")
     include_score_office_record = getattr(args, "include_score_office_record", False)
     current_month_info = build_score_month_info(args.year, args.month, "argument")
-    templates, template_info = load_monthly_templates(args.template_dir)
+    templates, template_info = load_monthly_templates(args.template_dir, allow_snapshot_fallback=args.dry_run)
     product_register = find_one(month_dir, [f"*{args.month}月*产品巡查底册*.docx", "*产品巡查底册*.docx"], "产品巡查底册")
     network_dir = find_one(month_dir, ["*联网监测基础信息考评明细表"], "联网监测明细目录")
     network_stats = require_path(network_dir / "联网监测统计表.xls", "联网监测统计表")

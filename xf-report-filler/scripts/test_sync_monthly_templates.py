@@ -18,9 +18,12 @@ class SyncMonthlyTemplatesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             template_dir = Path(tmp) / "模板文件"
             library = template_dir / "_编号模板库"
+            skeleton_dir = template_dir / "X月通报"
             library.mkdir(parents=True)
+            skeleton_dir.mkdir(parents=True)
             for item in syncer.TEMPLATES:
                 (library / item["file"]).write_bytes(f"template:{item['file']}".encode("utf-8"))
+            (skeleton_dir / syncer.WORK_REPORT_SKELETON).write_bytes(b"skeleton")
             (library / organizer.NUMBERED_TEMPLATE_NAMES[-1]).write_bytes(b"sample")
 
             result = syncer.run(

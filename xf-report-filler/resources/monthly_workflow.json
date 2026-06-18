@@ -1,0 +1,246 @@
+{
+  "version": 1,
+  "template_sources": {
+    "external_root": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件",
+    "numbered_library": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库",
+    "bulletin_skeleton": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报",
+    "skill_snapshot": "resources/monthly_templates"
+  },
+  "data_sources": {
+    "work_plan": {
+      "path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\2026年-产品、科技工作计划.xls",
+      "required_for": [
+        "bulletin_root_pending",
+        "bulletin_root_final_audit"
+      ]
+    },
+    "case_data": {
+      "path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\26年\\26年产品案卷信息收集\\产品案卷数据.xlsx",
+      "required_for": [
+        "bulletin_root_final_audit"
+      ]
+    },
+    "monitor_history": {
+      "path": "resources/history/monitor_report_history.json",
+      "required_for": [
+        "monthly_grade_register"
+      ]
+    }
+  },
+  "directory_model": {
+    "bulletin_dir_name": "{month}月通报",
+    "score_dir_name": "{score_month}月巡查",
+    "template_skeleton_dir_name": "X月通报",
+    "template_score_dir_name": "上月巡查",
+    "template_copy_archive_dir_name": "_模板副本归档"
+  },
+  "naming": {
+    "business_file": "{year}年{month}月{name}{extension}",
+    "pending_prefix": "【待补】"
+  },
+  "templates": [
+    {
+      "id": "T01",
+      "key": "product_register",
+      "file": "01_产品巡查底册模板.docx",
+      "description": "产品巡查底册模板",
+      "source": "numbered_library",
+      "used_in_monthly_register": false,
+      "reserved": false
+    },
+    {
+      "id": "T02",
+      "key": "product_archive_detail",
+      "file": "02_消防产品档案质量明细表模板.doc",
+      "description": "消防产品档案质量明细表模板",
+      "source": "numbered_library",
+      "used_in_monthly_register": true,
+      "reserved": false
+    },
+    {
+      "id": "T03",
+      "key": "product_summary",
+      "file": "03_产品监督成绩总表模板.xlsx",
+      "description": "产品监督成绩总表模板",
+      "source": "numbered_library",
+      "used_in_monthly_register": true,
+      "reserved": false
+    },
+    {
+      "id": "T04",
+      "key": "personal_stats",
+      "file": "04_个人执法统计表模板.xlsx",
+      "description": "个人执法统计表模板",
+      "source": "numbered_library",
+      "used_in_monthly_register": true,
+      "reserved": false
+    },
+    {
+      "id": "T05",
+      "key": "office_record",
+      "file": "05_科室月考核情况记录表模板.xlsx",
+      "description": "科室月考核情况记录表模板",
+      "source": "numbered_library",
+      "used_in_monthly_register": true,
+      "reserved": false
+    },
+    {
+      "id": "T06",
+      "key": "case_scores",
+      "file": "06_消防执法质量个案成绩模板.xls",
+      "description": "消防监督管理系统消防执法质量个案成绩模板",
+      "source": "numbered_library",
+      "used_in_monthly_register": true,
+      "reserved": false
+    },
+    {
+      "id": "T07",
+      "key": "monthly_report",
+      "file": "07_月度通报模板.doc",
+      "description": "月度通报模板",
+      "source": "numbered_library",
+      "used_in_monthly_register": true,
+      "reserved": false
+    },
+    {
+      "id": "T08",
+      "key": "monthly_product_supervision_stats_blank",
+      "file": "08_每月消防产品监督统计表空表模板.xls",
+      "description": "每月消防产品监督统计表空表模板",
+      "source": "numbered_library",
+      "used_in_monthly_register": false,
+      "reserved": true
+    },
+    {
+      "id": "T09",
+      "key": "monthly_product_supervision_stats_work_check",
+      "file": "09_消防产品监督统计表工作检查模板.xls",
+      "description": "消防产品监督统计表工作检查模板",
+      "source": "numbered_library",
+      "used_in_monthly_register": false,
+      "reserved": true
+    },
+    {
+      "id": "T10",
+      "key": "emergency_comm_fire_tech_work_report",
+      "file": "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
+      "description": "重点工作完成情况上报表（应急通信与消防科技）模板",
+      "source": "bulletin_skeleton",
+      "skeleton_file": "X月重点工作完成情况上报表（应急通信与消防科技）.xls",
+      "numbered_sync_file": "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
+      "used_in_monthly_register": false,
+      "reserved": true
+    }
+  ],
+  "excluded_templates": [
+    {
+      "id": "T90",
+      "file": "90_消防产品档案质量明细表样例数据.doc",
+      "reason": "样例数据文件，不作为空白模板参与月度生成。"
+    }
+  ],
+  "bulletin_root_files": [
+    {
+      "id": "R01",
+      "key": "office_record",
+      "skeleton_file": "X月科室月考核情况记录表.xlsx",
+      "fallback_template_key": "office_record",
+      "target": "{year}年{month}月科室月考核情况记录表.xlsx",
+      "pending_rule": "office_product_timeliness"
+    },
+    {
+      "id": "R02",
+      "key": "product_stats",
+      "skeleton_file": "X月消防产品监督统计表.xls",
+      "fallback_template_key": "monthly_product_supervision_stats_work_check",
+      "target": "{year}年{month}月消防产品监督统计表.xls",
+      "pending_rule": "product_stats_required_counts"
+    },
+    {
+      "id": "R03",
+      "key": "work_report",
+      "skeleton_file": "X月重点工作完成情况上报表（应急通信与消防科技）.xls",
+      "fallback_template_key": "emergency_comm_fire_tech_work_report",
+      "target": "{year}年{month}月重点工作完成情况上报表（应急通信与消防科技）.xls",
+      "pending_rule": "work_report_tech_and_product"
+    }
+  ],
+  "grade_outputs": [
+    {
+      "id": "G01",
+      "key": "product_archive_dir",
+      "target": "{year}年{month}月消防产品监督成绩"
+    },
+    {
+      "id": "G02",
+      "key": "product_summary",
+      "target": "{year}年{month}月消防产品监督成绩\\产品监督成绩总表.xlsx"
+    },
+    {
+      "id": "G03",
+      "key": "personal_stats",
+      "target": "{year}年{month}月个人执法统计表.xlsx"
+    },
+    {
+      "id": "G04",
+      "key": "case_scores",
+      "target": "{year}年{month}月消防监督管理系统消防执法质量（个案成绩）.xls"
+    },
+    {
+      "id": "G05",
+      "key": "monthly_report",
+      "target": "{year}年{month}月通报.doc"
+    },
+    {
+      "id": "G06",
+      "key": "score_office_record_legacy",
+      "target": "{year}年{month}月科室月考核情况记录表.xlsx",
+      "requires_flag": "include_score_office_record"
+    }
+  ],
+  "pending_rules": {
+    "office_product_timeliness": {
+      "label": "产品工作实效",
+      "header_row": 2,
+      "label_column": 3,
+      "brigade_columns": "from_header",
+      "value": "【待补】",
+      "font_color": "red"
+    },
+    "product_stats_required_counts": {
+      "brigade_column": 1,
+      "target_column": 2,
+      "value": "【待补】（{staff_count}）",
+      "font_color": "red"
+    },
+    "work_report_tech_and_product": {
+      "completed_cells": "J3:J10",
+      "completed_value": "已完成",
+      "pending_cells": [
+        "K3:K10",
+        "O3:R10"
+      ],
+      "pending_value": "【待补】",
+      "font_color": "red"
+    }
+  },
+  "validation_rules": {
+    "case_window": "previous_month_26_to_current_month_25",
+    "root_files_pending_before_day": 25,
+    "blank_product_template_item": "skip",
+    "pseudo_monitor_contact": "warning",
+    "monitor_average_gt_10": "recompute_warning_no_source_edit"
+  },
+  "legacy_template_names": {
+    "（模板）产品巡查底册.docx": "01_产品巡查底册模板.docx",
+    "（模板）消防产品档案质量明细表.doc": "02_消防产品档案质量明细表模板.doc",
+    "（模板）产品监督成绩总表.xlsx": "03_产品监督成绩总表模板.xlsx",
+    "（模板）个人执法统计表202601.xlsx": "04_个人执法统计表模板.xlsx",
+    "（模板）科室月考核情况记录表.xlsx": "05_科室月考核情况记录表模板.xlsx",
+    "(模板-成绩汇总)消防监督管理系统消防执法质量（个案成绩）.xls": "06_消防执法质量个案成绩模板.xls",
+    "(样例)xxxx年x月通报.doc": "07_月度通报模板.doc",
+    "（空表）每月消防产品监督统计表.xls": "08_每月消防产品监督统计表空表模板.xls",
+    "(模板)X月消防产品监督统计表.xls": "09_消防产品监督统计表工作检查模板.xls",
+    "（样例数据）消防产品档案质量明细表.doc": "90_消防产品档案质量明细表样例数据.doc"
+  }
+}
