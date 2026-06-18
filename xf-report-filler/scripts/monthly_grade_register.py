@@ -374,6 +374,36 @@ def clean_error_line(line):
     return text.strip(" ；;，,")
 
 
+def is_blank_product_template_item(description, deduction_line=""):
+    description_text = norm_text(description).replace("(", "（").replace(")", "）")
+    deduction_text = norm_text(deduction_line)
+    return description_text in {"（）", ""} and not parse_deduction_value(deduction_text) and not parse_general_index(deduction_text)
+
+
+def monitor_contact_warnings(monitor_details):
+    warnings = []
+    for detail in monitor_details:
+        if detail.get("联系人"):
+            continue
+        note = str(detail.get("note") or "")
+        if "联系人" not in note:
+            continue
+        warnings.append(
+            {
+                "type": "monitor_contact_label",
+                "message": "联网备注包含联系人类标签但未提取到人名，已作为问题描述处理，不写入个人执法统计表。",
+                "大队": detail.get("大队"),
+                "单位": detail.get("单位"),
+                "path": detail.get("source_path"),
+                "sheet": detail.get("sheet"),
+                "row": detail.get("row"),
+                "column": detail.get("note_column"),
+                "note": note,
+            }
+        )
+    return warnings
+
+
 def parse_product_register(path):
     document = Document(str(path))
     texts = [(index, p.text.strip()) for index, p in enumerate(document.paragraphs, 1)]
@@ -426,6 +456,9 @@ def parse_product_register(path):
                 general_index = parse_general_index(line)
                 if pending_error:
                     pending_text = pending_error["text"]
+                    if is_blank_product_template_item(pending_text, line):
+                        pending_error = None
+                        continue
                     broad_description = normalize_broad_description(pending_text)
                     record["errors"].append(pending_text)
                     record["archive_errors"].append(broad_description)
@@ -458,8 +491,9 @@ def parse_product_register(path):
                 if cleaned:
                     pending_error = {"text": cleaned, "paragraph": paragraph}
         if pending_error:
-            record["errors"].append(pending_error["text"])
-            record["archive_errors"].append(normalize_broad_description(pending_error["text"]))
+            if not is_blank_product_template_item(pending_error["text"]):
+                record["errors"].append(pending_error["text"])
+                record["archive_errors"].append(normalize_broad_description(pending_error["text"]))
 
         if not record["题名"] and not record["编号"] and not record["立卷人"]:
             record["no_case"] = True
@@ -861,8 +895,10 @@ def validate_person_matches(template_path, product_records, monitor_details):
 
     for detail in monitor_details:
         name = norm_text(detail["联系人"])
+        if not name:
+            continue
         key = (detail["short"], name)
-        if not name or key not in person_index:
+        if key not in person_index:
             issues.append(
                 {
                     "type": "monitor",
@@ -932,7 +968,11 @@ def write_personal_stats(template_path, output_path, product_records, monitor_de
 
     next_col_by_person = {}
     for detail in monitor_details:
-        key = (detail["short"], norm_text(detail["联系人"]))
+        name = norm_text(detail["联系人"])
+        if not name:
+            warnings.append(f"联网备注未提取到联系人，未写入个人执法统计表：{detail['大队']} {detail['单位']}")
+            continue
+        key = (detail["short"], name)
         row = person_index.get(key)
         if not row:
             warnings.append(f"个人统计表未找到联网联系人：{detail['大队']} {detail['联系人']}")
@@ -1468,6 +1508,10 @@ def run(args):
     base_info = find_base_info(month_dir, network_dir)
     personal_template = templates["personal_stats"]
     report_output = month_dir / f"{args.year}年{args.month}月通报.doc"
+    product_dir = month_dir / f"{args.year}年{args.month}月消防产品监督成绩"
+    personal_output = month_dir / f"{args.year}年{args.month}月个人执法统计表.xlsx"
+    office_output = month_dir / f"{args.year}年{args.month}月科室月考核情况记录表.xlsx"
+    case_scores_output = month_dir / f"{args.year}年{args.month}月消防监督管理系统消防执法质量（个案成绩）.xls"
 
     product_records = parse_product_register(product_register)
     product_score_guard = validate_product_score_guard(product_records)
@@ -1475,6 +1519,7 @@ def run(args):
         raise ProductScoreReviewRequired(product_score_guard)
     monitor_scores = read_monitor_scores(network_stats)
     monitor_details = read_monitor_details(base_info, monitor_scores)
+    contact_warnings = monitor_contact_warnings(monitor_details)
     person_match_issues = []
     try:
         validate_person_matches(personal_template, product_records, monitor_details)
@@ -1518,6 +1563,14 @@ def run(args):
                         "network_stats": str(network_stats),
                         "base_info": str(base_info),
                     },
+                    "output_files": {
+                        "product_dir": str(product_dir),
+                        "product_summary": str(product_dir / "产品监督成绩总表.xlsx"),
+                        "personal_stats": str(personal_output),
+                        "office_record": str(office_output),
+                        "case_scores": str(case_scores_output),
+                        "monthly_report": str(report_output),
+                    },
                     "registration_month": {
                         "year": current_month_info["registration_year"],
                         "month": current_month_info["registration_month"],
@@ -1543,6 +1596,7 @@ def run(args):
                     ],
                     "product_score_guard": product_score_guard,
                     "person_match_issues": person_match_issues,
+                    "monitor_contact_warnings": contact_warnings,
                     "monitor_score_warnings": read_monitor_scores.last_warnings,
                     "monitor_avg": {k: v["avg"] for k, v in monitor_scores.items()},
                     "monitor_report_history_counts": history_counts,
@@ -1578,8 +1632,7 @@ def run(args):
         )
         return
 
-    product_dir = month_dir / f"{args.year}年{args.month}月消防产品监督成绩"
-    if personal_template.resolve() == (month_dir / f"个人执法统计表{args.year}{args.month:02d}.xlsx").resolve():
+    if personal_template.resolve() == personal_output.resolve():
         raise FileNotFoundError("月份目录缺少个人执法统计表模板，不能用已生成成品覆盖自身")
     generate_product_docs(product_records, product_dir, args.year, args.month, args.force, templates["product_archive_detail"])
     write_product_summary(
@@ -1590,7 +1643,7 @@ def run(args):
     )
     personal_warnings = write_personal_stats(
         personal_template,
-        month_dir / f"个人执法统计表{args.year}{args.month:02d}.xlsx",
+        personal_output,
         product_records,
         monitor_details,
         args.month,
@@ -1598,14 +1651,14 @@ def run(args):
     )
     write_office_record(
         templates["office_record"],
-        month_dir / f"{args.month}月科室月考核情况记录表.xlsx",
+        office_output,
         product_records,
         monitor_details,
         args.force,
     )
     write_case_scores(
         templates["case_scores"],
-        month_dir / f"消防监督管理系统消防执法质量（{args.month}月个案成绩）.xls",
+        case_scores_output,
         product_records,
         monitor_scores,
         args.force,
@@ -1641,6 +1694,14 @@ def run(args):
             "network_stats": str(network_stats),
             "base_info": str(base_info),
         },
+        "output_files": {
+            "product_dir": str(product_dir),
+            "product_summary": str(product_dir / "产品监督成绩总表.xlsx"),
+            "personal_stats": str(personal_output),
+            "office_record": str(office_output),
+            "case_scores": str(case_scores_output),
+            "monthly_report": str(report_output),
+        },
         "registration_month": {
             "year": current_month_info["registration_year"],
             "month": current_month_info["registration_month"],
@@ -1655,6 +1716,7 @@ def run(args):
         "product_dir": str(product_dir),
         "product_scores": {item["short"]: item["score"] for item in product_records},
         "product_score_guard": product_score_guard,
+        "monitor_contact_warnings": contact_warnings,
         "monitor_score_warnings": read_monitor_scores.last_warnings,
         "monitor_avg": {k: v["avg"] for k, v in monitor_scores.items()},
         "personal_warnings": personal_warnings,

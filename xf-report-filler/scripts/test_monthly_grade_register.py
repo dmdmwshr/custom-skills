@@ -6,6 +6,8 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
+from openpyxl import Workbook
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -119,15 +121,24 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
         with self.assertRaises(mgr.HistoryMonthConflict):
             mgr.migrate_monitor_history_records(copy.deepcopy(history))
 
-    def test_find_base_info_prefers_root_pending_file(self):
+    def test_find_base_info_prefers_root_normal_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            network = base / "2026年5月联网监测基础信息考评明细表"
+            network.mkdir()
+            root_file = base / "2026年5月基础信息考评截图（不发）.xls"
+            nested_file = network / "5月基础信息考评截图.xls"
+            root_file.write_text("root", encoding="utf-8")
+            nested_file.write_text("nested", encoding="utf-8")
+            self.assertEqual(mgr.find_base_info(base, network), root_file)
+
+    def test_find_base_info_keeps_pending_prefix_compatibility(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             network = base / "2026年5月联网监测基础信息考评明细表"
             network.mkdir()
             root_file = base / "【待补】5月基础信息考评截图（不发）.xls"
-            nested_file = network / "5月基础信息考评截图.xls"
             root_file.write_text("root", encoding="utf-8")
-            nested_file.write_text("nested", encoding="utf-8")
             self.assertEqual(mgr.find_base_info(base, network), root_file)
 
     def test_find_base_info_falls_back_to_network_dir(self):
@@ -143,6 +154,34 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
         person, issues = mgr.parse_monitor_note("3202U01557  消防机构联系人、cad、pdf")
         self.assertEqual(person, "")
         self.assertIn("联系人", issues)
+
+    def test_blank_product_template_item_is_skipped(self):
+        self.assertTrue(mgr.is_blank_product_template_item("（）", "扣分："))
+        self.assertTrue(mgr.is_blank_product_template_item(mgr.clean_error_line("3、（）"), "扣分："))
+        self.assertFalse(mgr.is_blank_product_template_item("责令限期改正通知书填写不规范", "扣分：3.2 0.1分"))
+
+    def test_validate_person_matches_allows_missing_monitor_contact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template = Path(tmp) / "个人执法统计表模板.xlsx"
+            workbook = Workbook()
+            ws = workbook.active
+            ws.cell(6, 1).value = "宜兴大队"
+            ws.cell(6, 2).value = "张三"
+            workbook.save(template)
+
+            mgr.validate_person_matches(
+                template,
+                [],
+                [
+                    {
+                        "short": "宜兴",
+                        "大队": "宜兴大队",
+                        "联系人": "",
+                        "单位": "测试单位",
+                        "note": "3202U01557  消防机构联系人、cad、pdf",
+                    }
+                ],
+            )
 
     def test_read_monitor_scores_recomputes_avg_over_10(self):
         class FakeCell:

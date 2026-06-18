@@ -83,39 +83,39 @@
       "year": 2026,
       "month": 5,
       "month_key": "2026-05",
-      "report_file": "C:\\Users\\12070\\Desktop\\5月产品成绩登记\\5月\\2026年5月通报.doc",
-      "report_section_hash": "e49b38e716b6a1f1445550c9635fb07d92f1f8525dcf02e98742cb3e77d1e10d",
+      "report_file": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\26年\\6月通报\\5月巡查\\2026年5月通报.doc",
+      "report_section_hash": "acc68d5a9fc5f57ca88f089b1c412ba37d8803d72a0f89c0a4440934824f716e",
       "selected_cases": [
         {
           "rank": 1,
           "brigade": "滨湖",
           "brigade_name": "滨湖大队",
-          "contact": "曹云皓",
-          "unit": "无锡国家工业设计园产业集团有限公司（渔港商业地块）",
-          "case_score": 9.4,
-          "brigade_avg": 9.53
+          "contact": "李传瑞",
+          "unit": "阳光酒店管理集团有限公司无锡和怡阳光酒店更名温特莱酒店",
+          "case_score": 9.3,
+          "brigade_avg": 9.57
         },
         {
           "rank": 2,
           "brigade": "经开",
           "brigade_name": "经开大队",
           "contact": "巫超",
-          "unit": "无锡市自然资源和规划局无锡经济开发区分局（经开区政务服务中心不动产登记分中心）",
+          "unit": "无锡雅居乐房地产开发有限公司（雅居乐三期）（经开）",
           "case_score": 9.4,
-          "brigade_avg": 9.58
+          "brigade_avg": 9.56
         },
         {
           "rank": 3,
           "brigade": "江阴",
           "brigade_name": "江阴大队",
-          "contact": "周阳",
-          "unit": "江阴市申港街道沪光宾馆",
+          "contact": "洪磊磊",
+          "unit": "江阴惠友骨科医院有限公司 无视频",
           "case_score": 9.5,
           "brigade_avg": 9.59
         }
       ],
       "source": "generated",
-      "updated_at": "2026-05-15T08:23:57Z"
+      "updated_at": "2026-06-18T02:24:40Z"
     }
   ]
 }

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from docx import Document
-from docx.shared import RGBColor
+from docx.oxml.ns import qn
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -26,9 +26,19 @@ DEFAULT_TEMPLATE_DIR = DEFAULT_WORK_ROOT / "模板文件"
 PENDING_PREFIX = "【待补】"
 
 MAY_ROOT_RENAMES = {
-    "5月科室月考核情况记录表.xlsx": "2026年5月工作检查-科室月考核情况记录表.xlsx",
-    "5月消防产品监督统计表.xls": "2026年5月工作检查-消防产品监督统计表.xls",
-    "5月重点工作完成情况上报表（应急通信与消防科技）.xls": "2026年5月工作检查-重点工作完成情况上报表（应急通信与消防科技）.xls",
+    "5月科室月考核情况记录表.xlsx": "2026年5月科室月考核情况记录表.xlsx",
+    "2026年5月工作检查-科室月考核情况记录表.xlsx": "2026年5月科室月考核情况记录表.xlsx",
+    "5月消防产品监督统计表.xls": "2026年5月消防产品监督统计表.xls",
+    "2026年5月工作检查-消防产品监督统计表.xls": "2026年5月消防产品监督统计表.xls",
+    "5月重点工作完成情况上报表（应急通信与消防科技）.xls": "2026年5月重点工作完成情况上报表（应急通信与消防科技）.xls",
+    "2026年5月工作检查-重点工作完成情况上报表（应急通信与消防科技）.xls": "2026年5月重点工作完成情况上报表（应急通信与消防科技）.xls",
+}
+
+MAY_PATROL_ROOT_RENAMES = {
+    "（4月）产品巡查底册（不发）.docx": "2026年4月产品巡查底册（不发）.docx",
+    "4月基础信息考评截图（不发）.xls": "2026年4月基础信息考评截图（不发）.xls",
+    "个人执法统计表202604.xlsx": "2026年4月个人执法统计表.xlsx",
+    "消防监督管理系统消防执法质量（4月个案成绩）.xls": "2026年4月消防监督管理系统消防执法质量（个案成绩）.xls",
 }
 
 TEMPLATE_RENAMES = {
@@ -44,6 +54,14 @@ TEMPLATE_RENAMES = {
     "（样例数据）消防产品档案质量明细表.doc": "90_消防产品档案质量明细表样例数据.doc",
 }
 
+MAY_TEMPLATE_SOURCES = {
+    (
+        "2026年5月重点工作完成情况上报表（应急通信与消防科技）.xls",
+        "2026年5月工作检查-重点工作完成情况上报表（应急通信与消防科技）.xls",
+        "5月重点工作完成情况上报表（应急通信与消防科技）.xls",
+    ): "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
+}
+
 JUNE_TEMPLATE_COPY_NAMES = set(TEMPLATE_RENAMES) | {
     "（模板）产品监督成绩总表.xlsx",
     "（模板）个人执法统计表202601.xlsx",
@@ -54,6 +72,9 @@ JUNE_TEMPLATE_COPY_NAMES = set(TEMPLATE_RENAMES) | {
 }
 
 PRODUCT_REGISTER_PARAGRAPHS = [67, 68, 109, 110]
+
+PRODUCT_REGISTER_NORMAL_NAME = "2026年5月产品巡查底册（不发）.docx"
+BASE_INFO_NORMAL_NAME = "2026年5月基础信息考评截图（不发）.xls"
 
 
 def sha256_file(path):
@@ -96,6 +117,27 @@ def move_or_rename(src, dst, actions, blockers, apply, root, kind):
         shutil.move(str(src), str(dst))
 
 
+def copy_if_missing(src, dst, actions, blockers, apply, root, kind):
+    src = Path(src)
+    dst = Path(dst)
+    if not src.exists():
+        add_blocker(blockers, "源文件不存在，无法复制", src=src, dst=dst)
+        return
+    if not is_under(src, root) or not is_under(dst, root):
+        add_blocker(blockers, "路径越界，已拒绝复制", src=src, dst=dst, root=root)
+        return
+    if dst.exists():
+        if sha256_file(src) == sha256_file(dst):
+            actions.append({"kind": kind, "status": "skip_same_hash_target_exists", "src": str(src), "dst": str(dst)})
+            return
+        add_blocker(blockers, "目标已存在且内容不同", src=src, dst=dst)
+        return
+    actions.append({"kind": kind, "status": "planned" if not apply else "done", "src": str(src), "dst": str(dst)})
+    if apply:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+
 def collect_known_template_hashes(template_dir):
     hashes = {}
     for directory in [Path(template_dir), SKILL_TEMPLATE_DIR]:
@@ -117,6 +159,10 @@ def organize_may_dir(may_dir, actions, blockers, apply):
     may_dir = Path(may_dir)
     for old_name, new_name in MAY_ROOT_RENAMES.items():
         move_or_rename(may_dir / old_name, may_dir / new_name, actions, blockers, apply, may_dir, "may_root_rename")
+
+    patrol_dir = may_dir / "4月巡查"
+    for old_name, new_name in MAY_PATROL_ROOT_RENAMES.items():
+        move_or_rename(patrol_dir / old_name, patrol_dir / new_name, actions, blockers, apply, may_dir, "may_patrol_root_rename")
 
     product_dir = may_dir / "4月巡查" / "2026年4月消防产品监督成绩"
     if product_dir.exists():
@@ -140,6 +186,22 @@ def organize_template_dir(template_dir, actions, blockers, apply):
     archive_office_locks(template_dir, actions, blockers, apply)
 
 
+def supplement_template_dir_from_may(may_dir, template_dir, actions, blockers, apply):
+    may_dir = Path(may_dir)
+    template_dir = Path(template_dir)
+    for source_names, target_name in MAY_TEMPLATE_SOURCES.items():
+        source = next((may_dir / name for name in source_names if (may_dir / name).exists()), may_dir / source_names[0])
+        copy_if_missing(
+            source,
+            template_dir / target_name,
+            actions,
+            blockers,
+            apply,
+            DEFAULT_WORK_ROOT,
+            "supplement_template_from_may",
+        )
+
+
 def archive_june_template_copies(june_month_dir, template_dir, actions, blockers, apply):
     june_month_dir = Path(june_month_dir)
     archive_dir = june_month_dir / "_模板副本归档"
@@ -155,7 +217,7 @@ def archive_june_template_copies(june_month_dir, template_dir, actions, blockers
         move_or_rename(file_path, archive_dir / file_path.name, actions, blockers, apply, june_month_dir, "archive_june_template_copy")
 
 
-def mark_docx_paragraphs(path, paragraphs):
+def clear_docx_paragraph_colors(path, paragraphs):
     document = Document(str(path))
     changed = []
     for paragraph_no in paragraphs:
@@ -163,13 +225,18 @@ def mark_docx_paragraphs(path, paragraphs):
             continue
         paragraph = document.paragraphs[paragraph_no - 1]
         for run in paragraph.runs:
-            run.font.color.rgb = RGBColor(255, 0, 0)
+            r_pr = run._element.rPr
+            if r_pr is None:
+                continue
+            color = r_pr.find(qn("w:color"))
+            if color is not None:
+                r_pr.remove(color)
         changed.append({"paragraph": paragraph_no, "text": paragraph.text})
     document.save(str(path))
     return changed
 
 
-def mark_excel_cells(path, cells):
+def clear_excel_cell_colors(path, cells):
     import win32com.client
 
     excel = win32com.client.DispatchEx("Excel.Application")
@@ -182,7 +249,7 @@ def mark_excel_cells(path, cells):
             for cell_spec in cells:
                 sheet = workbook.Worksheets(cell_spec["sheet"])
                 cell = sheet.Cells(cell_spec["row"], cell_spec["col"])
-                cell.Font.Color = 255
+                cell.Font.ColorIndex = -4105
                 marked.append(
                     {
                         "path": str(path),
@@ -204,38 +271,47 @@ def organize_june_dir(june_month_dir, actions, blockers, apply, template_dir):
     june_month_dir = Path(june_month_dir)
     archive_june_template_copies(june_month_dir, template_dir, actions, blockers, apply)
 
-    old_product = june_month_dir / "（5月）产品巡查底册.docx"
-    product = june_month_dir / f"{PENDING_PREFIX}（5月）产品巡查底册（不发）.docx"
-    move_or_rename(old_product, product, actions, blockers, apply, june_month_dir, "june_product_register_pending_rename")
+    product = june_month_dir / PRODUCT_REGISTER_NORMAL_NAME
+    for old_name in [
+        f"{PENDING_PREFIX}（5月）产品巡查底册（不发）.docx",
+        "（5月）产品巡查底册（不发）.docx",
+        "（5月）产品巡查底册.docx",
+    ]:
+        move_or_rename(june_month_dir / old_name, product, actions, blockers, apply, june_month_dir, "june_product_register_rename")
 
     network_dir = june_month_dir / "2026年5月联网监测基础信息考评明细表"
     old_base_info = network_dir / "5月基础信息考评截图.xls"
-    base_info = june_month_dir / f"{PENDING_PREFIX}5月基础信息考评截图（不发）.xls"
-    move_or_rename(old_base_info, base_info, actions, blockers, apply, june_month_dir, "june_base_info_move_pending")
+    base_info = june_month_dir / BASE_INFO_NORMAL_NAME
+    for old_path in [
+        june_month_dir / f"{PENDING_PREFIX}5月基础信息考评截图（不发）.xls",
+        june_month_dir / "5月基础信息考评截图（不发）.xls",
+        old_base_info,
+    ]:
+        move_or_rename(old_path, base_info, actions, blockers, apply, june_month_dir, "june_base_info_move")
 
     if apply and not blockers:
         if product.exists():
-            marked = mark_docx_paragraphs(product, PRODUCT_REGISTER_PARAGRAPHS)
-            actions.append({"kind": "mark_docx_missing", "status": "done", "path": str(product), "marked": marked})
+            marked = clear_docx_paragraph_colors(product, PRODUCT_REGISTER_PARAGRAPHS)
+            actions.append({"kind": "clear_docx_misapplied_red", "status": "done", "path": str(product), "cleared": marked})
         else:
-            add_blocker(blockers, "产品巡查底册不存在，无法标红", path=product)
+            add_blocker(blockers, "产品巡查底册不存在，无法撤销误标红", path=product)
 
         excel_marks = []
         if base_info.exists():
-            excel_marks.extend(mark_excel_cells(base_info, [{"sheet": "宜兴", "row": 4, "col": 6}]))
+            excel_marks.extend(clear_excel_cell_colors(base_info, [{"sheet": "宜兴", "row": 4, "col": 6}]))
         else:
-            add_blocker(blockers, "基础信息考评截图不存在，无法标红", path=base_info)
+            add_blocker(blockers, "基础信息考评截图不存在，无法撤销误标红", path=base_info)
         network_stats = network_dir / "联网监测统计表.xls"
         if network_stats.exists():
-            excel_marks.extend(mark_excel_cells(network_stats, [{"sheet": "Sheet1", "row": 7, "col": 12}]))
+            excel_marks.extend(clear_excel_cell_colors(network_stats, [{"sheet": "Sheet1", "row": 7, "col": 12}]))
         else:
-            add_blocker(blockers, "联网监测统计表不存在，无法标红", path=network_stats)
+            add_blocker(blockers, "联网监测统计表不存在，无法撤销误标红", path=network_stats)
         if excel_marks:
-            actions.append({"kind": "mark_excel_missing", "status": "done", "marked": excel_marks})
+            actions.append({"kind": "clear_excel_misapplied_red", "status": "done", "cleared": excel_marks})
     else:
         actions.append(
             {
-                "kind": "mark_missing",
+                "kind": "clear_misapplied_red",
                 "status": "planned",
                 "docx": str(product),
                 "docx_paragraphs": PRODUCT_REGISTER_PARAGRAPHS,
@@ -254,6 +330,7 @@ def run(args):
 
     organize_may_dir(args.may_dir, actions, blockers, apply)
     organize_template_dir(args.template_dir, actions, blockers, apply)
+    supplement_template_dir_from_may(args.may_dir, args.template_dir, actions, blockers, apply)
     organize_june_dir(args.june_month_dir, actions, blockers, apply, args.template_dir)
 
     return {

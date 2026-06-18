@@ -81,6 +81,13 @@ TEMPLATES = [
         "used_in_monthly_register": False,
         "reserved": True,
     },
+    {
+        "key": "emergency_comm_fire_tech_work_report",
+        "file": "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
+        "description": "重点工作完成情况上报表（应急通信与消防科技）模板",
+        "used_in_monthly_register": False,
+        "reserved": True,
+    },
 ]
 
 EXCLUDED = [
