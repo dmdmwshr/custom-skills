@@ -49,6 +49,7 @@ MONTHLY_TEMPLATE_KEYS = {
 ALLOWED_DEDUCTION_VALUES = {0.1, 0.2, 0.5, 1.0}
 DESCRIPTION_WARN_LENGTH = 30
 NO_UNQUALIFIED_PRODUCT_CASE_TEXT = "本月未完成不合格消防产品案卷"
+INVALID_MONITOR_CONTACTS = {"消防机构", "机构联系人", "联系人"}
 YEAR_MONTH_PATTERN = re.compile(r"(\d{4})年(\d{1,2})月")
 MONTH_ONLY_PATTERN = re.compile(r"(\d{1,2})月")
 
@@ -105,6 +106,29 @@ def find_one(base, patterns, label):
     return matches[0]
 
 
+def find_optional_one(base, patterns):
+    matches = []
+    for pattern in patterns:
+        matches.extend(Path(base).glob(pattern))
+    matches = [p for p in matches if not p.name.startswith("~$")]
+    if not matches:
+        return None
+    return sorted(matches, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+
+
+def find_base_info(month_dir, network_dir):
+    root_match = find_optional_one(
+        month_dir,
+        [
+            "*基础信息考评截图*（不发）*.xls",
+            "*基础信息考评截图*.xls",
+        ],
+    )
+    if root_match:
+        return root_match
+    return find_one(network_dir, ["*基础信息考评截图*.xls"], "基础信息考评截图")
+
+
 def copy_output(src, dst, force=False):
     dst = Path(dst)
     if dst.exists() and not force:
@@ -135,14 +159,13 @@ def previous_month(year, month):
 
 
 def build_score_month_info(registration_year, registration_month, source):
-    score_year, score_month = previous_month(registration_year, registration_month)
     return {
         "registration_year": int(registration_year),
         "registration_month": int(registration_month),
         "registration_month_key": make_month_key(registration_year, registration_month),
-        "score_year": score_year,
-        "score_month": score_month,
-        "score_month_key": make_month_key(score_year, score_month),
+        "score_year": int(registration_year),
+        "score_month": int(registration_month),
+        "score_month_key": make_month_key(registration_year, registration_month),
         "source": source,
     }
 
@@ -353,10 +376,10 @@ def clean_error_line(line):
 
 def parse_product_register(path):
     document = Document(str(path))
-    texts = [p.text.strip() for p in document.paragraphs]
+    texts = [(index, p.text.strip()) for index, p in enumerate(document.paragraphs, 1)]
     blocks = []
     current = None
-    for text in texts:
+    for paragraph, text in texts:
         if not text:
             continue
         if text.startswith("大队："):
@@ -364,7 +387,7 @@ def parse_product_register(path):
                 blocks.append(current)
             current = {"大队": text.split("：", 1)[1].strip(), "lines": []}
         elif current:
-            current["lines"].append(text)
+            current["lines"].append({"paragraph": paragraph, "text": text})
     if current:
         blocks.append(current)
 
@@ -385,7 +408,9 @@ def parse_product_register(path):
             "no_case": False,
         }
         pending_error = None
-        for line in block["lines"]:
+        for entry in block["lines"]:
+            line = entry["text"]
+            paragraph = entry["paragraph"]
             if line.startswith("题名："):
                 record["题名"] = line.split("：", 1)[1].strip()
             elif line.startswith("编号："):
@@ -400,8 +425,9 @@ def parse_product_register(path):
                 value = parse_deduction_value(line)
                 general_index = parse_general_index(line)
                 if pending_error:
-                    broad_description = normalize_broad_description(pending_error)
-                    record["errors"].append(pending_error)
+                    pending_text = pending_error["text"]
+                    broad_description = normalize_broad_description(pending_text)
+                    record["errors"].append(pending_text)
                     record["archive_errors"].append(broad_description)
                     if value is not None and general_index is not None:
                         record["deductions"].append(
@@ -409,16 +435,20 @@ def parse_product_register(path):
                                 "general_index": general_index,
                                 "value": value,
                                 "line": line,
-                                "description": pending_error,
-                                "detail_description": pending_error,
+                                "paragraph": pending_error["paragraph"],
+                                "deduction_paragraph": paragraph,
+                                "description": pending_text,
+                                "detail_description": pending_text,
                                 "broad_description": broad_description,
                             }
                         )
                     else:
                         record["parse_issues"].append(
                             {
-                                "description": pending_error,
+                                "description": pending_text,
+                                "paragraph": pending_error["paragraph"],
                                 "line": line,
+                                "deduction_paragraph": paragraph,
                                 "message": "扣分行缺少可解析的 3.x 条款或分值",
                             }
                         )
@@ -426,10 +456,10 @@ def parse_product_register(path):
             else:
                 cleaned = clean_error_line(line)
                 if cleaned:
-                    pending_error = cleaned
+                    pending_error = {"text": cleaned, "paragraph": paragraph}
         if pending_error:
-            record["errors"].append(pending_error)
-            record["archive_errors"].append(normalize_broad_description(pending_error))
+            record["errors"].append(pending_error["text"])
+            record["archive_errors"].append(normalize_broad_description(pending_error["text"]))
 
         if not record["题名"] and not record["编号"] and not record["立卷人"]:
             record["no_case"] = True
@@ -532,7 +562,9 @@ def validate_product_score_guard(product_records):
                     "type": "parse_error",
                     "message": issue["message"],
                     "description": issue["description"],
+                    "paragraph": issue.get("paragraph"),
                     "line": issue["line"],
+                    "deduction_paragraph": issue.get("deduction_paragraph"),
                 }
             )
         for deduction in record["deductions"]:
@@ -618,35 +650,101 @@ def load_xls_as_workbook(path, data_only=True):
     soffice = find_soffice()
     temp_dir = tempfile.TemporaryDirectory(prefix="xf_grade_xls_")
     out_dir = Path(temp_dir.name)
-    subprocess.run(
-        [soffice, "--headless", "--convert-to", "xlsx", "--outdir", str(out_dir), str(path)],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    converted = next(out_dir.glob("*.xlsx"))
+    convert_dir = out_dir / "converted"
+    profile_dir = out_dir / "lo-profile"
+    convert_dir.mkdir()
+    profile_dir.mkdir()
+    try:
+        subprocess.run(
+            [
+                soffice,
+                "--headless",
+                f"-env:UserInstallation={profile_dir.resolve().as_uri()}",
+                "--convert-to",
+                "xlsx",
+                "--outdir",
+                str(convert_dir),
+                str(path),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        converted = next(convert_dir.glob("*.xlsx"))
+    except Exception as soffice_error:
+        try:
+            converted = convert_xls_with_excel(path, convert_dir)
+        except Exception as excel_error:
+            raise RuntimeError(
+                f"无法转换 .xls：{path}；LibreOffice 错误：{soffice_error}；Excel 兜底错误：{excel_error}"
+            ) from excel_error
     workbook = load_workbook(converted, data_only=data_only)
     workbook._xf_temp_dir = temp_dir
     return workbook
+
+
+def convert_xls_with_excel(path, out_dir):
+    import win32com.client
+
+    path = Path(path)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    converted = out_dir / f"{path.stem}.xlsx"
+    excel = win32com.client.DispatchEx("Excel.Application")
+    excel.Visible = False
+    excel.DisplayAlerts = False
+    try:
+        workbook = excel.Workbooks.Open(str(path.resolve()), ReadOnly=True)
+        try:
+            workbook.SaveAs(str(converted.resolve()), FileFormat=51)
+        finally:
+            workbook.Close(SaveChanges=False)
+    finally:
+        excel.Quit()
+    return converted
 
 
 def read_monitor_scores(stats_path):
     workbook = load_xls_as_workbook(stats_path, data_only=True)
     ws = workbook.active
     scores = {}
+    warnings = []
     for row in range(3, ws.max_row + 1):
         short = brigade_short(ws.cell(row, 1).value)
         if short not in PRODUCT_ORDER:
             continue
         row_scores = [float(ws.cell(row, col).value) for col in range(2, 12)]
-        avg = ws.cell(row, 12).value
-        if avg is None:
-            avg = sum(row_scores) / len(row_scores)
+        raw_avg = ws.cell(row, 12).value
+        computed_avg = sum(row_scores) / len(row_scores)
+        if raw_avg is None:
+            avg = computed_avg
+        else:
+            avg = float(raw_avg)
+            if avg > 10:
+                warnings.append(
+                    {
+                        "type": "monitor_avg_gt_10",
+                        "path": str(Path(stats_path)),
+                        "sheet": ws.title,
+                        "row": row,
+                        "column": 12,
+                        "cell": f"L{row}",
+                        "brigade": short,
+                        "raw_avg": raw_avg,
+                        "computed_avg": round(computed_avg, 2),
+                        "message": "联网监测均分列大于 10，脚本按 10 个案卷分数重算均分，未修改源表。",
+                    }
+                )
+                avg = computed_avg
         scores[short] = {"scores": row_scores, "avg": round(float(avg), 2)}
+    read_monitor_scores.last_warnings = warnings
     return scores
+
+
+read_monitor_scores.last_warnings = []
 
 
 def normalize_monitor_issues(raw):
@@ -692,6 +790,8 @@ def parse_monitor_note(note):
     note = str(note or "").strip()
     match = re.search(r"\d{3,4}\s*[，,、]?\s*([\u4e00-\u9fff]{2,4})", note)
     person = match.group(1) if match else ""
+    if person in INVALID_MONITOR_CONTACTS or "机构" in person or "联系人" in person:
+        person = ""
     if match:
         issues = note[match.end() :]
     else:
@@ -711,11 +811,12 @@ def read_monitor_details(base_info_path, monitor_scores):
         for row in range(1, min(ws.max_row, len(scores)) + 1):
             unit = ws.cell(row, 1).value
             non_empty = [
-                ws.cell(row, col).value
+                (col, ws.cell(row, col).value)
                 for col in range(1, ws.max_column + 1)
                 if ws.cell(row, col).value not in (None, "")
             ]
-            note = str(non_empty[-1]).strip() if non_empty else ""
+            note_col, note_value = non_empty[-1] if non_empty else (None, "")
+            note = str(note_value).strip() if non_empty else ""
             person, issues = parse_monitor_note(note)
             details.append(
                 {
@@ -728,6 +829,10 @@ def read_monitor_details(base_info_path, monitor_scores):
                     "issues_raw": issues,
                     "issues_report": normalize_monitor_issues(issues),
                     "note": note,
+                    "sheet": ws.title,
+                    "row": row,
+                    "note_column": note_col,
+                    "source_path": str(Path(base_info_path)),
                 }
             )
     return details
@@ -764,6 +869,11 @@ def validate_person_matches(template_path, product_records, monitor_details):
                     "大队": detail["大队"],
                     "姓名": detail["联系人"],
                     "单位": detail["单位"],
+                    "path": detail.get("source_path"),
+                    "sheet": detail.get("sheet"),
+                    "row": detail.get("row"),
+                    "column": detail.get("note_column"),
+                    "note": detail.get("note"),
                     "message": f"个人统计表未找到联网联系人：{detail['大队']} {detail['联系人']}",
                 }
             )
@@ -1355,17 +1465,23 @@ def run(args):
     product_register = find_one(month_dir, [f"*{args.month}月*产品巡查底册*.docx", "*产品巡查底册*.docx"], "产品巡查底册")
     network_dir = find_one(month_dir, ["*联网监测基础信息考评明细表"], "联网监测明细目录")
     network_stats = require_path(network_dir / "联网监测统计表.xls", "联网监测统计表")
-    base_info = find_one(month_dir, ["*基础信息考评截图*.xls"], "基础信息考评截图")
+    base_info = find_base_info(month_dir, network_dir)
     personal_template = templates["personal_stats"]
     report_output = month_dir / f"{args.year}年{args.month}月通报.doc"
 
     product_records = parse_product_register(product_register)
     product_score_guard = validate_product_score_guard(product_records)
-    if product_score_guard["blocking_issues"]:
+    if product_score_guard["blocking_issues"] and not args.dry_run:
         raise ProductScoreReviewRequired(product_score_guard)
     monitor_scores = read_monitor_scores(network_stats)
     monitor_details = read_monitor_details(base_info, monitor_scores)
-    validate_person_matches(personal_template, product_records, monitor_details)
+    person_match_issues = []
+    try:
+        validate_person_matches(personal_template, product_records, monitor_details)
+    except HumanReviewRequired as exc:
+        if not args.dry_run:
+            raise
+        person_match_issues = exc.issues
     history, scanned_history, history_counts, history_migration = prepare_monitor_history(
         month_dir.parent,
         args.year,
@@ -1375,7 +1491,12 @@ def run(args):
     selected_cases = select_monitor_report_cases(monitor_details, monitor_scores, history_counts)
 
     if args.dry_run:
-        product_text, monitor_text = build_report_sections(product_records, monitor_details, monitor_scores, history_counts)
+        report_text_error = None
+        try:
+            product_text, monitor_text = build_report_sections(product_records, monitor_details, monitor_scores, history_counts)
+        except Exception as exc:
+            product_text, monitor_text = "", ""
+            report_text_error = str(exc)
         current_record = build_generated_history_record(
             args.year,
             args.month,
@@ -1390,6 +1511,13 @@ def run(args):
             json.dumps(
                 {
                     "template_source": template_info,
+                    "input_files": {
+                        "month_dir": str(month_dir),
+                        "product_register": str(product_register),
+                        "network_dir": str(network_dir),
+                        "network_stats": str(network_stats),
+                        "base_info": str(base_info),
+                    },
                     "registration_month": {
                         "year": current_month_info["registration_year"],
                         "month": current_month_info["registration_month"],
@@ -1414,6 +1542,8 @@ def run(args):
                         for item in product_records
                     ],
                     "product_score_guard": product_score_guard,
+                    "person_match_issues": person_match_issues,
+                    "monitor_score_warnings": read_monitor_scores.last_warnings,
                     "monitor_avg": {k: v["avg"] for k, v in monitor_scores.items()},
                     "monitor_report_history_counts": history_counts,
                     "monitor_report_history_source": {
@@ -1440,6 +1570,7 @@ def run(args):
                         "product": validate_text_quality("消防产品通报", product_text),
                         "monitor": validate_text_quality("联网监测通报", monitor_text),
                     },
+                    "report_text_error": report_text_error,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -1503,6 +1634,13 @@ def run(args):
 
     summary = {
         "template_source": template_info,
+        "input_files": {
+            "month_dir": str(month_dir),
+            "product_register": str(product_register),
+            "network_dir": str(network_dir),
+            "network_stats": str(network_stats),
+            "base_info": str(base_info),
+        },
         "registration_month": {
             "year": current_month_info["registration_year"],
             "month": current_month_info["registration_month"],
@@ -1517,6 +1655,7 @@ def run(args):
         "product_dir": str(product_dir),
         "product_scores": {item["short"]: item["score"] for item in product_records},
         "product_score_guard": product_score_guard,
+        "monitor_score_warnings": read_monitor_scores.last_warnings,
         "monitor_avg": {k: v["avg"] for k, v in monitor_scores.items()},
         "personal_warnings": personal_warnings,
         "monitor_report_cases": [
@@ -1578,7 +1717,7 @@ def main():
             json.dumps(
                 {
                     "status": "history_month_conflict",
-                    "message": "联网通报历史月份在前推后发生冲突，已暂停任务，请人工核对。",
+                    "message": "联网通报历史月份发生冲突，已暂停任务，请人工核对。",
                     "issues": exc.issues,
                 },
                 ensure_ascii=False,

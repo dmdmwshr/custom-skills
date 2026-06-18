@@ -1,8 +1,10 @@
 import copy
 import sys
+import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -19,8 +21,8 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
             default_year=2026,
         )
         self.assertEqual(info["source"], "filename")
-        self.assertEqual((info["score_year"], info["score_month"]), (2026, 4))
-        self.assertEqual(info["score_month_key"], "2026-04")
+        self.assertEqual((info["score_year"], info["score_month"]), (2026, 5))
+        self.assertEqual(info["score_month_key"], "2026-05")
 
     def test_resolve_score_month_from_folder(self):
         info = mgr.resolve_score_month(
@@ -28,7 +30,7 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
             default_year=2026,
         )
         self.assertEqual(info["source"], "folder")
-        self.assertEqual((info["score_year"], info["score_month"]), (2026, 4))
+        self.assertEqual((info["score_year"], info["score_month"]), (2026, 5))
 
     def test_resolve_score_month_falls_back_to_runtime_date(self):
         info = mgr.resolve_score_month(
@@ -36,15 +38,15 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
             fallback_date=date(2026, 5, 21),
         )
         self.assertEqual(info["source"], "runtime")
-        self.assertEqual((info["score_year"], info["score_month"]), (2026, 4))
+        self.assertEqual((info["score_year"], info["score_month"]), (2026, 5))
 
     def test_resolve_score_month_cross_year(self):
         info = mgr.resolve_score_month(
             r"C:\workspace\1月\2026年1月通报.doc",
             default_year=2026,
         )
-        self.assertEqual((info["score_year"], info["score_month"]), (2025, 12))
-        self.assertEqual(info["score_month_key"], "2025-12")
+        self.assertEqual((info["score_year"], info["score_month"]), (2026, 1))
+        self.assertEqual(info["score_month_key"], "2026-01")
 
     def test_build_generated_history_record_uses_score_month(self):
         record = mgr.build_generated_history_record(
@@ -55,10 +57,10 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
             [],
             {},
         )
-        self.assertEqual(record["month_key"], "2026-04")
-        self.assertEqual((record["year"], record["month"]), (2026, 4))
+        self.assertEqual(record["month_key"], "2026-05")
+        self.assertEqual((record["year"], record["month"]), (2026, 5))
 
-    def test_migrate_monitor_history_records_shifts_existing_months(self):
+    def test_migrate_monitor_history_records_keeps_existing_months(self):
         history = {
             "version": 1,
             "records": [
@@ -89,8 +91,8 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
             ],
         }
         migrated, actions = mgr.migrate_monitor_history_records(history)
-        self.assertEqual([item["month_key"] for item in migrated["records"]], ["2026-02", "2026-03", "2026-04"])
-        self.assertEqual(len(actions), 3)
+        self.assertEqual([item["month_key"] for item in migrated["records"]], ["2026-03", "2026-04", "2026-05"])
+        self.assertEqual(actions, [])
 
     def test_migrate_monitor_history_records_raises_on_conflict(self):
         history = {
@@ -116,6 +118,58 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
         }
         with self.assertRaises(mgr.HistoryMonthConflict):
             mgr.migrate_monitor_history_records(copy.deepcopy(history))
+
+    def test_find_base_info_prefers_root_pending_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            network = base / "2026年5月联网监测基础信息考评明细表"
+            network.mkdir()
+            root_file = base / "【待补】5月基础信息考评截图（不发）.xls"
+            nested_file = network / "5月基础信息考评截图.xls"
+            root_file.write_text("root", encoding="utf-8")
+            nested_file.write_text("nested", encoding="utf-8")
+            self.assertEqual(mgr.find_base_info(base, network), root_file)
+
+    def test_find_base_info_falls_back_to_network_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            network = base / "2026年5月联网监测基础信息考评明细表"
+            network.mkdir()
+            nested_file = network / "5月基础信息考评截图.xls"
+            nested_file.write_text("nested", encoding="utf-8")
+            self.assertEqual(mgr.find_base_info(base, network), nested_file)
+
+    def test_parse_monitor_note_rejects_pseudo_contact(self):
+        person, issues = mgr.parse_monitor_note("3202U01557  消防机构联系人、cad、pdf")
+        self.assertEqual(person, "")
+        self.assertIn("联系人", issues)
+
+    def test_read_monitor_scores_recomputes_avg_over_10(self):
+        class FakeCell:
+            def __init__(self, value):
+                self.value = value
+
+        class FakeSheet:
+            title = "Sheet1"
+            max_row = 3
+
+            def __init__(self):
+                self.values = {(3, 1): "惠山"}
+                for col in range(2, 12):
+                    self.values[(3, col)] = 9.7
+                self.values[(3, 12)] = 97.2
+
+            def cell(self, row, col):
+                return FakeCell(self.values.get((row, col)))
+
+        class FakeWorkbook:
+            active = FakeSheet()
+
+        with patch.object(mgr, "load_xls_as_workbook", return_value=FakeWorkbook()):
+            scores = mgr.read_monitor_scores(Path("联网监测统计表.xls"))
+
+        self.assertEqual(scores["惠山"]["avg"], 9.7)
+        self.assertEqual(mgr.read_monitor_scores.last_warnings[0]["raw_avg"], 97.2)
 
 
 if __name__ == "__main__":
