@@ -30,6 +30,8 @@ class MonthlyFileOrganizerTests(unittest.TestCase):
             write_fake_templates(template_dir)
             wrong_office = score_dir / "2026年5月科室月考核情况记录表.xlsx"
             wrong_office.write_bytes(b"wrong")
+            deprecated_report = bulletin_dir / "【待补】2026年6月重点工作完成情况上报表（应急通信与消防科技）.xls"
+            deprecated_report.write_bytes(b"retired")
 
             result = organizer.run(
                 argparse.Namespace(
@@ -55,13 +57,20 @@ class MonthlyFileOrganizerTests(unittest.TestCase):
                 {
                     "2026年6月科室月考核情况记录表.xlsx",
                     "2026年6月消防产品监督统计表.xls",
-                    "2026年6月重点工作完成情况上报表（应急通信与消防科技）.xls",
                 },
             )
             self.assertTrue(
                 any(
                     action["kind"] == "delete_wrong_score_office_record"
                     and Path(action["path"]) == wrong_office
+                    for action in result["actions"]
+                )
+            )
+            self.assertTrue(
+                any(
+                    action["kind"] == "archive_deprecated_root_file"
+                    and Path(action["src"]) == deprecated_report
+                    and Path(action["dst"]).parent.name == "_停用文件归档"
                     for action in result["actions"]
                 )
             )

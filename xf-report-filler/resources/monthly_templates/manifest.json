@@ -1,7 +1,7 @@
 {
   "version": 3,
   "source_directory": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库",
-  "generated_at": "2026-06-18T06:50:47Z",
+  "generated_at": "2026-06-22T09:07:08Z",
   "templates": [
     {
       "id": "T01",
@@ -73,7 +73,7 @@
       "reserved": false,
       "original_name": "06_消防执法质量个案成绩模板.xls",
       "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\06_消防执法质量个案成绩模板.xls",
-      "sha256": "62FABF0ADAD26BAE2FEFF933FFB69BDA170DBA806F497AE9DDB87A067CF0AC00"
+      "sha256": "6BC7AC5BEBABD735CD76228FCC16C07F36F652D32F5ECE1CC487DBD810381FC7"
     },
     {
       "id": "T07",
@@ -110,20 +110,6 @@
       "original_name": "09_消防产品监督统计表工作检查模板.xls",
       "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库\\09_消防产品监督统计表工作检查模板.xls",
       "sha256": "5023051663837626A2843A0E66FDB1DA6FABD825DC68E36699DF0735D9DD0364"
-    },
-    {
-      "id": "T10",
-      "key": "emergency_comm_fire_tech_work_report",
-      "file": "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
-      "description": "重点工作完成情况上报表（应急通信与消防科技）模板",
-      "source": "bulletin_skeleton",
-      "skeleton_file": "X月重点工作完成情况上报表（应急通信与消防科技）.xls",
-      "numbered_sync_file": "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
-      "used_in_monthly_register": false,
-      "reserved": true,
-      "original_name": "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报\\X月重点工作完成情况上报表（应急通信与消防科技）.xls",
-      "sha256": "704909A42625A6FFC71E5F6D48CB9963FA8D4B563CE05CBF0B1A6D62A5F5153C"
     }
   ],
   "excluded_source_files": [

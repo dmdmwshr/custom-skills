@@ -36,6 +36,9 @@ for old_name, new_name in TEMPLATE_RENAMES.items():
 BULLETIN_ROOT_TEMPLATE_MAP = workflow.bulletin_root_map(CONFIG)
 
 TEMPLATE_COPY_NAMES = set(TEMPLATE_RENAMES) | set(NUMBERED_TEMPLATE_NAMES)
+DEPRECATED_ROOT_FILE_NAMES = [
+    "{year}年{month}月重点工作完成情况上报表（应急通信与消防科技）.xls",
+]
 
 
 def sha256_file(path):
@@ -284,6 +287,8 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
             "copy_bulletin_root_file",
         )
 
+    archive_deprecated_root_files(bulletin_dir, bulletin_year, bulletin_month, actions, blockers, apply)
+
     wrong_score_office = score_dir / f"{score_year}年{score_month}月科室月考核情况记录表.xlsx"
     delete_file_if_exists(
         wrong_score_office,
@@ -328,6 +333,23 @@ def archive_template_copies(month_dir, template_dir, actions, blockers, apply):
             add_blocker(blockers, "疑似模板副本哈希不在模板库中，未归档", path=file_path, sha256=digest)
             continue
         move_or_rename(file_path, archive_dir / file_path.name, actions, blockers, apply, month_dir, "archive_template_copy")
+
+
+def archive_deprecated_root_files(bulletin_dir, year, month, actions, blockers, apply):
+    bulletin_dir = Path(bulletin_dir)
+    archive_dir = bulletin_dir / "_停用文件归档"
+    for template in DEPRECATED_ROOT_FILE_NAMES:
+        name = template.format(year=year, month=month)
+        for candidate in [bulletin_dir / name, bulletin_dir / f"{PENDING_PREFIX}{name}"]:
+            move_or_rename(
+                candidate,
+                archive_dir / candidate.name,
+                actions,
+                blockers,
+                apply,
+                bulletin_dir,
+                "archive_deprecated_root_file",
+            )
 
 
 def run(args):

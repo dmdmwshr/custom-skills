@@ -23,23 +23,21 @@ class MonthlyBulletinRootTests(unittest.TestCase):
 
     def test_pending_root_names_use_prefix(self):
         paths = root.root_file_paths(Path(r"C:\work\6月通报"), 2026, 6)
+        self.assertEqual(set(paths), {"office_record", "product_stats"})
         self.assertEqual(paths["office_record"]["pending"].name, "【待补】2026年6月科室月考核情况记录表.xlsx")
         self.assertEqual(paths["product_stats"]["pending"].name, "【待补】2026年6月消防产品监督统计表.xls")
-        self.assertEqual(paths["work_report"]["pending"].name, "【待补】2026年6月重点工作完成情况上报表（应急通信与消防科技）.xls")
+
+    def test_work_report_root_file_is_retired(self):
+        root_ids = {item["id"] for item in root.CONFIG["bulletin_root_files"]}
+        template_ids = {item["id"] for item in root.CONFIG["templates"]}
+        self.assertNotIn("R03", root_ids)
+        self.assertNotIn("T10", template_ids)
 
     def test_staff_count_and_pending_value(self):
         self.assertEqual(root.normalize_brigade("江阴大队12人"), "江阴大队")
         self.assertEqual(root.parse_staff_count("江阴大队12人"), 12)
         self.assertEqual(root.parse_staff_count("经开大队6人"), 6)
         self.assertEqual(root.product_stats_pending_value(8), "（8）")
-
-    def test_work_report_pending_cells_exclude_tech_baseline_column(self):
-        cells = set(root.work_report_pending_cells())
-        self.assertNotIn("J3", cells)
-        self.assertIn("K3", cells)
-        self.assertIn("O10", cells)
-        self.assertIn("R10", cells)
-        self.assertEqual(len(cells), 40)
 
     def test_timeliness_text_matches_may_style(self):
         text = root.product_timeliness_text(["6月底前完成1起消防产品行政处罚案件"], required_count=12, actual_count=7)

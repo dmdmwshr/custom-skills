@@ -128,16 +128,6 @@ def excel_mark_pending(cell):
     cell.Font.Color = 0
 
 
-def work_report_pending_cells():
-    cells = []
-    for cell_range in CONFIG["pending_rules"]["work_report_tech_and_product"]["pending_cells"]:
-        min_col, min_row, max_col, max_row = range_boundaries(cell_range)
-        for row in range(min_row, max_row + 1):
-            for col in range(min_col, max_col + 1):
-                cells.append(f"{get_column_letter(col)}{row}")
-    return cells
-
-
 def column_range_letters(column_range):
     start, end = column_range.split(":", 1)
     min_col, _, max_col, _ = range_boundaries(f"{start}1:{end}1")
@@ -568,24 +558,6 @@ def pending_copy_roots(bulletin_dir, template_dir, year, month, actions, blocker
                 normal.unlink()
 
 
-def sync_work_report_skeleton(template_dir, actions, blockers, apply):
-    item = next(entry for entry in ROOT_FILES if entry["key"] == "work_report")
-    source = skeleton_path(template_dir, item)
-    target = numbered_template_path(template_dir, item)
-    if not source.exists():
-        add_blocker(blockers, "重点工作骨架文件不存在，无法同步编号模板", path=source)
-        return
-    if target is None:
-        return
-    if target.exists() and sha256_file(source) == sha256_file(target):
-        actions.append({"kind": "sync_work_report_numbered_template", "status": "skip_same_hash", "src": str(source), "dst": str(target)})
-        return
-    actions.append({"kind": "sync_work_report_numbered_template", "status": "planned" if not apply else "done", "src": str(source), "dst": str(target)})
-    if apply:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-
-
 def find_score_sources(score_dir, month):
     score_dir = Path(score_dir)
     product_matches = sorted(score_dir.glob(f"*{month}月*产品巡查底册*.docx")) + sorted(score_dir.glob("*产品巡查底册*.docx"))
@@ -670,71 +642,6 @@ def build_timeliness_by_brigade(work_plan, year, month, product_stats, staff_cou
             actual_count=actual_count,
         )
     return result
-
-
-def previous_bulletin_month(year, month):
-    if month == 1:
-        return year - 1, 12
-    return year, month - 1
-
-
-def find_previous_work_report(bulletin_dir, year, month):
-    prev_year, prev_month = previous_bulletin_month(year, month)
-    if prev_year != year:
-        return None
-    prev_dir = Path(bulletin_dir).parent / f"{prev_month}月通报"
-    item = next(entry for entry in ROOT_FILES if entry["key"] == "work_report")
-    candidates = [
-        prev_dir / root_file_name(item, prev_year, prev_month, pending=False),
-        prev_dir / root_file_name(item, prev_year, prev_month, pending=True),
-    ]
-    return next((path for path in candidates if path.exists()), None)
-
-
-def read_previous_tech_need_statuses(bulletin_dir, year, month):
-    previous = find_previous_work_report(bulletin_dir, year, month)
-    if not previous:
-        return {}
-    book = xlrd.open_workbook(str(previous))
-    sheet = book.sheet_by_index(0)
-    statuses = {}
-    for row in range(sheet.nrows):
-        brigade = normalize_brigade(sheet.cell_value(row, 1))
-        if brigade in BRIGADE_ORDER:
-            statuses[brigade] = str(sheet.cell_value(row, 10) or "").strip()
-    return statuses
-
-
-def tech_need_statuses(work_plan, bulletin_dir, year, month, blockers):
-    inherited = read_previous_tech_need_statuses(bulletin_dir, year, month)
-    current_tasks = read_work_plan_month_tasks(work_plan, month, blockers)
-    statuses = {}
-    for brigade in BRIGADE_ORDER:
-        current_text = "\n".join(current_tasks.get(brigade, []))
-        if "科技需求" in current_text or "上报一项科技需求" in current_text:
-            statuses[brigade] = "未完成"
-        elif inherited.get(brigade):
-            statuses[brigade] = inherited[brigade]
-        else:
-            statuses[brigade] = "未到时间"
-    return statuses
-
-
-def work_report_product_values(case_counts):
-    values = {}
-    warnings = []
-    for brigade in BRIGADE_ORDER:
-        counts = case_counts.get(brigade, {})
-        if not counts:
-            continue
-        values[brigade] = {
-            "O": f"{counts.get('unique_projects', 0)}起（其中现场判定{counts.get('onsite_rows', 0)}起，抽样送检{counts.get('sample_rows', 0)}起，不合格{counts.get('unqualified_rows', 0)}起）",
-            "P": f"{counts.get('administrative_case_year', 0)}起",
-            "Q": f"{counts.get('criminal_case_year', 0)}起",
-            "R": "0起",
-        }
-        warnings.append({"message": "召回不合格消防产品起数当前按 0 起预填，仍需人工最终确认。", "brigade": brigade, "column": "R"})
-    return values, warnings
 
 
 def mark_pending_office(path, timeliness_by_brigade=None, product_records=None, monitor_details=None):
@@ -831,41 +738,6 @@ def mark_pending_product_stats(path, staff_counts):
     return changed
 
 
-def mark_pending_work_report(path, tech_status_by_brigade=None, product_values_by_brigade=None):
-    excel = excel_com()
-    changed = []
-    rule = CONFIG["pending_rules"]["work_report_tech_and_product"]
-    try:
-        workbook = excel.Workbooks.Open(str(Path(path).resolve()))
-        try:
-            sheet = workbook.Worksheets(1)
-            min_col, min_row, max_col, max_row = range_boundaries(rule["completed_cells"])
-            for row in range(min_row, max_row + 1):
-                for col in range(min_col, max_col + 1):
-                    sheet.Cells(row, col).Value = rule["completed_value"]
-                    sheet.Cells(row, col).Font.Color = 0
-                    sheet.Cells(row, col).Interior.Pattern = 0
-            for cell_ref in work_report_pending_cells():
-                row, col = coordinate_to_tuple(cell_ref)
-                cell = sheet.Cells(row, col)
-                brigade = normalize_brigade(sheet.Cells(row, 2).Value)
-                letter = get_column_letter(col)
-                if letter == rule.get("tech_need_column", "K") and tech_status_by_brigade is not None:
-                    cell.Value = tech_status_by_brigade.get(brigade, cell.Value)
-                elif product_values_by_brigade is not None:
-                    value = product_values_by_brigade.get(brigade, {}).get(letter)
-                    if value is not None:
-                        cell.Value = value
-                excel_mark_pending(cell)
-                changed.append({"sheet": sheet.Name, "row": row, "col": col, "value": str(cell.Value)})
-            workbook.Save()
-        finally:
-            workbook.Close(SaveChanges=True)
-    finally:
-        excel.Quit()
-    return changed
-
-
 def mark_pending_cells(
     bulletin_dir,
     year,
@@ -882,8 +754,6 @@ def mark_pending_cells(
 ):
     paths = root_file_paths(bulletin_dir, year, month)
     timeliness_by_brigade = None
-    tech_status_by_brigade = None
-    product_values_by_brigade = None
     product_records = None
     monitor_details = None
     product_stats = {}
@@ -898,11 +768,8 @@ def mark_pending_cells(
         elif apply:
             add_blocker(blockers, "消防产品监督统计表不存在，无法先核对后生成产品工作实效", path=stats_path)
         timeliness_by_brigade = build_timeliness_by_brigade(work_plan, year, month, product_stats, staff_counts, blockers)
-        product_values_by_brigade, product_warnings = work_report_product_values(case_counts)
-        warnings.extend(product_warnings)
     else:
         add_blocker(blockers, "产品案卷数据不存在，无法预填产品工作实效和产品统计口径", path=case_data)
-    tech_status_by_brigade = tech_need_statuses(work_plan, bulletin_dir, year, month, blockers)
     if score_dir:
         sources, product_records, monitor_details = read_score_office_content(score_dir, score_month or month, blockers)
         actions.append({"kind": "resolve_score_sources_for_root_office", "status": "done", "sources": {key: str(value) if value else None for key, value in sources.items()}})
@@ -915,7 +782,6 @@ def mark_pending_cells(
             "cells": "产品案卷核查行、联网系统核查行、产品工作实效行 D:K",
         },
         {"kind": "mark_pending_product_stats_cells", "path": str(paths["product_stats"]["pending"]), "cells": "B:H 大队行红底，B列写要求数"},
-        {"kind": "mark_pending_work_report_cells", "path": str(paths["work_report"]["pending"]), "cells": "K3:K10,O3:R10 红底并预填可得数据"},
     ]
     if not apply:
         actions.extend({**item, "status": "planned"} for item in planned)
@@ -940,18 +806,6 @@ def mark_pending_cells(
         }
     )
     actions.append({"kind": "mark_pending_product_stats_cells", "status": "done", "path": str(paths["product_stats"]["pending"]), "changed": mark_pending_product_stats(paths["product_stats"]["pending"], staff_counts)})
-    actions.append(
-        {
-            "kind": "mark_pending_work_report_cells",
-            "status": "done",
-            "path": str(paths["work_report"]["pending"]),
-            "changed": mark_pending_work_report(
-                paths["work_report"]["pending"],
-                tech_status_by_brigade=tech_status_by_brigade,
-                product_values_by_brigade=product_values_by_brigade,
-            ),
-        }
-    )
 
 
 def remove_pending_prefixes(bulletin_dir, year, month, actions, blockers, apply):
@@ -986,8 +840,6 @@ def run(args):
             add_blocker(blockers, "必要路径不存在", path=required)
 
     staff_counts = read_staff_counts(work_plan) if work_plan.exists() else {}
-    sync_work_report_skeleton(template_dir, actions, blockers, apply)
-
     if args.mode == "pending":
         pending_copy_roots(bulletin_dir, template_dir, args.year, args.month, actions, blockers, apply)
         if not blockers:
@@ -1036,8 +888,8 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="处理通报月份根层三张当月表的待补和25号核对。",
-        epilog="参考：references/monthly/output_R01_office_record.md、output_R02_product_stats.md、output_R03_work_report.md。",
+        description="处理通报月份根层两张当月表的待补和25号核对。",
+        epilog="参考：references/monthly/output_R01_office_record.md、output_R02_product_stats.md。",
     )
     parser.add_argument("--bulletin-dir", required=True)
     parser.add_argument("--year", type=int, required=True)

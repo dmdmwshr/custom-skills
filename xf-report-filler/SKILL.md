@@ -11,7 +11,7 @@ x-edit-policy: edit-source-repo-only
 
 本 skill 分两条工作流：
 
-1. **月度产品与联网监测成绩登记**：整理 `X月通报` 目录、校验模板版本、生成上月巡查成绩材料、处理当月根层三张通报表待补/定稿。
+1. **月度产品与联网监测成绩登记**：整理 `X月通报` 目录、校验模板版本、生成上月巡查成绩材料、处理当月根层两张通报表待补/定稿。
 2. **旧版消防产品档案 `.doc` 批量填报**：从旧 `.doc` 或结构化 JSON 生成《消防产品专项监督抽查卷评查记录表》。
 
 月度流程是当前优先维护对象。先读 `references/monthly_workflow.md`，再按任务加载 `references/monthly/00_workflow_router.md` 指定的文件对象和数据源对象文档。机器配置见 `resources/monthly_workflow.json`。
@@ -20,7 +20,7 @@ x-edit-policy: edit-source-repo-only
 
 - 用户问整体流程：读本文件、`references/monthly_workflow.md`、`references/monthly/00_workflow_router.md`、`references/monthly/01_directory_model.md`。
 - 用户要整理目录：再读 `01_directory_model.md`、`02_template_strategy.md`。
-- 用户要处理当月根层三张表：读 `output_R01_office_record.md`、`output_R02_product_stats.md`、`output_R03_work_report.md`，以及它们依赖的数据源对象。
+- 用户要处理当月根层两张表：读 `output_R01_office_record.md`、`output_R02_product_stats.md`，以及它们依赖的数据源对象。
 - 用户要生成上月巡查成绩：读 `source_product_register.md`、联网源表对象、`output_G01_product_archives.md` 到 `output_G05_monthly_report.md`。
 - 用户指出某个文件不合规：只加载该目标文件对象、它依赖的数据源对象和 `validation_and_audit.md`，再改配置、脚本和测试。
 - 新增或修改规则时，必须落到具体文件对象文档、`resources/monthly_workflow.json` 和测试里，不只写在聊天记录或总览文档中。
@@ -50,7 +50,7 @@ python scripts/monthly_file_organizer.py `
   --dry-run
 ```
 
-当月 25 号前，根层三张表走待补模式：
+当月 25 号前，根层两张表走待补模式：
 
 ```powershell
 python scripts/monthly_bulletin_root.py `
@@ -100,7 +100,7 @@ python scripts/sync_monthly_templates.py --apply
 - 通报月份目录和成绩月份巡查目录分开：`6月通报` 根层放 6 月当月表，`6月通报\5月巡查` 放 5 月巡查成绩源和成品。
 - 外部模板事实源固定在 `resources/monthly_workflow.json` 的绝对路径；skill 内 `resources/monthly_templates` 只是快照。
 - `产品巡查底册（不发）` 和 `基础信息考评截图（不发）` 是数据源，不标 `【待补】`。
-- 根层三张表在当月 25 号最终数据确认前，文件名前加 `【待补】`；表格内不写 `【待补】`，待确认单元格只用红色底色标记。
+- 根层两张表在当月 25 号最终数据确认前，文件名前加 `【待补】`；表格内不写 `【待补】`，待确认单元格只用红色底色标记。
 - 产品底册黄色高亮问题属于私账：不进入成品，不参与扣分。
 - 产品公开问题描述只写底册括号前内容；括号内、`ps` 后、字段级细节只用于内部定位。
 - 联网公开描述中 CAD 类写“缺点位图”，PDF 类写“缺火灾防控图”。

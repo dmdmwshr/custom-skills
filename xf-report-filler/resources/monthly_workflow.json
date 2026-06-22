@@ -120,17 +120,6 @@
       "source": "numbered_library",
       "used_in_monthly_register": false,
       "reserved": true
-    },
-    {
-      "id": "T10",
-      "key": "emergency_comm_fire_tech_work_report",
-      "file": "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
-      "description": "重点工作完成情况上报表（应急通信与消防科技）模板",
-      "source": "bulletin_skeleton",
-      "skeleton_file": "X月重点工作完成情况上报表（应急通信与消防科技）.xls",
-      "numbered_sync_file": "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls",
-      "used_in_monthly_register": false,
-      "reserved": true
     }
   ],
   "excluded_templates": [
@@ -156,14 +145,6 @@
       "fallback_template_key": "monthly_product_supervision_stats_work_check",
       "target": "{year}年{month}月消防产品监督统计表.xls",
       "pending_rule": "product_stats_required_counts"
-    },
-    {
-      "id": "R03",
-      "key": "work_report",
-      "skeleton_file": "X月重点工作完成情况上报表（应急通信与消防科技）.xls",
-      "fallback_template_key": "emergency_comm_fire_tech_work_report",
-      "target": "{year}年{month}月重点工作完成情况上报表（应急通信与消防科技）.xls",
-      "pending_rule": "work_report_tech_and_product"
     }
   ],
   "grade_outputs": [
@@ -218,17 +199,6 @@
       "target_column": 2,
       "pending_columns": "B:H",
       "value": "（{staff_count}）",
-      "pending_style": "spreadsheet_pending_style"
-    },
-    "work_report_tech_and_product": {
-      "completed_cells": "J3:J10",
-      "completed_value": "已完成",
-      "pending_cells": [
-        "K3:K10",
-        "O3:R10"
-      ],
-      "tech_need_column": "K",
-      "product_columns": "O:R",
       "pending_style": "spreadsheet_pending_style"
     }
   },
@@ -290,13 +260,11 @@
       "T07": "references/monthly/output_G05_monthly_report.md",
       "T08": "references/monthly/output_R02_product_stats.md",
       "T09": "references/monthly/output_R02_product_stats.md",
-      "T10": "references/monthly/output_R03_work_report.md",
       "T90": "references/monthly/02_template_strategy.md"
     },
     "bulletin_root_files": {
       "R01": "references/monthly/output_R01_office_record.md",
-      "R02": "references/monthly/output_R02_product_stats.md",
-      "R03": "references/monthly/output_R03_work_report.md"
+      "R02": "references/monthly/output_R02_product_stats.md"
     },
     "grade_outputs": {
       "G01": "references/monthly/output_G01_product_archives.md",

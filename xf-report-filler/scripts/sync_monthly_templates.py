@@ -18,9 +18,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
 TARGET_DIR = SKILL_DIR / "resources" / "monthly_templates"
 DEFAULT_TEMPLATE_DIR = workflow.template_root()
-SKELETON_DIR_NAME = "X月通报"
-WORK_REPORT_SKELETON = "X月重点工作完成情况上报表（应急通信与消防科技）.xls"
-WORK_REPORT_NUMBERED = "10_重点工作完成情况上报表（应急通信与消防科技）模板.xls"
 
 CONFIG = workflow.load_config()
 TEMPLATES = workflow.templates(CONFIG)
