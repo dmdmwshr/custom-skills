@@ -11,6 +11,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from docx import Document
+from docx.enum.text import WD_COLOR_INDEX
 from openpyxl import load_workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -104,6 +105,10 @@ def write_openpyxl_score(cell, value, number_format):
 def write_com_score(cell, value, number_format):
     cell.Value = value
     cell.NumberFormat = number_format
+
+
+def paragraph_has_yellow_highlight(paragraph):
+    return any(run.font.highlight_color == WD_COLOR_INDEX.YELLOW for run in paragraph.runs)
 
 
 def require_path(path, label):
@@ -452,10 +457,19 @@ def monitor_contact_warnings(monitor_details):
 
 def parse_product_register(path):
     document = Document(str(path))
-    texts = [(index, p.text.strip()) for index, p in enumerate(document.paragraphs, 1)]
+    texts = [
+        {
+            "paragraph": index,
+            "text": p.text.strip(),
+            "yellow": paragraph_has_yellow_highlight(p),
+        }
+        for index, p in enumerate(document.paragraphs, 1)
+    ]
     blocks = []
     current = None
-    for paragraph, text in texts:
+    for item in texts:
+        paragraph = item["paragraph"]
+        text = item["text"]
         if not text:
             continue
         if text.startswith("大队："):
@@ -463,7 +477,7 @@ def parse_product_register(path):
                 blocks.append(current)
             current = {"大队": text.split("：", 1)[1].strip(), "lines": []}
         elif current:
-            current["lines"].append({"paragraph": paragraph, "text": text})
+            current["lines"].append(item)
     if current:
         blocks.append(current)
 
@@ -479,6 +493,7 @@ def parse_product_register(path):
             "errors": [],
             "archive_errors": [],
             "deductions": [],
+            "ignored_yellow_errors": [],
             "parse_issues": [],
             "score": None,
             "no_case": False,
@@ -487,6 +502,7 @@ def parse_product_register(path):
         for entry in block["lines"]:
             line = entry["text"]
             paragraph = entry["paragraph"]
+            is_yellow = entry.get("yellow", False)
             if line.startswith("题名："):
                 record["题名"] = line.split("：", 1)[1].strip()
             elif line.startswith("编号："):
@@ -502,6 +518,18 @@ def parse_product_register(path):
                 general_index = parse_general_index(line)
                 if pending_error:
                     pending_text = pending_error["text"]
+                    if pending_error.get("yellow") or is_yellow:
+                        if not is_blank_product_template_item(pending_text, line):
+                            record["ignored_yellow_errors"].append(
+                                {
+                                    "description": pending_text,
+                                    "line": line,
+                                    "paragraph": pending_error["paragraph"],
+                                    "deduction_paragraph": paragraph,
+                                }
+                            )
+                        pending_error = None
+                        continue
                     if is_blank_product_template_item(pending_text, line):
                         pending_error = None
                         continue
@@ -535,11 +563,21 @@ def parse_product_register(path):
             else:
                 cleaned = clean_error_line(line)
                 if cleaned:
-                    pending_error = {"text": cleaned, "paragraph": paragraph}
+                    pending_error = {"text": cleaned, "paragraph": paragraph, "yellow": is_yellow}
         if pending_error:
             if not is_blank_product_template_item(pending_error["text"]):
-                record["errors"].append(pending_error["text"])
-                record["archive_errors"].append(normalize_broad_description(pending_error["text"]))
+                if pending_error.get("yellow"):
+                    record["ignored_yellow_errors"].append(
+                        {
+                            "description": pending_error["text"],
+                            "line": "",
+                            "paragraph": pending_error["paragraph"],
+                            "deduction_paragraph": None,
+                        }
+                    )
+                else:
+                    record["errors"].append(pending_error["text"])
+                    record["archive_errors"].append(normalize_broad_description(pending_error["text"]))
 
         if not record["题名"] and not record["编号"] and not record["立卷人"]:
             record["no_case"] = True
@@ -1745,6 +1783,7 @@ def run(args):
                             "no_case": item["no_case"],
                             "errors": item["errors"],
                             "archive_errors": item["archive_errors"],
+                            "ignored_yellow_errors": item.get("ignored_yellow_errors", []),
                         }
                         for item in product_records
                     ],
@@ -1766,6 +1805,7 @@ def run(args):
                         {
                             "大队": item["大队"],
                             "broad_issues": unique_text_list(item.get("archive_errors", [])),
+                            "ignored_yellow_errors": item.get("ignored_yellow_errors", []),
                             "office_record_text": product_office_text(item),
                             "report_sentence": product_report_sentence(item),
                         }

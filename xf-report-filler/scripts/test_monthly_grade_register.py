@@ -7,6 +7,8 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
+from docx import Document
+from docx.enum.text import WD_COLOR_INDEX
 from openpyxl import Workbook, load_workbook
 
 
@@ -248,6 +250,36 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
         mismatch = [item for item in issues if item["type"] == "product_public_description_mismatch"]
         self.assertEqual(mismatch[0]["expected"], ["卷内应有的某文书缺失"])
         self.assertEqual(mismatch[0]["actual"], ["责令限期改正通知书审批材料缺失"])
+
+    def test_yellow_product_register_issue_is_private_and_not_scored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "2026年5月产品巡查底册（不发）.docx"
+            doc = Document()
+            doc.add_paragraph("大队：宜兴大队")
+            doc.add_paragraph("题名：测试案卷")
+            doc.add_paragraph("编号：3202")
+            doc.add_paragraph("立卷人：张三")
+            doc.add_paragraph("检查人：李四")
+            doc.add_paragraph("错误")
+            doc.add_paragraph("1、缺授权委托书（缺授权委托书）")
+            doc.add_paragraph("扣分：3.11 0.2分")
+            private_issue = doc.add_paragraph()
+            private_issue.add_run("2、卷内应有的某文书缺失（私账问题）").font.highlight_color = WD_COLOR_INDEX.YELLOW
+            private_deduction = doc.add_paragraph()
+            private_deduction.add_run("扣分：3.13 a 0.5分").font.highlight_color = WD_COLOR_INDEX.YELLOW
+            doc.save(path)
+
+            records = mgr.parse_product_register(path)
+
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            self.assertEqual(record["score"], 9.8)
+            self.assertEqual(record["errors"], ["缺授权委托书（缺授权委托书）"])
+            self.assertEqual(record["archive_errors"], ["缺授权委托书"])
+            self.assertEqual(len(record["deductions"]), 1)
+            self.assertEqual(record["deductions"][0]["value"], 0.2)
+            self.assertEqual(record["ignored_yellow_errors"][0]["description"], "卷内应有的某文书缺失（私账问题）")
+            self.assertNotIn("私账问题", mgr.product_office_text(record))
 
     def test_write_personal_stats_marks_product_person_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
