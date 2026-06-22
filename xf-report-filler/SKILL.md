@@ -127,4 +127,6 @@ python scripts/writer.py `
 
 ## 修改本 skill
 
+任何优化、细化、修复本 skill 前，先读 `references/skill_maintenance.md`，按变更类型选择需要加载的对象文档、配置和测试。
+
 只修改源仓库 `C:\Users\12070\.cc-switch\skills\自建skills\xf-report-filler`。完成后提交并推送，再验证安装副本 `C:\Users\12070\.cc-switch\skills\xf-report-filler` 是否同步。

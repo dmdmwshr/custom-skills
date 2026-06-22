@@ -11,6 +11,7 @@
 - 生成上月巡查成绩：读取 `source_product_register.md`、`source_monitor_base_info.md`、`source_monitor_stats.md`、`output_G01_product_archives.md` 到 `output_G05_monthly_report.md`。
 - 仅修某个文件：读取该文件对象、它依赖的数据源对象和 `validation_and_audit.md`。
 - 模板同步或模板版本问题：读取 `02_template_strategy.md`。
+- 规则变更或小改动：先读取 `../skill_maintenance.md`，再读取目标文件对象、相关数据源对象和 `validation_and_audit.md`。
 
 ## 脚本到文档
 

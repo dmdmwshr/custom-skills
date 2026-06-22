@@ -18,6 +18,15 @@ REQUIRED_OBJECT_HEADINGS = [
     "## 验收点",
 ]
 
+REQUIRED_MAINTENANCE_HEADINGS = [
+    "## 变更分级",
+    "## 渐进加载",
+    "## 修改边界",
+    "## 验证矩阵",
+    "## 提交同步",
+    "## 停止条件",
+]
+
 
 class MonthlyReferenceDocsTests(unittest.TestCase):
     def setUp(self):
@@ -73,7 +82,20 @@ class MonthlyReferenceDocsTests(unittest.TestCase):
         skill_text = (workflow.SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("references/monthly_workflow.md", skill_text)
         self.assertIn("references/monthly/00_workflow_router.md", skill_text)
+        self.assertIn("references/skill_maintenance.md", skill_text)
         self.assertIn("渐进加载规则", skill_text)
+
+    def test_skill_maintenance_doc_is_the_self_update_entry(self):
+        maintenance_path = workflow.SKILL_DIR / "references" / "skill_maintenance.md"
+        self.assertTrue(maintenance_path.exists())
+        maintenance_text = maintenance_path.read_text(encoding="utf-8")
+        for heading in REQUIRED_MAINTENANCE_HEADINGS:
+            with self.subTest(heading=heading):
+                self.assertIn(heading, maintenance_text)
+
+        router_text = (workflow.SKILL_DIR / "references" / "monthly" / "00_workflow_router.md").read_text(encoding="utf-8")
+        self.assertIn("../skill_maintenance.md", router_text)
+        self.assertIn("规则变更或小改动", router_text)
 
 
 if __name__ == "__main__":

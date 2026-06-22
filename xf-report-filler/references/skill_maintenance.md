@@ -1,0 +1,59 @@
+# xf-report-filler 自我维护流程
+
+本文件是维护、优化、细化或修复 `xf-report-filler` 自身前必须读取的入口。目标是让小改动只落到对应对象，避免为了某个文件规则误改整套流程。
+
+## 变更分级
+
+- **文档补充类**：只补充某个文件对象、数据源对象、目录、模板或审计说明；不改脚本业务行为。
+- **配置/索引调整类**：新增或调整 `resources/monthly_workflow.json` 中的数据源、模板编号、R/G 输出编号、引用文档索引。
+- **单文件业务规则类**：例如只调整 R01、G05 或某个数据源解析口径；必须定位到对应对象文档。
+- **脚本行为修复类**：修复解析、生成、审计、模板同步或目录整理脚本；必须保留 dry-run 能力。
+- **模板快照同步类**：用户更新外部模板后，把外部事实源同步到 skill 快照。
+- **真实材料重生成/修复类**：用户明确要求修复或重新生成真实通报材料时才执行。
+- **安装同步类**：源仓库提交推送后，验证并同步 `C:\Users\12070\.cc-switch\skills\xf-report-filler` 安装副本。
+
+## 渐进加载
+
+1. 先读本文件，判断变更分级。
+2. 月度规则改动继续读 `references/monthly/00_workflow_router.md`。
+3. 单文件改动只读目标文件对象、依赖的数据源对象和 `references/monthly/validation_and_audit.md`。
+4. 目录或模板改动只读 `references/monthly/01_directory_model.md` 或 `references/monthly/02_template_strategy.md`。
+5. 安装同步或仓库源问题再读 `cc-switch` skill，不把同步细节复制到月度业务文档里。
+
+## 修改边界
+
+- 只改源仓库 `C:\Users\12070\.cc-switch\skills\自建skills\xf-report-filler`。
+- 不直接把安装副本 `C:\Users\12070\.cc-switch\skills\xf-report-filler` 当源码改。
+- 小改动只碰对应对象文档、必要配置、相关脚本和测试。
+- 不做无关重构，不重命名 skill，不移动入口文件。
+- 不改真实业务材料，除非用户明确要求“重新生成”“修复真实文件”或等价表达。
+- 外部模板是事实源；skill 内模板只是快照，不能反向覆盖电脑里的模板文件。
+
+## 验证矩阵
+
+- 文档补充类：运行引用/结构测试，确认入口能路由到对象文档。
+- 配置/索引调整类：运行 JSON 校验、引用测试和涉及的定向测试。
+- 单文件业务规则类：补对象文档、补定向测试，必要时跑全量测试。
+- 脚本行为修复类：先跑定向测试，再跑 `python -m unittest discover -s scripts -p "test_*.py"`。
+- 模板快照同步类：先 `sync_monthly_templates.py --dry-run`，确认后再 `--apply`，并复查 manifest。
+- 真实材料重生成/修复类：先备份真实文件，再 dry-run，最后 apply 或 force。
+- 安装同步类：提交推送后核对源仓库和安装副本关键文件 SHA-256。
+
+## 提交同步
+
+1. 修改完成后在源仓库运行测试。
+2. 检查 `git status --short`，只暂存本次相关文件。
+3. 提交并推送到 `dmdmwshr/custom-skills`。
+4. 等待或刷新 CC Switch 后，核对安装副本是否同步。
+5. 自动同步滞后时，先完整备份安装副本到 `C:\Users\12070\.cc-switch\skill-backups\<timestamp>-xf-report-filler-before-sync`，再受控复制源目录内容。
+6. 手工同步后运行安装副本 smoke test，并清理源仓库和安装副本中的 `__pycache__`。
+
+## 停止条件
+
+- 发现真实业务材料会被误改，但用户没有明确要求处理真实文件。
+- 外部模板、数据源或用户手工修改内容存在冲突，无法判断事实源。
+- 需要改动多个目标文件对象，但当前请求只要求一个小范围规则。
+- 测试失败且失败原因不是本次计划内可解释的既有输出。
+- 安装副本路径不在 `C:\Users\12070\.cc-switch\skills\xf-report-filler` 下。
+
+遇到停止条件时，先汇报阻塞清单和建议下一步，不继续扩大修改范围。
