@@ -239,15 +239,16 @@
     "judge_type_column": "现场判定或抽样送检",
     "qualified_column": "是否合格",
     "case_type_column": "是否为行案/刑案",
+    "review_column": "是否为复查",
     "product_stats_audit": {
       "B": "unique_projects",
+      "C": "unqualified_projects",
       "D": "unqualified_rows",
       "E": "sample_rows",
       "F": "micro_rows",
       "G": "administrative_case_year"
     },
     "manual_review_columns": {
-      "C": "责令限期改正通知书份数无法仅凭产品案卷数据稳定核对。",
       "H": "光伏、锂离子电池等相关企业与消防处置力量配备次数需人工核对。"
     }
   },

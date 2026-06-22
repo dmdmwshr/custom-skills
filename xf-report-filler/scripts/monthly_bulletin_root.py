@@ -174,6 +174,25 @@ def _is_yellow(rgb):
     return rgb in {(255, 255, 0), (255, 255, 153)}
 
 
+def _is_red(rgb):
+    return rgb in {(255, 0, 0), (255, 51, 51), (192, 0, 0)}
+
+
+def work_plan_header_applies(header, month):
+    text = str(header or "").strip()
+    if not text:
+        return False
+    if "常规" in text:
+        return True
+    start_match = re.search(r"(\d{1,2})月开始", text)
+    if start_match:
+        return int(start_match.group(1)) <= month
+    for index, month_header in MONTH_HEADERS.items():
+        if text == month_header:
+            return index <= month
+    return False
+
+
 def parse_numbered_tasks(text):
     raw = str(text or "").strip()
     if not raw:
@@ -185,6 +204,38 @@ def parse_numbered_tasks(text):
         if line:
             tasks.append(line)
     return tasks
+
+
+def extract_red_text_map_xlrd(book, sheet, candidates):
+    result = {}
+    run_map = getattr(sheet, "rich_text_runlist_map", {}) or {}
+    for item in candidates:
+        row = item["row"]
+        col = item["col"]
+        text = str(sheet.cell_value(row, col) or "")
+        if not text:
+            continue
+        red_parts = []
+        runs = run_map.get((row, col), [])
+        if runs:
+            spans = list(runs) + [(len(text), None)]
+            for index in range(len(spans) - 1):
+                start, font_index = spans[index]
+                end = spans[index + 1][0]
+                if font_index is None:
+                    continue
+                font = book.font_list[font_index]
+                if _is_red(_xlrd_rgb(book, font.colour_index)):
+                    red_parts.append(text[start:end])
+        else:
+            xf = book.xf_list[sheet.cell_xf_index(row, col)]
+            font = book.font_list[xf.font_index]
+            if _is_red(_xlrd_rgb(book, font.colour_index)):
+                red_parts.append(text)
+        red_text = "".join(red_parts).strip()
+        if red_text:
+            result[item["cell"]] = red_text
+    return result
 
 
 def extract_red_text_map(work_plan, sheet_name, cells, blockers):
@@ -213,6 +264,7 @@ def extract_red_text_map(work_plan, sheet_name, cells, blockers):
                         if cell.Characters(index, 1).Font.Color == 255:
                             red_chars.append(char)
                     except Exception:
+                        add_blocker(blockers, "无法读取工作计划单元格富文本红字", cell=cell_ref)
                         red_chars = []
                         break
                 red_text = "".join(red_chars).strip()
@@ -229,14 +281,9 @@ def read_work_plan_month_tasks(work_plan, month, blockers=None):
     blockers = blockers if blockers is not None else []
     book = xlrd.open_workbook(str(work_plan), formatting_info=True)
     sheet = book.sheet_by_name("任务总表")
-    header = MONTH_HEADERS[month]
-    month_col = None
-    for col in range(sheet.ncols):
-        if sheet.cell_value(0, col) == header:
-            month_col = col
-            break
-    if month_col is None:
-        add_blocker(blockers, "工作计划缺少月份列", month=month, header=header)
+    applicable_cols = [col for col in range(1, sheet.ncols) if work_plan_header_applies(sheet.cell_value(0, col), month)]
+    if not applicable_cols:
+        add_blocker(blockers, "工作计划缺少可识别的累计任务列", month=month)
         return {}
 
     candidates = {}
@@ -244,22 +291,32 @@ def read_work_plan_month_tasks(work_plan, month, blockers=None):
         brigade = normalize_brigade(sheet.cell_value(row, 0))
         if not brigade:
             continue
-        xf = book.xf_list[sheet.cell_xf_index(row, month_col)]
-        rgb = _xlrd_rgb(book, xf.background.pattern_colour_index)
-        if not _is_yellow(rgb):
-            candidates[brigade] = []
-            continue
-        cell_ref = f"{xlrd.formula.colname(month_col)}{row + 1}"
-        candidates[brigade] = {"cell": cell_ref, "text": str(sheet.cell_value(row, month_col) or "")}
+        candidates.setdefault(brigade, [])
+        for month_col in applicable_cols:
+            xf = book.xf_list[sheet.cell_xf_index(row, month_col)]
+            rgb = _xlrd_rgb(book, xf.background.pattern_colour_index)
+            if not _is_yellow(rgb):
+                continue
+            cell_ref = f"{xlrd.formula.colname(month_col)}{row + 1}"
+            candidates[brigade].append(
+                {
+                    "row": row,
+                    "col": month_col,
+                    "cell": cell_ref,
+                    "text": str(sheet.cell_value(row, month_col) or ""),
+                }
+            )
 
-    red_map = extract_red_text_map(work_plan, "任务总表", [value["cell"] for value in candidates.values() if isinstance(value, dict)], blockers)
+    all_candidates = [item for values in candidates.values() for item in values]
+    red_map = extract_red_text_map_xlrd(book, sheet, all_candidates)
     tasks = {}
-    for brigade, value in candidates.items():
-        if isinstance(value, list):
-            tasks[brigade] = []
-            continue
-        text = red_map.get(value["cell"]) or value["text"]
-        tasks[brigade] = parse_numbered_tasks(text)
+    for brigade, values in candidates.items():
+        brigade_tasks = []
+        for value in values:
+            red_text = red_map.get(value["cell"], "")
+            if red_text:
+                brigade_tasks.extend(parse_numbered_tasks(red_text))
+        tasks[brigade] = brigade_tasks
     return tasks
 
 
@@ -267,27 +324,47 @@ def read_case_counts(case_data, year, month):
     start, end = previous_month_window(year, month)
     year_start = date(year, 1, 1)
     workbook = load_workbook(case_data, read_only=True, data_only=True)
+    mapping = CONFIG.get("case_data_mapping", {})
+    fallback_indexes = {
+        "date_column": 8,
+        "project_column": 2,
+        "micro_column": 10,
+        "judge_type_column": 11,
+        "qualified_column": 12,
+        "case_type_column": 13,
+        "review_column": 14,
+    }
     result = {}
     for sheet in workbook.worksheets:
         brigade = normalize_brigade(sheet.title)
         if brigade not in BRIGADE_ORDER:
             continue
+        headers = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), [])
+        header_map = {str(value or "").strip(): index for index, value in enumerate(headers)}
+        indexes = {
+            key: header_map.get(str(mapping.get(key, "")).strip(), fallback)
+            for key, fallback in fallback_indexes.items()
+        }
         rows = 0
         unique_projects = set()
+        unqualified_projects = set()
         sample_rows = 0
         onsite_rows = 0
         micro_rows = 0
         unqualified_rows = 0
         administrative_case_year = 0
         criminal_case_year = 0
-        for values in sheet.iter_rows(min_row=2, values_only=True):
+        for row_index, values in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
             if not any(values):
                 continue
-            raw_date = values[8] if len(values) > 8 else None
+            review_value = value_at(values, indexes["review_column"])
+            if is_review_case(review_value):
+                continue
+            raw_date = value_at(values, indexes["date_column"])
             check_date = normalize_date(raw_date)
             if not check_date:
                 continue
-            case_type = str(values[13] if len(values) > 13 and values[13] else "")
+            case_type = str(value_at(values, indexes["case_type_column"]) or "")
             if year_start <= check_date <= end:
                 if "行案" in case_type:
                     administrative_case_year += 1
@@ -295,19 +372,23 @@ def read_case_counts(case_data, year, month):
                     criminal_case_year += 1
             if start <= check_date <= end:
                 rows += 1
-                if len(values) > 2 and values[2]:
-                    unique_projects.add(str(values[2]).strip())
-                if len(values) > 10 and values[10] and "微型" in str(values[10]):
+                project_key = str(value_at(values, indexes["project_column"]) or "").strip() or f"{sheet.title}!{row_index}"
+                unique_projects.add(project_key)
+                if value_at(values, indexes["micro_column"]) and "微型" in str(value_at(values, indexes["micro_column"])):
                     micro_rows += 1
-                if len(values) > 11 and values[11] and "抽样" in str(values[11]):
+                judge_type = str(value_at(values, indexes["judge_type_column"]) or "")
+                if "抽样" in judge_type:
                     sample_rows += 1
-                if len(values) > 11 and values[11] and "现场" in str(values[11]):
+                if "现场" in judge_type:
                     onsite_rows += 1
-                if len(values) > 12 and values[12] and "不合格" in str(values[12]):
+                qualified = str(value_at(values, indexes["qualified_column"]) or "")
+                if "不合格" in qualified:
                     unqualified_rows += 1
+                    unqualified_projects.add(project_key)
         result[brigade] = {
             "rows": rows,
             "unique_projects": len(unique_projects),
+            "unqualified_projects": len(unqualified_projects),
             "sample_rows": sample_rows,
             "onsite_rows": onsite_rows,
             "micro_rows": micro_rows,
@@ -315,7 +396,19 @@ def read_case_counts(case_data, year, month):
             "administrative_case_year": administrative_case_year,
             "criminal_case_year": criminal_case_year,
         }
+    workbook.close()
     return result
+
+
+def value_at(values, index):
+    return values[index] if index is not None and len(values) > index else None
+
+
+def is_review_case(value):
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return "复查" in text or text in {"是", "y", "yes", "true", "1"}
 
 
 def normalize_date(value):
@@ -331,13 +424,22 @@ def normalize_date(value):
 
 
 def parse_stat_count(value):
-    match = re.search(r"(\d+)\s*次", str(value or ""))
+    match = re.search(r"(\d+)\s*(?:次|起|份|个)", str(value or ""))
     return int(match.group(1)) if match else None
 
 
 def parse_first_number(value):
     match = re.search(r"(\d+)", str(value or ""))
     return int(match.group(1)) if match else None
+
+
+def parse_required_count(value):
+    match = re.search(r"[（(]\s*(\d+)\s*[）)]", str(value or ""))
+    return int(match.group(1)) if match else None
+
+
+def product_stats_count_for_column(letter, value):
+    return parse_stat_count(value)
 
 
 def read_product_stats(path):
@@ -351,11 +453,15 @@ def read_product_stats(path):
             for col in range(1, min(sheet.ncols, 8)):
                 letter = get_column_letter(col + 1)
                 value = sheet.cell_value(row, col)
-                row_values[letter] = {"value": value, "count": parse_first_number(value)}
+                row_values[letter] = {
+                    "value": value,
+                    "count": product_stats_count_for_column(letter, value),
+                    "required": parse_required_count(value),
+                }
             stats[brigade] = {
                 "row": row + 1,
                 "value": sheet.cell_value(row, 1),
-                "count": parse_stat_count(sheet.cell_value(row, 1)),
+                "count": product_stats_count_for_column("B", sheet.cell_value(row, 1)),
                 "columns": row_values,
             }
     return stats
@@ -371,6 +477,13 @@ def product_timeliness_text(tasks, required_count=None, actual_count=None):
     lines.extend(f"{index}、{item}；" for index, item in enumerate(issues, start=1))
     lines[-1] = lines[-1].rstrip("；") + "。"
     return "\n".join(lines)
+
+
+def timeliness_count_from_stats(stats, brigade, staff_counts):
+    column_b = stats.get(brigade, {}).get("columns", {}).get("B", {})
+    required = column_b.get("required") or staff_counts.get(brigade)
+    actual = column_b.get("count")
+    return required, actual
 
 
 def audit_product_stats(stats, case_counts):
@@ -389,16 +502,27 @@ def audit_product_stats(stats, case_counts):
             expected = row_cases.get(case_key)
             value = row_stats.get("columns", {}).get(column, {}).get("value")
             if actual is None:
-                add_blocker(blockers, "消防产品监督统计表未填写可核对数据", brigade=brigade, column=column, value=value)
+                warnings.append(
+                    {
+                        "type": "product_stats_unfilled",
+                        "message": "消防产品监督统计表未填写可核对数据",
+                        "brigade": brigade,
+                        "column": column,
+                        "value": value,
+                        "case_field": case_key,
+                    }
+                )
             elif expected is not None and actual != expected:
-                add_blocker(
-                    blockers,
-                    "消防产品监督统计表与案卷数据不一致",
-                    brigade=brigade,
-                    column=column,
-                    stat_count=actual,
-                    case_count=expected,
-                    case_field=case_key,
+                warnings.append(
+                    {
+                        "type": "product_stats_mismatch",
+                        "message": "消防产品监督统计表与案卷数据不一致",
+                        "brigade": brigade,
+                        "column": column,
+                        "stat_count": actual,
+                        "case_count": expected,
+                        "case_field": case_key,
+                    }
                 )
         for column, reason in manual_columns.items():
             warnings.append({"message": "消防产品监督统计表列需人工核对", "brigade": brigade, "column": column, "reason": reason})
@@ -415,6 +539,17 @@ def pending_copy_roots(bulletin_dir, template_dir, year, month, actions, blocker
         normal = bulletin_dir / root_file_name(item, year, month, pending=False)
         if not source.exists():
             add_blocker(blockers, "通报骨架文件不存在", path=source)
+            continue
+        if target.exists():
+            actions.append(
+                {
+                    "kind": "copy_pending_root_file",
+                    "status": "skip_existing_pending_root_file",
+                    "src": str(source),
+                    "dst": str(target),
+                    "sha256": sha256_file(source),
+                }
+            )
             continue
         actions.append(
             {
@@ -524,15 +659,15 @@ def fill_office_record_score_rows(path, product_records, monitor_details):
     return changed
 
 
-def build_timeliness_by_brigade(work_plan, case_data, year, month, staff_counts, blockers):
+def build_timeliness_by_brigade(work_plan, year, month, product_stats, staff_counts, blockers):
     tasks_by_brigade = read_work_plan_month_tasks(work_plan, month, blockers)
-    case_counts = read_case_counts(case_data, year, month) if Path(case_data).exists() else {}
     result = {}
     for brigade in BRIGADE_ORDER:
+        required_count, actual_count = timeliness_count_from_stats(product_stats, brigade, staff_counts)
         result[brigade] = product_timeliness_text(
             tasks_by_brigade.get(brigade, []),
-            required_count=staff_counts.get(brigade),
-            actual_count=case_counts.get(brigade, {}).get("unique_projects"),
+            required_count=required_count,
+            actual_count=actual_count,
         )
     return result
 
@@ -659,6 +794,14 @@ def excel_com():
     return excel
 
 
+def ensure_product_stats_required_value(value, staff_count):
+    text = str(value or "").strip()
+    required = product_stats_pending_value(staff_count)
+    if parse_required_count(text):
+        return text
+    return f"{text}{required}" if text else required
+
+
 def mark_pending_product_stats(path, staff_counts):
     excel = excel_com()
     changed = []
@@ -677,7 +820,7 @@ def mark_pending_product_stats(path, staff_counts):
                     col = coordinate_to_tuple(f"{letter}1")[1]
                     cell = sheet.Cells(row, col)
                     if letter == "B":
-                        cell.Value = product_stats_pending_value(staff_counts[brigade])
+                        cell.Value = ensure_product_stats_required_value(cell.Value, staff_counts[brigade])
                     excel_mark_pending(cell)
                     changed.append({"sheet": sheet.Name, "cell": f"{letter}{row}", "value": str(cell.Value or "")})
             workbook.Save()
@@ -743,9 +886,18 @@ def mark_pending_cells(
     product_values_by_brigade = None
     product_records = None
     monitor_details = None
+    product_stats = {}
     if Path(case_data).exists():
         case_counts = read_case_counts(case_data, year, month)
-        timeliness_by_brigade = build_timeliness_by_brigade(work_plan, case_data, year, month, staff_counts, blockers)
+        stats_path = paths["product_stats"]["pending"] if paths["product_stats"]["pending"].exists() else paths["product_stats"]["normal"]
+        if stats_path.exists():
+            product_stats = read_product_stats(stats_path)
+            stats_audit = audit_product_stats(product_stats, case_counts)
+            blockers.extend(stats_audit["blockers"])
+            warnings.extend(stats_audit["warnings"])
+        elif apply:
+            add_blocker(blockers, "消防产品监督统计表不存在，无法先核对后生成产品工作实效", path=stats_path)
+        timeliness_by_brigade = build_timeliness_by_brigade(work_plan, year, month, product_stats, staff_counts, blockers)
         product_values_by_brigade, product_warnings = work_report_product_values(case_counts)
         warnings.extend(product_warnings)
     else:
