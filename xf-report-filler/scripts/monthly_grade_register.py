@@ -59,6 +59,8 @@ WORKFLOW_CONFIG = monthly_workflow.load_config()
 PERSONAL_RULES = WORKFLOW_CONFIG.get("personal_stats_rules", {})
 PENDING_FILL_RGB = PERSONAL_RULES.get("mismatch_fill_color", "FFFF0000")
 PENDING_FONT_RGB = PERSONAL_RULES.get("mismatch_font_color", "FF000000")
+PRODUCT_SCORE_NUMBER_FORMAT = "0.0"
+MONITOR_SCORE_NUMBER_FORMAT = "0.00"
 
 
 class HumanReviewRequired(RuntimeError):
@@ -92,6 +94,16 @@ def score_text(value):
         return ""
     num = float(value)
     return str(round(num, 2)).rstrip("0").rstrip(".")
+
+
+def write_openpyxl_score(cell, value, number_format):
+    cell.value = value
+    cell.number_format = number_format
+
+
+def write_com_score(cell, value, number_format):
+    cell.Value = value
+    cell.NumberFormat = number_format
 
 
 def require_path(path, label):
@@ -964,7 +976,7 @@ def write_product_summary(template_path, output_path, product_records, force):
     for row in range(2, ws.max_row + 1):
         short = brigade_short(ws.cell(row, 1).value)
         if short in scores:
-            ws.cell(row, 2).value = scores[short]
+            write_openpyxl_score(ws.cell(row, 2), scores[short], PRODUCT_SCORE_NUMBER_FORMAT)
     workbook.save(output_path)
 
 
@@ -1040,7 +1052,7 @@ def write_personal_stats(template_path, output_path, product_records, monitor_de
         key = (item["short"], norm_text(item["立卷人"]))
         row = person_index.get(key)
         if row:
-            ws.cell(row, 27).value = item["score"]
+            write_openpyxl_score(ws.cell(row, 27), item["score"], PRODUCT_SCORE_NUMBER_FORMAT)
         else:
             warnings.append(f"个人统计表未找到产品立卷人：{item['大队']} {item['立卷人']}")
     mismatch_marks = mark_personal_product_mismatches(ws, match_issues)
@@ -1062,7 +1074,7 @@ def write_personal_stats(template_path, output_path, product_records, monitor_de
         if col > PERSON_SCORE_COLUMNS[-1]:
             warnings.append(f"联网联系人超过 AB:AI 可填列：{detail['大队']} {detail['联系人']}")
             continue
-        ws.cell(row, col).value = detail["score"]
+        write_openpyxl_score(ws.cell(row, col), detail["score"], MONITOR_SCORE_NUMBER_FORMAT)
         next_col_by_person[key] = col + 1
     workbook.save(output_path)
     return warnings
@@ -1185,9 +1197,9 @@ def write_case_scores(template_path, output_path, product_records, monitor_score
         for row in range(3, 11):
             short = brigade_short(ws.Cells(row, 1).Value)
             if short in product_scores:
-                ws.Cells(row, 2).Value = product_scores[short]
+                write_com_score(ws.Cells(row, 2), product_scores[short], PRODUCT_SCORE_NUMBER_FORMAT)
             if short in monitor_scores:
-                ws.Cells(row, 11).Value = monitor_scores[short]["avg"]
+                write_com_score(ws.Cells(row, 11), monitor_scores[short]["avg"], MONITOR_SCORE_NUMBER_FORMAT)
         workbook.Save()
     finally:
         workbook.Close(False)

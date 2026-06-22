@@ -1,6 +1,7 @@
 import copy
 import sys
 import tempfile
+import types
 import unittest
 from datetime import date
 from pathlib import Path
@@ -282,6 +283,153 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
             self.assertEqual(ws.cell(6, 27).fill.fgColor.rgb, "FFFF0000")
             self.assertIsNotNone(ws.cell(6, 27).comment)
             self.assertTrue(any("未找到产品立卷人" in item for item in warnings))
+
+    def test_write_product_summary_formats_product_scores_one_decimal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template = Path(tmp) / "产品监督成绩总表模板.xlsx"
+            output = Path(tmp) / "产品监督成绩总表.xlsx"
+            workbook = Workbook()
+            ws = workbook.active
+            ws.cell(2, 1).value = "梁溪大队"
+            ws.cell(3, 1).value = "锡山大队"
+            workbook.save(template)
+
+            mgr.write_product_summary(
+                template,
+                output,
+                [
+                    {"short": "梁溪", "score": 10.0},
+                    {"short": "锡山", "score": 9.5},
+                ],
+                force=True,
+            )
+
+            wb = load_workbook(output)
+            ws = wb.active
+            self.assertEqual(ws.cell(2, 2).value, 10)
+            self.assertEqual(ws.cell(2, 2).number_format, mgr.PRODUCT_SCORE_NUMBER_FORMAT)
+            self.assertEqual(ws.cell(3, 2).value, 9.5)
+            self.assertEqual(ws.cell(3, 2).number_format, mgr.PRODUCT_SCORE_NUMBER_FORMAT)
+
+    def test_write_personal_stats_formats_product_and_monitor_scores(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template = Path(tmp) / "个人执法统计表模板.xlsx"
+            output = Path(tmp) / "2026年5月个人执法统计表.xlsx"
+            workbook = Workbook()
+            ws = workbook.active
+            ws.cell(6, 1).value = "梁溪大队"
+            ws.cell(6, 2).value = "张三"
+            workbook.save(template)
+
+            warnings = mgr.write_personal_stats(
+                template,
+                output,
+                [
+                    {
+                        "short": "梁溪",
+                        "大队": "梁溪大队",
+                        "立卷人": "张三",
+                        "题名": "测试案卷",
+                        "score": 10.0,
+                        "no_case": False,
+                    }
+                ],
+                [
+                    {
+                        "short": "梁溪",
+                        "大队": "梁溪大队",
+                        "联系人": "张三",
+                        "单位": "测试单位",
+                        "score": 9.7,
+                    }
+                ],
+                5,
+                force=True,
+            )
+
+            wb = load_workbook(output)
+            ws = wb.active
+            self.assertEqual(warnings, [])
+            self.assertEqual(ws.cell(6, 27).value, 10)
+            self.assertEqual(ws.cell(6, 27).number_format, mgr.PRODUCT_SCORE_NUMBER_FORMAT)
+            self.assertEqual(ws.cell(6, 28).value, 9.7)
+            self.assertEqual(ws.cell(6, 28).number_format, mgr.MONITOR_SCORE_NUMBER_FORMAT)
+
+    def test_write_case_scores_formats_product_and_monitor_scores(self):
+        class FakeCell:
+            def __init__(self, value=None):
+                self.Value = value
+                self.NumberFormat = None
+
+        class FakeSheet:
+            def __init__(self):
+                self.cells = {(3, 1): FakeCell("梁溪大队")}
+
+            def Cells(self, row, col):
+                return self.cells.setdefault((row, col), FakeCell())
+
+        class FakeWorkbook:
+            def __init__(self, sheet):
+                self.sheet = sheet
+                self.saved = False
+                self.closed = False
+
+            def Worksheets(self, index):
+                self.index = index
+                return self.sheet
+
+            def Save(self):
+                self.saved = True
+
+            def Close(self, save_changes):
+                self.closed = True
+
+        class FakeWorkbooks:
+            def __init__(self, workbook):
+                self.workbook = workbook
+                self.opened_path = None
+
+            def Open(self, path):
+                self.opened_path = path
+                return self.workbook
+
+        class FakeExcel:
+            def __init__(self, workbook):
+                self.Workbooks = FakeWorkbooks(workbook)
+                self.Visible = True
+                self.DisplayAlerts = True
+                self.quit = False
+
+            def Quit(self):
+                self.quit = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            template = Path(tmp) / "个案成绩模板.xls"
+            output = Path(tmp) / "个案成绩.xls"
+            template.write_bytes(b"fake-xls")
+            sheet = FakeSheet()
+            workbook = FakeWorkbook(sheet)
+            excel = FakeExcel(workbook)
+            win32com = types.ModuleType("win32com")
+            client = types.ModuleType("win32com.client")
+            client.DispatchEx = lambda name: excel
+            win32com.client = client
+
+            with patch.dict(sys.modules, {"win32com": win32com, "win32com.client": client}):
+                mgr.write_case_scores(
+                    template,
+                    output,
+                    [{"short": "梁溪", "score": 10.0}],
+                    {"梁溪": {"avg": 9.7}},
+                    force=True,
+                )
+
+            self.assertTrue(workbook.saved)
+            self.assertTrue(workbook.closed)
+            self.assertEqual(sheet.Cells(3, 2).Value, 10.0)
+            self.assertEqual(sheet.Cells(3, 2).NumberFormat, mgr.PRODUCT_SCORE_NUMBER_FORMAT)
+            self.assertEqual(sheet.Cells(3, 11).Value, 9.7)
+            self.assertEqual(sheet.Cells(3, 11).NumberFormat, mgr.MONITOR_SCORE_NUMBER_FORMAT)
 
     def test_read_monitor_scores_recomputes_avg_over_10(self):
         class FakeCell:
