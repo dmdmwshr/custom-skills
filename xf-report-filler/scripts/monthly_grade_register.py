@@ -823,12 +823,10 @@ def normalize_monitor_issues(raw):
         low = part.lower()
         if part in {"人员信息", "未上传人员信息"}:
             normalized.append("缺人员信息")
-        elif low in {"pdf", "缺pdf"}:
-            normalized.append("缺PDF")
-        elif low in {"cad", "缺cad"}:
-            normalized.append("缺CAD图")
-        elif part == "火灾防控图":
+        elif re.fullmatch(r"缺?\s*pdf(?:图)?", low) or part in {"火灾防控图", "缺火灾防控图"}:
             normalized.append("缺火灾防控图")
+        elif re.fullmatch(r"缺?\s*cad(?:图)?", low) or part in {"点位图", "缺点位图"}:
+            normalized.append("缺点位图")
         elif part == "主机日期":
             normalized.append("消控主机生产日期未录入")
         elif part in {"未登录", "账号长期登录"}:

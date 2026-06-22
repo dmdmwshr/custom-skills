@@ -155,6 +155,26 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
         self.assertEqual(person, "")
         self.assertIn("联系人", issues)
 
+    def test_normalize_monitor_issues_uses_public_cad_pdf_names(self):
+        text = mgr.normalize_monitor_issues("cad、CAD、缺cad、缺CAD、CAD图、点位图、pdf、PDF、缺pdf、缺PDF、火灾防控图")
+        self.assertNotIn("CAD", text)
+        self.assertNotIn("PDF", text)
+        self.assertIn("缺点位图", text)
+        self.assertIn("缺火灾防控图", text)
+
+    def test_monitor_office_text_uses_public_cad_pdf_names(self):
+        text = mgr.monitor_office_text(
+            "梁溪",
+            [
+                {
+                    "short": "梁溪",
+                    "单位": "测试单位",
+                    "issues_raw": "cad、pdf",
+                }
+            ],
+        )
+        self.assertEqual(text, "1、测试单位缺点位图、缺火灾防控图")
+
     def test_blank_product_template_item_is_skipped(self):
         self.assertTrue(mgr.is_blank_product_template_item("（）", "扣分："))
         self.assertTrue(mgr.is_blank_product_template_item(mgr.clean_error_line("3、（）"), "扣分："))
