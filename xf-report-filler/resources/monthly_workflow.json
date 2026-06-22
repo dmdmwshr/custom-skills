@@ -266,6 +266,47 @@
     "pseudo_monitor_contact": "warning",
     "monitor_average_gt_10": "recompute_warning_no_source_edit"
   },
+  "reference_docs": {
+    "overview": "references/monthly_workflow.md",
+    "router": "references/monthly/00_workflow_router.md",
+    "directory_model": "references/monthly/01_directory_model.md",
+    "template_strategy": "references/monthly/02_template_strategy.md",
+    "validation_and_audit": "references/monthly/validation_and_audit.md",
+    "data_sources": {
+      "work_plan": "references/monthly/source_work_plan.md",
+      "case_data": "references/monthly/source_product_case_data.md",
+      "monitor_history": "references/monthly/source_monitor_stats.md",
+      "product_register": "references/monthly/source_product_register.md",
+      "monitor_base_info": "references/monthly/source_monitor_base_info.md",
+      "monitor_stats": "references/monthly/source_monitor_stats.md"
+    },
+    "templates": {
+      "T01": "references/monthly/source_product_register.md",
+      "T02": "references/monthly/output_G01_product_archives.md",
+      "T03": "references/monthly/output_G02_product_summary.md",
+      "T04": "references/monthly/output_G03_personal_stats.md",
+      "T05": "references/monthly/output_R01_office_record.md",
+      "T06": "references/monthly/output_G04_case_scores.md",
+      "T07": "references/monthly/output_G05_monthly_report.md",
+      "T08": "references/monthly/output_R02_product_stats.md",
+      "T09": "references/monthly/output_R02_product_stats.md",
+      "T10": "references/monthly/output_R03_work_report.md",
+      "T90": "references/monthly/02_template_strategy.md"
+    },
+    "bulletin_root_files": {
+      "R01": "references/monthly/output_R01_office_record.md",
+      "R02": "references/monthly/output_R02_product_stats.md",
+      "R03": "references/monthly/output_R03_work_report.md"
+    },
+    "grade_outputs": {
+      "G01": "references/monthly/output_G01_product_archives.md",
+      "G02": "references/monthly/output_G02_product_summary.md",
+      "G03": "references/monthly/output_G03_personal_stats.md",
+      "G04": "references/monthly/output_G04_case_scores.md",
+      "G05": "references/monthly/output_G05_monthly_report.md",
+      "G06": "references/monthly/output_G06_legacy_score_office.md"
+    }
+  },
   "legacy_template_names": {
     "（模板）产品巡查底册.docx": "01_产品巡查底册模板.docx",
     "（模板）消防产品档案质量明细表.doc": "02_消防产品档案质量明细表模板.doc",

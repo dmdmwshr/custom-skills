@@ -1035,7 +1035,10 @@ def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="处理通报月份根层三张当月表的待补和25号核对。")
+    parser = argparse.ArgumentParser(
+        description="处理通报月份根层三张当月表的待补和25号核对。",
+        epilog="参考：references/monthly/output_R01_office_record.md、output_R02_product_stats.md、output_R03_work_report.md。",
+    )
     parser.add_argument("--bulletin-dir", required=True)
     parser.add_argument("--year", type=int, required=True)
     parser.add_argument("--month", type=int, required=True)

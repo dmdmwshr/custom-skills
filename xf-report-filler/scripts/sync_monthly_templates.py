@@ -130,7 +130,10 @@ def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="从外部模板事实源同步月度登记模板到 skill 快照目录。")
+    parser = argparse.ArgumentParser(
+        description="从外部模板事实源同步月度登记模板到 skill 快照目录。",
+        epilog="参考：references/monthly/02_template_strategy.md。",
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")

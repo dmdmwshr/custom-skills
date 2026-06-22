@@ -1927,7 +1927,10 @@ def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="按月生成产品与联网监测考评成绩登记文件。")
+    parser = argparse.ArgumentParser(
+        description="按月生成产品与联网监测考评成绩登记文件。",
+        epilog="参考：references/monthly/source_product_register.md、source_monitor_base_info.md、source_monitor_stats.md 和 G01-G06 对象文档。",
+    )
     parser.add_argument("--month-dir", required=True, help="月份目录，例如 C:\\...\\5月")
     parser.add_argument("--year", type=int, required=True, help="年份，例如 2026")
     parser.add_argument("--month", type=int, required=True, help="月份，例如 5")

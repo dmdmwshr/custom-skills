@@ -105,6 +105,15 @@ def data_source_path(name, config=None):
     return path_from_config(value)
 
 
+def reference_docs(config=None):
+    config = config or load_config()
+    return dict(config.get("reference_docs", {}))
+
+
+def reference_doc_path(value):
+    return path_from_config(value)
+
+
 def sha256_file(path):
     path = Path(path)
     digest = hashlib.sha256()

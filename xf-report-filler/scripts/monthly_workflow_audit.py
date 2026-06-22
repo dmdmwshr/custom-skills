@@ -217,7 +217,10 @@ def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="只读审计月度通报目录、数据源、模板版本和目标成品状态。")
+    parser = argparse.ArgumentParser(
+        description="只读审计月度通报目录、数据源、模板版本和目标成品状态。",
+        epilog="参考：references/monthly/00_workflow_router.md；审计规则见 references/monthly/validation_and_audit.md。",
+    )
     parser.add_argument("--bulletin-dir", required=True)
     parser.add_argument("--bulletin-year", type=int, required=True)
     parser.add_argument("--bulletin-month", type=int, required=True)

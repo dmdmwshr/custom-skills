@@ -368,7 +368,10 @@ def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="按通报月份目录模型整理月度产品成绩登记目录。")
+    parser = argparse.ArgumentParser(
+        description="按通报月份目录模型整理月度产品成绩登记目录。",
+        epilog="参考：references/monthly/01_directory_model.md；模板策略见 references/monthly/02_template_strategy.md。",
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true", help="只预览动作，不修改文件")
     mode.add_argument("--apply", action="store_true", help="执行安全重命名、移动、复制和指定误生成文件删除")
