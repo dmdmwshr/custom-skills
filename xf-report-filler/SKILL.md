@@ -24,6 +24,7 @@ x-edit-policy: edit-source-repo-only
 - 用户要处理当月根层两张表：读 `output_R01_office_record.md`、`output_R02_product_stats.md`，以及它们依赖的数据源对象。
 - 用户要生成上月巡查成绩：读 `source_product_register.md`、联网源表对象、`output_G01_product_archives.md` 到 `output_G05_monthly_report.md`。
 - 用户要生成年度产品问题汇总：读 `references/annual_problem_summary/00_workflow_router.md`、`source_product_register.md`、`output_annual_problem_summary.md`、`validation_and_audit.md`。
+- 用户要生成或修正 Word 公文类格式：读 `references/document_style.md`；年度汇总还要读年度输出对象文档。
 - 用户指出某个文件不合规：只加载该目标文件对象、它依赖的数据源对象和 `validation_and_audit.md`，再改配置、脚本和测试。
 - 新增或修改规则时，必须落到具体文件对象文档、对应工作流配置和测试里，不只写在聊天记录或总览文档中。
 
@@ -133,10 +134,12 @@ python scripts/sync_monthly_templates.py --apply
 - 默认扫描年度根目录下所有 `*产品巡查底册*.docx` 和 `*产品监督网上巡查.doc`；旧版网上巡查源按大队行、案卷信息行、问题行分段解析。
 - 同月多源时，新版修改版底册优先，其次新版普通底册，最后旧版网上巡查 `.doc`。
 - 年度汇总只生成封面和正文，不生成可见目录页；Word 左侧导航依靠“大队”一级标题和“月份”二级标题跳转。
+- 年度汇总按 `references/document_style.md` 的公文格式生成：标题 2 号方正小标宋，正文 3 号方正仿宋，一级标题 3 号方正黑体，二级标题 3 号方正楷体。
 - 年度汇总正文按“大队 -> 月份 -> 案卷 -> 问题”组织；同一案卷信息只出现一次，问题列在案卷下方。
-- 年度汇总正文不放图片、截图、扣分、扣分说明、单独 `ps` 备注或括号内细节；这些只写入 review JSON。
+- 年度汇总是内部复核材料，正文保留底册括号内细节和旧版网上巡查 `ps` 备注；`ps` 统一写成中文全角括号格式，如 `（ps：备注内容）`。
+- 年度汇总正文不放图片、截图、扣分、扣分说明、分值或条款号；这些只写入 review JSON。
 - 年度汇总纳入黄色高亮问题，并在输出中继续标黄；黄色只表示需人工复核，不在年度汇总中自动剔除。
-- 正文错误描述仍使用括号前、`ps` 前文本；旧版 `.doc` 的单独 `ps` 段落和扣分尾巴只写入 review JSON，不写入正文。
+- 月度产品登记公开材料仍只写括号前描述；不要把年度汇总的括号/ps 规则套到月度产品档案、通报或科室表。
 
 ## 旧版 `.doc` 填报
 

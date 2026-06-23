@@ -117,6 +117,7 @@ class AnnualProductProblemSummaryTests(unittest.TestCase):
             self.assertFalse(any("整改照片" in item["public_description"] for item in review["entries"]))
             note_entry = next(item for item in review["entries"] if item["public_description"] == "证据保全决定书格式错误")
             self.assertIn("整改照片未开盒", note_entry["legacy_notes"][0])
+            self.assertIn("（ps：整改照片未开盒拍摄新面罩的外观情况）", note_entry["summary_description"])
             self.assertTrue(note_entry["review_required"])
             self.assertEqual(note_entry["code"], "32113513C202500026")
             self.assertIn("经开区雀隐庐", note_entry["case_info"])
@@ -138,6 +139,7 @@ class AnnualProductProblemSummaryTests(unittest.TestCase):
             entry = review["entries"][0]
             self.assertTrue(entry["yellow"])
             self.assertEqual(entry["public_description"], "复查现场照片不齐全")
+            self.assertEqual(entry["summary_description"], "复查现场照片不齐全（缺少门头远景）")
             self.assertIn("缺少门头远景", entry["raw_error"])
             self.assertTrue(entry["review_required"])
             self.assertTrue(any(item.get("type") == "yellow_problem" for item in review["warnings"]))
@@ -222,13 +224,32 @@ class AnnualProductProblemSummaryTests(unittest.TestCase):
             self.assertNotIn(">目录<", xml)
             self.assertIn('w:val="Heading1"', xml)
             self.assertIn('w:val="Heading2"', xml)
+            self.assertIn('w:type="linesAndChars"', xml)
+            self.assertIn('w:linePitch="580"', xml)
+            self.assertIn('w:charSpace="312"', xml)
             self.assertIn('<w:br w:type="page"', xml)
             self.assertIn("<w:highlight", xml)
             self.assertIn("梁溪大队", xml)
             self.assertIn("锡山大队", xml)
             self.assertIn("复查现场照片不齐全", xml)
-            self.assertNotIn("缺少门头远景", xml)
+            self.assertIn("缺少门头远景", xml)
             self.assertNotIn("需人工复核", xml)
+            document = Document(str(output))
+            non_empty = [item for item in document.paragraphs if item.text.strip()]
+            self.assertEqual(non_empty[0].runs[0].font.name, "方正小标宋_GBK")
+            self.assertEqual(non_empty[0].runs[0].font.size.pt, 22)
+            heading1 = next(item for item in non_empty if item.style.name == "Heading 1")
+            heading2 = next(item for item in non_empty if item.style.name == "Heading 2")
+            body = next(item for item in non_empty if item.text.startswith("1、"))
+            self.assertEqual(heading1.runs[0].font.name, "方正黑体_GBK")
+            self.assertEqual(heading1.runs[0].font.size.pt, 16)
+            self.assertEqual(heading2.runs[0].font.name, "方正楷体_GBK")
+            self.assertEqual(heading2.runs[0].font.size.pt, 16)
+            self.assertEqual(body.runs[0].font.name, "方正仿宋_GBK")
+            self.assertEqual(body.runs[0].font.size.pt, 16)
+            with zipfile.ZipFile(output) as archive:
+                media = [name for name in archive.namelist() if name.startswith("word/media/")]
+            self.assertEqual(media, [])
 
     def test_generated_docx_groups_issues_under_case_without_repeating_case_info_or_scores(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -255,12 +276,11 @@ class AnnualProductProblemSummaryTests(unittest.TestCase):
                 xml = archive.read("word/document.xml").decode("utf-8")
             self.assertEqual(xml.count("WX-001"), 1)
             self.assertIn("1、消防产品监督检查记录填写不规范", xml)
-            self.assertIn("2、现场照片缺概貌", xml)
-            self.assertNotIn("缺门头照", xml)
+            self.assertIn("2、现场照片缺概貌（缺门头照）", xml)
             self.assertNotIn("3.13", xml)
             self.assertNotIn("0.5分", xml)
 
-    def test_generated_docx_includes_legacy_month_without_ps_or_score_tail(self):
+    def test_generated_docx_includes_legacy_month_with_ps_without_score_tail(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_legacy_online_patrol(
@@ -277,7 +297,9 @@ class AnnualProductProblemSummaryTests(unittest.TestCase):
             self.assertIn("江阴大队", xml)
             self.assertIn("消防产品质量监督抽查抽样单抽样人员未签字", xml)
             self.assertNotIn("扣0.1", xml)
-            self.assertNotIn("整改照片未开盒", xml)
+            self.assertNotIn("扣0.5分", xml)
+            self.assertIn("整改照片未开盒", xml)
+            self.assertIn("（ps：整改照片未开盒拍摄新面罩的外观情况）", xml)
 
     def test_review_json_can_be_written(self):
         with tempfile.TemporaryDirectory() as tmp:

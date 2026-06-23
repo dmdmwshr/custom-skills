@@ -50,6 +50,8 @@
   },
   "text_policy": {
     "public_description": "before_parentheses_and_ps",
+    "annual_summary_description": "keep_parentheses_and_ps",
+    "normalize_parentheses": true,
     "keep_raw_detail_in_review_json": true
   },
   "word_style": {
@@ -60,11 +62,26 @@
     "include_images": false,
     "include_deduction_in_body": false,
     "title_font": "方正小标宋_GBK",
+    "title_size_pt": 22,
     "heading_font": "方正黑体_GBK",
+    "heading1_font": "方正黑体_GBK",
+    "heading1_size_pt": 16,
+    "heading2_font": "方正楷体_GBK",
+    "heading2_size_pt": 16,
     "body_font": "方正仿宋_GBK",
     "fallback_body_font": "宋体",
     "body_size_pt": 16,
-    "case_size_pt": 14,
+    "case_size_pt": 16,
+    "page_width_cm": 21.0,
+    "page_height_cm": 29.7,
+    "top_margin_cm": 3.7,
+    "bottom_margin_cm": 3.5,
+    "left_margin_cm": 2.8,
+    "right_margin_cm": 2.6,
+    "lines_per_page": 22,
+    "chars_per_line": 28,
+    "line_pitch_twips": 580,
+    "char_space_twips": 312,
     "yellow_highlight": "YELLOW"
   },
   "reference_docs": {

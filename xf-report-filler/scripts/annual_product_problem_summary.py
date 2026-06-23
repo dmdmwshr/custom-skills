@@ -12,8 +12,9 @@ from pathlib import Path
 from docx import Document
 from docx.enum.text import WD_BREAK, WD_COLOR_INDEX
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.shared import Cm, Pt
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
@@ -312,6 +313,47 @@ def clean_legacy_problem_text(text):
     return cleaned.strip(" ；;，,、")
 
 
+def remove_score_fragments(text):
+    cleaned = str(text or "")
+    cleaned = re.sub(r"[，,；;、]?\s*\d+(?:\.\d+)?\s*[，,、]?\s*扣\s*\d+(?:\.\d+)?\s*(?:分)?\s*吗?", "", cleaned)
+    cleaned = re.sub(r"[，,；;、]?\s*扣\s*\d+(?:\.\d+)?\s*(?:分)?\s*吗?", "", cleaned)
+    cleaned = re.sub(r"[，,；;、]\s*）", "）", cleaned)
+    return cleaned.strip(" ；;，,、")
+
+
+def normalize_fullwidth_parentheses(text):
+    text = str(text or "").replace("(", "（").replace(")", "）")
+    text = re.sub(r"（\s*ps\s*[:：]\s*", "（ps：", text, flags=re.IGNORECASE)
+    return text
+
+
+def normalize_ps_note(note):
+    text = normalize_fullwidth_parentheses(note).strip()
+    if text.startswith("（") and text.endswith("）"):
+        text = text[1:-1].strip()
+    text = re.sub(r"^ps\s*[:：]\s*", "", text, flags=re.IGNORECASE).strip()
+    text = remove_score_fragments(text)
+    return f"ps：{text}" if text else ""
+
+
+def annual_problem_description_from_text(text, legacy_notes=None):
+    base = remove_score_fragments(normalize_fullwidth_parentheses(grade_register.clean_error_line(text))).strip()
+    notes = []
+    for note in legacy_notes or []:
+        normalized = normalize_ps_note(note)
+        if normalized:
+            notes.append(f"（{normalized}）")
+    return f"{base}{''.join(notes)}".strip()
+
+
+def entry_summary_description(entry):
+    if entry.get("source_type") == "legacy_online_patrol_doc":
+        base = clean_legacy_problem_text(entry.get("raw_error", ""))
+    else:
+        base = entry.get("raw_error", "")
+    return annual_problem_description_from_text(base, entry.get("legacy_notes", []))
+
+
 def parse_legacy_online_patrol_entries(path, month, config):
     lines = document_lines(path)
     entries = []
@@ -369,6 +411,7 @@ def parse_legacy_online_patrol_entries(path, month, config):
             "inspector": "",
             "raw_error": text,
             "public_description": public_description,
+            "summary_description": annual_problem_description_from_text(cleaned),
             "yellow": bool(item.get("yellow")),
             "deduction_line": "",
             "deduction_value": None,
@@ -419,6 +462,7 @@ def append_entry(entries, warnings, path, month, brigade, case, pending, deducti
         return
     is_yellow = bool(pending.get("yellow") or deduction_yellow)
     public_description = grade_register.public_product_description(raw)
+    summary_description = annual_problem_description_from_text(raw)
     value = grade_register.parse_deduction_value(deduction_line) if deduction_line else None
     general_index = grade_register.parse_general_index(deduction_line) if deduction_line else None
     review_required = bool(is_yellow or not deduction_line or value is None or general_index is None)
@@ -441,6 +485,7 @@ def append_entry(entries, warnings, path, month, brigade, case, pending, deducti
         "inspector": case.get("inspector", ""),
         "raw_error": raw,
         "public_description": public_description,
+        "summary_description": summary_description,
         "yellow": is_yellow,
         "deduction_line": deduction_line,
         "deduction_value": value,
@@ -505,6 +550,33 @@ def set_paragraph_font(paragraph, font_name, size_pt=None):
         set_run_font(run, font_name, size_pt)
 
 
+def set_style_font(style, font_name, size_pt=None):
+    style.font.name = font_name
+    if size_pt:
+        style.font.size = Pt(size_pt)
+    style._element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
+
+
+def apply_official_document_layout(doc, style):
+    normal_style = doc.styles["Normal"]
+    set_style_font(normal_style, style["body_font"], style["body_size_pt"])
+    for section in doc.sections:
+        section.page_width = Cm(style.get("page_width_cm", 21.0))
+        section.page_height = Cm(style.get("page_height_cm", 29.7))
+        section.top_margin = Cm(style.get("top_margin_cm", 3.7))
+        section.bottom_margin = Cm(style.get("bottom_margin_cm", 3.5))
+        section.left_margin = Cm(style.get("left_margin_cm", 2.8))
+        section.right_margin = Cm(style.get("right_margin_cm", 2.6))
+        sect_pr = section._sectPr
+        doc_grid = sect_pr.find(qn("w:docGrid"))
+        if doc_grid is None:
+            doc_grid = OxmlElement("w:docGrid")
+            sect_pr.append(doc_grid)
+        doc_grid.set(qn("w:type"), "linesAndChars")
+        doc_grid.set(qn("w:linePitch"), str(style.get("line_pitch_twips", 580)))
+        doc_grid.set(qn("w:charSpace"), str(style.get("char_space_twips", 312)))
+
+
 def case_label(entry):
     if entry.get("case_info"):
         return f"案卷：{entry['case_info']}"
@@ -548,12 +620,12 @@ def add_case_group(doc, case_group, config):
     case_paragraph = doc.add_paragraph(style=None)
     case_run = case_paragraph.add_run(case_label(case_group["label_entry"]))
     case_run.bold = True
-    set_run_font(case_run, style.get("fallback_body_font") or style["body_font"], style["case_size_pt"])
+    set_run_font(case_run, style["body_font"], style.get("case_size_pt", style["body_size_pt"]))
 
     seen_descriptions = set()
     issue_index = 1
     for entry in case_group["entries"]:
-        description = entry["public_description"]
+        description = entry.get("summary_description") or entry_summary_description(entry)
         if description in seen_descriptions:
             continue
         seen_descriptions.add(description)
@@ -573,13 +645,21 @@ def add_grouped_content(doc, entries, config):
             doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
         first_brigade = False
         heading = doc.add_heading(brigade, level=1)
-        set_paragraph_font(heading, config["word_style"]["heading_font"], 16)
+        set_paragraph_font(
+            heading,
+            config["word_style"].get("heading1_font", config["word_style"]["heading_font"]),
+            config["word_style"].get("heading1_size_pt", config["word_style"]["body_size_pt"]),
+        )
         by_month = defaultdict(list)
         for entry in brigade_entries:
             by_month[entry["month"]].append(entry)
         for month in sorted(by_month):
             month_heading = doc.add_heading(f"{month}月", level=2)
-            set_paragraph_font(month_heading, config["word_style"]["heading_font"], 15)
+            set_paragraph_font(
+                month_heading,
+                config["word_style"].get("heading2_font", config["word_style"]["heading_font"]),
+                config["word_style"].get("heading2_size_pt", config["word_style"]["body_size_pt"]),
+            )
             for case_group in group_cases(by_month[month]):
                 add_case_group(doc, case_group, config)
 
@@ -587,12 +667,13 @@ def add_grouped_content(doc, entries, config):
 def build_document(entries, year, config):
     doc = Document()
     style = config["word_style"]
+    apply_official_document_layout(doc, style)
     title_text = style["title"].format(year=year)
     title = doc.add_paragraph()
     title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
     title_run = title.add_run(title_text)
     title_run.bold = True
-    set_run_font(title_run, style["title_font"], 22)
+    set_run_font(title_run, style["title_font"], style.get("title_size_pt", 22))
 
     doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
     add_grouped_content(doc, entries, config)
@@ -640,6 +721,7 @@ def build_review(year_root, year, config):
         blockers.extend(source_blockers)
     known_order = {grade_register.brigade_short(item) for item in config["brigade_order"]}
     for entry in entries:
+        entry["summary_description"] = entry_summary_description(entry)
         if entry["brigade_short"] not in known_order:
             warnings.append(
                 {
