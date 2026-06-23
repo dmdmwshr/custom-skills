@@ -1,4 +1,5 @@
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -31,6 +32,9 @@ if hasattr(sys.stderr, "reconfigure"):
 
 MONTH_FOLDER_RE = re.compile(r"(?<!\d)(\d{1,2})月巡查")
 MONTH_RE = re.compile(r"(?<!\d)(\d{1,2})月")
+PROJECT_CODE_RE = re.compile(r"^([0-9A-Z]{10,})\s*(.*)$")
+LEGACY_BRIGADE_NAMES = ["江阴", "宜兴", "梁溪", "锡山", "惠山", "滨湖", "新吴", "经开"]
+LEGACY_BRIGADE_SET = set(LEGACY_BRIGADE_NAMES + [f"{name}大队" for name in LEGACY_BRIGADE_NAMES])
 
 
 def load_config(path=CONFIG_PATH):
@@ -58,28 +62,47 @@ def is_modified_version(path, config):
     return any(marker in name for marker in config["source_discovery"]["modified_markers"])
 
 
+def is_excluded_source(path, config):
+    name = Path(path).name
+    if name.startswith(tuple(config["source_discovery"].get("ignore_prefixes", []))):
+        return True
+    return any(fnmatch.fnmatch(name, pattern) for pattern in config["source_discovery"].get("exclude_patterns", []))
+
+
 def discover_registers(year_root, config):
     year_root = Path(year_root)
-    pattern = config["source_discovery"]["pattern"]
-    ignored_prefixes = tuple(config["source_discovery"].get("ignore_prefixes", []))
     by_month = defaultdict(list)
     blockers = []
-    for path in sorted(year_root.glob(pattern)):
-        if path.name.startswith(ignored_prefixes):
-            continue
-        month, source = infer_month(path)
-        item = {
-            "path": str(path),
-            "name": path.name,
-            "month": month,
-            "month_source": source,
-            "modified_version": is_modified_version(path, config),
-            "mtime": path.stat().st_mtime,
+    source_types = config["source_discovery"].get("source_types") or [
+        {
+            "type": "product_register_docx",
+            "label": "新版产品巡查底册",
+            "pattern": config["source_discovery"]["pattern"],
+            "priority": 1,
         }
-        if not month or month < 1 or month > 12:
-            blockers.append({"message": "无法识别产品巡查底册月份", **item})
-            continue
-        by_month[month].append(item)
+    ]
+    seen = set()
+    for source_type in source_types:
+        for path in sorted(year_root.glob(source_type["pattern"])):
+            if path in seen or is_excluded_source(path, config):
+                continue
+            seen.add(path)
+            month, source = infer_month(path)
+            item = {
+                "path": str(path),
+                "name": path.name,
+                "month": month,
+                "month_source": source,
+                "source_type": source_type["type"],
+                "source_label": source_type.get("label", source_type["type"]),
+                "source_priority": int(source_type.get("priority", 99)),
+                "modified_version": is_modified_version(path, config),
+                "mtime": path.stat().st_mtime,
+            }
+            if not month or month < 1 or month > 12:
+                blockers.append({"message": "无法识别产品巡查底册月份", **item})
+                continue
+            by_month[month].append(item)
     return by_month, blockers
 
 
@@ -89,18 +112,26 @@ def select_registers(by_month):
     warnings = []
     for month in sorted(by_month):
         candidates = by_month[month]
-        ranked = sorted(candidates, key=lambda item: (0 if item["modified_version"] else 1, -item["mtime"], item["name"]))
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                item.get("source_priority", 99),
+                0 if item["modified_version"] else 1,
+                -item["mtime"],
+                item["name"],
+            ),
+        )
         chosen = ranked[0]
         selected.append(chosen)
         for item in ranked[1:]:
             skipped_item = dict(item)
-            skipped_item["reason"] = f"{month}月存在多份底册，已按修改版优先规则采用 {chosen['name']}"
+            skipped_item["reason"] = f"{month}月存在多份年度汇总源，已按源类型和修改版优先规则采用 {chosen['name']}"
             skipped.append(skipped_item)
         if len(ranked) > 1:
             warnings.append(
                 {
                     "type": "duplicate_month_register",
-                    "message": f"{month}月存在多份产品巡查底册，已采用 {chosen['name']}，其余列为未采用。",
+                    "message": f"{month}月存在多份年度汇总源，已采用 {chosen['name']}，其余列为未采用。",
                     "month": month,
                     "selected": chosen["path"],
                     "skipped": [item["path"] for item in ranked[1:]],
@@ -113,17 +144,54 @@ def paragraph_has_yellow(paragraph):
     return grade_register.paragraph_has_yellow_highlight(paragraph)
 
 
+def document_from_source(path):
+    path = Path(path)
+    try:
+        return Document(str(path)), None
+    except Exception:
+        if path.suffix.lower() != ".doc":
+            raise
+
+    try:
+        import win32com.client
+    except Exception as exc:
+        raise RuntimeError(f"无法加载 Word COM，不能读取旧 .doc：{path}") from exc
+
+    temp_path = Path(os.environ.get("TEMP", str(path.parent))) / f"xf-annual-source-{os.getpid()}-{datetime.now().strftime('%H%M%S%f')}.docx"
+    word = win32com.client.DispatchEx("Word.Application")
+    word.Visible = False
+    word.DisplayAlerts = False
+    doc = None
+    try:
+        doc = word.Documents.Open(str(path.resolve()), ReadOnly=True)
+        doc.SaveAs2(str(temp_path.resolve()), FileFormat=16)
+    finally:
+        if doc is not None:
+            doc.Close(False)
+        word.Quit()
+    return Document(str(temp_path)), temp_path
+
+
+def document_lines(path):
+    temp_path = None
+    try:
+        document, temp_path = document_from_source(path)
+        return [
+            {
+                "paragraph": index,
+                "text": paragraph.text.strip(),
+                "yellow": paragraph_has_yellow(paragraph),
+            }
+            for index, paragraph in enumerate(document.paragraphs, 1)
+            if paragraph.text.strip()
+        ]
+    finally:
+        if temp_path:
+            temp_path.unlink(missing_ok=True)
+
+
 def parse_register_entries(path, month, config):
-    document = Document(str(path))
-    lines = [
-        {
-            "paragraph": index,
-            "text": paragraph.text.strip(),
-            "yellow": paragraph_has_yellow(paragraph),
-        }
-        for index, paragraph in enumerate(document.paragraphs, 1)
-        if paragraph.text.strip()
-    ]
+    lines = document_lines(path)
     blocks = []
     current = None
     for item in lines:
@@ -184,9 +252,171 @@ def parse_register_entries(path, month, config):
     return entries, warnings, blockers
 
 
+def normalize_legacy_brigade(text):
+    text = text.strip()
+    if text.endswith("大队"):
+        return text
+    return f"{text}大队"
+
+
+def is_legacy_brigade_line(text):
+    return text.strip() in LEGACY_BRIGADE_SET
+
+
+def legacy_case_from_line(text):
+    match = PROJECT_CODE_RE.match(text.strip())
+    if not match:
+        return None
+    return {
+        "code": match.group(1).strip(),
+        "case_info": text.strip(),
+        "title": "",
+        "filer": "",
+        "inspector": "",
+    }
+
+
+def is_legacy_score_summary(text):
+    compact = grade_register.norm_text(text)
+    if not compact:
+        return True
+    if re.fullmatch(r"扣\d+(?:\.\d+)?(?:分)?", compact):
+        return True
+    if re.search(r"(加起来|合计|共计|共).*扣.*\d", compact):
+        return True
+    return False
+
+
+def is_score_or_clause_only(text):
+    text = str(text or "").strip()
+    compact = grade_register.norm_text(text)
+    if not compact:
+        return True
+    patterns = [
+        r"^\d+(?:\.\d+)?分$",
+        r"^\d+\s+\d+(?:\.\d+)?\s*分$",
+        r"^\d+\s*[、.．]\s*\d+(?:\.\d+)?\s*分$",
+        r"^3\s*[.．]\s*\d+\s*[a-zA-Z]?\s*\d+(?:\.\d+)?\s*分$",
+    ]
+    return any(re.fullmatch(pattern, text) or re.fullmatch(pattern, compact) for pattern in patterns)
+
+
+def is_standalone_ps(text):
+    compact = grade_register.norm_text(text).lower().replace("(", "（").replace(")", "）")
+    return compact.startswith("（ps：") or compact.startswith("（ps:")
+
+
+def clean_legacy_problem_text(text):
+    cleaned = grade_register.clean_error_line(text)
+    cleaned = re.sub(r"[，,；;、]?\s*\d+(?:\.\d+)?\s*[，,、]?\s*扣\s*\d+(?:\.\d+)?\s*(?:分)?\s*$", "", cleaned)
+    cleaned = re.sub(r"[，,；;、]?\s*扣\s*\d+(?:\.\d+)?\s*(?:分)?\s*$", "", cleaned)
+    return cleaned.strip(" ；;，,、")
+
+
+def parse_legacy_online_patrol_entries(path, month, config):
+    lines = document_lines(path)
+    entries = []
+    warnings = []
+    blockers = []
+    current_brigade = None
+    current_case = None
+    last_entry = None
+
+    for item in lines:
+        text = item["text"].strip()
+        if is_legacy_brigade_line(text):
+            current_brigade = normalize_legacy_brigade(text)
+            current_case = None
+            last_entry = None
+            continue
+        case = legacy_case_from_line(text)
+        if case:
+            current_case = case
+            last_entry = None
+            continue
+        if not current_brigade:
+            continue
+        if is_standalone_ps(text):
+            if last_entry:
+                last_entry.setdefault("legacy_notes", []).append(text)
+            else:
+                warnings.append(
+                    {
+                        "type": "orphan_legacy_note",
+                        "message": "旧版网上巡查源存在无法归属的 ps 备注。",
+                        "path": str(path),
+                        "month": int(month),
+                        "paragraph": item["paragraph"],
+                        "note": text,
+                    }
+                )
+            continue
+        if is_legacy_score_summary(text):
+            continue
+        cleaned = clean_legacy_problem_text(text)
+        if not cleaned:
+            continue
+        public_description = grade_register.public_product_description(cleaned)
+        entry = {
+            "source_path": str(path),
+            "source_type": "legacy_online_patrol_doc",
+            "month": int(month),
+            "brigade": current_brigade,
+            "brigade_short": grade_register.brigade_short(current_brigade),
+            "title": "",
+            "code": current_case.get("code", "") if current_case else "",
+            "case_info": current_case.get("case_info", "") if current_case else "",
+            "filer": "",
+            "inspector": "",
+            "raw_error": text,
+            "public_description": public_description,
+            "yellow": bool(item.get("yellow")),
+            "deduction_line": "",
+            "deduction_value": None,
+            "general_index": None,
+            "paragraph": item["paragraph"],
+            "deduction_paragraph": None,
+            "review_required": True,
+            "review_notes": ["旧版网上巡查源，需人工复核。"],
+            "legacy_notes": [],
+        }
+        if not current_case:
+            entry["review_notes"].append("未匹配到案卷信息行。")
+        if entry["yellow"]:
+            entry["review_notes"].append(config["yellow_problem_policy"]["review_note"])
+            warnings.append(
+                {
+                    "type": "yellow_problem",
+                    "message": config["yellow_problem_policy"]["review_note"],
+                    "path": str(path),
+                    "month": int(month),
+                    "brigade": current_brigade,
+                    "paragraph": item["paragraph"],
+                    "raw_error": text,
+                }
+            )
+        warnings.append(
+            {
+                "type": "legacy_online_patrol_problem",
+                "message": "旧版网上巡查源问题条目已纳入年度汇总，需人工复核。",
+                "path": str(path),
+                "month": int(month),
+                "brigade": current_brigade,
+                "paragraph": item["paragraph"],
+                "raw_error": text,
+            }
+        )
+        entries.append(entry)
+        last_entry = entry
+
+    if not entries:
+        blockers.append({"message": "旧版产品监督网上巡查源未解析到有效问题", "path": str(path), "month": month})
+    return entries, warnings, blockers
+
+
 def append_entry(entries, warnings, path, month, brigade, case, pending, deduction_line, deduction_paragraph, deduction_yellow, config):
     raw = pending["raw"]
-    if grade_register.is_blank_product_template_item(raw, deduction_line):
+    if grade_register.is_blank_product_template_item(raw, deduction_line) or is_score_or_clause_only(raw):
         return
     is_yellow = bool(pending.get("yellow") or deduction_yellow)
     public_description = grade_register.public_product_description(raw)
@@ -202,6 +432,7 @@ def append_entry(entries, warnings, path, month, brigade, case, pending, deducti
         review_notes.append("扣分行缺少可解析条款或分值，需人工复核。")
     entry = {
         "source_path": str(path),
+        "source_type": "product_register_docx",
         "month": int(month),
         "brigade": brigade,
         "brigade_short": grade_register.brigade_short(brigade),
@@ -296,6 +527,8 @@ def case_label(entry):
     parts = []
     if entry.get("code"):
         parts.append(f"编号：{entry['code']}")
+    if entry.get("case_info"):
+        parts.append(f"案卷信息：{entry['case_info']}")
     if entry.get("title"):
         parts.append(f"题名：{entry['title']}")
     if entry.get("filer"):
@@ -417,7 +650,10 @@ def build_review(year_root, year, config):
         blockers.append({"message": "年度根目录未找到可采用的产品巡查底册", "year_root": str(Path(year_root))})
     entries = []
     for source in selected:
-        source_entries, source_warnings, source_blockers = parse_register_entries(source["path"], source["month"], config)
+        if source.get("source_type") == "legacy_online_patrol_doc":
+            source_entries, source_warnings, source_blockers = parse_legacy_online_patrol_entries(source["path"], source["month"], config)
+        else:
+            source_entries, source_warnings, source_blockers = parse_register_entries(source["path"], source["month"], config)
         entries.extend(source_entries)
         warnings.extend(source_warnings)
         blockers.extend(source_blockers)

@@ -4,7 +4,25 @@
   "output_file": "{year}年产品监督底册问题汇总.docx",
   "review_json_file": "{year}年产品监督底册问题汇总.review.json",
   "source_discovery": {
-    "pattern": "**/*产品巡查底册*.docx",
+    "source_types": [
+      {
+        "type": "product_register_docx",
+        "label": "新版产品巡查底册",
+        "pattern": "**/*产品巡查底册*.docx",
+        "priority": 1
+      },
+      {
+        "type": "legacy_online_patrol_doc",
+        "label": "旧版产品监督网上巡查",
+        "pattern": "**/*产品监督网上巡查.doc",
+        "priority": 3
+      }
+    ],
+    "exclude_patterns": [
+      "~$*",
+      "*（*月档案）.doc",
+      "*产品监督档案.doc"
+    ],
     "ignore_prefixes": [
       "~$"
     ],
