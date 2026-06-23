@@ -1,6 +1,6 @@
 ---
 name: "xf-report-filler"
-description: "根据消防产品底册、联网监测源表和月度模板，整理通报目录并生成产品/联网成绩登记材料；也保留旧版消防产品档案 `.doc` 批量填报能力。"
+description: "根据消防产品底册、联网监测源表和月度模板，整理通报目录并生成产品/联网成绩登记材料；按需生成年度产品问题汇总；也保留旧版消防产品档案 `.doc` 批量填报能力。"
 x-custom-skill: true
 x-managed-by: cc-switch
 x-source-repo: dmdmwshr/custom-skills
@@ -9,12 +9,13 @@ x-edit-policy: edit-source-repo-only
 
 # xf-report-filler
 
-本 skill 分两条工作流：
+本 skill 分三条工作流：
 
 1. **月度产品与联网监测成绩登记**：整理 `X月通报` 目录、校验模板版本、生成上月巡查成绩材料、处理当月根层两张通报表待补/定稿。
-2. **旧版消防产品档案 `.doc` 批量填报**：从旧 `.doc` 或结构化 JSON 生成《消防产品专项监督抽查卷评查记录表》。
+2. **年度产品监督底册问题汇总**：按需扫描本年各月产品巡查底册，生成年度根目录下的 `YYYY年产品监督底册问题汇总.docx`。
+3. **旧版消防产品档案 `.doc` 批量填报**：从旧 `.doc` 或结构化 JSON 生成《消防产品专项监督抽查卷评查记录表》。
 
-月度流程是当前优先维护对象。先读 `references/monthly_workflow.md`，再按任务加载 `references/monthly/00_workflow_router.md` 指定的文件对象和数据源对象文档。机器配置见 `resources/monthly_workflow.json`。
+月度流程是当前优先维护对象。月度任务先读 `references/monthly_workflow.md`，再按任务加载 `references/monthly/00_workflow_router.md` 指定的文件对象和数据源对象文档。年度汇总任务先读 `references/annual_problem_summary/00_workflow_router.md`。机器配置分别见 `resources/monthly_workflow.json` 和 `resources/annual_problem_summary.json`。
 
 ## 渐进加载规则
 
@@ -22,8 +23,9 @@ x-edit-policy: edit-source-repo-only
 - 用户要整理目录：再读 `01_directory_model.md`、`02_template_strategy.md`。
 - 用户要处理当月根层两张表：读 `output_R01_office_record.md`、`output_R02_product_stats.md`，以及它们依赖的数据源对象。
 - 用户要生成上月巡查成绩：读 `source_product_register.md`、联网源表对象、`output_G01_product_archives.md` 到 `output_G05_monthly_report.md`。
+- 用户要生成年度产品问题汇总：读 `references/annual_problem_summary/00_workflow_router.md`、`source_product_register.md`、`output_annual_problem_summary.md`、`validation_and_audit.md`。
 - 用户指出某个文件不合规：只加载该目标文件对象、它依赖的数据源对象和 `validation_and_audit.md`，再改配置、脚本和测试。
-- 新增或修改规则时，必须落到具体文件对象文档、`resources/monthly_workflow.json` 和测试里，不只写在聊天记录或总览文档中。
+- 新增或修改规则时，必须落到具体文件对象文档、对应工作流配置和测试里，不只写在聊天记录或总览文档中。
 
 ## 月度执行顺序
 
@@ -88,6 +90,25 @@ python scripts/monthly_grade_register.py `
   --dry-run
 ```
 
+按需审计年度产品问题汇总：
+
+```powershell
+python scripts/annual_product_problem_summary.py `
+  --year-root "E:\文件夹\1、工作\2、产品，科技，联网检测\1、产品监督\26年" `
+  --year 2026 `
+  --dry-run `
+  --review-json "<审计输出.json>"
+```
+
+审计无 blocker 后生成年度汇总：
+
+```powershell
+python scripts/annual_product_problem_summary.py `
+  --year-root "<年度根目录>" `
+  --year 2026 `
+  --apply
+```
+
 用户修改模板后同步 skill 快照：
 
 ```powershell
@@ -105,6 +126,14 @@ python scripts/sync_monthly_templates.py --apply
 - 产品公开问题描述只写底册括号前内容；括号内、`ps` 后、字段级细节只用于内部定位。
 - 联网公开描述中 CAD 类写“缺点位图”，PDF 类写“缺火灾防控图”。
 - 成绩汇总表显示格式：产品分数固定 1 位小数，联网监测分数固定 2 位小数。
+
+## 年度问题汇总硬规则
+
+- 年度汇总是独立条线，不改变月度 R01/R02/G01-G06 生成逻辑。
+- 默认扫描年度根目录下所有 `*产品巡查底册*.docx`；同月多底册时，文件名含“修改版本/修改版”的优先。
+- 年度汇总正文按“大队 -> 月份 -> 错误描述”组织，大队之间分页，并生成 Word 目录。
+- 年度汇总纳入黄色高亮问题，并在输出中继续标黄；黄色只表示需人工复核，不在年度汇总中自动剔除。
+- 正文错误描述仍使用括号前、`ps` 前文本；原始细节写入 review JSON。
 
 ## 旧版 `.doc` 填报
 

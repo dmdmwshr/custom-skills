@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "default_year_root": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\26年",
+  "output_file": "{year}年产品监督底册问题汇总.docx",
+  "review_json_file": "{year}年产品监督底册问题汇总.review.json",
+  "source_discovery": {
+    "pattern": "**/*产品巡查底册*.docx",
+    "ignore_prefixes": [
+      "~$"
+    ],
+    "month_folder_pattern": "{month}月巡查",
+    "duplicate_policy": "modified_version_first_then_newest",
+    "modified_markers": [
+      "修改版本",
+      "修改版"
+    ]
+  },
+  "brigade_order": [
+    "梁溪大队",
+    "锡山大队",
+    "惠山大队",
+    "滨湖大队",
+    "新吴大队",
+    "江阴大队",
+    "宜兴大队",
+    "经开大队"
+  ],
+  "yellow_problem_policy": {
+    "include": true,
+    "highlight_in_output": true,
+    "review_note": "底册标黄，需人工复核。"
+  },
+  "text_policy": {
+    "public_description": "before_parentheses_and_ps",
+    "keep_raw_detail_in_review_json": true
+  },
+  "word_style": {
+    "title": "{year}年产品监督底册问题汇总",
+    "toc_title": "目录",
+    "title_font": "方正小标宋_GBK",
+    "heading_font": "方正黑体_GBK",
+    "body_font": "方正仿宋_GBK",
+    "fallback_body_font": "宋体",
+    "body_size_pt": 16,
+    "case_size_pt": 14,
+    "yellow_highlight": "YELLOW"
+  },
+  "reference_docs": {
+    "router": "references/annual_problem_summary/00_workflow_router.md",
+    "source_product_register": "references/annual_problem_summary/source_product_register.md",
+    "output_summary": "references/annual_problem_summary/output_annual_problem_summary.md",
+    "validation_and_audit": "references/annual_problem_summary/validation_and_audit.md"
+  }
+}

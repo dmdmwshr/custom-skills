@@ -6,6 +6,7 @@
 
 - **文档补充类**：只补充某个文件对象、数据源对象、目录、模板或审计说明；不改脚本业务行为。
 - **配置/索引调整类**：新增或调整 `resources/monthly_workflow.json` 中的数据源、模板编号、R/G 输出编号、引用文档索引。
+- **新增业务条线类**：新增独立于月度 R/G 流程的业务能力；必须有独立配置、独立引用文档、独立脚本和独立测试，不能把新规则散落到月度对象里。
 - **单文件业务规则类**：例如只调整 R01、G05 或某个数据源解析口径；必须定位到对应对象文档。
 - **脚本行为修复类**：修复解析、生成、审计、模板同步或目录整理脚本；必须保留 dry-run 能力。
 - **模板快照同步类**：用户更新外部模板后，把外部事实源同步到 skill 快照。
@@ -16,15 +17,17 @@
 
 1. 先读本文件，判断变更分级。
 2. 月度规则改动继续读 `references/monthly/00_workflow_router.md`。
-3. 单文件改动只读目标文件对象、依赖的数据源对象和 `references/monthly/validation_and_audit.md`。
-4. 目录或模板改动只读 `references/monthly/01_directory_model.md` 或 `references/monthly/02_template_strategy.md`。
-5. 安装同步或仓库源问题再读 `cc-switch` skill，不把同步细节复制到月度业务文档里。
+3. 年度产品问题汇总改动继续读 `references/annual_problem_summary/00_workflow_router.md`。
+4. 单文件改动只读目标文件对象、依赖的数据源对象和对应条线的 `validation_and_audit.md`。
+5. 目录或模板改动只读 `references/monthly/01_directory_model.md` 或 `references/monthly/02_template_strategy.md`。
+6. 安装同步或仓库源问题再读 `cc-switch` skill，不把同步细节复制到业务文档里。
 
 ## 修改边界
 
 - 只改源仓库 `C:\Users\12070\.cc-switch\skills\自建skills\xf-report-filler`。
 - 不直接把安装副本 `C:\Users\12070\.cc-switch\skills\xf-report-filler` 当源码改。
 - 小改动只碰对应对象文档、必要配置、相关脚本和测试。
+- 新业务条线必须与既有条线解耦；除入口路由和维护说明外，不修改无关月度流程。
 - 不做无关重构，不重命名 skill，不移动入口文件。
 - 不改真实业务材料，除非用户明确要求“重新生成”“修复真实文件”或等价表达。
 - 外部模板是事实源；skill 内模板只是快照，不能反向覆盖电脑里的模板文件。
@@ -33,6 +36,7 @@
 
 - 文档补充类：运行引用/结构测试，确认入口能路由到对象文档。
 - 配置/索引调整类：运行 JSON 校验、引用测试和涉及的定向测试。
+- 新增业务条线类：运行新条线配置校验、对象文档结构测试、定向脚本测试和全量回归。
 - 单文件业务规则类：补对象文档、补定向测试，必要时跑全量测试。
 - 脚本行为修复类：先跑定向测试，再跑 `python -m unittest discover -s scripts -p "test_*.py"`。
 - 模板快照同步类：先 `sync_monthly_templates.py --dry-run`，确认后再 `--apply`，并复查 manifest。

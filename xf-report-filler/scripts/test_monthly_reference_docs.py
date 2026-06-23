@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -25,6 +26,12 @@ REQUIRED_MAINTENANCE_HEADINGS = [
     "## 验证矩阵",
     "## 提交同步",
     "## 停止条件",
+]
+
+REQUIRED_ANNUAL_OBJECT_DOCS = [
+    "source_product_register.md",
+    "output_annual_problem_summary.md",
+    "validation_and_audit.md",
 ]
 
 
@@ -82,6 +89,7 @@ class MonthlyReferenceDocsTests(unittest.TestCase):
         skill_text = (workflow.SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("references/monthly_workflow.md", skill_text)
         self.assertIn("references/monthly/00_workflow_router.md", skill_text)
+        self.assertIn("references/annual_problem_summary/00_workflow_router.md", skill_text)
         self.assertIn("references/skill_maintenance.md", skill_text)
         self.assertIn("渐进加载规则", skill_text)
 
@@ -92,10 +100,27 @@ class MonthlyReferenceDocsTests(unittest.TestCase):
         for heading in REQUIRED_MAINTENANCE_HEADINGS:
             with self.subTest(heading=heading):
                 self.assertIn(heading, maintenance_text)
+        self.assertIn("新增业务条线类", maintenance_text)
 
         router_text = (workflow.SKILL_DIR / "references" / "monthly" / "00_workflow_router.md").read_text(encoding="utf-8")
         self.assertIn("../skill_maintenance.md", router_text)
         self.assertIn("规则变更或小改动", router_text)
+
+    def test_annual_problem_summary_docs_are_routed_and_structured(self):
+        config_path = workflow.SKILL_DIR / "resources" / "annual_problem_summary.json"
+        self.assertTrue(config_path.exists())
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        annual_docs = config["reference_docs"]
+        for key in ["router", "source_product_register", "output_summary", "validation_and_audit"]:
+            with self.subTest(annual_doc=key):
+                self.assert_doc_exists(annual_docs[key])
+
+        annual_dir = workflow.SKILL_DIR / "references" / "annual_problem_summary"
+        for name in REQUIRED_ANNUAL_OBJECT_DOCS:
+            text = (annual_dir / name).read_text(encoding="utf-8")
+            with self.subTest(doc=name):
+                for heading in REQUIRED_OBJECT_HEADINGS:
+                    self.assertIn(heading, text)
 
 
 if __name__ == "__main__":
