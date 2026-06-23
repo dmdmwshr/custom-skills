@@ -196,7 +196,7 @@ class AnnualProductProblemSummaryTests(unittest.TestCase):
             self.assertFalse(review["ok"])
             self.assertTrue(any("未找到可采用的产品巡查底册" in item["message"] for item in review["blockers"]))
 
-    def test_writes_docx_with_toc_headings_page_break_and_yellow_highlight(self):
+    def test_writes_docx_with_cover_navigation_headings_and_yellow_highlight(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_register(
@@ -218,13 +218,47 @@ class AnnualProductProblemSummaryTests(unittest.TestCase):
             self.assertTrue(output.exists())
             with zipfile.ZipFile(output) as archive:
                 xml = archive.read("word/document.xml").decode("utf-8")
-            self.assertIn('TOC \\o "1-2"', xml)
+            self.assertNotIn('TOC \\o "1-2"', xml)
+            self.assertNotIn(">目录<", xml)
+            self.assertIn('w:val="Heading1"', xml)
+            self.assertIn('w:val="Heading2"', xml)
             self.assertIn('<w:br w:type="page"', xml)
             self.assertIn("<w:highlight", xml)
             self.assertIn("梁溪大队", xml)
             self.assertIn("锡山大队", xml)
             self.assertIn("复查现场照片不齐全", xml)
             self.assertNotIn("缺少门头远景", xml)
+            self.assertNotIn("需人工复核", xml)
+
+    def test_generated_docx_groups_issues_under_case_without_repeating_case_info_or_scores(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "3月通报" / "2月巡查" / "2月产品巡查底册.docx"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            doc = Document()
+            doc.add_paragraph("大队：梁溪大队")
+            doc.add_paragraph("题名：测试案卷")
+            doc.add_paragraph("编号：WX-001")
+            doc.add_paragraph("立卷人：张三")
+            doc.add_paragraph("错误")
+            doc.add_paragraph("1、消防产品监督检查记录填写不规范")
+            doc.add_paragraph("扣分：3.13 a 0.5分")
+            doc.add_paragraph("2、现场照片缺概貌（缺门头照）")
+            doc.add_paragraph("扣分：3.13 b 0.2分")
+            doc.save(path)
+            review = annual.build_review(root, 2026, self.config)
+            output = root / "2026年产品监督底册问题汇总.docx"
+
+            annual.write_annual_doc(review["entries"], 2026, output, self.config)
+
+            with zipfile.ZipFile(output) as archive:
+                xml = archive.read("word/document.xml").decode("utf-8")
+            self.assertEqual(xml.count("WX-001"), 1)
+            self.assertIn("1、消防产品监督检查记录填写不规范", xml)
+            self.assertIn("2、现场照片缺概貌", xml)
+            self.assertNotIn("缺门头照", xml)
+            self.assertNotIn("3.13", xml)
+            self.assertNotIn("0.5分", xml)
 
     def test_generated_docx_includes_legacy_month_without_ps_or_score_tail(self):
         with tempfile.TemporaryDirectory() as tmp:

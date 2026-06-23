@@ -12,7 +12,6 @@ from pathlib import Path
 from docx import Document
 from docx.enum.text import WD_BREAK, WD_COLOR_INDEX
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt
 
@@ -506,50 +505,65 @@ def set_paragraph_font(paragraph, font_name, size_pt=None):
         set_run_font(run, font_name, size_pt)
 
 
-def add_toc(paragraph):
-    run = paragraph.add_run()
-    fld_begin = OxmlElement("w:fldChar")
-    fld_begin.set(qn("w:fldCharType"), "begin")
-    instr = OxmlElement("w:instrText")
-    instr.set(qn("xml:space"), "preserve")
-    instr.text = 'TOC \\o "1-2" \\h \\z \\u'
-    fld_sep = OxmlElement("w:fldChar")
-    fld_sep.set(qn("w:fldCharType"), "separate")
-    fld_end = OxmlElement("w:fldChar")
-    fld_end.set(qn("w:fldCharType"), "end")
-    run._r.append(fld_begin)
-    run._r.append(instr)
-    run._r.append(fld_sep)
-    run._r.append(fld_end)
-
-
 def case_label(entry):
+    if entry.get("case_info"):
+        return f"案卷：{entry['case_info']}"
     parts = []
     if entry.get("code"):
         parts.append(f"编号：{entry['code']}")
-    if entry.get("case_info"):
-        parts.append(f"案卷信息：{entry['case_info']}")
     if entry.get("title"):
         parts.append(f"题名：{entry['title']}")
     if entry.get("filer"):
         parts.append(f"立卷人：{entry['filer']}")
-    if entry.get("review_required"):
-        parts.append("需人工复核")
-    return "；".join(parts) if parts else "未记录案卷信息"
+    return f"案卷：{'；'.join(parts)}" if parts else "案卷：未记录案卷信息"
 
 
-def add_issue_group(doc, description, items, config):
+def case_key(entry):
+    if entry.get("case_info"):
+        return ("legacy", entry.get("case_info", ""))
+    return (
+        "register",
+        entry.get("code", ""),
+        entry.get("title", ""),
+        entry.get("filer", ""),
+        entry.get("source_path", ""),
+    )
+
+
+def group_cases(entries):
+    cases = []
+    by_key = {}
+    for entry in entries:
+        key = case_key(entry)
+        if key not in by_key:
+            group = {"label_entry": entry, "entries": []}
+            by_key[key] = group
+            cases.append(group)
+        by_key[key]["entries"].append(entry)
+    return cases
+
+
+def add_case_group(doc, case_group, config):
     style = config["word_style"]
-    paragraph = doc.add_paragraph(style=None)
-    run = paragraph.add_run(description)
-    set_run_font(run, style["body_font"], style["body_size_pt"])
-    if any(item.get("yellow") for item in items):
-        run.font.highlight_color = WD_COLOR_INDEX.YELLOW
-    for entry in items:
-        case_paragraph = doc.add_paragraph(style=None)
-        case_paragraph.paragraph_format.left_indent = Pt(24)
-        case_run = case_paragraph.add_run(case_label(entry))
-        set_run_font(case_run, style.get("fallback_body_font") or style["body_font"], style["case_size_pt"])
+    case_paragraph = doc.add_paragraph(style=None)
+    case_run = case_paragraph.add_run(case_label(case_group["label_entry"]))
+    case_run.bold = True
+    set_run_font(case_run, style.get("fallback_body_font") or style["body_font"], style["case_size_pt"])
+
+    seen_descriptions = set()
+    issue_index = 1
+    for entry in case_group["entries"]:
+        description = entry["public_description"]
+        if description in seen_descriptions:
+            continue
+        seen_descriptions.add(description)
+        issue_paragraph = doc.add_paragraph(style=None)
+        issue_paragraph.paragraph_format.left_indent = Pt(24)
+        issue_run = issue_paragraph.add_run(f"{issue_index}、{description}")
+        set_run_font(issue_run, style["body_font"], style["body_size_pt"])
+        if entry.get("yellow"):
+            issue_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        issue_index += 1
 
 
 def add_grouped_content(doc, entries, config):
@@ -566,11 +580,8 @@ def add_grouped_content(doc, entries, config):
         for month in sorted(by_month):
             month_heading = doc.add_heading(f"{month}月", level=2)
             set_paragraph_font(month_heading, config["word_style"]["heading_font"], 15)
-            by_description = defaultdict(list)
-            for entry in by_month[month]:
-                by_description[entry["public_description"]].append(entry)
-            for description in sorted(by_description):
-                add_issue_group(doc, description, by_description[description], config)
+            for case_group in group_cases(by_month[month]):
+                add_case_group(doc, case_group, config)
 
 
 def build_document(entries, year, config):
@@ -583,40 +594,12 @@ def build_document(entries, year, config):
     title_run.bold = True
     set_run_font(title_run, style["title_font"], 22)
 
-    toc_title = doc.add_paragraph()
-    toc_title_run = toc_title.add_run(style["toc_title"])
-    toc_title_run.bold = True
-    set_run_font(toc_title_run, style["heading_font"], 16)
-    toc_paragraph = doc.add_paragraph()
-    add_toc(toc_paragraph)
     doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
     add_grouped_content(doc, entries, config)
     return doc
 
 
-def update_toc_with_word(path):
-    try:
-        import win32com.client
-    except Exception as exc:
-        raise RuntimeError(f"无法加载 Word COM，不能更新目录：{exc}") from exc
-
-    word = win32com.client.DispatchEx("Word.Application")
-    word.Visible = False
-    word.DisplayAlerts = False
-    doc = None
-    try:
-        doc = word.Documents.Open(str(Path(path).resolve()), ReadOnly=False)
-        if doc.TablesOfContents.Count < 1:
-            raise RuntimeError("年度汇总文档未生成目录字段")
-        doc.TablesOfContents(1).Update()
-        doc.Save()
-    finally:
-        if doc is not None:
-            doc.Close(False)
-        word.Quit()
-
-
-def write_annual_doc(entries, year, output_path, config, force=False, update_toc=True):
+def write_annual_doc(entries, year, output_path, config, force=False, update_toc=False):
     output_path = Path(output_path)
     if output_path.exists() and not force:
         raise FileExistsError(f"目标文件已存在，使用 --force 覆盖：{output_path}")
@@ -625,8 +608,6 @@ def write_annual_doc(entries, year, output_path, config, force=False, update_toc
     try:
         doc = build_document(entries, year, config)
         doc.save(temp_path)
-        if update_toc:
-            update_toc_with_word(temp_path)
         if output_path.exists():
             output_path.unlink()
         shutil.move(str(temp_path), str(output_path))
@@ -714,7 +695,14 @@ def main():
     if review["blockers"]:
         raise SystemExit(2)
     if args.apply:
-        write_annual_doc(review["entries"], args.year, output_path, config, force=args.force, update_toc=True)
+        write_annual_doc(
+            review["entries"],
+            args.year,
+            output_path,
+            config,
+            force=args.force,
+            update_toc=config["word_style"].get("visible_toc", False),
+        )
         print(json.dumps({"generated": str(output_path)}, ensure_ascii=False))
 
 

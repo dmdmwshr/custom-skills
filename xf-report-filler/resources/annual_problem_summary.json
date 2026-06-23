@@ -54,7 +54,11 @@
   },
   "word_style": {
     "title": "{year}年产品监督底册问题汇总",
-    "toc_title": "目录",
+    "visible_toc": false,
+    "navigation_outline": "brigade_month",
+    "body_layout": "case_then_issues",
+    "include_images": false,
+    "include_deduction_in_body": false,
     "title_font": "方正小标宋_GBK",
     "heading_font": "方正黑体_GBK",
     "body_font": "方正仿宋_GBK",
