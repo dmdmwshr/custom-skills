@@ -61,6 +61,8 @@
     "body_layout": "case_then_issues",
     "include_images": false,
     "include_deduction_in_body": false,
+    "font_color": "000000",
+    "cover_vertical_alignment": "center",
     "title_font": "方正小标宋_GBK",
     "title_size_pt": 22,
     "heading_font": "方正黑体_GBK",

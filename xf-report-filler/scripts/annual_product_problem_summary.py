@@ -10,11 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from docx import Document
+from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_BREAK, WD_COLOR_INDEX
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Cm, Pt
+from docx.shared import Cm, Pt, RGBColor
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
@@ -538,43 +539,91 @@ def grouped_entries(entries, config):
     return [(brigade, brigades[brigade]) for brigade in sorted(brigades, key=lambda value: brigade_sort_key(value, config))]
 
 
-def set_run_font(run, font_name, size_pt=None):
+def rgb_from_hex(value):
+    value = (value or "000000").strip().lstrip("#")
+    if len(value) != 6:
+        value = "000000"
+    return RGBColor(int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
+
+
+def clear_theme_color(r_pr, color_hex):
+    if r_pr is None:
+        return
+    color = r_pr.find(qn("w:color"))
+    if color is None:
+        color = OxmlElement("w:color")
+        r_pr.append(color)
+    color.set(qn("w:val"), color_hex)
+    for attr in ("themeColor", "themeTint", "themeShade"):
+        color.attrib.pop(qn(f"w:{attr}"), None)
+
+
+def set_run_font(run, font_name, size_pt=None, color_hex="000000"):
     run.font.name = font_name
     if size_pt:
         run.font.size = Pt(size_pt)
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
+    run.font.color.rgb = rgb_from_hex(color_hex)
+    r_pr = run._element.get_or_add_rPr()
+    r_pr.rFonts.set(qn("w:eastAsia"), font_name)
+    clear_theme_color(r_pr, color_hex)
 
 
-def set_paragraph_font(paragraph, font_name, size_pt=None):
+def set_paragraph_font(paragraph, font_name, size_pt=None, color_hex="000000"):
     for run in paragraph.runs:
-        set_run_font(run, font_name, size_pt)
+        set_run_font(run, font_name, size_pt, color_hex)
 
 
-def set_style_font(style, font_name, size_pt=None):
+def set_style_font(style, font_name, size_pt=None, color_hex="000000"):
     style.font.name = font_name
     if size_pt:
         style.font.size = Pt(size_pt)
-    style._element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
+    style.font.color.rgb = rgb_from_hex(color_hex)
+    r_pr = style._element.get_or_add_rPr()
+    r_pr.rFonts.set(qn("w:eastAsia"), font_name)
+    clear_theme_color(r_pr, color_hex)
+
+
+def apply_section_layout(section, style, vertical_alignment=None):
+    section.page_width = Cm(style.get("page_width_cm", 21.0))
+    section.page_height = Cm(style.get("page_height_cm", 29.7))
+    section.top_margin = Cm(style.get("top_margin_cm", 3.7))
+    section.bottom_margin = Cm(style.get("bottom_margin_cm", 3.5))
+    section.left_margin = Cm(style.get("left_margin_cm", 2.8))
+    section.right_margin = Cm(style.get("right_margin_cm", 2.6))
+    sect_pr = section._sectPr
+    doc_grid = sect_pr.find(qn("w:docGrid"))
+    if doc_grid is None:
+        doc_grid = OxmlElement("w:docGrid")
+        sect_pr.append(doc_grid)
+    doc_grid.set(qn("w:type"), "linesAndChars")
+    doc_grid.set(qn("w:linePitch"), str(style.get("line_pitch_twips", 580)))
+    doc_grid.set(qn("w:charSpace"), str(style.get("char_space_twips", 312)))
+    if vertical_alignment:
+        v_align = sect_pr.find(qn("w:vAlign"))
+        if v_align is None:
+            v_align = OxmlElement("w:vAlign")
+            sect_pr.append(v_align)
+        v_align.set(qn("w:val"), vertical_alignment)
 
 
 def apply_official_document_layout(doc, style):
+    color_hex = style.get("font_color", "000000")
     normal_style = doc.styles["Normal"]
-    set_style_font(normal_style, style["body_font"], style["body_size_pt"])
+    set_style_font(normal_style, style["body_font"], style["body_size_pt"], color_hex)
+    set_style_font(
+        doc.styles["Heading 1"],
+        style.get("heading1_font", style["heading_font"]),
+        style.get("heading1_size_pt", style["body_size_pt"]),
+        color_hex,
+    )
+    set_style_font(
+        doc.styles["Heading 2"],
+        style.get("heading2_font", style["heading_font"]),
+        style.get("heading2_size_pt", style["body_size_pt"]),
+        color_hex,
+    )
     for section in doc.sections:
-        section.page_width = Cm(style.get("page_width_cm", 21.0))
-        section.page_height = Cm(style.get("page_height_cm", 29.7))
-        section.top_margin = Cm(style.get("top_margin_cm", 3.7))
-        section.bottom_margin = Cm(style.get("bottom_margin_cm", 3.5))
-        section.left_margin = Cm(style.get("left_margin_cm", 2.8))
-        section.right_margin = Cm(style.get("right_margin_cm", 2.6))
-        sect_pr = section._sectPr
-        doc_grid = sect_pr.find(qn("w:docGrid"))
-        if doc_grid is None:
-            doc_grid = OxmlElement("w:docGrid")
-            sect_pr.append(doc_grid)
-        doc_grid.set(qn("w:type"), "linesAndChars")
-        doc_grid.set(qn("w:linePitch"), str(style.get("line_pitch_twips", 580)))
-        doc_grid.set(qn("w:charSpace"), str(style.get("char_space_twips", 312)))
+        apply_section_layout(section, style)
 
 
 def case_label(entry):
@@ -617,10 +666,11 @@ def group_cases(entries):
 
 def add_case_group(doc, case_group, config):
     style = config["word_style"]
+    color_hex = style.get("font_color", "000000")
     case_paragraph = doc.add_paragraph(style=None)
     case_run = case_paragraph.add_run(case_label(case_group["label_entry"]))
     case_run.bold = True
-    set_run_font(case_run, style["body_font"], style.get("case_size_pt", style["body_size_pt"]))
+    set_run_font(case_run, style["body_font"], style.get("case_size_pt", style["body_size_pt"]), color_hex)
 
     seen_descriptions = set()
     issue_index = 1
@@ -632,13 +682,14 @@ def add_case_group(doc, case_group, config):
         issue_paragraph = doc.add_paragraph(style=None)
         issue_paragraph.paragraph_format.left_indent = Pt(24)
         issue_run = issue_paragraph.add_run(f"{issue_index}、{description}")
-        set_run_font(issue_run, style["body_font"], style["body_size_pt"])
+        set_run_font(issue_run, style["body_font"], style["body_size_pt"], color_hex)
         if entry.get("yellow"):
             issue_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
         issue_index += 1
 
 
 def add_grouped_content(doc, entries, config):
+    color_hex = config["word_style"].get("font_color", "000000")
     first_brigade = True
     for brigade, brigade_entries in grouped_entries(entries, config):
         if not first_brigade:
@@ -649,6 +700,7 @@ def add_grouped_content(doc, entries, config):
             heading,
             config["word_style"].get("heading1_font", config["word_style"]["heading_font"]),
             config["word_style"].get("heading1_size_pt", config["word_style"]["body_size_pt"]),
+            color_hex,
         )
         by_month = defaultdict(list)
         for entry in brigade_entries:
@@ -659,6 +711,7 @@ def add_grouped_content(doc, entries, config):
                 month_heading,
                 config["word_style"].get("heading2_font", config["word_style"]["heading_font"]),
                 config["word_style"].get("heading2_size_pt", config["word_style"]["body_size_pt"]),
+                color_hex,
             )
             for case_group in group_cases(by_month[month]):
                 add_case_group(doc, case_group, config)
@@ -667,15 +720,18 @@ def add_grouped_content(doc, entries, config):
 def build_document(entries, year, config):
     doc = Document()
     style = config["word_style"]
+    color_hex = style.get("font_color", "000000")
     apply_official_document_layout(doc, style)
+    apply_section_layout(doc.sections[0], style, style.get("cover_vertical_alignment", "center"))
     title_text = style["title"].format(year=year)
     title = doc.add_paragraph()
     title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
     title_run = title.add_run(title_text)
     title_run.bold = True
-    set_run_font(title_run, style["title_font"], style.get("title_size_pt", 22))
+    set_run_font(title_run, style["title_font"], style.get("title_size_pt", 22), color_hex)
 
-    doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+    body_section = doc.add_section(WD_SECTION.NEW_PAGE)
+    apply_section_layout(body_section, style, "top")
     add_grouped_content(doc, entries, config)
     return doc
 

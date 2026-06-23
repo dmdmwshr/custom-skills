@@ -42,6 +42,7 @@
 - 模板快照同步类：先 `sync_monthly_templates.py --dry-run`，确认后再 `--apply`，并复查 manifest。
 - 真实材料重生成/修复类：先备份真实文件，再 dry-run，最后 apply 或 force。
 - 安装同步类：提交推送后核对源仓库和安装副本关键文件 SHA-256。
+- Word 公文样式类：同时验证字体、字号、颜色、页面网格、封面居中、导航标题和 Word XML 中是否残留主题色。
 
 ## 提交同步
 

@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -7,6 +8,8 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.shared import RGBColor
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -14,6 +17,24 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import annual_product_problem_summary as annual
+
+
+def assert_black_color_tags(testcase, xml, label):
+    for tag in re.findall(r"<w:color\b[^>]*/>", xml):
+        testcase.assertNotIn("w:themeColor", tag, f"{label} still has theme color: {tag}")
+        testcase.assertNotIn("w:themeTint", tag, f"{label} still has theme tint: {tag}")
+        testcase.assertNotIn("w:themeShade", tag, f"{label} still has theme shade: {tag}")
+        match = re.search(r'w:val="([^"]+)"', tag)
+        testcase.assertIsNotNone(match, f"{label} color tag missing explicit value: {tag}")
+        testcase.assertEqual(match.group(1).upper(), "000000", f"{label} has non-black color: {tag}")
+
+
+def style_xml(styles_xml, style_id):
+    match = re.search(
+        rf'<w:style\b(?=[^>]*w:styleId="{style_id}")[\s\S]*?</w:style>',
+        styles_xml,
+    )
+    return match.group(0) if match else ""
 
 
 def write_register(path, brigade="宜兴大队", error="卷内应有的某文书缺失（缺少审批表）", yellow=False, deduction=True):
@@ -234,19 +255,34 @@ class AnnualProductProblemSummaryTests(unittest.TestCase):
             self.assertIn("复查现场照片不齐全", xml)
             self.assertIn("缺少门头远景", xml)
             self.assertNotIn("需人工复核", xml)
+            self.assertIn('<w:vAlign w:val="center"', xml)
+            self.assertIn('<w:vAlign w:val="top"', xml)
+            assert_black_color_tags(self, xml, "document.xml")
+            with zipfile.ZipFile(output) as archive:
+                styles_xml = archive.read("word/styles.xml").decode("utf-8")
+            for style_id in ("Normal", "Heading1", "Heading2"):
+                block = style_xml(styles_xml, style_id)
+                self.assertTrue(block, f"missing style {style_id}")
+                assert_black_color_tags(self, block, style_id)
             document = Document(str(output))
             non_empty = [item for item in document.paragraphs if item.text.strip()]
+            self.assertEqual(non_empty[0].alignment, WD_PARAGRAPH_ALIGNMENT.CENTER)
             self.assertEqual(non_empty[0].runs[0].font.name, "方正小标宋_GBK")
             self.assertEqual(non_empty[0].runs[0].font.size.pt, 22)
+            self.assertEqual(non_empty[0].runs[0].font.color.rgb, RGBColor(0, 0, 0))
             heading1 = next(item for item in non_empty if item.style.name == "Heading 1")
             heading2 = next(item for item in non_empty if item.style.name == "Heading 2")
             body = next(item for item in non_empty if item.text.startswith("1、"))
             self.assertEqual(heading1.runs[0].font.name, "方正黑体_GBK")
             self.assertEqual(heading1.runs[0].font.size.pt, 16)
+            self.assertEqual(heading1.runs[0].font.color.rgb, RGBColor(0, 0, 0))
             self.assertEqual(heading2.runs[0].font.name, "方正楷体_GBK")
             self.assertEqual(heading2.runs[0].font.size.pt, 16)
+            self.assertEqual(heading2.runs[0].font.color.rgb, RGBColor(0, 0, 0))
             self.assertEqual(body.runs[0].font.name, "方正仿宋_GBK")
             self.assertEqual(body.runs[0].font.size.pt, 16)
+            self.assertEqual(body.runs[0].font.color.rgb, RGBColor(0, 0, 0))
+            self.assertEqual(body.runs[0].font.highlight_color, WD_COLOR_INDEX.YELLOW)
             with zipfile.ZipFile(output) as archive:
                 media = [name for name in archive.namelist() if name.startswith("word/media/")]
             self.assertEqual(media, [])
