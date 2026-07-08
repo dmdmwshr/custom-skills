@@ -65,17 +65,36 @@ def templates(config=None):
     return list(config["templates"])
 
 
+def internal_templates(config=None):
+    config = config or load_config()
+    return list(config.get("internal_templates", []))
+
+
+def all_templates(config=None):
+    return templates(config) + internal_templates(config)
+
+
 def templates_by_key(config=None):
     return {item["key"]: item for item in templates(config)}
 
 
+def internal_templates_by_key(config=None):
+    return {item["key"]: item for item in internal_templates(config)}
+
+
+def all_templates_by_key(config=None):
+    return {item["key"]: item for item in all_templates(config)}
+
+
 def template_by_key(key, config=None):
-    return templates_by_key(config)[key]
+    return all_templates_by_key(config)[key]
 
 
-def template_file_names(config=None, include_excluded=True):
+def template_file_names(config=None, include_excluded=True, include_internal=True):
     config = config or load_config()
     names = [item["file"] for item in config["templates"]]
+    if include_internal:
+        names.extend(item["file"] for item in config.get("internal_templates", []))
     if include_excluded:
         names.extend(item["file"] for item in config.get("excluded_templates", []))
     return names
@@ -93,7 +112,7 @@ def bulletin_root_files(config=None):
 
 def bulletin_root_map(config=None):
     config = config or load_config()
-    by_key = templates_by_key(config)
+    by_key = all_templates_by_key(config)
     result = []
     for item in bulletin_root_files(config):
         root_item = dict(item)
@@ -102,9 +121,22 @@ def bulletin_root_map(config=None):
             root_item["library"] = by_key[fallback_key]["file"]
             if by_key[fallback_key].get("numbered_sync_file"):
                 root_item["numbered"] = by_key[fallback_key]["numbered_sync_file"]
+        else:
+            root_item["library"] = root_item["skeleton_file"]
         root_item["skeleton"] = root_item["skeleton_file"]
         result.append(root_item)
     return result
+
+
+def pending_bulletin_root_files(config=None):
+    config = config or load_config()
+    return [item for item in bulletin_root_files(config) if item.get("pending_rule")]
+
+
+def pending_bulletin_root_map(config=None):
+    config = config or load_config()
+    all_items = {item["id"]: item for item in bulletin_root_map(config)}
+    return [all_items[item["id"]] for item in pending_bulletin_root_files(config)]
 
 
 def grade_outputs(config=None):
@@ -161,6 +193,10 @@ def external_template_path(item, config=None, template_dir=None):
 
 
 def snapshot_template_path(item, config=None):
+    return skill_snapshot_dir(config) / item["file"]
+
+
+def internal_template_path(item, config=None):
     return skill_snapshot_dir(config) / item["file"]
 
 
@@ -235,6 +271,7 @@ def validate_unique_ids(config=None):
     config = config or load_config()
     groups = {
         "templates": [item["id"] for item in config["templates"]],
+        "internal_templates": [item["id"] for item in config.get("internal_templates", [])],
         "bulletin_root_files": [item["id"] for item in config["bulletin_root_files"]],
         "grade_outputs": [item["id"] for item in config["grade_outputs"]],
     }

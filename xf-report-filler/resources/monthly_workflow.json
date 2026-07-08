@@ -50,37 +50,10 @@
       "reserved": false
     },
     {
-      "id": "T02",
-      "key": "product_archive_detail",
-      "file": "YYYY年（X-1）月消防产品档案质量明细表.doc",
-      "description": "消防产品档案质量明细表模板",
-      "source": "score_skeleton",
-      "used_in_monthly_register": true,
-      "reserved": false
-    },
-    {
-      "id": "T03",
-      "key": "product_summary",
-      "file": "YYYY年（X-1）月产品监督成绩总表.xlsx",
-      "description": "产品监督成绩总表模板",
-      "source": "score_skeleton",
-      "used_in_monthly_register": true,
-      "reserved": false
-    },
-    {
       "id": "T04",
       "key": "personal_stats",
       "file": "YYYY年（X-1）月个人执法统计表.xlsx",
       "description": "个人执法统计表模板",
-      "source": "score_skeleton",
-      "used_in_monthly_register": true,
-      "reserved": false
-    },
-    {
-      "id": "T05",
-      "key": "office_record",
-      "file": "YYYY年（X-1）月科室月考核情况记录表.xlsx",
-      "description": "科室月考核情况记录表模板",
       "source": "score_skeleton",
       "used_in_monthly_register": true,
       "reserved": false
@@ -104,15 +77,6 @@
       "reserved": false
     },
     {
-      "id": "T08",
-      "key": "monthly_product_supervision_stats_blank",
-      "file": "X月消防产品监督统计表空表.xls",
-      "description": "每月消防产品监督统计表空表模板",
-      "source": "bulletin_skeleton",
-      "used_in_monthly_register": false,
-      "reserved": true
-    },
-    {
       "id": "T09",
       "key": "monthly_product_supervision_stats_work_check",
       "file": "X月消防产品监督统计表.xls",
@@ -120,6 +84,54 @@
       "source": "bulletin_skeleton",
       "used_in_monthly_register": false,
       "reserved": true
+    },
+    {
+      "id": "T11",
+      "key": "root_office_record",
+      "file": "X月科室月考核情况记录表.xlsx",
+      "description": "当月科室月考核情况记录表模板",
+      "source": "bulletin_skeleton",
+      "used_in_monthly_register": false,
+      "reserved": true
+    },
+    {
+      "id": "T12",
+      "key": "work_dynamic",
+      "file": "X月消防产品工作动态（无锡）.doc",
+      "description": "当月消防产品工作动态模板",
+      "source": "bulletin_skeleton",
+      "used_in_monthly_register": false,
+      "reserved": true
+    }
+  ],
+  "internal_templates": [
+    {
+      "id": "T02",
+      "key": "product_archive_detail",
+      "file": "YYYY年（X-1）月消防产品档案质量明细表.doc",
+      "description": "消防产品档案质量明细表内置生成底稿",
+      "source": "skill_snapshot",
+      "used_in_monthly_register": true,
+      "reserved": false
+    },
+    {
+      "id": "T03",
+      "key": "product_summary",
+      "file": "YYYY年（X-1）月产品监督成绩总表.xlsx",
+      "description": "产品监督成绩总表内置生成底稿",
+      "source": "skill_snapshot",
+      "used_in_monthly_register": true,
+      "reserved": false
+    },
+    {
+      "id": "T05",
+      "key": "office_record",
+      "file": "YYYY年（X-1）月科室月考核情况记录表.xlsx",
+      "description": "巡查目录科室月考核情况记录表旧版内置底稿",
+      "source": "skill_snapshot",
+      "used_in_monthly_register": false,
+      "reserved": true,
+      "requires_flag": "include_score_office_record"
     }
   ],
   "excluded_templates": [
@@ -134,7 +146,7 @@
       "id": "R01",
       "key": "office_record",
       "skeleton_file": "X月科室月考核情况记录表.xlsx",
-      "fallback_template_key": "office_record",
+      "fallback_template_key": "root_office_record",
       "target": "{year}年{month}月科室月考核情况记录表.xlsx",
       "pending_rule": "office_product_timeliness"
     },
@@ -145,6 +157,14 @@
       "fallback_template_key": "monthly_product_supervision_stats_work_check",
       "target": "{year}年{month}月消防产品监督统计表.xls",
       "pending_rule": "product_stats_required_counts"
+    },
+    {
+      "id": "R03",
+      "key": "work_dynamic",
+      "skeleton_file": "X月消防产品工作动态（无锡）.doc",
+      "fallback_template_key": "work_dynamic",
+      "target": "{month}月消防产品工作动态（无锡） .doc",
+      "managed_by": "directory_organizer_only"
     }
   ],
   "grade_outputs": [
@@ -269,16 +289,17 @@
       "T02": "references/monthly/output_G01_product_archives.md",
       "T03": "references/monthly/output_G02_product_summary.md",
       "T04": "references/monthly/output_G03_personal_stats.md",
-      "T05": "references/monthly/output_R01_office_record.md",
       "T06": "references/monthly/output_G04_case_scores.md",
       "T07": "references/monthly/output_G05_monthly_report.md",
-      "T08": "references/monthly/output_R02_product_stats.md",
       "T09": "references/monthly/output_R02_product_stats.md",
+      "T11": "references/monthly/output_R01_office_record.md",
+      "T12": "references/monthly/output_R03_work_dynamic.md",
       "T90": "references/monthly/02_template_strategy.md"
     },
     "bulletin_root_files": {
       "R01": "references/monthly/output_R01_office_record.md",
-      "R02": "references/monthly/output_R02_product_stats.md"
+      "R02": "references/monthly/output_R02_product_stats.md",
+      "R03": "references/monthly/output_R03_work_dynamic.md"
     },
     "grade_outputs": {
       "G01": "references/monthly/output_G01_product_archives.md",

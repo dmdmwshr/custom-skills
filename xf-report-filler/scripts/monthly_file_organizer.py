@@ -81,7 +81,7 @@ def move_or_rename(src, dst, actions, blockers, apply, root, kind):
         shutil.move(str(src), str(dst))
 
 
-def copy_if_missing(src, dst, actions, blockers, apply, root, kind):
+def copy_if_missing(src, dst, actions, blockers, apply, root, kind, existing_diff_status=None):
     src = Path(src)
     dst = Path(dst)
     if not src.exists():
@@ -93,6 +93,17 @@ def copy_if_missing(src, dst, actions, blockers, apply, root, kind):
     if dst.exists():
         if sha256_file(src) == sha256_file(dst):
             actions.append({"kind": kind, "status": "skip_same_hash_target_exists", "src": str(src), "dst": str(dst)})
+            return
+        if existing_diff_status:
+            actions.append(
+                {
+                    "kind": kind,
+                    "status": existing_diff_status,
+                    "src": str(src),
+                    "dst": str(dst),
+                    "message": "目标已存在且内容不同，保留现有人工文件。",
+                }
+            )
             return
         add_blocker(blockers, "目标已存在且内容不同", src=src, dst=dst)
         return
@@ -297,6 +308,7 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
             apply,
             operation_root,
             "copy_bulletin_root_file",
+            existing_diff_status="skip_existing_manual_file",
         )
 
     archive_deprecated_root_files(bulletin_dir, bulletin_year, bulletin_month, actions, blockers, apply)

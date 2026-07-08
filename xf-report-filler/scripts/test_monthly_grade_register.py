@@ -45,6 +45,36 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
         self.assertEqual(info["source"], "runtime")
         self.assertEqual((info["score_year"], info["score_month"]), (2026, 5))
 
+    def test_load_monthly_templates_accepts_optimized_external_tree_and_builtin_assets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bulletin_dir = mgr.monthly_workflow.bulletin_skeleton_dir(template_dir=base)
+            score_dir = mgr.monthly_workflow.score_skeleton_dir(template_dir=base)
+            bulletin_dir.mkdir(parents=True)
+            score_dir.mkdir(parents=True)
+            for name in [
+                "X月科室月考核情况记录表.xlsx",
+                "X月消防产品监督统计表.xls",
+                "X月消防产品工作动态（无锡）.doc",
+            ]:
+                (bulletin_dir / name).write_bytes(name.encode("utf-8"))
+            for name in [
+                "YYYY年（X-1）月产品巡查底册（不发）.docx",
+                "YYYY年（X-1）月个人执法统计表.xlsx",
+                "YYYY年（X-1）月消防监督管理系统消防执法质量（个案成绩）.xls",
+                "YYYY年（X-1）月通报.doc",
+            ]:
+                (score_dir / name).write_bytes(name.encode("utf-8"))
+
+            templates, info = mgr.load_monthly_templates(template_dir=base)
+
+        self.assertIn("product_archive_detail", templates)
+        self.assertIn("product_summary", templates)
+        self.assertIn("personal_stats", templates)
+        self.assertNotIn("office_record", templates)
+        self.assertEqual(Path(templates["product_summary"]).name, "YYYY年（X-1）月产品监督成绩总表.xlsx")
+        self.assertEqual(info["mode"], "external_plus_builtin")
+
     def test_resolve_score_month_cross_year(self):
         info = mgr.resolve_score_month(
             r"C:\workspace\1月\2026年1月通报.doc",

@@ -35,6 +35,9 @@ class SyncMonthlyTemplatesTests(unittest.TestCase):
                 result["actions"][0]["src"],
                 str(syncer.workflow.external_template_path(syncer.TEMPLATES[0], config=syncer.CONFIG, template_dir=template_dir)),
             )
+            copied_names = {Path(action["dst"]).name for action in result["actions"] if action["kind"] == "copy_template"}
+            self.assertIn("X月消防产品工作动态（无锡）.doc", copied_names)
+            self.assertNotIn("YYYY年（X-1）月产品监督成绩总表.xlsx", copied_names)
 
     def test_work_report_template_is_retired(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -59,6 +62,31 @@ class SyncMonthlyTemplatesTests(unittest.TestCase):
             self.assertTrue(result["ok"], result["blockers"])
             self.assertFalse(any("重点工作完成情况上报表" in action.get("src", "") for action in result["actions"]))
             self.assertFalse(any("重点工作完成情况上报表" in action.get("dst", "") for action in result["actions"]))
+
+    def test_internal_generation_assets_are_not_removed_as_stale_snapshots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template_dir = Path(tmp) / "模板文件"
+            for item in syncer.TEMPLATES:
+                path = syncer.workflow.external_template_path(item, config=syncer.CONFIG, template_dir=template_dir)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(f"library:{item['file']}".encode("utf-8"))
+
+            result = syncer.run(
+                argparse.Namespace(
+                    dry_run=True,
+                    apply=False,
+                    template_dir=str(template_dir),
+                )
+            )
+
+            self.assertTrue(result["ok"], result["blockers"])
+            removed = {
+                Path(action["path"]).name
+                for action in result["actions"]
+                if action["kind"] == "remove_stale_snapshot_template"
+            }
+            self.assertNotIn("YYYY年（X-1）月产品监督成绩总表.xlsx", removed)
+            self.assertNotIn("YYYY年（X-1）月消防产品档案质量明细表.doc", removed)
 
 
 if __name__ == "__main__":

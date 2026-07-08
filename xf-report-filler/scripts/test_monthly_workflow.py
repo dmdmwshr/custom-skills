@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -38,6 +39,49 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
                 "2026年5月消防产品监督成绩",
             ],
         )
+
+    def test_optimized_external_template_tree_matches_manual_layout(self):
+        config = workflow.load_config()
+        external_keys = {item["key"] for item in workflow.templates(config)}
+        self.assertIn("root_office_record", external_keys)
+        self.assertIn("work_dynamic", external_keys)
+        self.assertIn("monthly_product_supervision_stats_work_check", external_keys)
+        self.assertNotIn("product_archive_detail", external_keys)
+        self.assertNotIn("product_summary", external_keys)
+        self.assertNotIn("office_record", external_keys)
+        self.assertNotIn("monthly_product_supervision_stats_blank", external_keys)
+
+        internal_keys = {item["key"] for item in workflow.internal_templates(config)}
+        self.assertIn("product_archive_detail", internal_keys)
+        self.assertIn("product_summary", internal_keys)
+        self.assertIn("office_record", internal_keys)
+
+    def test_template_resolver_accepts_manual_optimized_tree_without_retired_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bulletin_dir = workflow.bulletin_skeleton_dir(template_dir=base)
+            score_dir = workflow.score_skeleton_dir(template_dir=base)
+            bulletin_dir.mkdir(parents=True)
+            score_dir.mkdir(parents=True)
+            for name in [
+                "X月科室月考核情况记录表.xlsx",
+                "X月消防产品监督统计表.xls",
+                "X月消防产品工作动态（无锡）.doc",
+            ]:
+                (bulletin_dir / name).write_bytes(name.encode("utf-8"))
+            for name in [
+                "YYYY年（X-1）月产品巡查底册（不发）.docx",
+                "YYYY年（X-1）月个人执法统计表.xlsx",
+                "YYYY年（X-1）月消防监督管理系统消防执法质量（个案成绩）.xls",
+                "YYYY年（X-1）月通报.doc",
+            ]:
+                (score_dir / name).write_bytes(name.encode("utf-8"))
+
+            result = template_resolver.resolve_templates(template_dir=base, include_reserved=True)
+
+        self.assertFalse(result["blockers"], result["blockers"])
+        self.assertIn("work_dynamic", result["templates"])
+        self.assertNotIn("product_summary", result["templates"])
 
     def test_template_resolver_prefers_external_when_hash_differs(self):
         item = {

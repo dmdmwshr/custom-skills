@@ -42,14 +42,19 @@ REPORT_BODY_FONT = "方正楷体_GBK"
 MONTHLY_TEMPLATE_MANIFEST = SKILL_DIR / "resources" / "monthly_templates" / "manifest.json"
 MONITOR_HISTORY_PATH = SKILL_DIR / "resources" / "history" / "monitor_report_history.json"
 REVIEW_RULES_JS = SKILL_DIR / "resources" / "review_rules" / "消防产品专项监督抽查卷评查规则.js"
-MONTHLY_TEMPLATE_KEYS = {
-    "product_archive_detail",
-    "product_summary",
+EXTERNAL_MONTHLY_TEMPLATE_KEYS = {
     "personal_stats",
-    "office_record",
     "case_scores",
     "monthly_report",
 }
+BUILTIN_MONTHLY_TEMPLATE_KEYS = {
+    "product_archive_detail",
+    "product_summary",
+}
+OPTIONAL_BUILTIN_TEMPLATE_KEYS = {
+    "office_record",
+}
+MONTHLY_TEMPLATE_KEYS = EXTERNAL_MONTHLY_TEMPLATE_KEYS | BUILTIN_MONTHLY_TEMPLATE_KEYS | OPTIONAL_BUILTIN_TEMPLATE_KEYS
 ALLOWED_DEDUCTION_VALUES = {0.1, 0.2, 0.5, 1.0}
 DESCRIPTION_WARN_LENGTH = 30
 NO_UNQUALIFIED_PRODUCT_CASE_TEXT = "本月未完成不合格消防产品案卷"
@@ -247,42 +252,54 @@ def resolve_score_month(path_like=None, default_year=None, fallback_date=None, a
     )
 
 
-def load_monthly_template_manifest(manifest_path=MONTHLY_TEMPLATE_MANIFEST):
+def load_builtin_monthly_templates(required_keys):
+    templates = {}
+    by_key = monthly_workflow.internal_templates_by_key(WORKFLOW_CONFIG)
+    for key in required_keys:
+        if key not in by_key:
+            raise FileNotFoundError(f"monthly_workflow.json 缺少内置模板配置：{key}")
+        path = monthly_workflow.internal_template_path(by_key[key], WORKFLOW_CONFIG)
+        require_path(path, f"内置月度模板 {key}")
+        templates[key] = path
+    return templates
+
+
+def load_monthly_template_manifest(manifest_path=MONTHLY_TEMPLATE_MANIFEST, include_score_office_record=False):
     manifest_path = Path(manifest_path)
     if not manifest_path.exists():
         raise FileNotFoundError(f"月度模板 manifest 不存在：{manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     base_dir = manifest_path.parent
     templates = {}
+    required_external = set(EXTERNAL_MONTHLY_TEMPLATE_KEYS)
     for item in manifest.get("templates", []):
         key = item.get("key")
-        if key not in MONTHLY_TEMPLATE_KEYS:
+        if key not in required_external:
             continue
         if item.get("reserved") or not item.get("used_in_monthly_register"):
             continue
         path = base_dir / item["file"]
         require_path(path, f"月度模板 {key}")
         templates[key] = path
-    missing = sorted(MONTHLY_TEMPLATE_KEYS - set(templates))
+    missing = sorted(required_external - set(templates))
     if missing:
         raise FileNotFoundError("月度模板 manifest 缺少必要模板：" + "、".join(missing))
+    required_builtin = set(BUILTIN_MONTHLY_TEMPLATE_KEYS)
+    if include_score_office_record:
+        required_builtin |= OPTIONAL_BUILTIN_TEMPLATE_KEYS
+    templates.update(load_builtin_monthly_templates(required_builtin))
     return templates, str(manifest_path)
 
 
 def load_external_templates(template_dir):
-    template_dir = require_path(template_dir, "外部模板目录")
-    templates = {
-        "product_archive_detail": find_one(template_dir, ["YYYY年（X-1）月消防产品档案质量明细表.doc", "（X-1）月消防产品档案质量明细表.doc", "X月消防产品档案质量明细表.doc", "02_消防产品档案质量明细表模板.doc", "（模板）消防产品档案质量明细表.doc"], "消防产品档案质量明细表模板"),
-        "product_summary": find_one(template_dir, ["YYYY年（X-1）月产品监督成绩总表.xlsx", "（X-1）月产品监督成绩总表.xlsx", "X月产品监督成绩总表.xlsx", "03_产品监督成绩总表模板.xlsx", "（模板）产品监督成绩总表.xlsx"], "产品监督成绩总表模板"),
-        "personal_stats": find_one(template_dir, ["YYYY年（X-1）月个人执法统计表.xlsx", "（X-1）月个人执法统计表.xlsx", "X月个人执法统计表.xlsx", "04_个人执法统计表模板.xlsx", "（模板）个人执法统计表*.xlsx"], "个人执法统计表模板"),
-        "office_record": find_one(template_dir, ["YYYY年（X-1）月科室月考核情况记录表.xlsx", "（X-1）月科室月考核情况记录表.xlsx", "X月科室月考核情况记录表.xlsx", "05_科室月考核情况记录表模板.xlsx", "（模板）科室月考核情况记录表.xlsx"], "科室月考核情况记录表模板"),
-        "case_scores": find_one(template_dir, ["YYYY年（X-1）月消防监督管理系统消防执法质量（个案成绩）.xls", "（X-1）月消防监督管理系统消防执法质量（个案成绩）.xls", "X月消防监督管理系统消防执法质量（个案成绩）.xls", "06_消防执法质量个案成绩模板.xls", "(模板-成绩汇总)消防监督管理系统消防执法质量（个案成绩）.xls"], "消防执法质量个案成绩模板"),
-        "monthly_report": find_one(template_dir, ["YYYY年（X-1）月通报.doc", "（X-1）月通报.doc", "X月通报.doc", "07_月度通报模板.doc", "(样例)xxxx年x月通报.doc"], "月度通报模板"),
-    }
-    return templates, str(template_dir)
+    return load_monthly_templates(
+        template_dir=template_dir,
+        allow_snapshot_fallback=False,
+        include_score_office_record=True,
+    )
 
 
-def load_monthly_templates(template_dir=None, allow_snapshot_fallback=False):
+def load_monthly_templates(template_dir=None, allow_snapshot_fallback=False, include_score_office_record=False):
     resolved = template_resolver.resolve_templates(
         template_dir=template_dir,
         include_reserved=False,
@@ -294,14 +311,18 @@ def load_monthly_templates(template_dir=None, allow_snapshot_fallback=False):
             for item in resolved["blockers"]
         ]
         raise FileNotFoundError("月度模板外部事实源不可用：" + "；".join(messages))
-    templates = {key: path for key, path in resolved["templates"].items() if key in MONTHLY_TEMPLATE_KEYS}
-    missing = sorted(MONTHLY_TEMPLATE_KEYS - set(templates))
+    templates = {key: path for key, path in resolved["templates"].items() if key in EXTERNAL_MONTHLY_TEMPLATE_KEYS}
+    missing = sorted(EXTERNAL_MONTHLY_TEMPLATE_KEYS - set(templates))
     if missing:
         raise FileNotFoundError("月度模板缺少必要模板：" + "、".join(missing))
+    required_builtin = set(BUILTIN_MONTHLY_TEMPLATE_KEYS)
+    if include_score_office_record:
+        required_builtin |= OPTIONAL_BUILTIN_TEMPLATE_KEYS
+    templates.update(load_builtin_monthly_templates(required_builtin))
     return templates, {
-        "mode": "external_authoritative",
+        "mode": "external_plus_builtin",
         "template_dir": str(Path(template_dir)) if template_dir else None,
-        "policy": "external_template_source_is_authoritative; skill_snapshot_is_for_hash_verification",
+        "policy": "external_templates_follow_optimized_x_month_tree; builtin_generation_assets_stay_in_skill_snapshot",
         "warnings": resolved["warnings"],
         "statuses": resolved["statuses"],
     }
@@ -1701,7 +1722,11 @@ def run(args):
     month_dir = require_path(args.month_dir, "月份目录")
     include_score_office_record = getattr(args, "include_score_office_record", False)
     current_month_info = build_score_month_info(args.year, args.month, "argument")
-    templates, template_info = load_monthly_templates(args.template_dir, allow_snapshot_fallback=args.dry_run)
+    templates, template_info = load_monthly_templates(
+        args.template_dir,
+        allow_snapshot_fallback=args.dry_run,
+        include_score_office_record=include_score_office_record,
+    )
     product_register = find_one(month_dir, [f"*{args.month}月*产品巡查底册*.docx", "*产品巡查底册*.docx"], "产品巡查底册")
     network_dir = find_one(month_dir, ["*联网监测基础信息考评明细表"], "联网监测明细目录")
     network_stats = require_path(network_dir / "联网监测统计表.xls", "联网监测统计表")

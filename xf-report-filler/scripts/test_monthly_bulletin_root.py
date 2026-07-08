@@ -30,7 +30,7 @@ class MonthlyBulletinRootTests(unittest.TestCase):
     def test_work_report_root_file_is_retired(self):
         root_ids = {item["id"] for item in root.CONFIG["bulletin_root_files"]}
         template_ids = {item["id"] for item in root.CONFIG["templates"]}
-        self.assertNotIn("R03", root_ids)
+        self.assertIn("R03", root_ids)
         self.assertNotIn("T10", template_ids)
 
     def test_staff_count_and_pending_value(self):

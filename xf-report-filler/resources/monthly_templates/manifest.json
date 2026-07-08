@@ -1,7 +1,7 @@
 {
   "version": 3,
   "source_directory": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件",
-  "generated_at": "2026-07-08T02:43:06Z",
+  "generated_at": "2026-07-08T07:21:28Z",
   "templates": [
     {
       "id": "T01",
@@ -16,30 +16,6 @@
       "sha256": "09494CF92C990F8CDCDDA60066896193FB4A23FDCFDF2AD0B21F7D3BD6669F6F"
     },
     {
-      "id": "T02",
-      "key": "product_archive_detail",
-      "file": "YYYY年（X-1）月消防产品档案质量明细表.doc",
-      "description": "消防产品档案质量明细表模板",
-      "source": "score_skeleton",
-      "used_in_monthly_register": true,
-      "reserved": false,
-      "original_name": "YYYY年（X-1）月消防产品档案质量明细表.doc",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报\\（X-1）月巡查\\YYYY年（X-1）月消防产品档案质量明细表.doc",
-      "sha256": "DFE71B4A062E6986ACB6B14CE6C8DBCECFFD73D2D3A6ED60B5D196DE1CFB3B66"
-    },
-    {
-      "id": "T03",
-      "key": "product_summary",
-      "file": "YYYY年（X-1）月产品监督成绩总表.xlsx",
-      "description": "产品监督成绩总表模板",
-      "source": "score_skeleton",
-      "used_in_monthly_register": true,
-      "reserved": false,
-      "original_name": "YYYY年（X-1）月产品监督成绩总表.xlsx",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报\\（X-1）月巡查\\YYYY年（X-1）月产品监督成绩总表.xlsx",
-      "sha256": "E13B7CE483C3A45422668E9098499168E5A53AA19C583018A64DAFF98CC82285"
-    },
-    {
       "id": "T04",
       "key": "personal_stats",
       "file": "YYYY年（X-1）月个人执法统计表.xlsx",
@@ -50,18 +26,6 @@
       "original_name": "YYYY年（X-1）月个人执法统计表.xlsx",
       "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报\\（X-1）月巡查\\YYYY年（X-1）月个人执法统计表.xlsx",
       "sha256": "70D84D1AD336BB2724BDC1EA5A90743EA35B6516EC8E3C5DBA242BC330FC90B6"
-    },
-    {
-      "id": "T05",
-      "key": "office_record",
-      "file": "YYYY年（X-1）月科室月考核情况记录表.xlsx",
-      "description": "科室月考核情况记录表模板",
-      "source": "score_skeleton",
-      "used_in_monthly_register": true,
-      "reserved": false,
-      "original_name": "YYYY年（X-1）月科室月考核情况记录表.xlsx",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报\\（X-1）月巡查\\YYYY年（X-1）月科室月考核情况记录表.xlsx",
-      "sha256": "E6A1C39A5395367957EC5E289358ED33B957714E8E979B8FA16B6798C29106FA"
     },
     {
       "id": "T06",
@@ -88,18 +52,6 @@
       "sha256": "D9CBD03DFAA95724D78D96905B68FD8C4A902FF4AC42A5AE88ED42CCCE2C33E0"
     },
     {
-      "id": "T08",
-      "key": "monthly_product_supervision_stats_blank",
-      "file": "X月消防产品监督统计表空表.xls",
-      "description": "每月消防产品监督统计表空表模板",
-      "source": "bulletin_skeleton",
-      "used_in_monthly_register": false,
-      "reserved": true,
-      "original_name": "X月消防产品监督统计表空表.xls",
-      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报\\X月消防产品监督统计表空表.xls",
-      "sha256": "01264F29D22E64532C1250CC3C4AAF2409E2BF298C6C04653511B18F18B98D6C"
-    },
-    {
       "id": "T09",
       "key": "monthly_product_supervision_stats_work_check",
       "file": "X月消防产品监督统计表.xls",
@@ -110,6 +62,60 @@
       "original_name": "X月消防产品监督统计表.xls",
       "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报\\X月消防产品监督统计表.xls",
       "sha256": "CB9A276BA90651FC6453BF72F871B8D4C0867E11F09EF2CEC824B3528AFCE67B"
+    },
+    {
+      "id": "T11",
+      "key": "root_office_record",
+      "file": "X月科室月考核情况记录表.xlsx",
+      "description": "当月科室月考核情况记录表模板",
+      "source": "bulletin_skeleton",
+      "used_in_monthly_register": false,
+      "reserved": true,
+      "original_name": "X月科室月考核情况记录表.xlsx",
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报\\X月科室月考核情况记录表.xlsx",
+      "sha256": "E6A1C39A5395367957EC5E289358ED33B957714E8E979B8FA16B6798C29106FA"
+    },
+    {
+      "id": "T12",
+      "key": "work_dynamic",
+      "file": "X月消防产品工作动态（无锡）.doc",
+      "description": "当月消防产品工作动态模板",
+      "source": "bulletin_skeleton",
+      "used_in_monthly_register": false,
+      "reserved": true,
+      "original_name": "X月消防产品工作动态（无锡）.doc",
+      "source_path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报\\X月消防产品工作动态（无锡）.doc",
+      "sha256": "16F536933664A7117764CD4255A9C75A609A8769F811A3B447937545E1C090F6"
+    }
+  ],
+  "internal_templates": [
+    {
+      "id": "T02",
+      "key": "product_archive_detail",
+      "file": "YYYY年（X-1）月消防产品档案质量明细表.doc",
+      "description": "消防产品档案质量明细表内置生成底稿",
+      "source": "skill_snapshot",
+      "used_in_monthly_register": true,
+      "reserved": false
+    },
+    {
+      "id": "T03",
+      "key": "product_summary",
+      "file": "YYYY年（X-1）月产品监督成绩总表.xlsx",
+      "description": "产品监督成绩总表内置生成底稿",
+      "source": "skill_snapshot",
+      "used_in_monthly_register": true,
+      "reserved": false
+    },
+    {
+      "id": "T05",
+      "key": "office_record",
+      "file": "YYYY年（X-1）月科室月考核情况记录表.xlsx",
+      "description": "巡查目录科室月考核情况记录表旧版内置底稿",
+      "source": "skill_snapshot",
+      "used_in_monthly_register": false,
+      "reserved": true,
+      "requires_flag": "include_score_office_record"
     }
   ],
   "excluded_source_files": [

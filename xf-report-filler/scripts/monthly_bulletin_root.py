@@ -33,7 +33,7 @@ PENDING_STYLE = CONFIG["pending_rules"]["spreadsheet_pending_style"]
 PENDING_FILL_RGB = PENDING_STYLE["fill_color"]
 PENDING_FONT_RGB = PENDING_STYLE["font_color"]
 
-ROOT_FILES = workflow.bulletin_root_map(CONFIG)
+ROOT_FILES = workflow.pending_bulletin_root_map(CONFIG)
 
 BRIGADE_ORDER = ["梁溪大队", "锡山大队", "惠山大队", "滨湖大队", "新吴大队", "江阴大队", "宜兴大队", "经开大队"]
 BRIGADE_ALIASES = {"轨交大队": "轨道交通大队"}

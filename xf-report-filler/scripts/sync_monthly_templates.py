@@ -22,6 +22,7 @@ DEFAULT_TEMPLATE_DIR = workflow.template_root()
 CONFIG = workflow.load_config()
 TEMPLATES = workflow.templates(CONFIG)
 EXCLUDED = CONFIG.get("excluded_templates", [])
+INTERNAL_TEMPLATES = workflow.internal_templates(CONFIG)
 
 
 def resolve_source_dir(template_dir):
@@ -70,7 +71,10 @@ def run(args):
     blockers = []
     manifest_items = []
     config = workflow.load_config()
-    expected_snapshot_files = {item["file"] for item in workflow.templates(config)}
+    expected_snapshot_files = {
+        item["file"]
+        for item in workflow.templates(config) + workflow.internal_templates(config)
+    }
 
     for item in workflow.templates(config):
         source = workflow.external_template_path(item, config=config, template_dir=args.template_dir)
@@ -106,6 +110,7 @@ def run(args):
         "source_directory": str(source_dir),
         "generated_at": utc_now_text(),
         "templates": manifest_items,
+        "internal_templates": INTERNAL_TEMPLATES,
         "excluded_source_files": EXCLUDED,
         "template_policy": "external_template_source_is_authoritative; skill_snapshot_is_for_hash_verification",
     }

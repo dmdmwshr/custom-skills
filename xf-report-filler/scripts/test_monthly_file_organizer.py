@@ -61,6 +61,7 @@ class MonthlyFileOrganizerTests(unittest.TestCase):
                 {
                     "2026年6月科室月考核情况记录表.xlsx",
                     "2026年6月消防产品监督统计表.xls",
+                    "6月消防产品工作动态（无锡） .doc",
                 },
             )
             ensured_score_subdirs = {
@@ -88,6 +89,39 @@ class MonthlyFileOrganizerTests(unittest.TestCase):
                     action["kind"] == "archive_deprecated_root_file"
                     and Path(action["src"]) == deprecated_report
                     and Path(action["dst"]).parent.name == "_停用文件归档"
+                    for action in result["actions"]
+                )
+            )
+
+    def test_bulletin_dry_run_preserves_existing_manual_root_file_with_different_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            template_dir = base / "模板文件"
+            bulletin_dir = base / "26年" / "6月通报"
+            (bulletin_dir / organizer.workflow.score_dir_name(5, organizer.CONFIG)).mkdir(parents=True)
+            write_fake_templates(template_dir)
+            existing = bulletin_dir / "2026年6月消防产品监督统计表.xls"
+            existing.write_bytes(b"manual-result")
+
+            result = organizer.run(
+                argparse.Namespace(
+                    dry_run=True,
+                    apply=False,
+                    bulletin_dir=str(bulletin_dir),
+                    bulletin_year=2026,
+                    bulletin_month=6,
+                    score_year=2026,
+                    score_month=5,
+                    template_dir=str(template_dir),
+                )
+            )
+
+            self.assertTrue(result["ok"], result["blockers"])
+            self.assertTrue(
+                any(
+                    action["kind"] == "copy_bulletin_root_file"
+                    and action["status"] == "skip_existing_manual_file"
+                    and Path(action["dst"]) == existing
                     for action in result["actions"]
                 )
             )
