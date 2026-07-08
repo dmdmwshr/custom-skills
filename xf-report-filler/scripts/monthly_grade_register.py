@@ -272,12 +272,12 @@ def load_monthly_template_manifest(manifest_path=MONTHLY_TEMPLATE_MANIFEST):
 def load_external_templates(template_dir):
     template_dir = require_path(template_dir, "外部模板目录")
     templates = {
-        "product_archive_detail": find_one(template_dir, ["02_消防产品档案质量明细表模板.doc", "（模板）消防产品档案质量明细表.doc"], "消防产品档案质量明细表模板"),
-        "product_summary": find_one(template_dir, ["03_产品监督成绩总表模板.xlsx", "（模板）产品监督成绩总表.xlsx"], "产品监督成绩总表模板"),
-        "personal_stats": find_one(template_dir, ["04_个人执法统计表模板.xlsx", "（模板）个人执法统计表*.xlsx"], "个人执法统计表模板"),
-        "office_record": find_one(template_dir, ["05_科室月考核情况记录表模板.xlsx", "（模板）科室月考核情况记录表.xlsx"], "科室月考核情况记录表模板"),
-        "case_scores": find_one(template_dir, ["06_消防执法质量个案成绩模板.xls", "(模板-成绩汇总)消防监督管理系统消防执法质量（个案成绩）.xls"], "消防执法质量个案成绩模板"),
-        "monthly_report": find_one(template_dir, ["07_月度通报模板.doc", "(样例)xxxx年x月通报.doc"], "月度通报模板"),
+        "product_archive_detail": find_one(template_dir, ["X月消防产品档案质量明细表.doc", "02_消防产品档案质量明细表模板.doc", "（模板）消防产品档案质量明细表.doc"], "消防产品档案质量明细表模板"),
+        "product_summary": find_one(template_dir, ["X月产品监督成绩总表.xlsx", "03_产品监督成绩总表模板.xlsx", "（模板）产品监督成绩总表.xlsx"], "产品监督成绩总表模板"),
+        "personal_stats": find_one(template_dir, ["X月个人执法统计表.xlsx", "04_个人执法统计表模板.xlsx", "（模板）个人执法统计表*.xlsx"], "个人执法统计表模板"),
+        "office_record": find_one(template_dir, ["X月科室月考核情况记录表.xlsx", "05_科室月考核情况记录表模板.xlsx", "（模板）科室月考核情况记录表.xlsx"], "科室月考核情况记录表模板"),
+        "case_scores": find_one(template_dir, ["X月消防监督管理系统消防执法质量（个案成绩）.xls", "06_消防执法质量个案成绩模板.xls", "(模板-成绩汇总)消防监督管理系统消防执法质量（个案成绩）.xls"], "消防执法质量个案成绩模板"),
+        "monthly_report": find_one(template_dir, ["X月通报.doc", "07_月度通报模板.doc", "(样例)xxxx年x月通报.doc"], "月度通报模板"),
     }
     return templates, str(template_dir)
 
@@ -1936,7 +1936,7 @@ def main():
     parser.add_argument("--month", type=int, required=True, help="月份，例如 5")
     parser.add_argument("--force", action="store_true", help="覆盖已生成的同名成品文件")
     parser.add_argument("--dry-run", action="store_true", help="只解析并输出数据，不写入文件")
-    parser.add_argument("--template-dir", help="临时覆盖月度模板目录；默认使用 skill 内 resources/monthly_templates")
+    parser.add_argument("--template-dir", help="临时覆盖月度模板根目录；默认使用 monthly_workflow.json 的外部事实源")
     parser.add_argument("--no-history-update", action="store_true", help="生成文件但不更新联网通报历史台账")
     parser.add_argument(
         "--include-score-office-record",

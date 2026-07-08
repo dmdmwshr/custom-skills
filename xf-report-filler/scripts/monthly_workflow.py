@@ -28,18 +28,18 @@ def template_root(config=None, override=None):
     return Path(config["template_sources"]["external_root"])
 
 
-def numbered_library_dir(config=None, template_dir=None):
-    if template_dir:
-        return Path(template_dir) / "_编号模板库"
-    config = config or load_config()
-    return Path(config["template_sources"]["numbered_library"])
-
-
 def bulletin_skeleton_dir(config=None, template_dir=None):
     if template_dir:
         return Path(template_dir) / "X月通报"
     config = config or load_config()
     return Path(config["template_sources"]["bulletin_skeleton"])
+
+
+def score_skeleton_dir(config=None, template_dir=None):
+    if template_dir:
+        return Path(template_dir) / "X月通报" / "上月巡查"
+    config = config or load_config()
+    return Path(config["template_sources"]["score_skeleton"])
 
 
 def skill_snapshot_dir(config=None):
@@ -124,10 +124,10 @@ def sha256_file(path):
 
 
 def external_template_path(item, config=None, template_dir=None):
-    source = item.get("source", "numbered_library")
+    source = item.get("source", "score_skeleton")
     if source == "bulletin_skeleton":
         return bulletin_skeleton_dir(config, template_dir) / item.get("skeleton_file", item["file"])
-    return numbered_library_dir(config, template_dir) / item["file"]
+    return score_skeleton_dir(config, template_dir) / item["file"]
 
 
 def snapshot_template_path(item, config=None):

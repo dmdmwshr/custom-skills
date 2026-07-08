@@ -19,8 +19,8 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
     def test_config_contains_external_template_absolute_paths(self):
         config = workflow.load_config()
         self.assertTrue(Path(config["template_sources"]["external_root"]).is_absolute())
-        self.assertTrue(Path(config["template_sources"]["numbered_library"]).is_absolute())
         self.assertTrue(Path(config["template_sources"]["bulletin_skeleton"]).is_absolute())
+        self.assertTrue(Path(config["template_sources"]["score_skeleton"]).is_absolute())
 
     def test_template_resolver_prefers_external_when_hash_differs(self):
         item = {
@@ -28,26 +28,26 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
             "key": "demo",
             "file": "demo.xls",
             "description": "demo",
-            "source": "numbered_library",
+            "source": "score_skeleton",
             "used_in_monthly_register": True,
             "reserved": False,
         }
         config = workflow.load_config()
         with self.subTest("external wins"):
             with patch.object(workflow, "templates", return_value=[item]):
-                with patch.object(workflow, "numbered_library_dir") as numbered, patch.object(workflow, "snapshot_template_path") as snapshot:
+                with patch.object(workflow, "score_skeleton_dir") as score_skeleton, patch.object(workflow, "snapshot_template_path") as snapshot:
                     import tempfile
 
                     with tempfile.TemporaryDirectory() as tmp:
                         base = Path(tmp)
-                        external_dir = base / "_编号模板库"
-                        external_dir.mkdir()
+                        external_dir = base / "X月通报" / "上月巡查"
+                        external_dir.mkdir(parents=True)
                         external = external_dir / "demo.xls"
                         snap = base / "snapshot" / "demo.xls"
                         snap.parent.mkdir()
                         external.write_bytes(b"external")
                         snap.write_bytes(b"snapshot")
-                        numbered.return_value = external_dir
+                        score_skeleton.return_value = external_dir
                         snapshot.return_value = snap
                         result = template_resolver.resolve_templates(template_dir=base, include_reserved=False)
 
@@ -61,22 +61,22 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
             "key": "demo",
             "file": "demo.xls",
             "description": "demo",
-            "source": "numbered_library",
+            "source": "score_skeleton",
             "used_in_monthly_register": True,
             "reserved": False,
         }
         with patch.object(workflow, "templates", return_value=[item]):
-            with patch.object(workflow, "numbered_library_dir") as numbered, patch.object(workflow, "snapshot_template_path") as snapshot:
+            with patch.object(workflow, "score_skeleton_dir") as score_skeleton, patch.object(workflow, "snapshot_template_path") as snapshot:
                 import tempfile
 
                 with tempfile.TemporaryDirectory() as tmp:
                     base = Path(tmp)
-                    external_dir = base / "_编号模板库"
-                    external_dir.mkdir()
+                    external_dir = base / "X月通报" / "上月巡查"
+                    external_dir.mkdir(parents=True)
                     snap = base / "snapshot" / "demo.xls"
                     snap.parent.mkdir()
                     snap.write_bytes(b"snapshot")
-                    numbered.return_value = external_dir
+                    score_skeleton.return_value = external_dir
                     snapshot.return_value = snap
                     result = template_resolver.resolve_templates(template_dir=base, include_reserved=False)
 

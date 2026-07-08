@@ -2,8 +2,8 @@
   "version": 1,
   "template_sources": {
     "external_root": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件",
-    "numbered_library": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\_编号模板库",
     "bulletin_skeleton": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报",
+    "score_skeleton": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报\\上月巡查",
     "skill_snapshot": "resources/monthly_templates"
   },
   "data_sources": {
@@ -43,81 +43,81 @@
     {
       "id": "T01",
       "key": "product_register",
-      "file": "01_产品巡查底册模板.docx",
+      "file": "X月产品巡查底册（不发）.docx",
       "description": "产品巡查底册模板",
-      "source": "numbered_library",
+      "source": "score_skeleton",
       "used_in_monthly_register": false,
       "reserved": false
     },
     {
       "id": "T02",
       "key": "product_archive_detail",
-      "file": "02_消防产品档案质量明细表模板.doc",
+      "file": "X月消防产品档案质量明细表.doc",
       "description": "消防产品档案质量明细表模板",
-      "source": "numbered_library",
+      "source": "score_skeleton",
       "used_in_monthly_register": true,
       "reserved": false
     },
     {
       "id": "T03",
       "key": "product_summary",
-      "file": "03_产品监督成绩总表模板.xlsx",
+      "file": "X月产品监督成绩总表.xlsx",
       "description": "产品监督成绩总表模板",
-      "source": "numbered_library",
+      "source": "score_skeleton",
       "used_in_monthly_register": true,
       "reserved": false
     },
     {
       "id": "T04",
       "key": "personal_stats",
-      "file": "04_个人执法统计表模板.xlsx",
+      "file": "X月个人执法统计表.xlsx",
       "description": "个人执法统计表模板",
-      "source": "numbered_library",
+      "source": "score_skeleton",
       "used_in_monthly_register": true,
       "reserved": false
     },
     {
       "id": "T05",
       "key": "office_record",
-      "file": "05_科室月考核情况记录表模板.xlsx",
+      "file": "X月科室月考核情况记录表.xlsx",
       "description": "科室月考核情况记录表模板",
-      "source": "numbered_library",
+      "source": "score_skeleton",
       "used_in_monthly_register": true,
       "reserved": false
     },
     {
       "id": "T06",
       "key": "case_scores",
-      "file": "06_消防执法质量个案成绩模板.xls",
+      "file": "X月消防监督管理系统消防执法质量（个案成绩）.xls",
       "description": "消防监督管理系统消防执法质量个案成绩模板",
-      "source": "numbered_library",
+      "source": "score_skeleton",
       "used_in_monthly_register": true,
       "reserved": false
     },
     {
       "id": "T07",
       "key": "monthly_report",
-      "file": "07_月度通报模板.doc",
+      "file": "X月通报.doc",
       "description": "月度通报模板",
-      "source": "numbered_library",
+      "source": "score_skeleton",
       "used_in_monthly_register": true,
       "reserved": false
     },
     {
       "id": "T08",
       "key": "monthly_product_supervision_stats_blank",
-      "file": "08_每月消防产品监督统计表空表模板.xls",
+      "file": "X月消防产品监督统计表空表.xls",
       "description": "每月消防产品监督统计表空表模板",
-      "source": "numbered_library",
+      "source": "bulletin_skeleton",
       "used_in_monthly_register": false,
       "reserved": true
     },
     {
       "id": "T09",
       "key": "monthly_product_supervision_stats_work_check",
-      "file": "09_消防产品监督统计表工作检查模板.xls",
+      "file": "X月消防产品监督统计表.xls",
       "description": "消防产品监督统计表工作检查模板",
-      "source": "numbered_library",
+      "source": "bulletin_skeleton",
       "used_in_monthly_register": false,
       "reserved": true
     }
@@ -276,15 +276,24 @@
     }
   },
   "legacy_template_names": {
-    "（模板）产品巡查底册.docx": "01_产品巡查底册模板.docx",
-    "（模板）消防产品档案质量明细表.doc": "02_消防产品档案质量明细表模板.doc",
-    "（模板）产品监督成绩总表.xlsx": "03_产品监督成绩总表模板.xlsx",
-    "（模板）个人执法统计表202601.xlsx": "04_个人执法统计表模板.xlsx",
-    "（模板）科室月考核情况记录表.xlsx": "05_科室月考核情况记录表模板.xlsx",
-    "(模板-成绩汇总)消防监督管理系统消防执法质量（个案成绩）.xls": "06_消防执法质量个案成绩模板.xls",
-    "(样例)xxxx年x月通报.doc": "07_月度通报模板.doc",
-    "（空表）每月消防产品监督统计表.xls": "08_每月消防产品监督统计表空表模板.xls",
-    "(模板)X月消防产品监督统计表.xls": "09_消防产品监督统计表工作检查模板.xls",
+    "01_产品巡查底册模板.docx": "X月产品巡查底册（不发）.docx",
+    "（模板）产品巡查底册.docx": "X月产品巡查底册（不发）.docx",
+    "02_消防产品档案质量明细表模板.doc": "X月消防产品档案质量明细表.doc",
+    "（模板）消防产品档案质量明细表.doc": "X月消防产品档案质量明细表.doc",
+    "03_产品监督成绩总表模板.xlsx": "X月产品监督成绩总表.xlsx",
+    "（模板）产品监督成绩总表.xlsx": "X月产品监督成绩总表.xlsx",
+    "04_个人执法统计表模板.xlsx": "X月个人执法统计表.xlsx",
+    "（模板）个人执法统计表202601.xlsx": "X月个人执法统计表.xlsx",
+    "05_科室月考核情况记录表模板.xlsx": "X月科室月考核情况记录表.xlsx",
+    "（模板）科室月考核情况记录表.xlsx": "X月科室月考核情况记录表.xlsx",
+    "06_消防执法质量个案成绩模板.xls": "X月消防监督管理系统消防执法质量（个案成绩）.xls",
+    "(模板-成绩汇总)消防监督管理系统消防执法质量（个案成绩）.xls": "X月消防监督管理系统消防执法质量（个案成绩）.xls",
+    "07_月度通报模板.doc": "X月通报.doc",
+    "(样例)xxxx年x月通报.doc": "X月通报.doc",
+    "08_每月消防产品监督统计表空表模板.xls": "X月消防产品监督统计表空表.xls",
+    "（空表）每月消防产品监督统计表.xls": "X月消防产品监督统计表空表.xls",
+    "09_消防产品监督统计表工作检查模板.xls": "X月消防产品监督统计表.xls",
+    "(模板)X月消防产品监督统计表.xls": "X月消防产品监督统计表.xls",
     "（样例数据）消防产品档案质量明细表.doc": "90_消防产品档案质量明细表样例数据.doc"
   }
 }

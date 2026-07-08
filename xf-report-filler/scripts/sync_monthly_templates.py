@@ -25,9 +25,6 @@ EXCLUDED = CONFIG.get("excluded_templates", [])
 
 
 def resolve_source_dir(template_dir):
-    numbered_dir = workflow.numbered_library_dir(CONFIG, template_dir)
-    if numbered_dir.exists():
-        return numbered_dir
     return Path(template_dir)
 
 
@@ -73,6 +70,7 @@ def run(args):
     blockers = []
     manifest_items = []
     config = workflow.load_config()
+    expected_snapshot_files = {item["file"] for item in workflow.templates(config)}
 
     for item in workflow.templates(config):
         source = workflow.external_template_path(item, config=config, template_dir=args.template_dir)
@@ -83,30 +81,25 @@ def run(args):
 
         source_hash = add_copy_action(actions, source, target, "copy_template", args.dry_run, args.apply)
 
-        if item.get("numbered_sync_file"):
-            numbered_target = workflow.numbered_library_dir(config, args.template_dir) / item["numbered_sync_file"]
-            add_copy_action(actions, source, numbered_target, "sync_numbered_template_from_skeleton", args.dry_run, args.apply)
-
         manifest_item = dict(item)
         manifest_item["original_name"] = item["file"]
         manifest_item["source_path"] = str(source)
         manifest_item["sha256"] = source_hash
         manifest_items.append(manifest_item)
 
-    old_reserved = TARGET_DIR / "08_每月消防产品监督统计表模板.xls"
-    new_reserved = TARGET_DIR / "08_每月消防产品监督统计表空表模板.xls"
-    if args.apply and old_reserved.exists() and new_reserved.exists():
-        old_hash = sha256_file(old_reserved)
-        old_reserved.unlink()
-        actions.append(
-            {
-                "kind": "remove_old_reserved_template_name",
-                "status": "done",
-                "path": str(old_reserved),
-                "sha256": old_hash,
-                "replacement": str(new_reserved),
+    if TARGET_DIR.exists():
+        for stale in sorted(TARGET_DIR.iterdir(), key=lambda path: path.name):
+            if not stale.is_file() or stale.name == "manifest.json" or stale.name in expected_snapshot_files:
+                continue
+            action = {
+                "kind": "remove_stale_snapshot_template",
+                "status": "planned" if args.dry_run else "done",
+                "path": str(stale),
+                "sha256": sha256_file(stale),
             }
-        )
+            if args.apply:
+                stale.unlink()
+            actions.append(action)
 
     manifest = {
         "version": 3,

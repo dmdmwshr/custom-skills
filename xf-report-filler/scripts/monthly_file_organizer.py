@@ -133,12 +133,12 @@ def common_root(*paths):
     return Path(os.path.commonpath(resolved))
 
 
-def numbered_template_dir(template_dir):
-    return Path(template_dir) / "_编号模板库"
-
-
 def skeleton_template_dir(template_dir):
     return Path(template_dir) / "X月通报"
+
+
+def score_template_dir(template_dir):
+    return skeleton_template_dir(template_dir) / "上月巡查"
 
 
 def find_first_existing(paths):
@@ -151,15 +151,26 @@ def find_first_existing(paths):
 
 def template_source_for(template_dir, filename):
     template_dir = Path(template_dir)
-    library_dir = numbered_template_dir(template_dir)
+    skeleton_dir = skeleton_template_dir(template_dir)
+    score_dir = score_template_dir(template_dir)
     configured = next((item for item in workflow.templates(CONFIG) if item["file"] == filename), None)
-    if configured and configured.get("source") == "bulletin_skeleton":
-        skeleton = skeleton_template_dir(template_dir) / configured.get("skeleton_file", filename)
-        if skeleton.exists():
-            return skeleton
-    candidates = [library_dir / filename]
+    if configured:
+        canonical = workflow.external_template_path(configured, config=CONFIG, template_dir=template_dir)
+        if canonical.exists():
+            return canonical
+    candidates = []
     for candidate_name in NUMBERED_TEMPLATE_CANDIDATES.get(filename, [filename]):
-        candidates.append(template_dir / candidate_name)
+        candidates.extend(
+            [
+                score_dir / candidate_name,
+                skeleton_dir / candidate_name,
+                template_dir / candidate_name,
+            ]
+        )
+    if configured:
+        candidates.append(workflow.external_template_path(configured, config=CONFIG, template_dir=template_dir))
+    else:
+        candidates.append(template_dir / filename)
     return find_first_existing(candidates) or candidates[0]
 
 
@@ -173,42 +184,32 @@ def skeleton_source_for(template_dir, item):
 
 def organize_template_model(template_dir, actions, blockers, apply):
     template_dir = Path(template_dir)
-    library_dir = numbered_template_dir(template_dir)
     skeleton_dir = skeleton_template_dir(template_dir)
+    score_dir = score_template_dir(template_dir)
 
-    ensure_dir(library_dir, actions, apply, "ensure_numbered_template_library")
     ensure_dir(skeleton_dir, actions, apply, "ensure_bulletin_skeleton_dir")
-    ensure_dir(skeleton_dir / "上月巡查", actions, apply, "ensure_bulletin_skeleton_patrol_dir")
+    ensure_dir(score_dir, actions, apply, "ensure_bulletin_skeleton_patrol_dir")
     archive_office_locks(template_dir, actions, blockers, apply)
 
-    for filename in NUMBERED_TEMPLATE_NAMES:
-        if (library_dir / filename).exists():
-            actions.append({"kind": "numbered_template_present", "status": "skip_exists", "path": str(library_dir / filename)})
+    for item in workflow.templates(CONFIG):
+        filename = item["file"]
+        target = workflow.external_template_path(item, config=CONFIG, template_dir=template_dir)
+        if target.exists():
+            actions.append({"kind": "standard_template_present", "status": "skip_exists", "path": str(target)})
             continue
         source = template_source_for(template_dir, filename)
         if source is None or not source.exists():
-            add_blocker(blockers, "编号模板源文件不存在", target=library_dir / filename)
+            add_blocker(blockers, "标准模板源文件不存在", target=target)
             continue
-        if source.parent == skeleton_dir:
-            copy_if_missing(
-                source,
-                library_dir / filename,
-                actions,
-                blockers,
-                apply,
-                template_dir,
-                "copy_skeleton_to_numbered_library",
-            )
-        else:
-            move_or_rename(
-                source,
-                library_dir / filename,
-                actions,
-                blockers,
-                apply,
-                template_dir,
-                "move_template_to_numbered_library",
-            )
+        copy_if_missing(
+            source,
+            target,
+            actions,
+            blockers,
+            apply,
+            template_dir,
+            "copy_template_to_standard_skeleton",
+        )
 
     for item in BULLETIN_ROOT_TEMPLATE_MAP:
         skeleton_target = skeleton_dir / item["skeleton"]
@@ -299,16 +300,16 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
         "delete_wrong_score_office_record",
     )
 
-    archive_template_copies(score_dir, numbered_template_dir(template_dir), actions, blockers, apply)
+    archive_template_copies(score_dir, template_dir, actions, blockers, apply)
     normalize_score_source_names(score_dir, score_year, score_month, actions, blockers, apply)
 
 
 def collect_known_template_hashes(template_dir):
     hashes = {}
-    for directory in [Path(template_dir), SKILL_TEMPLATE_DIR]:
+    for directory in [skeleton_template_dir(template_dir), score_template_dir(template_dir), SKILL_TEMPLATE_DIR]:
         if not directory.exists():
             continue
-        for file_path in directory.glob("*"):
+        for file_path in directory.rglob("*"):
             if file_path.is_file() and not file_path.name.startswith("~$"):
                 hashes.setdefault(sha256_file(file_path), []).append(str(file_path))
     return hashes
@@ -329,10 +330,10 @@ def archive_template_copies(month_dir, template_dir, actions, blockers, apply):
         if not file_path.exists() or not file_path.is_file():
             continue
         digest = sha256_file(file_path)
-        if digest not in known_hashes:
-            add_blocker(blockers, "疑似模板副本哈希不在模板库中，未归档", path=file_path, sha256=digest)
-            continue
         move_or_rename(file_path, archive_dir / file_path.name, actions, blockers, apply, month_dir, "archive_template_copy")
+        if actions and actions[-1].get("src") == str(file_path):
+            actions[-1]["sha256"] = digest
+            actions[-1]["hash_match_current_template"] = digest in known_hashes
 
 
 def archive_deprecated_root_files(bulletin_dir, year, month, actions, blockers, apply):

@@ -138,12 +138,6 @@ def skeleton_path(template_dir, item):
     return Path(template_dir) / "X月通报" / item["skeleton"]
 
 
-def numbered_template_path(template_dir, item):
-    if not item.get("numbered"):
-        return None
-    return Path(template_dir) / "_编号模板库" / item["numbered"]
-
-
 def read_staff_counts(work_plan):
     book = xlrd.open_workbook(str(work_plan), formatting_info=True)
     sheet = book.sheet_by_name("任务总表")

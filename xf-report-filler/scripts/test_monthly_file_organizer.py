@@ -13,10 +13,14 @@ import monthly_file_organizer as organizer
 
 
 def write_fake_templates(template_dir):
-    library = template_dir / "_编号模板库"
-    library.mkdir(parents=True)
-    for name in organizer.NUMBERED_TEMPLATE_NAMES:
-        (library / name).write_bytes(f"template:{name}".encode("utf-8"))
+    for item in organizer.workflow.templates(organizer.CONFIG):
+        path = organizer.workflow.external_template_path(item, config=organizer.CONFIG, template_dir=template_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"template:{item['file']}".encode("utf-8"))
+    for item in organizer.workflow.bulletin_root_files(organizer.CONFIG):
+        path = template_dir / "X月通报" / item["skeleton_file"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"root:{item['skeleton_file']}".encode("utf-8"))
 
 
 class MonthlyFileOrganizerTests(unittest.TestCase):

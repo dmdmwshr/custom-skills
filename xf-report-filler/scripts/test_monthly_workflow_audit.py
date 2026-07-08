@@ -15,15 +15,12 @@ import monthly_workflow_audit as audit
 
 def write_fake_template_tree(template_dir):
     config = workflow.load_config()
-    library = template_dir / "_编号模板库"
     skeleton = template_dir / "X月通报"
-    library.mkdir(parents=True)
     skeleton.mkdir(parents=True)
     for item in workflow.templates(config):
-        if item.get("source") == "bulletin_skeleton":
-            (skeleton / item["skeleton_file"]).write_bytes(f"skeleton:{item['file']}".encode("utf-8"))
-        else:
-            (library / item["file"]).write_bytes(f"template:{item['file']}".encode("utf-8"))
+        path = workflow.external_template_path(item, config=config, template_dir=template_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"template:{item['file']}".encode("utf-8"))
     for item in workflow.bulletin_root_files(config):
         (skeleton / item["skeleton_file"]).write_bytes(f"root:{item['skeleton_file']}".encode("utf-8"))
 
