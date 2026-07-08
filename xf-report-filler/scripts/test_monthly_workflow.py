@@ -22,6 +22,14 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
         self.assertTrue(Path(config["template_sources"]["bulletin_skeleton"]).is_absolute())
         self.assertTrue(Path(config["template_sources"]["score_skeleton"]).is_absolute())
 
+    def test_template_and_real_score_dir_names_are_centralized(self):
+        config = workflow.load_config()
+        base = Path("模板文件")
+        self.assertEqual(workflow.template_bulletin_dir_name(config), "X月通报")
+        self.assertEqual(workflow.template_score_dir_name(config), "（X-1）月巡查")
+        self.assertEqual(workflow.score_dir_name(5, config), "5月巡查")
+        self.assertEqual(workflow.score_skeleton_dir(config=config, template_dir=base), base / "X月通报" / "（X-1）月巡查")
+
     def test_template_resolver_prefers_external_when_hash_differs(self):
         item = {
             "id": "T99",
@@ -40,7 +48,7 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
 
                     with tempfile.TemporaryDirectory() as tmp:
                         base = Path(tmp)
-                        external_dir = base / "X月通报" / "上月巡查"
+                        external_dir = base / "X月通报" / "（X-1）月巡查"
                         external_dir.mkdir(parents=True)
                         external = external_dir / "demo.xls"
                         snap = base / "snapshot" / "demo.xls"
@@ -71,7 +79,7 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
 
                 with tempfile.TemporaryDirectory() as tmp:
                     base = Path(tmp)
-                    external_dir = base / "X月通报" / "上月巡查"
+                    external_dir = base / "X月通报" / "（X-1）月巡查"
                     external_dir.mkdir(parents=True)
                     snap = base / "snapshot" / "demo.xls"
                     snap.parent.mkdir()

@@ -134,11 +134,11 @@ def common_root(*paths):
 
 
 def skeleton_template_dir(template_dir):
-    return Path(template_dir) / "X月通报"
+    return workflow.bulletin_skeleton_dir(config=CONFIG, template_dir=template_dir)
 
 
 def score_template_dir(template_dir):
-    return skeleton_template_dir(template_dir) / "上月巡查"
+    return workflow.score_skeleton_dir(config=CONFIG, template_dir=template_dir)
 
 
 def find_first_existing(paths):
@@ -258,7 +258,7 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
     bulletin_dir = Path(bulletin_dir)
     template_dir = Path(template_dir)
     operation_root = common_root(bulletin_dir, template_dir)
-    score_dir = bulletin_dir / f"{score_month}月巡查"
+    score_dir = bulletin_dir / workflow.score_dir_name(score_month, CONFIG)
 
     ensure_dir(bulletin_dir, actions, apply, "ensure_bulletin_dir")
     ensure_dir(score_dir, actions, apply, "ensure_score_patrol_dir")
@@ -381,7 +381,7 @@ def run(args):
         "score": {
             "year": args.score_year,
             "month": args.score_month,
-            "dir": str(Path(args.bulletin_dir) / f"{args.score_month}月巡查"),
+            "dir": str(Path(args.bulletin_dir) / workflow.score_dir_name(args.score_month, CONFIG)),
         },
         "template_dir": str(Path(args.template_dir)),
         "actions": actions,

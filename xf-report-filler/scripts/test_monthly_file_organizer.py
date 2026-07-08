@@ -18,7 +18,7 @@ def write_fake_templates(template_dir):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(f"template:{item['file']}".encode("utf-8"))
     for item in organizer.workflow.bulletin_root_files(organizer.CONFIG):
-        path = template_dir / "X月通报" / item["skeleton_file"]
+        path = organizer.workflow.bulletin_skeleton_dir(config=organizer.CONFIG, template_dir=template_dir) / item["skeleton_file"]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(f"root:{item['skeleton_file']}".encode("utf-8"))
 
@@ -29,7 +29,7 @@ class MonthlyFileOrganizerTests(unittest.TestCase):
             base = Path(tmp)
             template_dir = base / "模板文件"
             bulletin_dir = base / "26年" / "6月通报"
-            score_dir = bulletin_dir / "5月巡查"
+            score_dir = bulletin_dir / organizer.workflow.score_dir_name(5, organizer.CONFIG)
             score_dir.mkdir(parents=True)
             write_fake_templates(template_dir)
             wrong_office = score_dir / "2026年5月科室月考核情况记录表.xlsx"
@@ -84,7 +84,7 @@ class MonthlyFileOrganizerTests(unittest.TestCase):
             base = Path(tmp)
             template_dir = base / "模板文件"
             bulletin_dir = base / "26年" / "6月通报"
-            (bulletin_dir / "5月巡查").mkdir(parents=True)
+            (bulletin_dir / organizer.workflow.score_dir_name(5, organizer.CONFIG)).mkdir(parents=True)
             write_fake_templates(template_dir)
             (bulletin_dir / "【待补】2026年6月消防产品监督统计表.xls").write_bytes(b"pending")
 

@@ -28,16 +28,29 @@ def template_root(config=None, override=None):
     return Path(config["template_sources"]["external_root"])
 
 
+def directory_model(config=None):
+    config = config or load_config()
+    return config["directory_model"]
+
+
+def template_bulletin_dir_name(config=None):
+    return directory_model(config)["template_skeleton_dir_name"]
+
+
+def template_score_dir_name(config=None):
+    return directory_model(config)["template_score_dir_name"]
+
+
 def bulletin_skeleton_dir(config=None, template_dir=None):
     if template_dir:
-        return Path(template_dir) / "X月通报"
+        return Path(template_dir) / template_bulletin_dir_name(config)
     config = config or load_config()
     return Path(config["template_sources"]["bulletin_skeleton"])
 
 
 def score_skeleton_dir(config=None, template_dir=None):
     if template_dir:
-        return Path(template_dir) / "X月通报" / "上月巡查"
+        return bulletin_skeleton_dir(config=config, template_dir=template_dir) / template_score_dir_name(config)
     config = config or load_config()
     return Path(config["template_sources"]["score_skeleton"])
 
@@ -141,8 +154,7 @@ def root_file_name(item, year, month, pending=False, config=None):
 
 
 def score_dir_name(score_month, config=None):
-    config = config or load_config()
-    return config["directory_model"]["score_dir_name"].format(score_month=score_month)
+    return directory_model(config)["score_dir_name"].format(score_month=score_month)
 
 
 def status_for_template(item, config=None, template_dir=None, allow_snapshot_fallback=False):

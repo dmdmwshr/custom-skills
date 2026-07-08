@@ -39,7 +39,7 @@ class SyncMonthlyTemplatesTests(unittest.TestCase):
     def test_work_report_template_is_retired(self):
         with tempfile.TemporaryDirectory() as tmp:
             template_dir = Path(tmp) / "模板文件"
-            skeleton_dir = template_dir / "X月通报"
+            skeleton_dir = syncer.workflow.bulletin_skeleton_dir(config=syncer.CONFIG, template_dir=template_dir)
             skeleton_dir.mkdir(parents=True)
             for item in syncer.TEMPLATES:
                 path = syncer.workflow.external_template_path(item, config=syncer.CONFIG, template_dir=template_dir)

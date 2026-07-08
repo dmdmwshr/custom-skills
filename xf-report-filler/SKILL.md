@@ -11,7 +11,7 @@ x-edit-policy: edit-source-repo-only
 
 本 skill 分三条工作流：
 
-1. **月度产品与联网监测成绩登记**：整理 `X月通报` 目录、校验模板版本、生成上月巡查成绩材料、处理当月根层两张通报表待补/定稿。
+1. **月度产品与联网监测成绩登记**：整理 `X月通报` 目录、校验模板版本、生成 `（X-1）月巡查` 成绩材料、处理当月根层两张通报表待补/定稿。
 2. **年度产品监督底册问题汇总**：按需扫描本年各月产品巡查底册，兼容 1 月旧版产品监督网上巡查 `.doc` 源，生成年度根目录下的 `YYYY年产品监督底册问题汇总.docx`。
 3. **旧版消防产品档案 `.doc` 批量填报**：从旧 `.doc` 或结构化 JSON 生成《消防产品专项监督抽查卷评查记录表》。
 
@@ -22,7 +22,7 @@ x-edit-policy: edit-source-repo-only
 - 用户问整体流程：读本文件、`references/monthly_workflow.md`、`references/monthly/00_workflow_router.md`、`references/monthly/01_directory_model.md`。
 - 用户要整理目录：再读 `01_directory_model.md`、`02_template_strategy.md`。
 - 用户要处理当月根层两张表：读 `output_R01_office_record.md`、`output_R02_product_stats.md`，以及它们依赖的数据源对象。
-- 用户要生成上月巡查成绩：读 `source_product_register.md`、联网源表对象、`output_G01_product_archives.md` 到 `output_G05_monthly_report.md`。
+- 用户要生成 `（X-1）月巡查` 成绩：读 `source_product_register.md`、联网源表对象、`output_G01_product_archives.md` 到 `output_G05_monthly_report.md`。
 - 用户要生成年度产品问题汇总：读 `references/annual_problem_summary/00_workflow_router.md`、`source_product_register.md`、`output_annual_problem_summary.md`、`validation_and_audit.md`。
 - 用户要生成或修正 Word 公文类格式：读 `references/document_style.md`；年度汇总还要读年度输出对象文档。
 - 用户指出某个文件不合规：只加载该目标文件对象、它依赖的数据源对象和 `validation_and_audit.md`，再改配置、脚本和测试。
@@ -120,7 +120,7 @@ python scripts/sync_monthly_templates.py --apply
 ## 月度硬规则
 
 - 通报月份目录和成绩月份巡查目录分开：`6月通报` 根层放 6 月当月表，`6月通报\5月巡查` 放 5 月巡查成绩源和成品。
-- 外部模板事实源固定在 `resources/monthly_workflow.json` 的绝对路径；`模板文件\X月通报` 是唯一标准模板文件夹，根层放当月通报表模板，`上月巡查` 放成绩材料模板；skill 内 `resources/monthly_templates` 只是快照。
+- 外部模板事实源固定在 `resources/monthly_workflow.json` 的绝对路径；`模板文件\X月通报` 是唯一标准模板文件夹，根层放当月通报表模板，`（X-1）月巡查` 放成绩材料模板；skill 内 `resources/monthly_templates` 只是快照。
 - `产品巡查底册（不发）` 和 `基础信息考评截图（不发）` 是数据源，不标 `【待补】`。
 - 根层两张表在当月 25 号最终数据确认前，文件名前加 `【待补】`；表格内不写 `【待补】`，待确认单元格只用红色底色标记。
 - 产品底册黄色高亮问题属于私账：不进入成品，不参与扣分。

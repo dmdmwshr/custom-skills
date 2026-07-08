@@ -1,8 +1,14 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import monthly_workflow as workflow
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 
 
 def resolve_templates(template_dir=None, include_reserved=True, allow_snapshot_fallback=False, config=None):

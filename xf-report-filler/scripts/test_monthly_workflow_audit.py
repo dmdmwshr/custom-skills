@@ -15,7 +15,7 @@ import monthly_workflow_audit as audit
 
 def write_fake_template_tree(template_dir):
     config = workflow.load_config()
-    skeleton = template_dir / "X月通报"
+    skeleton = workflow.bulletin_skeleton_dir(config=config, template_dir=template_dir)
     skeleton.mkdir(parents=True)
     for item in workflow.templates(config):
         path = workflow.external_template_path(item, config=config, template_dir=template_dir)

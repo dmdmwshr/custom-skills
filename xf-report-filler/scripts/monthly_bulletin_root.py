@@ -135,7 +135,7 @@ def column_range_letters(column_range):
 
 
 def skeleton_path(template_dir, item):
-    return Path(template_dir) / "X月通报" / item["skeleton"]
+    return workflow.bulletin_skeleton_dir(config=CONFIG, template_dir=template_dir) / item["skeleton"]
 
 
 def read_staff_counts(work_plan):
@@ -829,7 +829,7 @@ def run(args):
     score_dir = Path(args.score_dir) if getattr(args, "score_dir", None) else None
     score_month = getattr(args, "score_month", None)
 
-    for required in [template_dir / "X月通报", work_plan]:
+    for required in [workflow.bulletin_skeleton_dir(config=CONFIG, template_dir=template_dir), work_plan]:
         if not required.exists():
             add_blocker(blockers, "必要路径不存在", path=required)
 
