@@ -63,6 +63,19 @@ class MonthlyFileOrganizerTests(unittest.TestCase):
                     "2026年6月消防产品监督统计表.xls",
                 },
             )
+            ensured_score_subdirs = {
+                Path(action["path"]).name
+                for action in result["actions"]
+                if action["kind"].startswith("ensure_score_subdir_")
+            }
+            self.assertEqual(
+                ensured_score_subdirs,
+                {
+                    "2026年5月错误照片留档",
+                    "2026年5月联网监测基础信息考评明细表",
+                    "2026年5月消防产品监督成绩",
+                },
+            )
             self.assertTrue(
                 any(
                     action["kind"] == "delete_wrong_score_office_record"

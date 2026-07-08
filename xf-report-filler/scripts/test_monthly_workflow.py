@@ -29,6 +29,15 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
         self.assertEqual(workflow.template_score_dir_name(config), "（X-1）月巡查")
         self.assertEqual(workflow.score_dir_name(5, config), "5月巡查")
         self.assertEqual(workflow.score_skeleton_dir(config=config, template_dir=base), base / "X月通报" / "（X-1）月巡查")
+        self.assertIn("YYYY年（X-1）月通报.doc", workflow.template_file_names(config))
+        self.assertEqual(
+            workflow.score_subdir_names(2026, 5, config),
+            [
+                "2026年5月错误照片留档",
+                "2026年5月联网监测基础信息考评明细表",
+                "2026年5月消防产品监督成绩",
+            ],
+        )
 
     def test_template_resolver_prefers_external_when_hash_differs(self):
         item = {

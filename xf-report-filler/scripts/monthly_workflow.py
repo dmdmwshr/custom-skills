@@ -112,6 +112,23 @@ def grade_outputs(config=None):
     return list(config["grade_outputs"])
 
 
+def score_subdirectories(config=None):
+    config = config or load_config()
+    return list(config.get("score_subdirectories", []))
+
+
+def score_subdir_name(item, year, month):
+    return item["target"].format(year=year, month=month)
+
+
+def score_subdir_names(year, month, config=None):
+    return [score_subdir_name(item, year, month) for item in score_subdirectories(config)]
+
+
+def score_subdir_map(year, month, config=None):
+    return {item["key"]: score_subdir_name(item, year, month) for item in score_subdirectories(config)}
+
+
 def data_source_path(name, config=None):
     config = config or load_config()
     value = config["data_sources"][name]["path"]

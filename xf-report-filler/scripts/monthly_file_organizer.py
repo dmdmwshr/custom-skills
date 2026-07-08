@@ -228,11 +228,21 @@ def organize_template_model(template_dir, actions, blockers, apply):
         )
 
 
+def score_subdir_paths(score_dir, score_year, score_month):
+    names = workflow.score_subdir_map(score_year, score_month, CONFIG)
+    return {key: Path(score_dir) / name for key, name in names.items()}
+
+
+def ensure_score_subdirs(score_dir, score_year, score_month, actions, apply):
+    for key, path in score_subdir_paths(score_dir, score_year, score_month).items():
+        ensure_dir(path, actions, apply, f"ensure_score_subdir_{key}")
+
+
 def normalize_score_source_names(score_dir, score_year, score_month, actions, blockers, apply):
     score_dir = Path(score_dir)
     product_normal_name = f"{score_year}年{score_month}月产品巡查底册（不发）.docx"
     base_info_normal_name = f"{score_year}年{score_month}月基础信息考评截图（不发）.xls"
-    network_dir = score_dir / f"{score_year}年{score_month}月联网监测基础信息考评明细表"
+    network_dir = score_subdir_paths(score_dir, score_year, score_month)["monitor_base_info_detail"]
 
     product_target = score_dir / product_normal_name
     product_old_names = [
@@ -262,6 +272,7 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
 
     ensure_dir(bulletin_dir, actions, apply, "ensure_bulletin_dir")
     ensure_dir(score_dir, actions, apply, "ensure_score_patrol_dir")
+    ensure_score_subdirs(score_dir, score_year, score_month, actions, apply)
 
     for item in BULLETIN_ROOT_TEMPLATE_MAP:
         source = skeleton_source_for(template_dir, item)
