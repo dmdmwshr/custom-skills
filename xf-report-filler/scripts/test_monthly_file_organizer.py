@@ -126,6 +126,41 @@ class MonthlyFileOrganizerTests(unittest.TestCase):
                 )
             )
 
+    def test_bulletin_dry_run_archives_root_template_copies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            template_dir = base / "模板文件"
+            bulletin_dir = base / "26年" / "6月通报"
+            (bulletin_dir / organizer.workflow.score_dir_name(5, organizer.CONFIG)).mkdir(parents=True)
+            write_fake_templates(template_dir)
+            root_template_copy = bulletin_dir / "X月消防产品监督统计表.xls"
+            root_template_copy.write_bytes(
+                (organizer.workflow.bulletin_skeleton_dir(config=organizer.CONFIG, template_dir=template_dir) / "X月消防产品监督统计表.xls").read_bytes()
+            )
+
+            result = organizer.run(
+                argparse.Namespace(
+                    dry_run=True,
+                    apply=False,
+                    bulletin_dir=str(bulletin_dir),
+                    bulletin_year=2026,
+                    bulletin_month=6,
+                    score_year=2026,
+                    score_month=5,
+                    template_dir=str(template_dir),
+                )
+            )
+
+            self.assertTrue(result["ok"], result["blockers"])
+            self.assertTrue(
+                any(
+                    action["kind"] == "archive_template_copy"
+                    and Path(action["src"]) == root_template_copy
+                    and Path(action["dst"]).parent.name == "_模板副本归档"
+                    for action in result["actions"]
+                )
+            )
+
     def test_bulletin_dry_run_skips_unprefixed_when_pending_root_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

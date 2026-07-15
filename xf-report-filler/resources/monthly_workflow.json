@@ -1,21 +1,21 @@
 {
   "version": 1,
   "template_sources": {
-    "external_root": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件",
-    "bulletin_skeleton": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报",
-    "score_skeleton": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\模板文件\\X月通报\\（X-1）月巡查",
+    "external_root": "E:\\文件夹\\1、工作\\2、产品科技联网\\1、产品监督\\模板",
+    "bulletin_skeleton": "E:\\文件夹\\1、工作\\2、产品科技联网\\1、产品监督\\模板\\月通报模板",
+    "score_skeleton": "E:\\文件夹\\1、工作\\2、产品科技联网\\1、产品监督\\模板\\月通报模板\\（X-1）月巡查",
     "skill_snapshot": "resources/monthly_templates"
   },
   "data_sources": {
     "work_plan": {
-      "path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\2026年-产品、科技工作计划.xls",
+      "path": "E:\\文件夹\\1、工作\\2、产品科技联网\\26\\产品科技工作计划.xls",
       "required_for": [
         "bulletin_root_pending",
         "bulletin_root_final_audit"
       ]
     },
     "case_data": {
-      "path": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\26年\\26年产品案卷信息收集\\产品案卷数据.xlsx",
+      "path": "E:\\文件夹\\1、工作\\2、产品科技联网\\1、产品监督\\26\\案卷信息\\产品案卷数据.xlsx",
       "required_for": [
         "bulletin_root_pending",
         "bulletin_root_final_audit"
@@ -31,7 +31,7 @@
   "directory_model": {
     "bulletin_dir_name": "{month}月通报",
     "score_dir_name": "{score_month}月巡查",
-    "template_skeleton_dir_name": "X月通报",
+    "template_skeleton_dir_name": "月通报模板",
     "template_score_dir_name": "（X-1）月巡查",
     "template_copy_archive_dir_name": "_模板副本归档"
   },

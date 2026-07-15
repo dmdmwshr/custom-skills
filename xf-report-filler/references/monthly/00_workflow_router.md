@@ -6,7 +6,7 @@
 
 - 说明整体流程：读取 `01_directory_model.md`、`02_template_strategy.md`。
 - 审计真实目录：读取 `01_directory_model.md`、`02_template_strategy.md`、`validation_and_audit.md`。
-- 整理 `X月通报` 目录：读取 `01_directory_model.md`、`02_template_strategy.md`。
+- 整理月度通报目录：读取 `01_directory_model.md`、`02_template_strategy.md`。
 - 处理根层当月两张表：读取 `output_R01_office_record.md`、`output_R02_product_stats.md`，并按依赖读取 `source_work_plan.md`、`source_product_case_data.md`、联网源表对象。
 - 生成 `（X-1）月巡查` 成绩：读取 `source_product_register.md`、`source_monitor_base_info.md`、`source_monitor_stats.md`、`output_G01_product_archives.md` 到 `output_G05_monthly_report.md`。
 - 仅修某个文件：读取该文件对象、它依赖的数据源对象和 `validation_and_audit.md`。

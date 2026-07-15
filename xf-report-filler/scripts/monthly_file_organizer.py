@@ -311,6 +311,7 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
             existing_diff_status="skip_existing_manual_file",
         )
 
+    archive_template_copies(bulletin_dir, template_dir, actions, blockers, apply)
     archive_deprecated_root_files(bulletin_dir, bulletin_year, bulletin_month, actions, blockers, apply)
 
     wrong_score_office = score_dir / f"{score_year}年{score_month}月科室月考核情况记录表.xlsx"

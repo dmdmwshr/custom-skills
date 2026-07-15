@@ -116,6 +116,44 @@
       ],
       "source": "generated",
       "updated_at": "2026-06-18T02:24:40Z"
+    },
+    {
+      "year": 2026,
+      "month": 6,
+      "month_key": "2026-06",
+      "report_file": "E:\\文件夹\\1、工作\\2、产品科技联网\\1、产品监督\\26\\月度通报\\2607_通报\\6月巡查\\2026年6月通报.doc",
+      "report_section_hash": "9bde11b2e9489426fbe42d4b6d6b07f7f04aff7044792f4ad589bf3b5207c97f",
+      "selected_cases": [
+        {
+          "rank": 1,
+          "brigade": "滨湖",
+          "brigade_name": "滨湖大队",
+          "contact": "曹云皓",
+          "unit": "无锡市华源企业管理咨询服务有限公司（领馆88大厦）",
+          "case_score": 9.4,
+          "brigade_avg": 9.57
+        },
+        {
+          "rank": 2,
+          "brigade": "锡山",
+          "brigade_name": "锡山大队",
+          "contact": "滕广远",
+          "unit": "无锡市锡山区人民政府东亭街道办事处（华庭苑）",
+          "case_score": 9.5,
+          "brigade_avg": 9.53
+        },
+        {
+          "rank": 3,
+          "brigade": "江阴",
+          "brigade_name": "江阴大队",
+          "contact": "王强",
+          "unit": "江阴临港科创实验学校",
+          "case_score": 9.5,
+          "brigade_avg": 9.59
+        }
+      ],
+      "source": "generated",
+      "updated_at": "2026-07-15T07:49:36Z"
     }
   ]
 }

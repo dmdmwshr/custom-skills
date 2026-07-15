@@ -26,10 +26,10 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
     def test_template_and_real_score_dir_names_are_centralized(self):
         config = workflow.load_config()
         base = Path("模板文件")
-        self.assertEqual(workflow.template_bulletin_dir_name(config), "X月通报")
+        self.assertEqual(workflow.template_bulletin_dir_name(config), "月通报模板")
         self.assertEqual(workflow.template_score_dir_name(config), "（X-1）月巡查")
         self.assertEqual(workflow.score_dir_name(5, config), "5月巡查")
-        self.assertEqual(workflow.score_skeleton_dir(config=config, template_dir=base), base / "X月通报" / "（X-1）月巡查")
+        self.assertEqual(workflow.score_skeleton_dir(config=config, template_dir=base), base / "月通报模板" / "（X-1）月巡查")
         self.assertIn("YYYY年（X-1）月通报.doc", workflow.template_file_names(config))
         self.assertEqual(
             workflow.score_subdir_names(2026, 5, config),
@@ -101,7 +101,7 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
 
                     with tempfile.TemporaryDirectory() as tmp:
                         base = Path(tmp)
-                        external_dir = base / "X月通报" / "（X-1）月巡查"
+                        external_dir = base / "月通报模板" / "（X-1）月巡查"
                         external_dir.mkdir(parents=True)
                         external = external_dir / "demo.xls"
                         snap = base / "snapshot" / "demo.xls"
@@ -132,7 +132,7 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
 
                 with tempfile.TemporaryDirectory() as tmp:
                     base = Path(tmp)
-                    external_dir = base / "X月通报" / "（X-1）月巡查"
+                    external_dir = base / "月通报模板" / "（X-1）月巡查"
                     external_dir.mkdir(parents=True)
                     snap = base / "snapshot" / "demo.xls"
                     snap.parent.mkdir()
