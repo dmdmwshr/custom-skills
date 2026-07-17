@@ -67,6 +67,7 @@ PENDING_FILL_RGB = PERSONAL_RULES.get("mismatch_fill_color", "FFFF0000")
 PENDING_FONT_RGB = PERSONAL_RULES.get("mismatch_font_color", "FF000000")
 PRODUCT_SCORE_NUMBER_FORMAT = "0.0"
 MONITOR_SCORE_NUMBER_FORMAT = "0.00"
+CASE_SCORE_MONITOR_NUMBER_FORMAT = "0.0"
 
 
 class HumanReviewRequired(RuntimeError):
@@ -1258,7 +1259,7 @@ def write_case_scores(template_path, output_path, product_records, monitor_score
             if short in product_scores:
                 write_com_score(ws.Cells(row, 2), product_scores[short], PRODUCT_SCORE_NUMBER_FORMAT)
             if short in monitor_scores:
-                write_com_score(ws.Cells(row, 11), monitor_scores[short]["avg"], MONITOR_SCORE_NUMBER_FORMAT)
+                write_com_score(ws.Cells(row, 11), monitor_scores[short]["avg"], CASE_SCORE_MONITOR_NUMBER_FORMAT)
         workbook.Save()
     finally:
         workbook.Close(False)

@@ -491,7 +491,7 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
             self.assertEqual(sheet.Cells(3, 2).Value, 10.0)
             self.assertEqual(sheet.Cells(3, 2).NumberFormat, mgr.PRODUCT_SCORE_NUMBER_FORMAT)
             self.assertEqual(sheet.Cells(3, 11).Value, 9.7)
-            self.assertEqual(sheet.Cells(3, 11).NumberFormat, mgr.MONITOR_SCORE_NUMBER_FORMAT)
+            self.assertEqual(sheet.Cells(3, 11).NumberFormat, mgr.CASE_SCORE_MONITOR_NUMBER_FORMAT)
 
     def test_read_monitor_scores_recomputes_avg_over_10(self):
         class FakeCell:
