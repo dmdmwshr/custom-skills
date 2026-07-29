@@ -1,0 +1,4 @@
+interface:
+  display_name: "Browser Tamer 路由管理"
+  short_description: "管理 Browser Tamer 的链接路由、配置与安全核验"
+  default_prompt: "使用 $browser-tamer 检查 Browser Tamer，并把指定域名安全路由到目标浏览器配置文件。"
