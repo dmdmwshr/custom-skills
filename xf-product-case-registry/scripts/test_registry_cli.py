@@ -5,6 +5,7 @@ import json
 import zipfile
 from pathlib import Path
 
+import httpx
 import pytest
 from pypdf import PdfWriter
 
@@ -13,12 +14,14 @@ from scripts.registry_cli import (
     RegistryError,
     build_entities,
     compose_command,
+    file_sha256,
     inventory_command,
     ocr_command,
     read_json,
     safe_extract_zip,
     source_analysis_command,
     split_command,
+    sync_document_versions_command,
     upload_command,
     validate_manifest,
 )
@@ -35,8 +38,8 @@ def write_blank_pdf(path: Path, pages: int = 2) -> None:
 def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     source = tmp_path / "32002207C202600033"
     source.mkdir()
-    write_blank_pdf(source / "组合件.pdf")
-    (source / "案卷截图.json").write_text('{"kind":"fixture"}\n', encoding="utf-8")
+    write_blank_pdf(source / "组合件.pdf", pages=4)
+    (source / "案卷截图.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
     work = tmp_path / "work"
 
     inventory_command(argparse.Namespace(input=str(source), work_dir=str(work)))
@@ -44,13 +47,19 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     assert inventory["containerKind"] == "DIRECTORY"
     assert len(inventory["files"]) == 2
     pdf_record = next(item for item in inventory["files"] if item["mimeType"] == "application/pdf")
-    assert pdf_record["pageCount"] == 2
-    assert [page["needsOcr"] for page in pdf_record["pages"]] == [True, True]
+    assert pdf_record["pageCount"] == 4
+    assert [page["needsOcr"] for page in pdf_record["pages"]] == [
+        True,
+        True,
+        True,
+        True,
+    ]
 
     plan = {
         "projectNo": "32002207C202600033",
         "items": [
             {
+                "documentRef": "document:service-receipt-1",
                 "sourceRelativePath": "组合件.pdf",
                 "pageStart": 1,
                 "pageEnd": 1,
@@ -58,16 +67,69 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
                 "documentType": "SERVICE_RECEIPT",
                 "documentLabel": "送达回证",
                 "documentNoOrDate": "〔2026〕第0001号",
+                "documentVersionKind": "SCANNED",
                 "sequence": 1,
-            }
+            },
+            {
+                "documentRef": "document:type-test-report-1",
+                "sourceRelativePath": "组合件.pdf",
+                "pageStart": 2,
+                "pageEnd": 2,
+                "stage": "INITIAL_CHECK",
+                "documentType": "TYPE_TEST_REPORT",
+                "documentLabel": "型式检验报告",
+                "documentNoOrDate": "ZB2018M3262",
+                "documentVersionKind": "UNKNOWN",
+                "sequence": 2,
+            },
+            {
+                "documentRef": "document:service-receipt-1",
+                "sourceRelativePath": "组合件.pdf",
+                "pageStart": 3,
+                "pageEnd": 3,
+                "stage": "INITIAL_CHECK",
+                "documentType": "SERVICE_RECEIPT",
+                "documentLabel": "送达回证",
+                "documentNoOrDate": "〔2026〕第0001号",
+                "documentVersionKind": "SCANNED",
+                "sequence": 3,
+            },
+            {
+                "documentRef": "document:service-receipt-1",
+                "sourceRelativePath": "组合件.pdf",
+                "pageStart": 4,
+                "pageEnd": 4,
+                "stage": "INITIAL_CHECK",
+                "documentType": "SERVICE_RECEIPT",
+                "documentLabel": "送达回证",
+                "documentNoOrDate": "〔2026〕第0001号",
+                "documentVersionKind": "ELECTRONIC",
+                "sequence": 4,
+            },
         ],
     }
     plan_path = work / "split-plan.json"
+    missing_document_ref_plan = json.loads(json.dumps(plan))
+    missing_document_ref_plan["items"][0].pop("documentRef")
+    missing_document_ref_path = work / "split-plan-missing-document-ref.json"
+    missing_document_ref_path.write_text(
+        json.dumps(missing_document_ref_plan, ensure_ascii=False), encoding="utf-8"
+    )
+    with pytest.raises(RegistryError, match="必须填写.*documentRef"):
+        split_command(argparse.Namespace(work_dir=str(work), plan=str(missing_document_ref_path)))
     plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
     split_command(argparse.Namespace(work_dir=str(work), plan=str(plan_path)))
     split_index = read_json(work / "split-index.json")
-    assert len(split_index["items"]) == 1
+    assert split_index["splitIndexVersion"] == 2
+    assert len(split_index["items"]) == 4
     assert Path(split_index["items"][0]["absolutePath"]).is_file()
+    assert "_扫描件_" in split_index["items"][0]["relativePath"]
+    assert split_index["items"][0]["documentVersionKind"] == "SCANNED"
+    assert "_版本待核对_" in split_index["items"][1]["relativePath"]
+    assert split_index["items"][1]["documentVersionKind"] == "UNKNOWN"
+    assert split_index["items"][2]["documentRef"] == "document:service-receipt-1"
+    assert "_电子版_" in split_index["items"][3]["relativePath"]
+    assert split_index["items"][3]["documentVersionKind"] == "ELECTRONIC"
 
     case_data = {
         "case": {
@@ -76,13 +138,13 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
             "unitName": "测试单位",
             "inspectionForm": "ROUTINE",
             "caseType": "UNKNOWN",
-            "onlineSale": "UNKNOWN",
         },
         "products": [
             {
                 "sequence": 1,
                 "name": "直流水枪",
                 "modelSpec": "QZ3.5/7.5",
+                "onlineSale": "NO",
                 "inspections": [
                     {
                         "stage": "INITIAL_CHECK",
@@ -95,6 +157,7 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
             {
                 "sequence": 2,
                 "name": "消防水带",
+                "onlineSale": "YES",
                 "inspections": [
                     {
                         "stage": "INITIAL_CHECK",
@@ -108,6 +171,7 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
             {
                 "sequence": 3,
                 "name": "消防接口",
+                "onlineSale": "UNKNOWN",
                 "inspections": [
                     {
                         "stage": "INITIAL_CHECK",
@@ -119,7 +183,42 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
             },
         ],
         "documentRequirements": [],
-        "documents": [],
+        "documents": [
+            {
+                "clientRef": "document:service-receipt-1",
+                "documentType": "SERVICE_RECEIPT",
+                "documentNo": "〔2026〕第0001号",
+                "issueDate": "2026-05-19",
+                "stage": "INITIAL_CHECK",
+                "productRefs": ["product:1"],
+                "inspectionRefs": ["inspection:1:initial_check"],
+                "versions": [
+                    {
+                        "relativePath": split_index["items"][0]["relativePath"],
+                        "kind": "SCANNED",
+                    }
+                ],
+                "fileLinks": [],
+            },
+            {
+                "clientRef": "document:type-test-report-1",
+                "documentType": "TYPE_TEST_REPORT",
+                "documentNo": "ZB2018M3262",
+                "issueDate": "2026-05-19",
+                "stage": "INITIAL_CHECK",
+                "productRefs": ["product:1"],
+                "inspectionRefs": [],
+                "versions": [],
+                "fileLinks": [
+                    {
+                        "relativePath": "original/组合件.pdf",
+                        "relationRole": "SOURCE_COPY",
+                        "pageStart": 2,
+                        "pageEnd": 2,
+                    }
+                ],
+            },
+        ],
         "fieldEvidence": [
             {
                 "entityRef": "case:32002207C202600033",
@@ -190,23 +289,22 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     invalid_review = json.loads(json.dumps(manifest))
     invalid_review["reviewItems"].append(dict(invalid_review["reviewItems"][0]))
     assert any(
-        "clientRef 重复：" in error
-        for error in validate_manifest(invalid_review, upload_map)
+        "clientRef 重复：" in error for error in validate_manifest(invalid_review, upload_map)
     )
     entity_ref_collision = json.loads(json.dumps(manifest))
     entity_ref_collision["reviewItems"][0]["clientRef"] = "product:1"
     assert "clientRef 重复：product:1" in validate_manifest(entity_ref_collision, upload_map)
     duplicate_candidate = json.loads(json.dumps(manifest))
-    duplicate_candidate["reviewItems"][0]["candidates"][1]["candidateRef"] = (
-        duplicate_candidate["reviewItems"][0]["candidates"][0]["candidateRef"]
-    )
+    duplicate_candidate["reviewItems"][0]["candidates"][1]["candidateRef"] = duplicate_candidate[
+        "reviewItems"
+    ][0]["candidates"][0]["candidateRef"]
     assert any(
         "候选标识重复" in error for error in validate_manifest(duplicate_candidate, upload_map)
     )
     legacy_value_conflict = json.loads(json.dumps(manifest))
     legacy_value_conflict["reviewItems"][0].pop("candidates")
     assert validate_manifest(legacy_value_conflict, upload_map) == []
-    assert len(manifest["files"]) == 4
+    assert len(manifest["files"]) == 7
     assert manifest["products"][0]["clientRef"] == "product:1"
     assert (
         manifest["products"][0]["inspections"][0]["caseInspectionRef"]
@@ -221,11 +319,144 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
         == "external:initial-2026-05-19"
     )
     assert manifest["case"]["caseType"] == "UNKNOWN"
+    assert "onlineSale" not in manifest["case"]
+    assert [product["onlineSale"] for product in manifest["products"]] == [
+        "NO",
+        "YES",
+        "UNKNOWN",
+    ]
+    assert {version["kind"] for version in manifest["documents"][0]["versions"]} == {
+        "ELECTRONIC",
+        "SCANNED",
+    }
+    assert manifest["documents"][0]["fileLinks"][0]["fileRef"].startswith("file:orig:")
+    assert {
+        (link.get("pageStart"), link.get("pageEnd"))
+        for link in manifest["documents"][0]["fileLinks"]
+    } == {(1, 1), (3, 3), (4, 4)}
     assert any(
-        item["entityRef"] == "case:32002207C202600033"
-        and item["fieldPath"] == "caseType"
+        item["entityRef"] == "document:service-receipt-1"
+        and item["fieldPath"] == "versions"
+        and item["issueType"] == "DUPLICATE_CANDIDATE"
+        for item in manifest["reviewItems"]
+    )
+    assert any(
+        item["entityRef"] == "document:type-test-report-1"
+        and item["fieldPath"] == "versions"
+        and item["issueType"] == "LOW_CONFIDENCE"
+        for item in manifest["reviewItems"]
+    )
+    assert manifest["documents"][1]["versions"] == []
+    assert any(
+        item["entityRef"] == "case:32002207C202600033" and item["fieldPath"] == "caseType"
         for item in manifest["missingItems"]
     )
+
+    screenshot_file_ref = next(
+        item["clientRef"]
+        for item in manifest["files"]
+        if item["relativePath"] == "original/案卷截图.png"
+    )
+
+    legacy_case_online_sale = json.loads(json.dumps(manifest))
+    legacy_case_online_sale["case"]["onlineSale"] = "YES"
+    assert any(
+        "case.onlineSale 已停用" in error
+        for error in validate_manifest(legacy_case_online_sale, upload_map)
+    )
+
+    invalid_online_sale_review = json.loads(json.dumps(manifest))
+    invalid_online_sale_review["reviewItems"].append(
+        {
+            "clientRef": "review:case-online-sale",
+            "entityRef": "case:32002207C202600033",
+            "fieldPath": "onlineSale",
+            "issueType": "DATA_ANOMALY",
+            "message": "旧版案卷级网售字段待迁移。",
+        }
+    )
+    assert "onlineSale 待核对项只能关联 product 实体" in validate_manifest(
+        invalid_online_sale_review, upload_map
+    )
+
+    invalid_online_sale_evidence = json.loads(json.dumps(manifest))
+    invalid_online_sale_evidence["fieldEvidence"].append(
+        {
+            "entityRef": "case:32002207C202600033",
+            "fieldPath": "onlineSale",
+            "value": "YES",
+            "trustLevel": "MANUAL",
+            "sources": [{"fileRef": screenshot_file_ref}],
+        }
+    )
+    assert "onlineSale 字段证据只能关联 product 实体" in validate_manifest(
+        invalid_online_sale_evidence, upload_map
+    )
+
+    invalid_online_sale_missing = json.loads(json.dumps(manifest))
+    invalid_online_sale_missing["missingItems"].append(
+        {
+            "entityRef": "case:32002207C202600033",
+            "fieldPath": "onlineSale",
+            "reason": "旧版案卷级网售缺失项。",
+        }
+    )
+    assert "onlineSale 缺失项只能关联 product 实体" in validate_manifest(
+        invalid_online_sale_missing, upload_map
+    )
+
+    duplicate_kind = json.loads(json.dumps(manifest))
+    duplicate_kind["documents"][0]["versions"].append(
+        dict(duplicate_kind["documents"][0]["versions"][0])
+    )
+    assert any(
+        "同一 kind 只能有一个正式版本" in error
+        for error in validate_manifest(duplicate_kind, upload_map)
+    )
+
+    duplicate_identity = json.loads(json.dumps(manifest))
+    duplicate_document = dict(duplicate_identity["documents"][0])
+    duplicate_document["clientRef"] = "document:service-receipt-duplicate"
+    duplicate_document["versions"] = []
+    duplicate_identity["documents"].append(duplicate_document)
+    assert any(
+        "逻辑文书身份重复" in error for error in validate_manifest(duplicate_identity, upload_map)
+    )
+
+    screenshot_as_version = json.loads(json.dumps(manifest))
+    screenshot_as_version["documents"][0]["versions"][0]["fileRef"] = screenshot_file_ref
+    assert any(
+        "只能引用 NORMALIZED_FILE" in error
+        for error in validate_manifest(screenshot_as_version, upload_map)
+    )
+
+    duplicate_source = json.loads(json.dumps(manifest))
+    duplicate_source["reviewItems"] = [
+        item
+        for item in duplicate_source["reviewItems"]
+        if not (
+            item.get("entityRef") == "document:service-receipt-1"
+            and item.get("fieldPath") == "versions"
+            and item.get("issueType") == "DUPLICATE_CANDIDATE"
+        )
+    ]
+    duplicate_source["documents"][0]["fileLinks"].append(
+        {"fileRef": screenshot_file_ref, "relationRole": "DUPLICATE_COPY"}
+    )
+    assert any(
+        "必须创建 DUPLICATE_CANDIDATE 待核对项" in error
+        for error in validate_manifest(duplicate_source, upload_map)
+    )
+    duplicate_source["reviewItems"].append(
+        {
+            "clientRef": "review:document-source-duplicate",
+            "entityRef": "document:service-receipt-1",
+            "fieldPath": "versions",
+            "issueType": "DUPLICATE_CANDIDATE",
+            "message": "存在未选为正式版本的原始来源，待人工核对。",
+        }
+    )
+    assert validate_manifest(duplicate_source, upload_map) == []
 
     legacy_manifest = json.loads(json.dumps(manifest))
     for product in legacy_manifest["products"]:
@@ -236,8 +467,7 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     inconsistent_group = json.loads(json.dumps(manifest))
     inconsistent_group["products"][2]["inspections"][0]["inspectionDate"] = "2026-05-20"
     assert any(
-        "案卷检查分组 case-inspection:initial:2026-05-19 的阶段或检查日期不一致"
-        in error
+        "案卷检查分组 case-inspection:initial:2026-05-19 的阶段或检查日期不一致" in error
         for error in validate_manifest(inconsistent_group, upload_map)
     )
 
@@ -266,8 +496,7 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     indirect_criminal_manifest = read_json(work / "manifest.json")
     assert indirect_criminal_manifest["case"]["caseType"] == "UNKNOWN"
     assert any(
-        item["entityRef"] == "case:32002207C202600033"
-        and item["fieldPath"] == "caseType"
+        item["entityRef"] == "case:32002207C202600033" and item["fieldPath"] == "caseType"
         for item in indirect_criminal_manifest["missingItems"]
     )
 
@@ -286,15 +515,11 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
 
     sampling_reinspection = json.loads(json.dumps(invalid_reinspection))
     sampling_reinspection["products"][0]["inspections"][0]["method"] = "SAMPLING"
-    sampling_reinspection["products"][0]["inspections"][0][
-        "reinspectionStatus"
-    ] = "COMPLETED"
+    sampling_reinspection["products"][0]["inspections"][0]["reinspectionStatus"] = "COMPLETED"
     assert validate_manifest(sampling_reinspection, upload_map) == []
 
     inconsistent_reinspection = json.loads(json.dumps(sampling_reinspection))
-    inconsistent_reinspection["products"][0]["inspections"][0][
-        "reinspectionStatus"
-    ] = "NOT_APPLIED"
+    inconsistent_reinspection["products"][0]["inspections"][0]["reinspectionStatus"] = "NOT_APPLIED"
     assert any(
         "复检状态为未申请时不能包含复检详情" in error
         for error in validate_manifest(inconsistent_reinspection, upload_map)
@@ -302,10 +527,7 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
 
     legacy_stage = json.loads(json.dumps(manifest))
     legacy_stage["products"][0]["inspections"][0]["stage"] = "LAB_REINSPECTION"
-    assert any(
-        ".stage 不合法" in error
-        for error in validate_manifest(legacy_stage, upload_map)
-    )
+    assert any(".stage 不合法" in error for error in validate_manifest(legacy_stage, upload_map))
 
     administrative_case_data = json.loads(json.dumps(case_data))
     administrative_case_data["products"][0]["inspections"].append(
@@ -325,24 +547,17 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     administrative_evidence = next(
         item
         for item in administrative_manifest["fieldEvidence"]
-        if item["entityRef"] == "case:32002207C202600033"
-        and item["fieldPath"] == "caseType"
+        if item["entityRef"] == "case:32002207C202600033" and item["fieldPath"] == "caseType"
     )
     assert administrative_evidence["sources"][0]["kind"] == "RULE"
-    assert (
-        administrative_evidence["sources"][0]["value"]["inspectionRef"]
-        == "inspection:1:recheck"
-    )
+    assert administrative_evidence["sources"][0]["value"]["inspectionRef"] == "inspection:1:recheck"
     assert validate_manifest(administrative_manifest, upload_map) == []
 
     missing_rule_evidence = json.loads(json.dumps(administrative_manifest))
     missing_rule_evidence["fieldEvidence"] = [
         item
         for item in missing_rule_evidence["fieldEvidence"]
-        if not (
-            item["entityRef"] == "case:32002207C202600033"
-            and item["fieldPath"] == "caseType"
-        )
+        if not (item["entityRef"] == "case:32002207C202600033" and item["fieldPath"] == "caseType")
     ]
     assert any(
         "行案必须具有引用整改复查不合格记录" in error
@@ -367,9 +582,7 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
             ],
         }
     )
-    case_data_path.write_text(
-        json.dumps(criminal_case_data, ensure_ascii=False), encoding="utf-8"
-    )
+    case_data_path.write_text(json.dumps(criminal_case_data, ensure_ascii=False), encoding="utf-8")
     compose_command(argparse.Namespace(work_dir=str(work), case_data=str(case_data_path)))
     criminal_manifest = read_json(work / "manifest.json")
     assert criminal_manifest["case"]["caseType"] == "CRIMINAL"
@@ -483,8 +696,7 @@ def test_inventory_ocr_and_source_analysis_handles_images_and_source_priority(
     assert classifications["现场签字扫描件.pdf"] == "SIGNED_SCAN_OCR"
     assert analysis["doesNotInferBusinessValues"] is True
     assert (
-        analysis["fieldGroupPriorities"]["problemDescription"][0]
-        == "SUPERVISION_RECORD_PDF_TEXT"
+        analysis["fieldGroupPriorities"]["problemDescription"][0] == "SUPERVISION_RECORD_PDF_TEXT"
     )
 
 
@@ -530,12 +742,394 @@ def test_undated_case_inspections_share_stage_ordinal_refs() -> None:
     assert first_product["inspections"][0]["caseInspectionRef"] == (
         "case-inspection:recheck:ordinal-1"
     )
-    assert first_product["inspections"][0]["caseInspectionRef"] == (
-        second_product["inspections"][0]["caseInspectionRef"]
+    assert (
+        first_product["inspections"][0]["caseInspectionRef"]
+        == (second_product["inspections"][0]["caseInspectionRef"])
     )
     assert first_product["inspections"][1]["caseInspectionRef"] == (
         "case-inspection:recheck:ordinal-2"
     )
-    assert first_product["inspections"][1]["caseInspectionRef"] == (
-        second_product["inspections"][1]["caseInspectionRef"]
+    assert (
+        first_product["inspections"][1]["caseInspectionRef"]
+        == (second_product["inspections"][1]["caseInspectionRef"])
     )
+
+
+def test_sync_document_versions_skips_same_hash_and_rejects_non_unique_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_electronic = tmp_path / "原始电子版.pdf"
+    original_scanned = tmp_path / "原始扫描件.pdf"
+    normalized_electronic = tmp_path / "规范电子版.pdf"
+    normalized_scanned = tmp_path / "规范扫描件.pdf"
+    for path in (
+        original_electronic,
+        original_scanned,
+        normalized_electronic,
+        normalized_scanned,
+    ):
+        write_blank_pdf(path, pages=1)
+    original_electronic_sha = file_sha256(original_electronic)
+    original_scanned_sha = file_sha256(original_scanned)
+    normalized_electronic_sha = file_sha256(normalized_electronic)
+    normalized_scanned_sha = file_sha256(normalized_scanned)
+    manifest = {
+        "schemaVersion": "CaseImportManifestV1",
+        "source": {
+            "sourceType": "LOCAL_SKILL",
+            "packageName": "同步测试",
+            "containerKind": "DIRECTORY",
+            "packageSha256": "sha256:" + "a" * 64,
+            "packageHashMethod": "SORTED_RELATIVE_PATH_AND_FILE_SHA256",
+            "extractedAt": "2026-07-31T00:00:00Z",
+            "extractor": {"name": "xf-product-case-registry", "version": "0.5.0"},
+        },
+        "case": {
+            "clientRef": "case:32002207C202600033",
+            "projectNo": "32002207C202600033",
+            "brigadeCode": "XISHAN",
+            "unitName": "测试单位",
+            "caseType": "UNKNOWN",
+        },
+        "products": [
+            {
+                "clientRef": "product:1",
+                "sequence": 1,
+                "name": "直流水枪",
+                "onlineSale": "YES",
+                "inspections": [
+                    {
+                        "clientRef": "inspection:1:initial_check",
+                        "caseInspectionRef": "case-inspection:initial:2026-05-19",
+                        "stage": "INITIAL_CHECK",
+                        "method": "ONSITE",
+                        "inspectionDate": "2026-05-19",
+                        "inspectionResult": "UNQUALIFIED",
+                    }
+                ],
+            }
+        ],
+        "files": [
+            {
+                "clientRef": "file:original-electronic",
+                "storageKind": "ORIGINAL_FILE",
+                "relativePath": "original/原始电子版.pdf",
+                "sha256": original_electronic_sha,
+                "mimeType": "application/pdf",
+                "pageCount": 1,
+            },
+            {
+                "clientRef": "file:original-scanned",
+                "storageKind": "ORIGINAL_FILE",
+                "relativePath": "original/原始扫描件.pdf",
+                "sha256": original_scanned_sha,
+                "mimeType": "application/pdf",
+                "pageCount": 1,
+            },
+            {
+                "clientRef": "file:normalized-electronic",
+                "storageKind": "NORMALIZED_FILE",
+                "relativePath": "normalized/规范电子版.pdf",
+                "sha256": normalized_electronic_sha,
+                "mimeType": "application/pdf",
+                "pageCount": 1,
+                "sourceFileRef": "file:original-electronic",
+                "sourcePageStart": 1,
+                "sourcePageEnd": 1,
+                "documentVersionKind": "ELECTRONIC",
+            },
+            {
+                "clientRef": "file:normalized-scanned",
+                "storageKind": "NORMALIZED_FILE",
+                "relativePath": "normalized/规范扫描件.pdf",
+                "sha256": normalized_scanned_sha,
+                "mimeType": "application/pdf",
+                "pageCount": 1,
+                "sourceFileRef": "file:original-scanned",
+                "sourcePageStart": 1,
+                "sourcePageEnd": 1,
+                "documentVersionKind": "SCANNED",
+            },
+        ],
+        "documents": [
+            {
+                "clientRef": "document:record-1",
+                "documentType": "PRODUCT_INSPECTION_RECORD",
+                "documentNo": "〔2026〕第0036号",
+                "issueDate": "2026-05-19",
+                "stage": "INITIAL_CHECK",
+                "productRefs": ["product:1"],
+                "inspectionRefs": ["inspection:1:initial_check"],
+                "versions": [
+                    {"fileRef": "file:normalized-electronic", "kind": "ELECTRONIC"},
+                    {"fileRef": "file:normalized-scanned", "kind": "SCANNED"},
+                ],
+                "fileLinks": [
+                    {
+                        "fileRef": "file:original-electronic",
+                        "relationRole": "PRIMARY",
+                        "pageStart": 1,
+                        "pageEnd": 1,
+                    },
+                    {
+                        "fileRef": "file:original-scanned",
+                        "relationRole": "SOURCE_COPY",
+                        "pageStart": 1,
+                        "pageEnd": 1,
+                    },
+                ],
+            }
+        ],
+        "documentRequirements": [],
+        "fieldEvidence": [],
+        "missingItems": [
+            {
+                "entityRef": "case:32002207C202600033",
+                "fieldPath": "caseType",
+                "reason": "待人工核对。",
+            }
+        ],
+        "reviewItems": [],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    upload_map_path = tmp_path / "upload-map.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    upload_map_path.write_text(
+        json.dumps(
+            {
+                "files": {
+                    "file:original-electronic": str(original_electronic),
+                    "file:original-scanned": str(original_scanned),
+                    "file:normalized-electronic": str(normalized_electronic),
+                    "file:normalized-scanned": str(normalized_scanned),
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        validate_manifest(
+            manifest,
+            {
+                "file:original-electronic": str(original_electronic),
+                "file:original-scanned": str(original_scanned),
+                "file:normalized-electronic": str(normalized_electronic),
+                "file:normalized-scanned": str(normalized_scanned),
+            },
+        )
+        == []
+    )
+
+    server_state = {
+        "uploadedKinds": set(),
+        "caseMode": "unique",
+        "documentMode": "unique",
+        "serverVersion": 3,
+        "failKind": "SCANNED",
+        "failRefreshKind": None,
+        "putAttempts": [],
+        "serverHashes": {
+            "ELECTRONIC": normalized_electronic_sha,
+            "SCANNED": normalized_scanned_sha,
+        },
+        "incomingHashes": {
+            "ELECTRONIC": normalized_electronic_sha,
+            "SCANNED": normalized_scanned_sha,
+        },
+    }
+
+    def server_document() -> dict[str, object]:
+        return {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "documentType": "PRODUCT_INSPECTION_RECORD",
+            "documentNo": "〔2026〕第0036号",
+            "issueDate": "2026-05-19T00:00:00.000Z",
+            "stage": "INITIAL_CHECK",
+            "version": server_state["serverVersion"],
+            "deletedAt": None,
+            "versions": [
+                {
+                    "kind": kind,
+                    "deletedAt": None,
+                    "fileAsset": {"sha256": server_state["serverHashes"][kind]},
+                }
+                for kind in ("ELECTRONIC", "SCANNED")
+                if kind in server_state["uploadedKinds"]
+            ],
+        }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/api/v1/cases":
+            cases = [
+                {
+                    "id": "22222222-2222-4222-8222-222222222222",
+                    "projectNo": "32002207C202600033",
+                    "deletedAt": None,
+                }
+            ]
+            if server_state["caseMode"] == "ambiguous":
+                cases.append(
+                    {
+                        "id": "33333333-3333-4333-8333-333333333333",
+                        "projectNo": "32002207C202600033",
+                        "deletedAt": None,
+                    }
+                )
+            return httpx.Response(200, json={"data": cases, "meta": {"total": len(cases)}})
+        if request.url.path.endswith("/documents"):
+            documents = [server_document()]
+            if server_state["documentMode"] == "none":
+                documents = []
+            elif server_state["documentMode"] == "ambiguous":
+                duplicate = dict(server_document())
+                duplicate["id"] = "44444444-4444-4444-8444-444444444444"
+                documents.append(duplicate)
+            return httpx.Response(200, json=documents)
+        if request.method == "PUT" and "/versions/" in request.url.path:
+            kind = request.url.path.rsplit("/", maxsplit=1)[-1]
+            marker = b'name="expectedDocumentVersion"'
+            assert marker in request.content
+            expected_version = int(
+                request.content.split(marker, maxsplit=1)[1]
+                .split(b"\r\n\r\n", maxsplit=1)[1]
+                .split(b"\r\n", maxsplit=1)[0]
+            )
+            server_state["putAttempts"].append((kind, expected_version))
+            if server_state["failKind"] == kind:
+                return httpx.Response(500, json={"message": "fixture upload failure"})
+            assert expected_version == server_state["serverVersion"]
+            server_state["uploadedKinds"].add(kind)
+            server_state["serverHashes"][kind] = server_state["incomingHashes"][kind]
+            server_state["serverVersion"] += 1
+            return httpx.Response(200, json=server_document())
+        if request.url.path.startswith("/api/v1/documents/"):
+            if server_state["failRefreshKind"] is not None:
+                server_state["failRefreshKind"] = None
+                return httpx.Response(503, json={"message": "fixture refresh failure"})
+            return httpx.Response(200, json=server_document())
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    real_client = httpx.Client
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs: object) -> httpx.Client:
+        return real_client(
+            transport=transport,
+            timeout=kwargs.get("timeout"),
+            follow_redirects=False,
+            headers=kwargs.get("headers"),
+        )
+
+    monkeypatch.setattr(registry_cli.httpx, "Client", client_factory)
+    args = argparse.Namespace(
+        manifest=str(manifest_path),
+        upload_map=str(upload_map_path),
+        api_base="https://example.invalid",
+        timeout=10.0,
+        dry_run=False,
+    )
+    with pytest.raises(RegistryError, match="SCANNED 版本同步失败"):
+        sync_document_versions_command(args)
+    failed_state = read_json(tmp_path / "document-version-sync-state.json")
+    assert failed_state["status"] == "NEEDS_REVIEW"
+    assert [item["status"] for item in failed_state["results"]] == [
+        "UPLOADED",
+        "FAILED",
+    ]
+    assert failed_state["results"][1]["failedPhase"] == "UPLOAD"
+    assert failed_state["results"][1]["remoteWriteMayHaveSucceeded"] is False
+    assert server_state["putAttempts"] == [("ELECTRONIC", 3), ("SCANNED", 4)]
+
+    server_state["failKind"] = None
+    sync_document_versions_command(args)
+    assert server_state["putAttempts"] == [
+        ("ELECTRONIC", 3),
+        ("SCANNED", 4),
+        ("SCANNED", 4),
+    ]
+    sync_state = read_json(tmp_path / "document-version-sync-state.json")
+    assert sync_state["status"] == "DONE"
+    assert sync_state["results"][0]["status"] == "UNCHANGED"
+    assert sync_state["results"][1]["status"] == "UPLOADED"
+    assert sync_state["results"][1]["expectedDocumentVersion"] == 4
+    assert sync_state["results"][1]["serverDocumentVersion"] == 5
+
+    sync_document_versions_command(args)
+    assert server_state["putAttempts"] == [
+        ("ELECTRONIC", 3),
+        ("SCANNED", 4),
+        ("SCANNED", 4),
+    ]
+    assert {
+        item["status"]
+        for item in read_json(tmp_path / "document-version-sync-state.json")["results"]
+    } == {"UNCHANGED"}
+
+    replacement_electronic = tmp_path / "规范电子版-替换.pdf"
+    write_blank_pdf(replacement_electronic, pages=2)
+    replacement_electronic_sha = file_sha256(replacement_electronic)
+    electronic_file = next(
+        item for item in manifest["files"] if item["clientRef"] == "file:normalized-electronic"
+    )
+    electronic_file["sha256"] = replacement_electronic_sha
+    electronic_file["pageCount"] = 2
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    upload_map_document = read_json(upload_map_path)
+    upload_map_document["files"]["file:normalized-electronic"] = str(replacement_electronic)
+    upload_map_path.write_text(
+        json.dumps(upload_map_document, ensure_ascii=False), encoding="utf-8"
+    )
+    server_state["incomingHashes"]["ELECTRONIC"] = replacement_electronic_sha
+    server_state["failRefreshKind"] = "ELECTRONIC"
+    with pytest.raises(RegistryError, match="REFRESH"):
+        sync_document_versions_command(args)
+    refresh_failed_state = read_json(tmp_path / "document-version-sync-state.json")
+    assert refresh_failed_state["status"] == "NEEDS_REVIEW"
+    assert refresh_failed_state["results"][0]["status"] == "FAILED"
+    assert refresh_failed_state["results"][0]["failedPhase"] == "REFRESH"
+    assert refresh_failed_state["results"][0]["remoteWriteMayHaveSucceeded"] is True
+    assert server_state["putAttempts"][-1] == ("ELECTRONIC", 5)
+
+    sync_document_versions_command(args)
+    assert len(server_state["putAttempts"]) == 4
+    assert {
+        item["status"]
+        for item in read_json(tmp_path / "document-version-sync-state.json")["results"]
+    } == {"UNCHANGED"}
+
+    server_state["caseMode"] = "ambiguous"
+    with pytest.raises(RegistryError, match="匹配到 2 个活动案卷"):
+        sync_document_versions_command(args)
+    assert read_json(tmp_path / "document-version-sync-state.json")["status"] == "NEEDS_REVIEW"
+    assert len(server_state["putAttempts"]) == 4
+
+    server_state["caseMode"] = "unique"
+    server_state["documentMode"] = "none"
+    with pytest.raises(RegistryError, match="匹配到 0 项"):
+        sync_document_versions_command(args)
+    assert read_json(tmp_path / "document-version-sync-state.json")["status"] == "NEEDS_REVIEW"
+    assert len(server_state["putAttempts"]) == 4
+
+    server_state["documentMode"] = "ambiguous"
+    with pytest.raises(RegistryError, match="匹配到 2 项"):
+        sync_document_versions_command(args)
+    assert read_json(tmp_path / "document-version-sync-state.json")["status"] == "NEEDS_REVIEW"
+    assert len(server_state["putAttempts"]) == 4
+
+    server_state["documentMode"] = "unique"
+    duplicate_local_manifest = json.loads(json.dumps(manifest))
+    duplicate_local_document = json.loads(json.dumps(duplicate_local_manifest["documents"][0]))
+    duplicate_local_document["clientRef"] = "document:record-duplicate"
+    duplicate_local_manifest["documents"].append(duplicate_local_document)
+    manifest_path.write_text(
+        json.dumps(duplicate_local_manifest, ensure_ascii=False), encoding="utf-8"
+    )
+    with pytest.raises(RegistryError, match="本地清单存在重复逻辑文书身份"):
+        sync_document_versions_command(args)
+    duplicate_state = read_json(tmp_path / "document-version-sync-state.json")
+    assert duplicate_state["status"] == "NEEDS_REVIEW"
+    assert duplicate_state["results"][0]["status"] == "DUPLICATE_IDENTITY"
+    assert len(server_state["putAttempts"]) == 4

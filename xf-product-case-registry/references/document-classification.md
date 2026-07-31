@@ -8,7 +8,7 @@
 4. 被检查单位、产品、阶段和送达对象；
 5. 文件名，仅作为最后提示。
 
-同一逻辑文书可以关联多份物理来源。独立文书、组合扫描件、文本版和重复页都保留 `FileAsset`；通过文号、标题、日期和对象归并到同一个 `CaseDocument`。
+同一逻辑文书可以关联多份物理来源。独立文书、组合扫描件、文本版和重复页都保留 `FileAsset/fileLinks`；通过文号、标题、日期和对象归并到同一个 `CaseDocument`。正式归档另由 `versions` 选择电子版和扫描件各最多一份规范 PDF。
 
 ## 来源优先级与多版本关系
 
@@ -22,7 +22,7 @@
 
 不同来源的候选值不一致时，只为已选正式实体值保留 `fieldEvidence`；另一候选优先以 `reviewItems.candidates`（值、可信等级、来源文件/页码）保存，旧 `currentValue/incomingValue` 仍兼容。不得依赖文件名自动择一，也不要把与实体值不一致的候选写为 `fieldEvidence`。
 
-同一逻辑文书的 `fileLinks`：电子版为 `PRIMARY`，扫描签字版为 `SOURCE_COPY`，重复扫描件为 `DUPLICATE_COPY`，图片/清单等附件为 `SUPPORTING_ATTACHMENT`。没有电子版时，扫描签字版可为 `PRIMARY`。已经在 `case-data.json` 明确填写的 `relationRole` 必须原样保留。
+`documents[].versions` 只允许 `ELECTRONIC`、`SCANNED` 各一份，必须引用带对应 `documentVersionKind` 的规范化 PDF。`fileLinks` 保留所有原始来源和页码映射；已有最佳版本之外的来源创建 `DUPLICATE_CANDIDATE`。无法可靠判断类型时不猜，拆分项标为 `UNKNOWN`，逻辑文书 `versions` 留空并创建 `LOW_CONFIDENCE`。图片、清单和截图可作来源或另建逻辑附件，但不能成为正式版本。
 
 ## 阶段
 
@@ -65,6 +65,7 @@
   "projectNo": "32002207C202600033",
   "items": [
     {
+      "documentRef": "document:service-receipt-0776",
       "sourceRelativePath": "送达回证.pdf",
       "pageStart": 1,
       "pageEnd": 1,
@@ -72,8 +73,15 @@
       "documentType": "SERVICE_RECEIPT",
       "documentLabel": "送达回证",
       "documentNoOrDate": "锡锡消送证字〔2026〕第0776号",
+      "documentVersionKind": "SCANNED",
       "sequence": 1
     }
   ]
 }
 ```
+
+`documentRef` 与 `documentVersionKind` 均必填。`documentRef` 必须完全等于目标 `case-data.documents[].clientRef`，同一逻辑文书的电子版、扫描件、组合件副本和 `UNKNOWN` 候选均填写同一个值；找不到唯一目标文书时停止，不新造近似引用。`documentVersionKind` 只允许 `ELECTRONIC`、`SCANNED`、`UNKNOWN`。前两者生成带“电子版/扫描件”的规范名并可进入 `versions`；`UNKNOWN` 生成“版本待核对”规范名，只保留为候选和来源证据。
+
+`compose` 按 `documentRef` 汇总全部规范化候选。每种 kind 只有一个候选时自动选用；多个同 kind 候选必须显式指定最佳版本，其余候选的原文件和页码仍自动写入 `fileLinks` 并生成 `DUPLICATE_CANDIDATE`。同一逻辑身份不得拆成两条 `documents`。
+
+案卷级文书在 `case-data.documents[]` 中可不填 `stage`，其拆分项使用 `stage=CASE`；检查级文书必须让拆分项阶段与文书的 `INITIAL_CHECK` 或 `RECHECK` 完全一致。`CASE` 只用于规范文件名和候选归属，不写入服务端检查阶段枚举。

@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 import httpx
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 TEXT_THRESHOLD = 30
 MAX_ZIP_FILES = 1_000
 MAX_ZIP_BYTES = 1024 * 1024 * 1024
@@ -43,6 +43,14 @@ STAGES = {"INITIAL_CHECK", "RECHECK"}
 METHODS = {"ONSITE", "SAMPLING", "UNKNOWN"}
 RESULTS = {"QUALIFIED", "UNQUALIFIED", "PENDING", "UNKNOWN"}
 CASE_TYPES = {"NONE", "ADMINISTRATIVE", "CRIMINAL", "UNKNOWN"}
+TRI_STATES = {"YES", "NO", "UNKNOWN"}
+DOCUMENT_VERSION_KINDS = {"ELECTRONIC", "SCANNED"}
+SPLIT_DOCUMENT_VERSION_KINDS = DOCUMENT_VERSION_KINDS | {"UNKNOWN"}
+DOCUMENT_VERSION_LABELS = {
+    "ELECTRONIC": "电子版",
+    "SCANNED": "扫描件",
+    "UNKNOWN": "版本待核对",
+}
 REINSPECTION_STATUSES = {
     "NOT_APPLIED",
     "APPLIED",
@@ -79,7 +87,6 @@ REVIEWABLE_ENTITY_FIELDS = {
         "caseHandler",
         "inspector",
         "caseType",
-        "onlineSale",
     },
     "product": {
         "sequence",
@@ -87,6 +94,7 @@ REVIEWABLE_ENTITY_FIELDS = {
         "modelSpec",
         "nominalProducer",
         "location",
+        "onlineSale",
         "repairStatus",
         "problemSummary",
     },
@@ -119,6 +127,7 @@ REVIEWABLE_ENTITY_FIELDS = {
         "issueDate",
         "stage",
         "classificationEvidence",
+        "versions",
     },
 }
 IMAGE_MIME_TYPES = {"image/png", "image/jpeg"}
@@ -137,9 +146,7 @@ SUPERVISION_SCREENSHOT_HEADERS = (
 SUPERVISION_RECORD_HINTS = ("消防产品监督检查记录", "监督检查记录")
 SUPERVISION_ELECTRONIC_HINTS = ("消防产品", "市场准入", "消防救援", "监督检查")
 SIGNED_SCAN_HINTS = ("扫描", "签字", "签名", "盖章", "手写")
-DIRECT_CRIMINAL_EVIDENCE_RE = re.compile(
-    r"刑事案件|刑案|移送\s*(?:公安|公安机关)|公安机关.*移送"
-)
+DIRECT_CRIMINAL_EVIDENCE_RE = re.compile(r"刑事案件|刑案|移送\s*(?:公安|公安机关)|公安机关.*移送")
 STAGE_LABELS = {
     "INITIAL_CHECK": "初查",
     "RECHECK": "复查",
@@ -706,12 +713,16 @@ def classify_source(item: dict[str, Any], extracted_text: str) -> tuple[str, str
             + "、".join(screenshot_headers)
             + "。",
         )
-    if mime_type == "application/pdf" and has_text_layer and contains_any(
-        combined, SUPERVISION_RECORD_HINTS
+    if (
+        mime_type == "application/pdf"
+        and has_text_layer
+        and contains_any(combined, SUPERVISION_RECORD_HINTS)
     ):
         return "SUPERVISION_RECORD_PDF_TEXT", "PDF 文本层命中消防产品监督检查记录。"
-    if mime_type == "application/pdf" and has_text_layer and contains_any(
-        combined, SUPERVISION_ELECTRONIC_HINTS
+    if (
+        mime_type == "application/pdf"
+        and has_text_layer
+        and contains_any(combined, SUPERVISION_ELECTRONIC_HINTS)
     ):
         return "SUPERVISION_ELECTRONIC_PDF_TEXT", "PDF 具有可用文本层，作为电子文本候选来源。"
     if (
@@ -801,6 +812,11 @@ def split_command(args: argparse.Namespace) -> None:
     output_items: list[dict[str, Any]] = []
     seen_names: set[str] = set()
     for position, item in enumerate(plan.get("items", []), start=1):
+        document_ref = str(item.get("documentRef", "")).strip()
+        if not re.fullmatch(r"document:.+", document_ref):
+            raise RegistryError(
+                "拆分项必须填写与 case-data.documents[].clientRef 一致的 documentRef"
+            )
         source_relative = assert_safe_relative(str(item.get("sourceRelativePath", "")))
         source_record = sources.get(source_relative)
         if not source_record or source_record["mimeType"] != "application/pdf":
@@ -825,9 +841,15 @@ def split_command(args: argparse.Namespace) -> None:
         number_or_date = clean_filename_part(
             str(item.get("documentNoOrDate", "未知日期")), "未知日期"
         )
+        if "documentVersionKind" not in item:
+            raise RegistryError("拆分项必须明确 documentVersionKind；无法判断时填写 UNKNOWN")
+        document_version_kind = str(item.get("documentVersionKind", ""))
+        if document_version_kind not in SPLIT_DOCUMENT_VERSION_KINDS:
+            raise RegistryError(f"文书版本类型不合法：{document_version_kind}")
+        version_label = DOCUMENT_VERSION_LABELS[document_version_kind]
         file_name = (
             f"{project_no}_{STAGE_LABELS[stage]}_{document_label}_"
-            f"{number_or_date}_{sequence:02d}.pdf"
+            f"{number_or_date}_{version_label}_{sequence:02d}.pdf"
         )
         if file_name in seen_names:
             raise RegistryError(f"规范化文件名重复：{file_name}")
@@ -862,13 +884,15 @@ def split_command(args: argparse.Namespace) -> None:
                 "sourceRelativePath": source_relative,
                 "sourcePageStart": start,
                 "sourcePageEnd": end,
+                "documentRef": document_ref,
                 "stage": stage,
                 "documentType": document_type,
+                "documentVersionKind": document_version_kind,
                 "sequence": sequence,
             }
         )
     split_index = {
-        "splitIndexVersion": 1,
+        "splitIndexVersion": 2,
         "generatedAt": utc_now(),
         "projectNo": project_no,
         "items": output_items,
@@ -981,9 +1005,7 @@ def is_case_type_evidence(item: Any, case_ref: str, case_type: str) -> bool:
 
 
 def source_has_file_locator(source: Any) -> bool:
-    return isinstance(source, dict) and bool(
-        source.get("relativePath") or source.get("fileRef")
-    )
+    return isinstance(source, dict) and bool(source.get("relativePath") or source.get("fileRef"))
 
 
 def has_direct_criminal_evidence(evidence_items: list[Any], case_ref: str) -> bool:
@@ -1085,9 +1107,7 @@ def normalize_case_type(case_data: dict[str, Any], case: dict[str, Any]) -> None
     ]
     if case_type == "CRIMINAL":
         retained_evidence.extend(
-            item
-            for item in evidence_items
-            if is_case_type_evidence(item, case_ref, "CRIMINAL")
+            item for item in evidence_items if is_case_type_evidence(item, case_ref, "CRIMINAL")
         )
     elif case_type == "ADMINISTRATIVE":
         retained_evidence.append(
@@ -1157,8 +1177,61 @@ def compose_command(args: argparse.Namespace) -> None:
     split_index = read_json(split_index_path) if split_index_path.exists() else {"items": []}
     case, _ = build_entities(case_data)
     normalize_case_type(case_data, case)
-    review_items = compose_review_items(case_data)
+    source_documents = case_data.get("documents", [])
+    if not isinstance(source_documents, list):
+        raise RegistryError("case-data.documents 必须是数组")
+    prepared_documents: list[dict[str, Any]] = []
+    prepared_document_refs: set[str] = set()
+    prepared_document_by_ref: dict[str, dict[str, Any]] = {}
+    prepared_document_identities: dict[tuple[str, str, str, str], str] = {}
+    for index, source_document in enumerate(source_documents, start=1):
+        if not isinstance(source_document, dict):
+            raise RegistryError(f"case-data.documents[{index}] 必须是对象")
+        document = dict(source_document)
+        document.setdefault("clientRef", f"document:{index}")
+        document_ref = str(document["clientRef"])
+        if not re.fullmatch(r"document:.+", document_ref):
+            raise RegistryError(f"文书 clientRef 不合法：{document_ref}")
+        if document_ref in prepared_document_refs:
+            raise RegistryError(f"文书 clientRef 重复：{document_ref}")
+        prepared_document_refs.add(document_ref)
+        prepared_document_by_ref[document_ref] = document
+        identity = normalized_document_identity(document)
+        identity_owner = prepared_document_identities.get(identity)
+        if identity_owner:
+            raise RegistryError(
+                f"逻辑文书身份重复：{identity_owner} 与 {document_ref}；"
+                "必须合并为一条文书并保留全部原始来源"
+            )
+        prepared_document_identities[identity] = document_ref
+        prepared_documents.append(document)
 
+    split_items = split_index.get("items", [])
+    if not isinstance(split_items, list):
+        raise RegistryError("split-index.items 必须是数组")
+    split_items_by_document: dict[str, list[dict[str, Any]]] = {}
+    for index, split_item in enumerate(split_items, start=1):
+        if not isinstance(split_item, dict):
+            raise RegistryError(f"split-index.items[{index}] 必须是对象")
+        document_ref = str(split_item.get("documentRef", ""))
+        if document_ref not in prepared_document_refs:
+            raise RegistryError(
+                f"规范化候选 {split_item.get('relativePath')} 未绑定到唯一逻辑文书：{document_ref}"
+            )
+        target_document = prepared_document_by_ref[document_ref]
+        split_stage = split_item.get("stage")
+        target_stage = target_document.get("stage")
+        stage_matches = split_stage == target_stage or (
+            split_stage == "CASE" and target_stage in (None, "")
+        )
+        if not stage_matches or split_item.get("documentType") != target_document.get(
+            "documentType"
+        ):
+            raise RegistryError(
+                f"规范化候选 {split_item.get('relativePath')} 的阶段或文书类型"
+                f"与 {document_ref} 不一致"
+            )
+        split_items_by_document.setdefault(document_ref, []).append(split_item)
     files: list[dict[str, Any]] = []
     upload_map: dict[str, str] = {}
     path_to_ref: dict[str, str] = {}
@@ -1182,6 +1255,11 @@ def compose_command(args: argparse.Namespace) -> None:
                 else {}
             ),
             **({"sourcePageEnd": record["sourcePageEnd"]} if record.get("sourcePageEnd") else {}),
+            **(
+                {"documentVersionKind": record["documentVersionKind"]}
+                if record.get("documentVersionKind")
+                else {}
+            ),
         }
         files.append(manifest_file)
         upload_map[client_ref] = str(Path(record["absolutePath"]).resolve())
@@ -1222,13 +1300,59 @@ def compose_command(args: argparse.Namespace) -> None:
             },
             "ORIGINAL_FILE",
         )
-    for item in split_index.get("items", []):
+    for item in split_items:
         add_file(item, "NORMALIZED_FILE")
 
     documents: list[dict[str, Any]] = []
-    for index, source_document in enumerate(case_data.get("documents", []), start=1):
-        document = dict(source_document)
-        document.setdefault("clientRef", f"document:{index}")
+    file_by_ref = {item["clientRef"]: item for item in files}
+    document_candidate_state: dict[str, dict[str, bool]] = {}
+    for document in prepared_documents:
+        document_ref = str(document["clientRef"])
+        candidates = split_items_by_document.get(document_ref, [])
+        candidates_by_kind: dict[str, list[dict[str, Any]]] = {
+            kind: [] for kind in sorted(DOCUMENT_VERSION_KINDS)
+        }
+        unknown_candidates: list[dict[str, Any]] = []
+        for candidate in candidates:
+            candidate_kind = candidate.get("documentVersionKind")
+            if candidate_kind in DOCUMENT_VERSION_KINDS:
+                candidates_by_kind[str(candidate_kind)].append(candidate)
+            else:
+                unknown_candidates.append(candidate)
+        versions: list[dict[str, Any]] = []
+        for source_version in document.get("versions", []):
+            if not isinstance(source_version, dict):
+                raise RegistryError("文书 versions 中每项必须是对象")
+            version = dict(source_version)
+            relative = version.pop("relativePath", None)
+            if relative:
+                file_ref = path_to_ref.get(assert_safe_relative(relative))
+                if not file_ref:
+                    raise RegistryError(f"文书版本引用了未知文件：{relative}")
+                version["fileRef"] = file_ref
+            versions.append(version)
+        selected_kinds: dict[str, str] = {}
+        for version in versions:
+            kind = str(version.get("kind", ""))
+            file_ref = str(version.get("fileRef", ""))
+            if kind in selected_kinds:
+                raise RegistryError(f"文书 {document_ref} 的 {kind} 正式版本重复")
+            matching_candidates = {
+                str(candidate["clientRef"]) for candidate in candidates_by_kind.get(kind, [])
+            }
+            if file_ref not in matching_candidates:
+                raise RegistryError(
+                    f"文书 {document_ref} 的正式版本 {file_ref} 不是该文书同类型规范化候选"
+                )
+            selected_kinds[kind] = file_ref
+        for kind, kind_candidates in candidates_by_kind.items():
+            if kind in selected_kinds or len(kind_candidates) != 1:
+                continue
+            candidate_ref = str(kind_candidates[0]["clientRef"])
+            versions.append({"fileRef": candidate_ref, "kind": kind})
+            selected_kinds[kind] = candidate_ref
+        versions.sort(key=lambda version: 0 if version.get("kind") == "ELECTRONIC" else 1)
+        document["versions"] = versions
         links: list[dict[str, Any]] = []
         for source_link in document.get("fileLinks", []):
             link = dict(source_link)
@@ -1239,10 +1363,124 @@ def compose_command(args: argparse.Namespace) -> None:
                     raise RegistryError(f"文书引用了未知文件：{relative}")
                 link["fileRef"] = file_ref
             links.append(link)
+        linked_source_keys = {
+            (
+                link.get("fileRef"),
+                link.get("pageStart"),
+                link.get("pageEnd"),
+            )
+            for link in links
+            if isinstance(link.get("fileRef"), str)
+        }
+        selected_file_refs = set(selected_kinds.values())
+        for candidate in candidates:
+            source_file_ref = candidate.get("sourceFileRef")
+            source_key = (
+                source_file_ref,
+                candidate.get("sourcePageStart"),
+                candidate.get("sourcePageEnd"),
+            )
+            if not isinstance(source_file_ref, str) or source_key in linked_source_keys:
+                continue
+            source_link = {
+                "fileRef": source_file_ref,
+                "relationRole": (
+                    "PRIMARY"
+                    if candidate.get("clientRef") in selected_file_refs
+                    and candidate.get("documentVersionKind") == "ELECTRONIC"
+                    else "SOURCE_COPY"
+                ),
+            }
+            if candidate.get("sourcePageStart"):
+                source_link["pageStart"] = candidate["sourcePageStart"]
+            if candidate.get("sourcePageEnd"):
+                source_link["pageEnd"] = candidate["sourcePageEnd"]
+            links.append(source_link)
+            linked_source_keys.add(source_key)
         document["fileLinks"] = links
         document.setdefault("productRefs", [])
         document.setdefault("inspectionRefs", [])
         documents.append(document)
+        document_candidate_state[document_ref] = {
+            "hasUnknown": bool(unknown_candidates),
+            "hasAmbiguousSelection": any(
+                len(kind_candidates) > 1 and kind not in selected_kinds
+                for kind, kind_candidates in candidates_by_kind.items()
+            ),
+            "hasDuplicateCandidates": any(
+                len(kind_candidates) > 1 for kind_candidates in candidates_by_kind.values()
+            ),
+        }
+
+    review_items = compose_review_items(case_data)
+    for document in documents:
+        document_ref = document["clientRef"]
+        versions = document["versions"]
+        selected_source_keys = {
+            (
+                file_by_ref[version["fileRef"]].get("sourceFileRef"),
+                file_by_ref[version["fileRef"]].get("sourcePageStart"),
+                file_by_ref[version["fileRef"]].get("sourcePageEnd"),
+            )
+            for version in versions
+            if version.get("fileRef") in file_by_ref
+        }
+        linked_source_keys = {
+            (link.get("fileRef"), link.get("pageStart"), link.get("pageEnd"))
+            for link in document["fileLinks"]
+            if isinstance(link, dict) and isinstance(link.get("fileRef"), str)
+        }
+        candidate_state = document_candidate_state.get(document_ref, {})
+        review_keys = {
+            (item.get("entityRef"), item.get("fieldPath"), item.get("issueType"))
+            for item in review_items
+            if isinstance(item, dict)
+        }
+        if (
+            not versions
+            or candidate_state.get("hasUnknown")
+            or candidate_state.get("hasAmbiguousSelection")
+        ) and (document_ref, "versions", "LOW_CONFIDENCE") not in review_keys:
+            review_item = {
+                "entityRef": document_ref,
+                "fieldPath": "versions",
+                "issueType": "LOW_CONFIDENCE",
+                "message": "无法可靠判断电子版或扫描件；未写入正式版本，保留原始来源待人工核对。",
+            }
+            review_item["clientRef"] = generated_review_item_ref(review_item)
+            review_items.append(review_item)
+        extra_source_keys = sorted(
+            (key for key in linked_source_keys - selected_source_keys if isinstance(key[0], str)),
+            key=lambda key: (str(key[0]), int(key[1] or 0), int(key[2] or 0)),
+        )
+        if (candidate_state.get("hasDuplicateCandidates") or (versions and extra_source_keys)) and (
+            document_ref,
+            "versions",
+            "DUPLICATE_CANDIDATE",
+        ) not in review_keys:
+            extra_sources = [
+                f"{file_ref}"
+                + (
+                    f"（第{page_start}-{page_end}页）"
+                    if page_start is not None and page_end is not None
+                    else ""
+                )
+                for file_ref, page_start, page_end in extra_source_keys
+            ]
+            if not extra_sources:
+                extra_sources = ["同类型规范化候选"]
+            review_item = {
+                "entityRef": document_ref,
+                "fieldPath": "versions",
+                "issueType": "DUPLICATE_CANDIDATE",
+                "message": (
+                    "同一逻辑文书存在未选为正式版本的原始来源："
+                    + "、".join(extra_sources)
+                    + "；保留来源并待人工核对。"
+                ),
+            }
+            review_item["clientRef"] = generated_review_item_ref(review_item)
+            review_items.append(review_item)
 
     requirements: list[dict[str, Any]] = []
     for index, source_requirement in enumerate(case_data.get("documentRequirements", []), start=1):
@@ -1370,6 +1608,8 @@ def validate_manifest(
         errors.append("case.unitName 不能为空")
     if case.get("caseType") not in CASE_TYPES:
         errors.append("case.caseType 必须为 NONE、ADMINISTRATIVE、CRIMINAL 或 UNKNOWN")
+    if "onlineSale" in case:
+        errors.append("case.onlineSale 已停用；网售情况必须分别填写在 products[].onlineSale")
 
     entity_map: dict[str, dict[str, Any]] = {}
 
@@ -1398,6 +1638,8 @@ def validate_manifest(
             continue
         if not str(product.get("name", "")).strip():
             errors.append(f"products[{product_index}].name 不能为空")
+        if product.get("onlineSale") not in TRI_STATES:
+            errors.append(f"products[{product_index}].onlineSale 必须为 YES、NO 或 UNKNOWN")
         inspections = product.get("inspections")
         if not isinstance(inspections, list) or not inspections:
             errors.append(f"products[{product_index}].inspections 至少需要一项")
@@ -1415,9 +1657,8 @@ def validate_manifest(
                 errors.append(f"{label}.inspectionResult 不合法")
             case_inspection_ref = inspection.get("caseInspectionRef")
             if case_inspection_ref is not None:
-                if (
-                    not isinstance(case_inspection_ref, str)
-                    or not CASE_INSPECTION_REF_RE.match(case_inspection_ref)
+                if not isinstance(case_inspection_ref, str) or not CASE_INSPECTION_REF_RE.match(
+                    case_inspection_ref
                 ):
                     errors.append(f"{label}.caseInspectionRef 必须是以小写前缀开头的引用")
                 else:
@@ -1429,9 +1670,7 @@ def validate_manifest(
                     if existing_group is None:
                         case_inspection_groups[case_inspection_ref] = current_group
                     elif existing_group != current_group:
-                        errors.append(
-                            f"案卷检查分组 {case_inspection_ref} 的阶段或检查日期不一致"
-                        )
+                        errors.append(f"案卷检查分组 {case_inspection_ref} 的阶段或检查日期不一致")
             if (
                 inspection.get("stage") == "RECHECK"
                 and inspection.get("inspectionResult") == "UNQUALIFIED"
@@ -1439,9 +1678,7 @@ def validate_manifest(
                 and inspection["clientRef"]
             ):
                 failed_recheck_refs.append(inspection["clientRef"])
-            reinspection_status = inspection.get(
-                "reinspectionStatus", "NOT_APPLIED"
-            )
+            reinspection_status = inspection.get("reinspectionStatus", "NOT_APPLIED")
             if reinspection_status not in REINSPECTION_STATUSES:
                 errors.append(f"{label}.reinspectionStatus 不合法")
             reinspection_detail_fields = (
@@ -1454,25 +1691,17 @@ def validate_manifest(
                 "reinspectionNotes",
             )
             has_reinspection = reinspection_status != "NOT_APPLIED" or any(
-                inspection.get(field) not in (None, "")
-                for field in reinspection_detail_fields
+                inspection.get(field) not in (None, "") for field in reinspection_detail_fields
             )
             has_reinspection_details = any(
-                inspection.get(field) not in (None, "")
-                for field in reinspection_detail_fields
+                inspection.get(field) not in (None, "") for field in reinspection_detail_fields
             )
-            if (
-                reinspection_status == "NOT_APPLIED"
-                and has_reinspection_details
-            ):
+            if reinspection_status == "NOT_APPLIED" and has_reinspection_details:
                 errors.append(f"{label} 复检状态为未申请时不能包含复检详情")
             if has_reinspection and inspection.get("method") != "SAMPLING":
                 errors.append(f"{label} 只有抽样送检记录可以包含复检信息")
             reinspection_result = inspection.get("reinspectionResult")
-            if (
-                reinspection_result is not None
-                and reinspection_result not in RESULTS
-            ):
+            if reinspection_result is not None and reinspection_result not in RESULTS:
                 errors.append(f"{label}.reinspectionResult 不合法")
 
     files = manifest.get("files")
@@ -1503,6 +1732,12 @@ def validate_manifest(
             errors.append(str(error))
         if file_item.get("storageKind") not in FILE_KINDS:
             errors.append(f"{label}.storageKind 不合法")
+        document_version_kind = file_item.get("documentVersionKind")
+        if file_item.get("storageKind") == "NORMALIZED_FILE":
+            if document_version_kind not in SPLIT_DOCUMENT_VERSION_KINDS:
+                errors.append(f"{label}.documentVersionKind 不合法")
+        elif document_version_kind is not None:
+            errors.append(f"{label} 只有规范化 PDF 可以填写 documentVersionKind")
         if not re.fullmatch(r"sha256:[a-f0-9]{64}", str(file_item.get("sha256", ""))):
             errors.append(f"{label}.sha256 格式错误")
         source_ref = file_item.get("sourceFileRef")
@@ -1515,21 +1750,119 @@ def validate_manifest(
             if source_ref and source_ref not in file_refs:
                 errors.append(f"规范化文件引用了未知 sourceFileRef：{source_ref}")
 
-    for index, document in enumerate(manifest.get("documents", []), start=1):
+    document_review_requirements: set[tuple[str, str]] = set()
+    version_file_owners: dict[str, str] = {}
+    document_identity_owners: dict[tuple[str, str, str, str], str] = {}
+    manifest_documents = manifest.get("documents", [])
+    if not isinstance(manifest_documents, list):
+        errors.append("documents 必须是数组")
+        manifest_documents = []
+    for index, document in enumerate(manifest_documents, start=1):
         add_entity(document, f"documents[{index}]")
         if not isinstance(document, dict):
             continue
+        document_ref = str(document.get("clientRef", ""))
+        identity = normalized_document_identity(document)
+        identity_owner = document_identity_owners.get(identity)
+        if identity_owner:
+            errors.append(
+                f"逻辑文书身份重复：{identity_owner} 与 {document_ref}；"
+                "阶段、类型、文号、日期必须唯一"
+            )
+        else:
+            document_identity_owners[identity] = document_ref
         for ref in document.get("productRefs", []):
             if ref not in entity_map:
                 errors.append(f"文书引用了未知 productRef：{ref}")
         for ref in document.get("inspectionRefs", []):
             if ref not in entity_map:
                 errors.append(f"文书引用了未知 inspectionRef：{ref}")
+        versions = document.get("versions")
+        if not isinstance(versions, list):
+            errors.append(f"documents[{index}].versions 必须是数组")
+            versions = []
+        if len(versions) > len(DOCUMENT_VERSION_KINDS):
+            errors.append(f"documents[{index}].versions 最多包含电子版和扫描件各一份")
+        version_kinds: set[str] = set()
+        version_file_refs: set[str] = set()
+        selected_source_keys: set[tuple[str, Any, Any]] = set()
+        for version_index, version in enumerate(versions, start=1):
+            version_label = f"documents[{index}].versions[{version_index}]"
+            if not isinstance(version, dict):
+                errors.append(f"{version_label} 必须是对象")
+                continue
+            if set(version) != {"fileRef", "kind"}:
+                errors.append(f"{version_label} 只允许 fileRef 和 kind")
+            kind = version.get("kind")
+            if kind not in DOCUMENT_VERSION_KINDS:
+                errors.append(f"{version_label}.kind 必须为 ELECTRONIC 或 SCANNED")
+            elif kind in version_kinds:
+                errors.append(f"documents[{index}] 同一 kind 只能有一个正式版本：{kind}")
+            else:
+                version_kinds.add(kind)
+            file_ref = version.get("fileRef")
+            if not isinstance(file_ref, str) or file_ref not in file_refs:
+                errors.append(f"{version_label}.fileRef 引用了未知文件：{file_ref}")
+                continue
+            if file_ref in version_file_refs:
+                errors.append(f"documents[{index}] 正式版本 fileRef 重复：{file_ref}")
+            version_file_refs.add(file_ref)
+            owner = version_file_owners.get(file_ref)
+            if owner and owner != document_ref:
+                errors.append(f"正式版本文件 {file_ref} 已属于其他逻辑文书：{owner}")
+            else:
+                version_file_owners[file_ref] = document_ref
+            version_file = file_refs[file_ref]
+            if version_file.get("storageKind") != "NORMALIZED_FILE":
+                errors.append(f"{version_label} 只能引用 NORMALIZED_FILE")
+            if version_file.get("mimeType") != "application/pdf":
+                errors.append(f"{version_label} 只能引用 PDF")
+            if version_file.get("documentVersionKind") != kind:
+                errors.append(f"{version_label}.kind 与规范化文件版本类型不一致")
+            source_file_ref = version_file.get("sourceFileRef")
+            if isinstance(source_file_ref, str):
+                selected_source_keys.add(
+                    (
+                        source_file_ref,
+                        version_file.get("sourcePageStart"),
+                        version_file.get("sourcePageEnd"),
+                    )
+                )
+
+        linked_source_keys: set[tuple[str, Any, Any]] = set()
         for link in document.get("fileLinks", []):
             if not isinstance(link, dict) or link.get("fileRef") not in file_refs:
                 errors.append(f"文书引用了未知 fileRef：{link}")
             elif link.get("relationRole") not in FILE_ROLES:
                 errors.append(f"文书文件关系不合法：{link.get('relationRole')}")
+            else:
+                linked_file_ref = str(link["fileRef"])
+                linked_source_keys.add(
+                    (linked_file_ref, link.get("pageStart"), link.get("pageEnd"))
+                )
+                if file_refs[linked_file_ref].get("storageKind") != "ORIGINAL_FILE":
+                    errors.append("文书 fileLinks 只保存 ORIGINAL_FILE 原始来源映射")
+        missing_source_keys = selected_source_keys - linked_source_keys
+        if missing_source_keys:
+            missing_sources = [
+                f"{file_ref}"
+                + (
+                    f"（第{page_start}-{page_end}页）"
+                    if page_start is not None and page_end is not None
+                    else ""
+                )
+                for file_ref, page_start, page_end in sorted(
+                    missing_source_keys,
+                    key=lambda key: (str(key[0]), int(key[1] or 0), int(key[2] or 0)),
+                )
+            ]
+            errors.append(
+                f"documents[{index}] 正式版本缺少原始来源 fileLinks：" + "、".join(missing_sources)
+            )
+        if not versions:
+            document_review_requirements.add((document_ref, "LOW_CONFIDENCE"))
+        if versions and linked_source_keys - selected_source_keys:
+            document_review_requirements.add((document_ref, "DUPLICATE_CANDIDATE"))
 
     for index, requirement in enumerate(manifest.get("documentRequirements", []), start=1):
         add_entity(requirement, f"documentRequirements[{index}]")
@@ -1561,6 +1894,8 @@ def validate_manifest(
                 errors.append(f"字段证据路径不存在：{entity_ref}.{evidence.get('fieldPath')}")
         if evidence.get("trustLevel") not in TRUST_LEVELS:
             errors.append(f"fieldEvidence[{index}].trustLevel 不合法")
+        if evidence.get("fieldPath") == "onlineSale" and not str(entity_ref).startswith("product:"):
+            errors.append("onlineSale 字段证据只能关联 product 实体")
         sources = evidence.get("sources")
         if not isinstance(sources, list) or not sources:
             errors.append(f"fieldEvidence[{index}].sources 至少需要一项")
@@ -1581,6 +1916,10 @@ def validate_manifest(
             errors.append(f"missingItems[{index}].fieldPath 不能为空")
         if not str(missing.get("reason", "")).strip():
             errors.append(f"missingItems[{index}].reason 不能为空")
+        if missing.get("fieldPath") == "onlineSale" and not str(
+            missing.get("entityRef", "")
+        ).startswith("product:"):
+            errors.append("onlineSale 缺失项只能关联 product 实体")
 
     review_items = manifest.get("reviewItems", [])
     if not isinstance(review_items, list):
@@ -1618,6 +1957,8 @@ def validate_manifest(
             errors.append(f"{label}.fieldPath 不是可抽取字段：{entity_ref}.{field_path}")
         if review.get("issueType") not in REVIEW_ISSUE_TYPES:
             errors.append(f"{label}.issueType 不合法")
+        if field_path == "onlineSale" and entity_type != "product":
+            errors.append("onlineSale 待核对项只能关联 product 实体")
         for value_key in ("currentValue", "incomingValue"):
             if value_key not in review:
                 continue
@@ -1709,13 +2050,21 @@ def validate_manifest(
                         and page > source_file["pageCount"]
                     ):
                         errors.append(f"{source_label}.page 超出文件页数")
-                if (
-                    "value" in candidate_source
-                    and candidate_source["value"] != candidate.get("value")
+                if "value" in candidate_source and candidate_source["value"] != candidate.get(
+                    "value"
                 ):
                     errors.append(f"{source_label}.value 必须等于候选 value")
         if review.get("issueType") == "VALUE_CONFLICT" and not contains_entity_value:
             errors.append(f"{label} VALUE_CONFLICT 候选必须包含实体最终值")
+
+    review_resolution_keys = {
+        (str(item.get("entityRef", "")), str(item.get("issueType", "")))
+        for item in review_items
+        if isinstance(item, dict) and item.get("fieldPath") == "versions"
+    }
+    for document_ref, issue_type in sorted(document_review_requirements):
+        if (document_ref, issue_type) not in review_resolution_keys:
+            errors.append(f"文书 {document_ref} 的 versions 必须创建 {issue_type} 待核对项")
 
     case_ref = str(case.get("clientRef", ""))
     case_type = case.get("caseType")
@@ -1723,16 +2072,12 @@ def validate_manifest(
     evidence_items = evidence_items if isinstance(evidence_items, list) else []
     missing_items = manifest.get("missingItems")
     missing_items = missing_items if isinstance(missing_items, list) else []
-    if case_type == "CRIMINAL" and not has_direct_criminal_evidence(
-        evidence_items, case_ref
-    ):
+    if case_type == "CRIMINAL" and not has_direct_criminal_evidence(evidence_items, case_ref):
         errors.append("刑案必须具有含页码和直接刑事表述的 caseType 字段证据")
     if case_type == "ADMINISTRATIVE":
         if not failed_recheck_refs:
             errors.append("行案必须存在整改复查不合格检查记录")
-        elif not has_administrative_rule_evidence(
-            evidence_items, case_ref, failed_recheck_refs
-        ):
+        elif not has_administrative_rule_evidence(evidence_items, case_ref, failed_recheck_refs):
             errors.append("行案必须具有引用整改复查不合格记录的 RULE 字段证据")
     if failed_recheck_refs and case_type not in {"ADMINISTRATIVE", "CRIMINAL"}:
         errors.append("存在整改复查不合格记录时，案卷类型必须为 ADMINISTRATIVE 或已证实的 CRIMINAL")
@@ -1742,8 +2087,7 @@ def validate_manifest(
         none_evidence = [
             item
             for item in evidence_items
-            if is_case_type_evidence(item, case_ref, "NONE")
-            and item.get("trustLevel") == "MANUAL"
+            if is_case_type_evidence(item, case_ref, "NONE") and item.get("trustLevel") == "MANUAL"
         ]
         if not none_evidence:
             errors.append("NONE 案卷类型不得作为默认值，必须具有明确人工确认的字段证据")
@@ -1796,6 +2140,294 @@ def response_json(response: httpx.Response, action: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RegistryError(f"{action}返回 JSON 顶层不是对象")
     return value
+
+
+def response_json_list(response: httpx.Response, action: str) -> list[dict[str, Any]]:
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        body = response.text[:4_000]
+        raise RegistryError(f"{action}失败：HTTP {response.status_code}\n{body}") from error
+    try:
+        value = response.json()
+    except ValueError as error:
+        raise RegistryError(f"{action}返回的不是 JSON") from error
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise RegistryError(f"{action}返回 JSON 顶层不是对象数组")
+    return value
+
+
+def normalized_document_identity(document: dict[str, Any]) -> tuple[str, str, str, str]:
+    issue_date = str(document.get("issueDate") or "").strip()
+    return (
+        str(document.get("stage") or "").strip().upper(),
+        str(document.get("documentType") or "").strip().upper(),
+        str(document.get("documentNo") or "").strip(),
+        issue_date[:10] if issue_date else "",
+    )
+
+
+def server_document_version_sha(document: dict[str, Any], kind: str) -> str | None:
+    active_versions = [
+        version
+        for version in document.get("versions", [])
+        if isinstance(version, dict)
+        and version.get("kind") == kind
+        and not version.get("deletedAt")
+    ]
+    if len(active_versions) != 1:
+        return None
+    file_asset = active_versions[0].get("fileAsset")
+    sha256 = file_asset.get("sha256") if isinstance(file_asset, dict) else None
+    return sha256 if isinstance(sha256, str) else None
+
+
+def sync_document_versions_command(args: argparse.Namespace) -> None:
+    manifest_path = Path(args.manifest).resolve()
+    upload_map_path = Path(args.upload_map).resolve()
+    manifest = read_json(manifest_path)
+    upload_map_doc = read_json(upload_map_path)
+    upload_files = upload_map_doc.get("files")
+    if not isinstance(upload_files, dict):
+        raise RegistryError("upload-map.files 必须是对象")
+    project_no = str(manifest.get("case", {}).get("projectNo", ""))
+    state_path = manifest_path.parent / "document-version-sync-state.json"
+    identity_refs: dict[tuple[str, str, str, str], list[str]] = {}
+    manifest_documents = manifest.get("documents", [])
+    if isinstance(manifest_documents, list):
+        for document in manifest_documents:
+            if not isinstance(document, dict):
+                continue
+            identity_refs.setdefault(normalized_document_identity(document), []).append(
+                str(document.get("clientRef", ""))
+            )
+    duplicate_identities = [
+        (identity, refs) for identity, refs in identity_refs.items() if len(refs) > 1
+    ]
+    if duplicate_identities:
+        state = {
+            "stateVersion": 1,
+            "manifestSha256": file_sha256(manifest_path),
+            "projectNo": project_no,
+            "apiBase": args.api_base.rstrip("/"),
+            "dryRun": bool(args.dry_run),
+            "updatedAt": utc_now(),
+            "status": "NEEDS_REVIEW",
+            "results": [
+                {
+                    "scope": "local-document",
+                    "status": "DUPLICATE_IDENTITY",
+                    "identity": list(identity),
+                    "documentRefs": refs,
+                }
+                for identity, refs in duplicate_identities
+            ],
+        }
+        write_json(state_path, state)
+        raise RegistryError(
+            "本地清单存在重复逻辑文书身份，拒绝向同一服务端文书连续写入；"
+            f"待处理状态已写入 {state_path}"
+        )
+    errors = validate_manifest(manifest, upload_files)
+    if errors:
+        raise RegistryError("同步文书版本前本地校验失败：\n- " + "\n- ".join(errors))
+
+    api_base = args.api_base.rstrip("/")
+    parsed = urlsplit(api_base)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise RegistryError("文书版本同步 api-base 必须是有效 HTTPS 地址")
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    project_no = str(manifest["case"]["projectNo"])
+    manifest_files = {item["clientRef"]: item for item in manifest["files"]}
+    state: dict[str, Any] = {
+        "stateVersion": 1,
+        "manifestSha256": file_sha256(manifest_path),
+        "projectNo": project_no,
+        "apiBase": api_base,
+        "dryRun": bool(args.dry_run),
+        "updatedAt": utc_now(),
+        "status": "RUNNING",
+        "results": [],
+    }
+
+    def persist_state(status: str | None = None) -> None:
+        if status is not None:
+            state["status"] = status
+        state["updatedAt"] = utc_now()
+        write_json(state_path, state)
+
+    persist_state()
+    pending_messages: list[str] = []
+    headers = {WRITE_HEADER: WRITE_HEADER_VALUE, "Origin": origin}
+    timeout = httpx.Timeout(args.timeout, read=max(args.timeout, 300.0))
+    with httpx.Client(timeout=timeout, follow_redirects=False, headers=headers) as client:
+        ready = response_json(client.get(f"{api_base}/api/ready"), "readiness")
+        if ready.get("status") != "ready":
+            raise RegistryError(f"服务未就绪：{ready}")
+        cases_result = response_json(
+            client.get(
+                f"{api_base}/api/v1/cases",
+                params={"projectNo": project_no, "page": 1, "pageSize": 100},
+            ),
+            "按项目编号查询案卷",
+        )
+        cases = cases_result.get("data")
+        if not isinstance(cases, list):
+            raise RegistryError("按项目编号查询案卷响应缺少 data 数组")
+        exact_cases = [
+            item
+            for item in cases
+            if isinstance(item, dict)
+            and item.get("projectNo") == project_no
+            and not item.get("deletedAt")
+        ]
+        if len(exact_cases) != 1:
+            state["results"].append(
+                {
+                    "scope": "case",
+                    "status": "NO_UNIQUE_MATCH",
+                    "matches": len(exact_cases),
+                }
+            )
+            persist_state("NEEDS_REVIEW")
+            raise RegistryError(
+                f"项目编号 {project_no} 匹配到 {len(exact_cases)} 个活动案卷，拒绝猜测；"
+                f"待处理状态已写入 {state_path}"
+            )
+        case_id = str(exact_cases[0]["id"])
+        server_documents = response_json_list(
+            client.get(f"{api_base}/api/v1/cases/{case_id}/documents"),
+            "查询案卷文书",
+        )
+
+        for local_document in manifest.get("documents", []):
+            versions = local_document.get("versions", [])
+            if not versions:
+                continue
+            identity = normalized_document_identity(local_document)
+            matches = [
+                item
+                for item in server_documents
+                if not item.get("deletedAt") and normalized_document_identity(item) == identity
+            ]
+            if len(matches) != 1:
+                message = (
+                    f"文书 {local_document.get('clientRef')} 按阶段、类型、文号、日期"
+                    f"匹配到 {len(matches)} 项"
+                )
+                pending_messages.append(message)
+                state["results"].append(
+                    {
+                        "documentRef": local_document.get("clientRef"),
+                        "identity": identity,
+                        "status": "NO_UNIQUE_MATCH",
+                        "matches": len(matches),
+                    }
+                )
+                persist_state("NEEDS_REVIEW")
+                continue
+            server_document = matches[0]
+            for version in versions:
+                kind = str(version["kind"])
+                file_ref = str(version["fileRef"])
+                file_item = manifest_files[file_ref]
+                local_path = Path(str(upload_files[file_ref])).resolve()
+                current_sha256 = server_document_version_sha(server_document, kind)
+                if current_sha256 == file_item["sha256"]:
+                    state["results"].append(
+                        {
+                            "documentRef": local_document.get("clientRef"),
+                            "documentId": server_document["id"],
+                            "kind": kind,
+                            "status": "UNCHANGED",
+                            "sha256": file_item["sha256"],
+                        }
+                    )
+                    persist_state()
+                    continue
+                if args.dry_run:
+                    state["results"].append(
+                        {
+                            "documentRef": local_document.get("clientRef"),
+                            "documentId": server_document["id"],
+                            "kind": kind,
+                            "status": "WOULD_UPLOAD",
+                            "sha256": file_item["sha256"],
+                        }
+                    )
+                    persist_state()
+                    continue
+                expected_version = server_document.get("version")
+                if not isinstance(expected_version, int) or expected_version < 1:
+                    pending_messages.append(
+                        f"文书 {server_document.get('id')} 缺少有效 expectedDocumentVersion"
+                    )
+                    state["results"].append(
+                        {
+                            "documentRef": local_document.get("clientRef"),
+                            "documentId": server_document.get("id"),
+                            "kind": kind,
+                            "status": "INVALID_SERVER_VERSION",
+                        }
+                    )
+                    persist_state("NEEDS_REVIEW")
+                    continue
+                sync_result: dict[str, Any] = {
+                    "documentRef": local_document.get("clientRef"),
+                    "documentId": server_document["id"],
+                    "kind": kind,
+                    "status": "UPLOADING",
+                    "sha256": file_item["sha256"],
+                    "expectedDocumentVersion": expected_version,
+                }
+                state["results"].append(sync_result)
+                persist_state()
+                phase = "UPLOAD"
+                try:
+                    with local_path.open("rb") as stream:
+                        response_json(
+                            client.put(
+                                f"{api_base}/api/v1/documents/{server_document['id']}/versions/{kind}",
+                                data={"expectedDocumentVersion": str(expected_version)},
+                                files={"file": (local_path.name, stream, "application/pdf")},
+                            ),
+                            f"同步文书 {server_document['id']} 的 {kind} 版本",
+                        )
+                    sync_result["status"] = "UPLOAD_ACCEPTED"
+                    persist_state()
+                    phase = "REFRESH"
+                    server_document = response_json(
+                        client.get(f"{api_base}/api/v1/documents/{server_document['id']}"),
+                        "刷新文书版本",
+                    )
+                    sync_result["status"] = "UPLOADED"
+                    sync_result["serverDocumentVersion"] = server_document.get("version")
+                    persist_state()
+                except Exception as error:
+                    error_summary = str(error).strip()[:1_000] or type(error).__name__
+                    sync_result.update(
+                        {
+                            "status": "FAILED",
+                            "failedPhase": phase,
+                            "error": error_summary,
+                            "remoteWriteMayHaveSucceeded": phase == "REFRESH",
+                        }
+                    )
+                    persist_state("NEEDS_REVIEW")
+                    raise RegistryError(
+                        f"文书 {local_document.get('clientRef')} 的 {kind} 版本同步失败"
+                        f"（{phase}）：{error_summary}；状态已写入 {state_path}"
+                    ) from error
+
+    final_status = "NEEDS_REVIEW" if pending_messages else "DRY_RUN" if args.dry_run else "DONE"
+    persist_state(final_status)
+    print(json.dumps(state, ensure_ascii=False, indent=2))
+    if pending_messages:
+        raise RegistryError(
+            "文书版本同步存在待处理项：\n- "
+            + "\n- ".join(pending_messages)
+            + f"\n状态已写入 {state_path}"
+        )
 
 
 def upload_command(args: argparse.Namespace) -> None:
@@ -1970,9 +2602,7 @@ def build_parser() -> argparse.ArgumentParser:
     inventory_parser.add_argument("--work-dir", required=True)
     inventory_parser.set_defaults(func=inventory_command)
 
-    ocr_parser = subparsers.add_parser(
-        "ocr", help="对无有效文本层的 PDF 页及单页图片运行 Zerox"
-    )
+    ocr_parser = subparsers.add_parser("ocr", help="对无有效文本层的 PDF 页及单页图片运行 Zerox")
     ocr_parser.add_argument("--work-dir", required=True)
     ocr_parser.add_argument("--zerox", default=str(DEFAULT_ZEROX))
     ocr_parser.add_argument("--poppler", default=str(DEFAULT_POPPLER))
@@ -2010,6 +2640,17 @@ def build_parser() -> argparse.ArgumentParser:
     upload_parser.add_argument("--dry-run", action="store_true")
     upload_parser.add_argument("--finalize", action="store_true")
     upload_parser.set_defaults(func=upload_command)
+
+    sync_versions_parser = subparsers.add_parser(
+        "sync-document-versions",
+        help="不依赖导入任务状态，按唯一文书身份幂等同步电子版/扫描件",
+    )
+    sync_versions_parser.add_argument("--manifest", required=True)
+    sync_versions_parser.add_argument("--upload-map", required=True)
+    sync_versions_parser.add_argument("--api-base", required=True)
+    sync_versions_parser.add_argument("--timeout", type=float, default=60.0)
+    sync_versions_parser.add_argument("--dry-run", action="store_true")
+    sync_versions_parser.set_defaults(func=sync_document_versions_command)
     return parser
 
 

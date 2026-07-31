@@ -1,6 +1,6 @@
 ---
 name: xf-product-case-registry
-description: 清点、哈希、识别、OCR、拆分、规范命名消防产品案卷 PDF、监督系统截图或 ZIP，分析电子版/扫描件来源优先级，生成可追溯的 CaseImportManifestV1，并通过消防产品案卷信息登记系统的幂等接口上传和终结导入。用于用户提到 PDF 案卷包、产品信息截图、组合扫描件拆分、案卷文件重命名、字段证据/冲突核对、项目包导入 product-cases.meifu.zzxhlyj.top，或样例案卷 32002207C202600033 时；截图转 Excel 仍使用 xf-product-case-filler。
+description: 清点、哈希、识别、OCR、拆分、规范命名消防产品案卷 PDF、监督系统截图或 ZIP，分析电子版/扫描件来源优先级，为每个逻辑文书选择电子版和扫描件各最多一份规范 PDF，生成可追溯的 CaseImportManifestV1，并通过消防产品案卷信息登记系统的幂等接口导入及同步文书版本。用于用户提到 PDF 案卷包、产品信息截图、组合扫描件拆分、案卷文件重命名、字段证据/冲突核对、项目包导入 product-cases.meifu.zzxhlyj.top，或样例案卷 32002207C202600033 时；截图转 Excel 仍使用 xf-product-case-filler。
 ---
 
 # 消防产品案卷提取与导入
@@ -14,6 +14,8 @@ description: 清点、哈希、识别、OCR、拆分、规范命名消防产品�
 - 原件缺失、OCR 失败或无法确认时写 `UNKNOWN`/`missingItems`，绝不推断为“无”。
 - 人工确认值不得由自动结果覆盖；服务端冲突必须进入待核对。
 - `png`、`jpg`、`jpeg` 一律按单页图片清点并调用 Zerox；OCR 结果只作为证据，不能凭 OCR 结果猜测业务值。
+- 网售情况属于单个产品，只能填写 `products[].onlineSale=YES|NO|UNKNOWN`；不得在案卷层填写或把一个网售产品扩散到同案其他产品。
+- 每个逻辑文书的正式版本只允许 `ELECTRONIC`、`SCANNED` 各一份，且只能引用规范化 PDF；截图、原始组合件和重复副本仅保留为 `fileLinks`/字段证据，不能成为正式版本。
 - 案卷类型按固定优先级归一：具有页码和直接刑事表述的证据才为 `CRIMINAL`；否则任一产品存在整改复查不合格（`RECHECK` + `UNQUALIFIED`）即为 `ADMINISTRATIVE`；其余一律为 `UNKNOWN` 并创建 `caseType` 待核对项。自动路径绝不把未确认案件写为 `NONE`；处罚、罚字、处罚文书或通报本身不足以推定刑案或行案。
 - 文件名只作提示；正文标题、文号、检验类别和关联对象决定文书分类。
 - `检验报告.pdf` 只有正文明确“型式试验/型式检验”时才归为型式检验报告，不能误归为本案抽样送检报告。
@@ -50,6 +52,8 @@ uv run python scripts/registry_cli.py inventory `
 
 ### 2. 仅 OCR 扫描页
 
+执行前先核对 `zerox-local` 当前模型端点。若端点会把页面内容发送到外部模型服务，真实案卷、执法文书或其他敏感材料必须先取得用户对该第三方数据传输的明确授权；不得把“本机启动命令”误称为“内容仅在本机处理”。未获授权时停止 OCR，保留 `needsOcrPages` 和中间清单，继续处理已有可靠文本层的内容，且不得把未识别写成“无”。检查端点时不得输出 `.env.local` 中的密钥。
+
 ```powershell
 uv run python scripts/registry_cli.py ocr `
   --work-dir "<工作目录>" --concurrency 1
@@ -81,7 +85,7 @@ uv run python scripts/registry_cli.py source-analysis --work-dir "<工作目录>
 逐页核对标题、文号、日期、产品、阶段、对象和案卷类型，编写：
 
 - `case-data.json`：案卷、产品、阶段检查、文书、证据和缺失项；`CRIMINAL` 必须提供含文件、页码和直接刑事表述的字段证据，`UNKNOWN` 必须建立 `caseType` 待核对项。`ADMINISTRATIVE` 的规则证据由 `compose` 生成，其 `value.inspectionRef` 引用整改复查不合格记录；
-- `split-plan.json`：组合 PDF 的经确认页码范围。
+- `split-plan.json`：组合 PDF 的经确认页码范围；每项必须写与 `case-data.documents[].clientRef` 完全一致的稳定 `documentRef`，并写 `documentVersionKind=ELECTRONIC|SCANNED|UNKNOWN`；无法可靠判断时明确写 `UNKNOWN`，不得猜测。
 
 每条产品检查的 `caseInspectionRef` 可由人工显式指定；未指定时 `compose` 会按阶段和检查日期生成共享父检查引用，无日期时按同阶段同序位生成。不要把不同阶段或不同日期的记录填写为同一引用。
 
@@ -94,7 +98,7 @@ uv run python scripts/registry_cli.py split `
   --work-dir "<工作目录>" --plan "<split-plan.json>"
 ```
 
-文件名固定为 `项目编号_阶段_文书类型_文号或日期_序号.pdf`。脚本只写 `normalized/`，并在 `split-index.json` 保存原文件及页码映射。
+文件名固定为 `项目编号_阶段_文书类型_文号或日期_电子版或扫描件_序号.pdf`。`UNKNOWN` 使用“版本待核对”，但不得进入 `documents[].versions`。脚本只写 `normalized/`，并在 `split-index.json` 保存 `documentRef`、`documentVersionKind`、原文件及页码映射；缺少或无法匹配 `documentRef` 时立即失败。
 
 ### 6. 组装并本地校验 manifest
 
@@ -108,6 +112,8 @@ uv run python scripts/registry_cli.py validate `
 ```
 
 必须先消除结构错误、悬空引用和哈希错误。低可信字段可以保留，但要带 `OCR_ONLY` 证据并创建相应 `missingItems` 或待核对信息。
+
+`documents[].versions` 只保存每种类型选出的最佳规范 PDF；同一 `documentRef + kind` 只有一个候选时由 `compose` 自动选入，存在多个候选时必须在 `case-data` 显式选定一个，否则不猜测。`compose` 会把该 `documentRef` 的所有候选原文件与页码写入 `fileLinks`，未选候选强制创建 `DUPLICATE_CANDIDATE`；`UNKNOWN` 强制创建 `LOW_CONFIDENCE`。同一 `stage + documentType + documentNo + issueDate` 出现两条逻辑文书会校验失败，必须先合并来源。
 
 ### 7. 接口上传
 
@@ -133,6 +139,25 @@ uv run python scripts/registry_cli.py upload `
 
 上传状态写入工作目录的 `upload-state.json`，失败后使用同一命令续传。幂等键由原包哈希确定；重复执行不得增加案卷、产品、阶段检查或文件数量。
 
+### 8. 独立同步文书版本
+
+导入任务可能因相同包哈希已 `FINALIZED` 而直接返回旧结果。无论是否发生幂等重放，导入后都运行：
+
+```powershell
+uv run python scripts/registry_cli.py sync-document-versions `
+  --manifest "<工作目录>\manifest.json" `
+  --upload-map "<工作目录>\upload-map.json" `
+  --api-base "https://product-cases.meifu.zzxhlyj.top" `
+  --dry-run
+
+uv run python scripts/registry_cli.py sync-document-versions `
+  --manifest "<工作目录>\manifest.json" `
+  --upload-map "<工作目录>\upload-map.json" `
+  --api-base "https://product-cases.meifu.zzxhlyj.top"
+```
+
+命令按项目编号唯一定位案卷，再按阶段、文书类型、文号和日期唯一匹配文书；无匹配或多匹配时写入 `document-version-sync-state.json` 并停止猜测。相同 SHA-256 直接跳过；不同内容以服务器当前文书版本号执行乐观锁 PUT，同一命令可安全重跑。
+
 ## 完成条件
 
 - 原件哈希与清点时一致；
@@ -142,3 +167,4 @@ uv run python scripts/registry_cli.py upload `
 - `validate` 和 `finalize` 均成功；
 - 返回的新增、冲突、缺失、跳过明细已保存；
 - 前端待核对项与无法确认内容一致。
+- `document-version-sync-state.json` 为 `DONE`，或所有 `NEEDS_REVIEW` 项已人工处理。

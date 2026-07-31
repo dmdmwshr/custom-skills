@@ -16,8 +16,7 @@
     "inspectionForm": "ROUTINE",
     "caseHandler": "朱大海",
     "inspector": "张慧",
-    "caseType": "UNKNOWN",
-    "onlineSale": "UNKNOWN"
+    "caseType": "UNKNOWN"
   },
   "products": [
     {
@@ -25,6 +24,7 @@
       "name": "直流水枪",
       "modelSpec": "QZ3.5/7.5",
       "nominalProducer": "高邮市顺威消防科技有限公司",
+      "onlineSale": "UNKNOWN",
       "inspections": [
         {
           "caseInspectionRef": "case-inspection:initial:2026-05-19",
@@ -86,20 +86,31 @@
 - 父检查引用：每条检查的 `caseInspectionRef`，用于把同一次案卷级检查下的多个产品分组；
 - 文书和资料要求缺少 `clientRef` 时的顺序引用。
 
-## 文件引用
+## 产品级网售
 
-文书 `fileLinks` 可以用上传相对路径，`compose` 会转换为 `fileRef`：
+`onlineSale` 只属于产品，枚举为 `YES`、`NO`、`UNKNOWN`。同一案卷有四个产品且仅一个来自网售时，只给对应产品写 `YES`；其余产品必须按各自证据写 `NO` 或 `UNKNOWN`。`fieldEvidence`、`missingItems` 和 `reviewItems` 的 `entityRef` 必须是对应 `product:<序号>`，不得指向案卷。
+
+## 文书版本与原始来源
+
+`documents[].versions` 只保存正式归档版本，每个逻辑文书的 `ELECTRONIC`、`SCANNED` 各最多一份；只能引用 `NORMALIZED_FILE` 且 MIME 为 `application/pdf`。每条文书必须有稳定且唯一的 `clientRef`，`split-plan.items[].documentRef` 必须完全指向该值。`fileLinks` 继续保存所有原始来源、组合件和重复副本映射。两者都可以用上传相对路径，`compose` 会转换为 `fileRef`：
 
 ```json
 {
+  "clientRef": "document:type-test-report-zb2018m3262",
   "documentType": "TYPE_TEST_REPORT",
   "documentNo": "ZB2018M3262",
   "productRefs": ["product:1"],
   "inspectionRefs": [],
+  "versions": [
+    {
+      "relativePath": "normalized/32002207C202600033_案卷_型式检验报告_ZB2018M3262_电子版_01.pdf",
+      "kind": "ELECTRONIC"
+    }
+  ],
   "fileLinks": [
     {
       "relativePath": "original/检验报告.pdf",
-      "relationRole": "PRIMARY",
+      "relationRole": "SOURCE_COPY",
       "pageStart": 1,
       "pageEnd": 10
     }
@@ -108,15 +119,16 @@
 }
 ```
 
-### 同一文书的电子版、扫描件与附件
+### 正式双版本与重复来源
 
-`fileLinks` 已显式填写 `relationRole` 时，`compose` 原样保留，绝不按文件名改写。每个逻辑文书可链接多个物理文件：
+`versions` 的元素只允许 `fileRef`、`kind`；`kind` 只允许：
 
-- 监督系统电子版：`PRIMARY`；
-- 同文书扫描签字版：`SOURCE_COPY`，必须保留；
-- 重复扫描副本：`DUPLICATE_COPY`；
-- 与正文配套的图片、清单等：`SUPPORTING_ATTACHMENT`；
-- 没有电子版时，扫描签字版可以为 `PRIMARY`。
+- `ELECTRONIC`：监督系统生成、具有可靠文本层的电子版 PDF；
+- `SCANNED`：签字盖章或手写记录的扫描版 PDF。
+
+`fileLinks` 已显式填写 `relationRole` 时，`compose` 原样保留，并按 `documentRef` 自动补上全部规范化候选（不仅是所选版本）的原文件及页码来源。原始来源仍使用 `PRIMARY`、`SOURCE_COPY`、`DUPLICATE_COPY`、`SUPPORTING_ATTACHMENT` 描述物理关系，但这些关系不再代表正式版本。
+
+同一 `documentRef + kind` 只有一个候选时，`compose` 自动选入 `versions`；有多个候选时必须显式选择最佳版本，无法确定则不写该 kind。已有最佳正式版本之外的原始来源保留在 `fileLinks`，并创建 `DUPLICATE_CANDIDATE`。无法可靠判断电子版或扫描件时，拆分计划写 `documentVersionKind=UNKNOWN`，规范文件名使用“版本待核对”，该文件不得进入 `versions`，并创建 `LOW_CONFIDENCE`。截图可用于字段提取和来源证据，但不能进入 `versions`。两条文书若 `stage + documentType + documentNo + issueDate` 完全相同，必须先合并为一条逻辑文书，不能依赖同步顺序覆盖版本。
 
 电子版优先用于印刷字段抽取，扫描签字版优先用于签章、手写更正和归档。二者的字段提取不同，不得自动覆盖：已选正式值可保留 `fieldEvidence`，另一候选值写入 `reviewItems`；不要把与正式实体值不一致的候选也写为 `fieldEvidence`。
 
@@ -203,6 +215,8 @@
 - 结果：`QUALIFIED`、`UNQUALIFIED`、`PENDING`、`UNKNOWN`
 - 复检状态：`NOT_APPLIED`、`APPLIED`、`ACCEPTED`、`REJECTED`、`COMPLETED`、`UNKNOWN`
 - 证据可信度：`DETERMINISTIC`、`CORROBORATED`、`OCR_ONLY`、`MANUAL`
+- 产品网售：`YES`、`NO`、`UNKNOWN`
+- 正式文书版本：`ELECTRONIC`、`SCANNED`
 - 文件关系：`PRIMARY`、`SOURCE_COPY`、`DUPLICATE_COPY`、`SUPPORTING_ATTACHMENT`
 
 `SAMPLING` 是初查或复查采用的检查方式，不是检查阶段。只有 `method=SAMPLING` 的记录可以填写 `reinspection*` 字段；复检是当事人对首次抽样检验结果有异议后的单次子流程，绝不能与大队整改后的 `RECHECK` 混用。对现场判定结论有异议后首次送检属于监督检验，不直接写成复检。
