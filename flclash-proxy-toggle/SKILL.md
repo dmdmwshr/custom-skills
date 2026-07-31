@@ -13,6 +13,8 @@ x-edit-policy: edit-source-repo-only
 
 执行配置诊断或变更前，完整读取 [references/configuration-layers.md](references/configuration-layers.md)。
 
+任务涉及 Windows 桌面界面、按钮盘点或 UI 设置定位时，还必须完整读取 [references/windows-desktop-ui-map.md](references/windows-desktop-ui-map.md)。该参考记录的是版本化实测，不替代当前窗口截图与可访问文本。
+
 ## 最高优先级安全边界
 
 1. 未经用户在当前任务中明确要求，绝不点击暂停/启动按钮，绝不关闭窗口、退出托盘、重启应用、结束 `FlClash`、`FlClashCore` 或 `FlClashHelperService` 进程。
@@ -44,7 +46,7 @@ x-edit-policy: edit-source-repo-only
    <项目或可信 Python 3.11 解释器> scripts/flclash_state.py
    ```
 
-2. 需要看桌面界面时，先限定到 FlClash 窗口，读取截图与无障碍树；不按旧截图坐标盲点。
+2. 需要看桌面界面时，先限定到 FlClash 窗口，读取截图与无障碍树；按“页面标题 + 控件文本 + 控件角色”唯一确认，不按旧截图坐标盲点。
 3. 需要持久修改时，优先使用 FlClash UI。
 4. 已明确启用 external controller 且只需要运行态策略组操作时，可使用本机 Mihomo HTTP API。
 5. `database.sqlite` 只用于只读审计；直接写库仅限用户明确批准的恢复性维护窗口。
@@ -64,6 +66,16 @@ x-edit-policy: edit-source-repo-only
 - 应用设置中的 `常规`：端口、外部控制器等客户端补丁设置；具体分组名称以当前版本可访问文本为准。
 
 图标无稳定标签、页面与说明不一致或目标项不可唯一识别时，停止并报告，不尝试相邻按钮。
+
+## 桌面 UI 只读盘点协议
+
+1. 盘点前运行 `scripts/flclash_state.py`，至少记录进程、Windows 系统代理、应用偏好中的系统代理/TUN，以及生成配置中的 TUN；这些字段组成运行态哨兵。
+2. 只读盘点只允许已确认的主导航、返回、搜索、滚动和窗口尺寸调整。打开页面不等于允许点击页面内的开关、单选项、配置卡片、节点卡片、测速、刷新、重置、添加、清空或关闭连接按钮。
+3. 每次输入前重新聚焦 FlClash，先用可访问文本定位；若只能看到无标签图标，保留截图并标记“未唯一识别”，不得猜坐标。
+4. `请求`、`连接`、`代理`、`配置`、按需运行等页面可能暴露域名、IP、进程、SSID、节点标签或订阅信息。截图只用于临时核验，不提交到 skill 仓库；文档只保留脱敏后的界面能力。
+5. 延迟测试、网络检测、订阅刷新虽不一定改配置，但会产生网络请求或重新加载运行态，盘点任务默认不执行。
+6. 页面盘点结束后回到原页面，再运行一次只读脚本并逐项比较运行态哨兵。只有前后值一致，才能报告“代理状态未改变”。
+7. 当前版本实测按钮地图、风险等级与未实测边界见 `references/windows-desktop-ui-map.md`；版本变化时按当前 UI 重新核验并更新日期，不沿用坐标。
 
 ## 操作授权矩阵
 
