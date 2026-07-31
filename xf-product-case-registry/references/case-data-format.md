@@ -52,7 +52,7 @@
 
 - 案卷引用：`case:<项目编号>`；
 - 产品引用：`product:<序号>`；
-- 阶段引用：`inspection:<产品序号>:<阶段小写>`；
+- 检查记录引用：`inspection:<产品序号>:<阶段小写>`；同一阶段有多条方式记录时依次追加 `:2`、`:3`；
 - 文书和资料要求缺少 `clientRef` 时的顺序引用。
 
 ## 文件引用
@@ -106,10 +106,31 @@
 ## 枚举
 
 - 大队：`JIANGYIN`、`YIXING`、`LIANGXI`、`XISHAN`、`HUISHAN`、`BINHU`、`XINWU`、`JINGKAI`
-- 阶段：`INITIAL_CHECK`、`RECHECK`、`SAMPLING_INSPECTION`、`LAB_REINSPECTION`
-- 方法：`ONSITE`、`SAMPLING`、`UNKNOWN`、`NOT_APPLICABLE`
+- 阶段：`INITIAL_CHECK`、`RECHECK`
+- 方法：`ONSITE`、`SAMPLING`、`UNKNOWN`
 - 结果：`QUALIFIED`、`UNQUALIFIED`、`PENDING`、`UNKNOWN`
+- 复检状态：`NOT_APPLIED`、`APPLIED`、`ACCEPTED`、`REJECTED`、`COMPLETED`、`UNKNOWN`
 - 证据可信度：`DETERMINISTIC`、`CORROBORATED`、`OCR_ONLY`、`MANUAL`
 - 文件关系：`PRIMARY`、`SOURCE_COPY`、`DUPLICATE_COPY`、`SUPPORTING_ATTACHMENT`
 
-不要把 `inspection.stage=LAB_REINSPECTION` 与大队整改后的 `RECHECK` 混用。
+`SAMPLING` 是初查或复查采用的检查方式，不是检查阶段。只有 `method=SAMPLING` 的记录可以填写 `reinspection*` 字段；复检是当事人对首次抽样检验结果有异议后的单次子流程，绝不能与大队整改后的 `RECHECK` 混用。对现场判定结论有异议后首次送检属于监督检验，不直接写成复检。
+
+以下仅演示抽样记录下复检子流程的字段结构，不表示样例案卷存在抽样或复检事实：
+
+```json
+{
+  "stage": "INITIAL_CHECK",
+  "method": "SAMPLING",
+  "inspectionDate": "2026-06-01",
+  "inspectionResult": "UNQUALIFIED",
+  "submittedSampleName": "送检样品名称",
+  "reinspectionStatus": "COMPLETED",
+  "reinspectionApplicationDate": "2026-06-10",
+  "reinspectionAcceptanceDate": "2026-06-11",
+  "reinspectionAgency": "法定检验机构",
+  "reinspectionReportNo": "复检报告编号",
+  "reinspectionReportDate": "2026-06-20",
+  "reinspectionResult": "UNQUALIFIED",
+  "reinspectionNotes": "使用备用样品完成一次复检"
+}
+```

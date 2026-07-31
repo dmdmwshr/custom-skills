@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 import httpx
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 TEXT_THRESHOLD = 30
 MAX_ZIP_FILES = 1_000
 MAX_ZIP_BYTES = 1024 * 1024 * 1024
@@ -39,14 +39,17 @@ BRIGADES = {
     "XINWU",
     "JINGKAI",
 }
-STAGES = {
-    "INITIAL_CHECK",
-    "RECHECK",
-    "SAMPLING_INSPECTION",
-    "LAB_REINSPECTION",
-}
-METHODS = {"ONSITE", "SAMPLING", "UNKNOWN", "NOT_APPLICABLE"}
+STAGES = {"INITIAL_CHECK", "RECHECK"}
+METHODS = {"ONSITE", "SAMPLING", "UNKNOWN"}
 RESULTS = {"QUALIFIED", "UNQUALIFIED", "PENDING", "UNKNOWN"}
+REINSPECTION_STATUSES = {
+    "NOT_APPLIED",
+    "APPLIED",
+    "ACCEPTED",
+    "REJECTED",
+    "COMPLETED",
+    "UNKNOWN",
+}
 TRUST_LEVELS = {"DETERMINISTIC", "CORROBORATED", "OCR_ONLY", "MANUAL"}
 FILE_KINDS = {
     "ORIGINAL_PACKAGE",
@@ -60,8 +63,6 @@ REQUIREMENT_STATUSES = {"PRESENT", "ABSENT", "NOT_REQUIRED", "UNKNOWN"}
 STAGE_LABELS = {
     "INITIAL_CHECK": "初查",
     "RECHECK": "复查",
-    "SAMPLING_INSPECTION": "抽样送检",
-    "LAB_REINSPECTION": "复检",
     "CASE": "案卷",
 }
 
@@ -863,6 +864,41 @@ def validate_manifest(
                 errors.append(f"{label}.method 不合法")
             if inspection.get("inspectionResult") not in RESULTS:
                 errors.append(f"{label}.inspectionResult 不合法")
+            reinspection_status = inspection.get(
+                "reinspectionStatus", "NOT_APPLIED"
+            )
+            if reinspection_status not in REINSPECTION_STATUSES:
+                errors.append(f"{label}.reinspectionStatus 不合法")
+            reinspection_detail_fields = (
+                "reinspectionApplicationDate",
+                "reinspectionAcceptanceDate",
+                "reinspectionAgency",
+                "reinspectionReportNo",
+                "reinspectionReportDate",
+                "reinspectionResult",
+                "reinspectionNotes",
+            )
+            has_reinspection = reinspection_status != "NOT_APPLIED" or any(
+                inspection.get(field) not in (None, "")
+                for field in reinspection_detail_fields
+            )
+            has_reinspection_details = any(
+                inspection.get(field) not in (None, "")
+                for field in reinspection_detail_fields
+            )
+            if (
+                reinspection_status == "NOT_APPLIED"
+                and has_reinspection_details
+            ):
+                errors.append(f"{label} 复检状态为未申请时不能包含复检详情")
+            if has_reinspection and inspection.get("method") != "SAMPLING":
+                errors.append(f"{label} 只有抽样送检记录可以包含复检信息")
+            reinspection_result = inspection.get("reinspectionResult")
+            if (
+                reinspection_result is not None
+                and reinspection_result not in RESULTS
+            ):
+                errors.append(f"{label}.reinspectionResult 不合法")
 
     files = manifest.get("files")
     if not isinstance(files, list) or not files:

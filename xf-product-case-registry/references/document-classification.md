@@ -14,10 +14,10 @@
 
 - `INITIAL_CHECK`：大队首次监督检查。
 - `RECHECK`：大队再次检查整改结果。
-- `SAMPLING_INSPECTION`：大队抽样并送检。
-- `LAB_REINSPECTION`：检验机构受理的复检申请与报告。
 
-“现场判定/抽样送检”属于方法，不能代替阶段。
+“现场判定/抽样送检”属于检查方法，不能代替阶段。同一初查或复查可以有多条方法记录，例如先现场判定，因当事人对判定结论有异议后再抽样送法定检验机构进行监督检验。
+
+“复检”不是检查阶段，也不是整改复查。它只发生在当事人对首次抽样检验结果有异议、提出书面申请并获受理后；使用备用样品，且申请以一次为限。复检信息写入对应 `method=SAMPLING` 检查记录的 `reinspection*` 字段，并用 `REINSPECTION_APPLICATION`、`REINSPECTION_ACCEPTANCE`、`REINSPECTION_REPORT` 等逻辑文书提供证据。
 
 ## 常用类型
 
