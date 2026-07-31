@@ -1,0 +1,4 @@
+interface:
+  display_name: "消防产品案卷提取与导入"
+  short_description: "清点、识别、拆分消防产品案卷 PDF 并幂等导入系统"
+  default_prompt: "使用 $xf-product-case-registry 处理这个消防产品案卷包，生成可核对的清单并导入系统。"
