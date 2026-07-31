@@ -1,0 +1,4 @@
+interface:
+  display_name: "Applio 音色转换与模型管理"
+  short_description: "管理本机 Applio 部署、RVC 模型、推理流程与故障诊断"
+  default_prompt: "使用 $applio-rvc-manager 检查本机 Applio 状态，并安全管理和测试 RVC 音色模型。"
