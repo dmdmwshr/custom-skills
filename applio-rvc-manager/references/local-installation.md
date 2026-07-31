@@ -14,6 +14,8 @@
 | PyTorch | 2.11.0+cu128 |
 | GPU | NVIDIA GeForce RTX 5080 |
 | 默认地址 | `http://127.0.0.1:6969` |
+| 内置 TTS 中间件 | `edge-tts 7.2.8`，需要联网 |
+| TTS 音色清单 | `D:\Program_Files\Applio\rvc\lib\tools\tts_voices.json` |
 | 模型根目录 | `D:\Program_Files\Applio\logs` |
 | 模型原包目录 | `D:\Program_Files\Applio\model_packages\<日期>` |
 | 音频工作目录 | `D:\Program_Files\Applio\assets\audios` |
@@ -53,3 +55,12 @@
 ## 音频数据边界
 
 Applio 的“Clear Outputs”会删除 `assets\audios` 内的音频。原始视频、原始人声、分离后干声和最终成片应保存在独立项目目录；Applio 目录只放可重建的工作副本与输出。
+
+## 内置 TTS 边界
+
+- TTS 页调用 Microsoft EdgeTTS 在线服务，不在本机加载独立的 TTS 权重。
+- 本机不需要另下 TTS 模型；需要网络可访问 EdgeTTS 服务。
+- 当前代码流程是“文字或 UTF-8 TXT → EdgeTTS 底稿 → RVC 角色音色”，会分别生成 TTS 底稿和 RVC 输出。
+- 要输出角色音色，仍需选择已安装的 RVC `.pth`，并建议配套 `.index`。
+- 2026-07-31 现场查询返回 322 个 EdgeTTS 音色，其中 14 个为 `zh-*` 中文音色；服务清单会变化，使用前可重新查询。
+- 完全离线、可训练或高可控 TTS 需要另选专用项目及其模型，不属于 Applio 内置 TTS。

@@ -9,7 +9,7 @@ description: 管理本机 Applio 与 RVC 音色模型，包括安装、升级、
 
 1. 先核验现场，再引用历史快照。运行 `scripts/audit-applio.ps1`，不要把旧 PID、端口占用或模型清单当作当前事实。
 2. 本机安装使用 Applio 自带的 `env\python.exe`；不要向系统 Python、Conda `base` 或 Applio 内置环境随意安装、升级包。
-3. 区分声音转换和语音合成：RVC 需要源语音并保留其内容、节奏和大部分语气；它不会翻译，也不是仅凭文字生成目标声音。
+3. 区分声音转换和语音合成：RVC 需要源语音并保留其内容、节奏和大部分语气；Applio 内置 TTS 使用联网 EdgeTTS 生成源语音，再接 RVC 形成角色音色。它不会自动翻译。
 4. 下载前核对来源、模型卡、文件格式、授权和训练语言。真人或公众人物音色只在获得授权且用途正当时使用，不制作欺骗性冒充内容。
 5. 将外部 `.pth` 视为不可信序列化文件。安装前用 Applio 内置 Python 运行 `scripts/inspect-rvc-model.py`，必须使用 `torch.load(..., weights_only=True)`。
 6. 原始音频保存在 Applio 目录之外。不要把唯一原件放进 `assets\audios`，因为界面的清理功能会删除该目录内音频。
@@ -19,7 +19,7 @@ description: 管理本机 Applio 与 RVC 音色模型，包括安装、升级、
 
 - 本机部署、启动、停止、升级或状态问题：先读 `references/local-installation.md`，再运行只读审计脚本。
 - 获取、安装、改名、迁移、备份或清理模型：读 `references/model-management.md`。
-- 中文转日语角色、说话或唱歌参数、长音频转换：读 `references/inference-guide.md`。
+- 文字转语音、中文转日语角色、说话或唱歌参数、长音频转换、与 ComfyUI 视频的音频交接：读 `references/inference-guide.md`。
 - 界面打不开、端口冲突、模型不显示、显存或内存异常、下载失败：读 `references/troubleshooting.md`。
 
 ## 标准工作流
@@ -55,7 +55,15 @@ description: 管理本机 Applio 与 RVC 音色模型，包括安装、升级、
   --index "D:\Program_Files\Applio\logs\示例\example.index"
 ```
 
-### 3. 转换与验收
+### 3. 文字转角色音色
+
+1. 在 TTS 页输入文字或 UTF-8 `.txt`，选择与文本语言一致的 EdgeTTS 音色。
+2. Applio 会先生成 `tts_output.wav`，再用所选 RVC `.pth/.index` 生成 `tts_rvc_output.wav`。
+3. EdgeTTS 不需要下载本地 TTS 模型，但需要联网；目标角色音色仍需要 RVC 模型。
+4. 用于视频时，先锁定文案、语速、停顿和最终 RVC 音频，再把最终音频交给 ComfyUI 做口型或音频驱动。
+5. 将最终音频复制到项目目录，并记录 EdgeTTS 音色、语速、RVC 模型哈希和推理参数；不要只保存在 `assets\audios`。
+
+### 4. 转换与验收
 
 1. 使用干净、无背景音乐、无混响的源人声。
 2. 先做短样本，固定源音频，对音高、索引比例、辅音保护和嵌入模型进行 A/B 测试。
@@ -63,7 +71,7 @@ description: 管理本机 Applio 与 RVC 音色模型，包括安装、升级、
 4. 长音频按语义停顿切段，段间保留少量上下文，最后统一响度并检查断句。
 5. 保留源文件、参数、模型哈希和输出文件，确保结果可复现。
 
-### 4. 变更和升级
+### 5. 变更和升级
 
 1. 升级前备份 `logs`、`assets\presets`、自定义嵌入模型及要保留的音频。
 2. 记录当前版本、内置 Python、PyTorch、CUDA、模型清单和启动方式。
@@ -79,5 +87,5 @@ description: 管理本机 Applio 与 RVC 音色模型，包括安装、升级、
 - 新增、保留或失败的模型及其目录；
 - `.pth/.index` 配对、安全加载、哈希和 Applio 可见性；
 - 模型来源、训练语言和授权不确定性；
-- 测试所用音频、参数、输出路径和已知限制；
+- 测试所用文字或音频、EdgeTTS 音色、RVC 参数、输出路径和已知限制；
 - 尚未完成的下载、推理或人工试听步骤。
