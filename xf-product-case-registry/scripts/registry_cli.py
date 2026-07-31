@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 import httpx
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 TEXT_THRESHOLD = 30
 MAX_ZIP_FILES = 1_000
 MAX_ZIP_BYTES = 1024 * 1024 * 1024
@@ -42,6 +42,7 @@ BRIGADES = {
 STAGES = {"INITIAL_CHECK", "RECHECK"}
 METHODS = {"ONSITE", "SAMPLING", "UNKNOWN"}
 RESULTS = {"QUALIFIED", "UNQUALIFIED", "PENDING", "UNKNOWN"}
+CASE_TYPES = {"NONE", "ADMINISTRATIVE", "CRIMINAL", "UNKNOWN"}
 REINSPECTION_STATUSES = {
     "NOT_APPLIED",
     "APPLIED",
@@ -60,6 +61,9 @@ FILE_KINDS = {
 }
 FILE_ROLES = {"PRIMARY", "SOURCE_COPY", "DUPLICATE_COPY", "SUPPORTING_ATTACHMENT"}
 REQUIREMENT_STATUSES = {"PRESENT", "ABSENT", "NOT_REQUIRED", "UNKNOWN"}
+DIRECT_CRIMINAL_EVIDENCE_RE = re.compile(
+    r"刑事案件|刑案|移送\s*(?:公安|公安机关)|公安机关.*移送"
+)
 STAGE_LABELS = {
     "INITIAL_CHECK": "初查",
     "RECHECK": "复查",
@@ -636,6 +640,173 @@ def build_entities(case_data: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     return case, entity_map
 
 
+def failed_recheck_inspection_refs(products: list[dict[str, Any]]) -> list[str]:
+    return [
+        str(inspection["clientRef"])
+        for product in products
+        if isinstance(product, dict)
+        for inspection in product.get("inspections", [])
+        if isinstance(inspection, dict)
+        and inspection.get("stage") == "RECHECK"
+        and inspection.get("inspectionResult") == "UNQUALIFIED"
+        and isinstance(inspection.get("clientRef"), str)
+        and inspection["clientRef"]
+    ]
+
+
+def is_case_type_evidence(item: Any, case_ref: str, case_type: str) -> bool:
+    return (
+        isinstance(item, dict)
+        and item.get("entityRef") == case_ref
+        and item.get("fieldPath") == "caseType"
+        and item.get("value") == case_type
+    )
+
+
+def source_has_file_locator(source: Any) -> bool:
+    return isinstance(source, dict) and bool(
+        source.get("relativePath") or source.get("fileRef")
+    )
+
+
+def has_direct_criminal_evidence(evidence_items: list[Any], case_ref: str) -> bool:
+    for item in evidence_items:
+        if not is_case_type_evidence(item, case_ref, "CRIMINAL"):
+            continue
+        if item.get("trustLevel") == "OCR_ONLY":
+            continue
+        sources = item.get("sources")
+        if not isinstance(sources, list):
+            continue
+        if any(
+            source_has_file_locator(source)
+            and isinstance(source.get("page"), int)
+            and source["page"] >= 1
+            and DIRECT_CRIMINAL_EVIDENCE_RE.search(str(source.get("evidence", "")))
+            for source in sources
+            if isinstance(source, dict)
+        ):
+            return True
+    return False
+
+
+def administrative_rule_evidence(inspection_refs: list[str]) -> dict[str, Any]:
+    return {
+        "kind": "RULE",
+        "value": {
+            "inspectionRef": inspection_refs[0],
+            "stage": "RECHECK",
+            "inspectionResult": "UNQUALIFIED",
+        },
+        "evidence": "规则判定：存在整改复查不合格检查记录，案卷类型归为行案。",
+    }
+
+
+def has_administrative_rule_evidence(
+    evidence_items: list[Any], case_ref: str, inspection_refs: list[str]
+) -> bool:
+    for item in evidence_items:
+        if not is_case_type_evidence(item, case_ref, "ADMINISTRATIVE"):
+            continue
+        if item.get("trustLevel") != "DETERMINISTIC":
+            continue
+        sources = item.get("sources")
+        if not isinstance(sources, list):
+            continue
+        for source in sources:
+            if not isinstance(source, dict) or source.get("kind") != "RULE":
+                continue
+            rule_value = source.get("value")
+            if (
+                isinstance(rule_value, dict)
+                and rule_value.get("inspectionRef") in inspection_refs
+                and rule_value.get("stage") == "RECHECK"
+                and rule_value.get("inspectionResult") == "UNQUALIFIED"
+            ):
+                return True
+    return False
+
+
+def has_case_type_missing_item(missing_items: list[Any], case_ref: str) -> bool:
+    return any(
+        isinstance(item, dict)
+        and item.get("entityRef") == case_ref
+        and item.get("fieldPath") == "caseType"
+        and str(item.get("reason", "")).strip()
+        for item in missing_items
+    )
+
+
+def normalize_case_type(case_data: dict[str, Any], case: dict[str, Any]) -> None:
+    """按已确认刑事证据和整改复查结果归一案卷类型，不以 NONE 作为默认值。"""
+    case_ref = str(case["clientRef"])
+    products = case_data.get("products")
+    product_items = products if isinstance(products, list) else []
+    evidence_items = case_data.get("fieldEvidence")
+    evidence_items = evidence_items if isinstance(evidence_items, list) else []
+    missing_items = case_data.get("missingItems")
+    missing_items = missing_items if isinstance(missing_items, list) else []
+    failed_refs = failed_recheck_inspection_refs(product_items)
+
+    criminal_confirmed = has_direct_criminal_evidence(evidence_items, case_ref)
+    if criminal_confirmed:
+        case_type = "CRIMINAL"
+    elif failed_refs:
+        case_type = "ADMINISTRATIVE"
+    else:
+        case_type = "UNKNOWN"
+    case["caseType"] = case_type
+
+    retained_evidence = [
+        item
+        for item in evidence_items
+        if not (
+            isinstance(item, dict)
+            and item.get("entityRef") == case_ref
+            and item.get("fieldPath") == "caseType"
+        )
+    ]
+    if case_type == "CRIMINAL":
+        retained_evidence.extend(
+            item
+            for item in evidence_items
+            if is_case_type_evidence(item, case_ref, "CRIMINAL")
+        )
+    elif case_type == "ADMINISTRATIVE":
+        retained_evidence.append(
+            {
+                "entityRef": case_ref,
+                "fieldPath": "caseType",
+                "value": "ADMINISTRATIVE",
+                "trustLevel": "DETERMINISTIC",
+                "sources": [administrative_rule_evidence(failed_refs)],
+            }
+        )
+    case_data["fieldEvidence"] = retained_evidence
+
+    retained_missing = [
+        item
+        for item in missing_items
+        if not (
+            isinstance(item, dict)
+            and item.get("entityRef") == case_ref
+            and item.get("fieldPath") == "caseType"
+        )
+    ]
+    if case_type == "UNKNOWN":
+        retained_missing.append(
+            {
+                "entityRef": case_ref,
+                "fieldPath": "caseType",
+                "reason": (
+                    "未识别到明确刑事直接证据，且不存在整改复查不合格记录；"
+                    "案卷类型保持 UNKNOWN，待人工核对。"
+                ),
+            }
+        )
+    case_data["missingItems"] = retained_missing
+
+
 def compose_command(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir).resolve()
     inventory = read_json(work_dir / "inventory.json")
@@ -643,6 +814,7 @@ def compose_command(args: argparse.Namespace) -> None:
     split_index_path = work_dir / "split-index.json"
     split_index = read_json(split_index_path) if split_index_path.exists() else {"items": []}
     case, _ = build_entities(case_data)
+    normalize_case_type(case_data, case)
 
     files: list[dict[str, Any]] = []
     upload_map: dict[str, str] = {}
@@ -823,6 +995,8 @@ def validate_manifest(
         errors.append("case.brigadeCode 不在八个大队枚举中")
     if not str(case.get("unitName", "")).strip():
         errors.append("case.unitName 不能为空")
+    if case.get("caseType") not in CASE_TYPES:
+        errors.append("case.caseType 必须为 NONE、ADMINISTRATIVE、CRIMINAL 或 UNKNOWN")
 
     entity_map: dict[str, dict[str, Any]] = {}
 
@@ -843,6 +1017,7 @@ def validate_manifest(
     if not isinstance(products, list) or not products:
         errors.append("products 至少需要一项")
         products = []
+    failed_recheck_refs: list[str] = []
     for product_index, product in enumerate(products, start=1):
         add_entity(product, f"products[{product_index}]")
         if not isinstance(product, dict):
@@ -864,6 +1039,13 @@ def validate_manifest(
                 errors.append(f"{label}.method 不合法")
             if inspection.get("inspectionResult") not in RESULTS:
                 errors.append(f"{label}.inspectionResult 不合法")
+            if (
+                inspection.get("stage") == "RECHECK"
+                and inspection.get("inspectionResult") == "UNQUALIFIED"
+                and isinstance(inspection.get("clientRef"), str)
+                and inspection["clientRef"]
+            ):
+                failed_recheck_refs.append(inspection["clientRef"])
             reinspection_status = inspection.get(
                 "reinspectionStatus", "NOT_APPLIED"
             )
@@ -1006,6 +1188,37 @@ def validate_manifest(
             errors.append(f"missingItems[{index}].fieldPath 不能为空")
         if not str(missing.get("reason", "")).strip():
             errors.append(f"missingItems[{index}].reason 不能为空")
+
+    case_ref = str(case.get("clientRef", ""))
+    case_type = case.get("caseType")
+    evidence_items = manifest.get("fieldEvidence")
+    evidence_items = evidence_items if isinstance(evidence_items, list) else []
+    missing_items = manifest.get("missingItems")
+    missing_items = missing_items if isinstance(missing_items, list) else []
+    if case_type == "CRIMINAL" and not has_direct_criminal_evidence(
+        evidence_items, case_ref
+    ):
+        errors.append("刑案必须具有含页码和直接刑事表述的 caseType 字段证据")
+    if case_type == "ADMINISTRATIVE":
+        if not failed_recheck_refs:
+            errors.append("行案必须存在整改复查不合格检查记录")
+        elif not has_administrative_rule_evidence(
+            evidence_items, case_ref, failed_recheck_refs
+        ):
+            errors.append("行案必须具有引用整改复查不合格记录的 RULE 字段证据")
+    if failed_recheck_refs and case_type not in {"ADMINISTRATIVE", "CRIMINAL"}:
+        errors.append("存在整改复查不合格记录时，案卷类型必须为 ADMINISTRATIVE 或已证实的 CRIMINAL")
+    if case_type == "UNKNOWN" and not has_case_type_missing_item(missing_items, case_ref):
+        errors.append("UNKNOWN 案卷类型必须创建 caseType 待核对项")
+    if case_type == "NONE":
+        none_evidence = [
+            item
+            for item in evidence_items
+            if is_case_type_evidence(item, case_ref, "NONE")
+            and item.get("trustLevel") == "MANUAL"
+        ]
+        if not none_evidence:
+            errors.append("NONE 案卷类型不得作为默认值，必须具有明确人工确认的字段证据")
 
     if upload_files is not None:
         for file_ref, file_item in file_refs.items():

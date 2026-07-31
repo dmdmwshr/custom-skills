@@ -44,9 +44,25 @@
   "documentRequirements": [],
   "documents": [],
   "fieldEvidence": [],
-  "missingItems": []
+  "missingItems": [
+    {
+      "entityRef": "case:32002207C202600033",
+      "fieldPath": "caseType",
+      "reason": "未识别到明确刑事直接证据，且不存在整改复查不合格记录；待人工核对。"
+    }
+  ]
 }
 ```
+
+## 案卷类型归一
+
+`case.caseType` 使用服务端既有枚举：`NONE`、`ADMINISTRATIVE`、`CRIMINAL`、`UNKNOWN`。`compose` 不改变 Manifest V1 结构，但会按以下优先级归一其值：
+
+1. 仅当 `fieldEvidence` 中存在 `entityRef=case:<项目编号>`、`fieldPath=caseType`、`value=CRIMINAL` 的直接刑事证据时，写 `CRIMINAL`。该证据必须具有文件引用、页码，以及“刑事案件”“刑案”或“移送公安”等直接表述；`OCR_ONLY`、处罚、罚字、行政处罚文书和通报线索不足以定性。
+2. 否则，只要任一产品检查记录同时为 `stage=RECHECK` 与 `inspectionResult=UNQUALIFIED`，写 `ADMINISTRATIVE`。`compose` 自动生成一条 `fieldEvidence`，其 `sources[0]` 为 `kind=RULE`，并在 `value.inspectionRef` 引用该条复查不合格记录。
+3. 其他情况一律写 `UNKNOWN`，并自动建立 `entityRef=case:<项目编号>`、`fieldPath=caseType` 的 `missingItems` 待核对项。
+
+自动路径从不把“尚未确认不是行案/刑案”写为 `NONE`。`NONE` 只可由人工基于明确反向证据填写，并须保留非 `OCR_ONLY` 的 `caseType` 字段证据。`CRIMINAL` 的优先级高于整改复查不合格。
 
 `compose` 自动生成：
 

@@ -112,6 +112,42 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     assert validate_manifest(manifest, upload_map) == []
     assert len(manifest["files"]) == 4
     assert manifest["products"][0]["clientRef"] == "product:1"
+    assert manifest["case"]["caseType"] == "UNKNOWN"
+    assert any(
+        item["entityRef"] == "case:32002207C202600033"
+        and item["fieldPath"] == "caseType"
+        for item in manifest["missingItems"]
+    )
+
+    indirect_criminal_case_data = json.loads(json.dumps(case_data))
+    indirect_criminal_case_data["case"]["caseType"] = "CRIMINAL"
+    indirect_criminal_case_data["fieldEvidence"].append(
+        {
+            "entityRef": "case:32002207C202600033",
+            "fieldPath": "caseType",
+            "value": "CRIMINAL",
+            "trustLevel": "CORROBORATED",
+            "sources": [
+                {
+                    "kind": "PDF_TEXT",
+                    "relativePath": "original/组合件.pdf",
+                    "page": 1,
+                    "evidence": "行政处罚决定书和通报函。",
+                }
+            ],
+        }
+    )
+    case_data_path.write_text(
+        json.dumps(indirect_criminal_case_data, ensure_ascii=False), encoding="utf-8"
+    )
+    compose_command(argparse.Namespace(work_dir=str(work), case_data=str(case_data_path)))
+    indirect_criminal_manifest = read_json(work / "manifest.json")
+    assert indirect_criminal_manifest["case"]["caseType"] == "UNKNOWN"
+    assert any(
+        item["entityRef"] == "case:32002207C202600033"
+        and item["fieldPath"] == "caseType"
+        for item in indirect_criminal_manifest["missingItems"]
+    )
 
     invalid_reinspection = json.loads(json.dumps(manifest))
     invalid_reinspection["products"][0]["inspections"][0].update(
@@ -147,6 +183,81 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     assert any(
         ".stage 不合法" in error
         for error in validate_manifest(legacy_stage, upload_map)
+    )
+
+    administrative_case_data = json.loads(json.dumps(case_data))
+    administrative_case_data["products"][0]["inspections"].append(
+        {
+            "stage": "RECHECK",
+            "method": "ONSITE",
+            "inspectionDate": "2026-05-27",
+            "inspectionResult": "UNQUALIFIED",
+        }
+    )
+    case_data_path.write_text(
+        json.dumps(administrative_case_data, ensure_ascii=False), encoding="utf-8"
+    )
+    compose_command(argparse.Namespace(work_dir=str(work), case_data=str(case_data_path)))
+    administrative_manifest = read_json(work / "manifest.json")
+    assert administrative_manifest["case"]["caseType"] == "ADMINISTRATIVE"
+    administrative_evidence = next(
+        item
+        for item in administrative_manifest["fieldEvidence"]
+        if item["entityRef"] == "case:32002207C202600033"
+        and item["fieldPath"] == "caseType"
+    )
+    assert administrative_evidence["sources"][0]["kind"] == "RULE"
+    assert (
+        administrative_evidence["sources"][0]["value"]["inspectionRef"]
+        == "inspection:1:recheck"
+    )
+    assert validate_manifest(administrative_manifest, upload_map) == []
+
+    missing_rule_evidence = json.loads(json.dumps(administrative_manifest))
+    missing_rule_evidence["fieldEvidence"] = [
+        item
+        for item in missing_rule_evidence["fieldEvidence"]
+        if not (
+            item["entityRef"] == "case:32002207C202600033"
+            and item["fieldPath"] == "caseType"
+        )
+    ]
+    assert any(
+        "行案必须具有引用整改复查不合格记录" in error
+        for error in validate_manifest(missing_rule_evidence, upload_map)
+    )
+
+    criminal_case_data = json.loads(json.dumps(administrative_case_data))
+    criminal_case_data["case"]["caseType"] = "CRIMINAL"
+    criminal_case_data["fieldEvidence"].append(
+        {
+            "entityRef": "case:32002207C202600033",
+            "fieldPath": "caseType",
+            "value": "CRIMINAL",
+            "trustLevel": "CORROBORATED",
+            "sources": [
+                {
+                    "kind": "PDF_TEXT",
+                    "relativePath": "original/组合件.pdf",
+                    "page": 1,
+                    "evidence": "正文明确载明本案已移送公安机关。",
+                }
+            ],
+        }
+    )
+    case_data_path.write_text(
+        json.dumps(criminal_case_data, ensure_ascii=False), encoding="utf-8"
+    )
+    compose_command(argparse.Namespace(work_dir=str(work), case_data=str(case_data_path)))
+    criminal_manifest = read_json(work / "manifest.json")
+    assert criminal_manifest["case"]["caseType"] == "CRIMINAL"
+    assert validate_manifest(criminal_manifest, upload_map) == []
+
+    indirect_criminal = json.loads(json.dumps(criminal_manifest))
+    indirect_criminal["fieldEvidence"][-1]["sources"][0]["evidence"] = "行政处罚决定书。"
+    assert any(
+        "刑案必须具有含页码和直接刑事表述" in error
+        for error in validate_manifest(indirect_criminal, upload_map)
     )
 
     upload_command(

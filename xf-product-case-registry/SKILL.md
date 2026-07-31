@@ -13,6 +13,7 @@ description: 清点、哈希、识别、OCR、拆分、规范命名消防产品�
 - 截图抽取并填写 Excel 使用 `xf-product-case-filler`，不要混用。
 - 原件缺失、OCR 失败或无法确认时写 `UNKNOWN`/`missingItems`，绝不推断为“无”。
 - 人工确认值不得由自动结果覆盖；服务端冲突必须进入待核对。
+- 案卷类型按固定优先级归一：具有页码和直接刑事表述的证据才为 `CRIMINAL`；否则任一产品存在整改复查不合格（`RECHECK` + `UNQUALIFIED`）即为 `ADMINISTRATIVE`；其余一律为 `UNKNOWN` 并创建 `caseType` 待核对项。自动路径绝不把未确认案件写为 `NONE`；处罚、罚字、处罚文书或通报本身不足以推定刑案或行案。
 - 文件名只作提示；正文标题、文号、检验类别和关联对象决定文书分类。
 - `检验报告.pdf` 只有正文明确“型式试验/型式检验”时才归为型式检验报告，不能误归为本案抽样送检报告。
 - 检查阶段只允许初查、整改复查；现场判定和抽样送检是检查方法。复检只作为抽样送检记录下的单次子流程，不能写成检查阶段或与整改复查混用。
@@ -62,9 +63,9 @@ uv run python scripts/registry_cli.py ocr `
 - `references/case-data-format.md`
 - `references/document-classification.md`
 
-逐页核对标题、文号、日期、产品、阶段和对象，编写：
+逐页核对标题、文号、日期、产品、阶段、对象和案卷类型，编写：
 
-- `case-data.json`：案卷、产品、阶段检查、文书、证据和缺失项；
+- `case-data.json`：案卷、产品、阶段检查、文书、证据和缺失项；`CRIMINAL` 必须提供含文件、页码和直接刑事表述的字段证据，`UNKNOWN` 必须建立 `caseType` 待核对项。`ADMINISTRATIVE` 的规则证据由 `compose` 生成，其 `value.inspectionRef` 引用整改复查不合格记录；
 - `split-plan.json`：组合 PDF 的经确认页码范围。
 
 不要仅凭 `p1` 或文件名假定一页就是一份文书。
