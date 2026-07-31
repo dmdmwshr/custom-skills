@@ -68,6 +68,8 @@ uv run python scripts/registry_cli.py ocr `
 - `case-data.json`：案卷、产品、阶段检查、文书、证据和缺失项；`CRIMINAL` 必须提供含文件、页码和直接刑事表述的字段证据，`UNKNOWN` 必须建立 `caseType` 待核对项。`ADMINISTRATIVE` 的规则证据由 `compose` 生成，其 `value.inspectionRef` 引用整改复查不合格记录；
 - `split-plan.json`：组合 PDF 的经确认页码范围。
 
+每条产品检查的 `caseInspectionRef` 可由人工显式指定；未指定时 `compose` 会按阶段和检查日期生成共享父检查引用，无日期时按同阶段同序位生成。不要把不同阶段或不同日期的记录填写为同一引用。
+
 不要仅凭 `p1` 或文件名假定一页就是一份文书。
 
 ### 4. 生成规范化 PDF

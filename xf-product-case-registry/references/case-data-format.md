@@ -25,6 +25,7 @@
       "nominalProducer": "高邮市顺威消防科技有限公司",
       "inspections": [
         {
+          "caseInspectionRef": "case-inspection:initial:2026-05-19",
           "stage": "INITIAL_CHECK",
           "method": "ONSITE",
           "inspectionDate": "2026-05-19",
@@ -32,6 +33,7 @@
           "problemDescription": "跌落试验后破裂"
         },
         {
+          "caseInspectionRef": "case-inspection:recheck:2026-05-27",
           "stage": "RECHECK",
           "method": "ONSITE",
           "inspectionDate": "2026-05-27",
@@ -64,11 +66,22 @@
 
 自动路径从不把“尚未确认不是行案/刑案”写为 `NONE`。`NONE` 只可由人工基于明确反向证据填写，并须保留非 `OCR_ONLY` 的 `caseType` 字段证据。`CRIMINAL` 的优先级高于整改复查不合格。
 
+## 父检查引用
+
+`caseInspectionRef` 是 Manifest V1 可选的案卷级检查事件分组键。`compose` 对每条产品检查都输出该字段：
+
+1. 输入存在非空 `caseInspectionRef` 时原样保留。
+2. 未显式指定且有 `inspectionDate` 时，以 `stage + inspectionDate` 分组；同一次检查的多个产品共享稳定引用，例如 `case-inspection:initial:2026-05-19`。
+3. 未显式指定且无日期时，以每个产品内同一 `stage` 的序位分组；各产品的第一个复查记录共享 `case-inspection:recheck:ordinal-1`，第二个共享 `case-inspection:recheck:ordinal-2`。
+
+为保持向后兼容，`validate` 接受旧 Manifest 缺少该可选字段；但字段存在时必须以小写前缀和冒号开头，且同一引用下的 `stage` 与 `inspectionDate` 必须完全一致。
+
 `compose` 自动生成：
 
 - 案卷引用：`case:<项目编号>`；
 - 产品引用：`product:<序号>`；
 - 检查记录引用：`inspection:<产品序号>:<阶段小写>`；同一阶段有多条方式记录时依次追加 `:2`、`:3`；
+- 父检查引用：每条检查的 `caseInspectionRef`，用于把同一次案卷级检查下的多个产品分组；
 - 文书和资料要求缺少 `clientRef` 时的顺序引用。
 
 ## 文件引用

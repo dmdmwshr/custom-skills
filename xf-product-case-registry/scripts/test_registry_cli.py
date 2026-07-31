@@ -10,6 +10,7 @@ from pypdf import PdfWriter
 
 from scripts.registry_cli import (
     RegistryError,
+    build_entities,
     compose_command,
     inventory_command,
     read_json,
@@ -86,7 +87,32 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
                         "inspectionResult": "UNQUALIFIED",
                     }
                 ],
-            }
+            },
+            {
+                "sequence": 2,
+                "name": "消防水带",
+                "inspections": [
+                    {
+                        "stage": "INITIAL_CHECK",
+                        "method": "ONSITE",
+                        "inspectionDate": "2026-05-19",
+                        "inspectionResult": "UNQUALIFIED",
+                        "caseInspectionRef": "external:initial-2026-05-19",
+                    }
+                ],
+            },
+            {
+                "sequence": 3,
+                "name": "消防接口",
+                "inspections": [
+                    {
+                        "stage": "INITIAL_CHECK",
+                        "method": "ONSITE",
+                        "inspectionDate": "2026-05-19",
+                        "inspectionResult": "UNQUALIFIED",
+                    }
+                ],
+            },
         ],
         "documentRequirements": [],
         "documents": [],
@@ -112,11 +138,37 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     assert validate_manifest(manifest, upload_map) == []
     assert len(manifest["files"]) == 4
     assert manifest["products"][0]["clientRef"] == "product:1"
+    assert (
+        manifest["products"][0]["inspections"][0]["caseInspectionRef"]
+        == "case-inspection:initial:2026-05-19"
+    )
+    assert (
+        manifest["products"][2]["inspections"][0]["caseInspectionRef"]
+        == manifest["products"][0]["inspections"][0]["caseInspectionRef"]
+    )
+    assert (
+        manifest["products"][1]["inspections"][0]["caseInspectionRef"]
+        == "external:initial-2026-05-19"
+    )
     assert manifest["case"]["caseType"] == "UNKNOWN"
     assert any(
         item["entityRef"] == "case:32002207C202600033"
         and item["fieldPath"] == "caseType"
         for item in manifest["missingItems"]
+    )
+
+    legacy_manifest = json.loads(json.dumps(manifest))
+    for product in legacy_manifest["products"]:
+        for inspection in product["inspections"]:
+            inspection.pop("caseInspectionRef")
+    assert validate_manifest(legacy_manifest, upload_map) == []
+
+    inconsistent_group = json.loads(json.dumps(manifest))
+    inconsistent_group["products"][2]["inspections"][0]["inspectionDate"] = "2026-05-20"
+    assert any(
+        "案卷检查分组 case-inspection:initial:2026-05-19 的阶段或检查日期不一致"
+        in error
+        for error in validate_manifest(inconsistent_group, upload_map)
     )
 
     indirect_criminal_case_data = json.loads(json.dumps(case_data))
@@ -278,3 +330,56 @@ def test_safe_extract_zip_rejects_traversal(tmp_path: Path) -> None:
         output.writestr("../escape.pdf", b"%PDF-1.4\n")
     with pytest.raises(RegistryError, match="不安全"):
         safe_extract_zip(archive, tmp_path / "out")
+
+
+def test_undated_case_inspections_share_stage_ordinal_refs() -> None:
+    case_data = {
+        "case": {"projectNo": "32002207C202600033"},
+        "products": [
+            {
+                "sequence": 1,
+                "inspections": [
+                    {
+                        "stage": "RECHECK",
+                        "method": "ONSITE",
+                        "inspectionResult": "UNQUALIFIED",
+                    },
+                    {
+                        "stage": "RECHECK",
+                        "method": "SAMPLING",
+                        "inspectionResult": "PENDING",
+                    },
+                ],
+            },
+            {
+                "sequence": 2,
+                "inspections": [
+                    {
+                        "stage": "RECHECK",
+                        "method": "ONSITE",
+                        "inspectionResult": "UNQUALIFIED",
+                    },
+                    {
+                        "stage": "RECHECK",
+                        "method": "SAMPLING",
+                        "inspectionResult": "PENDING",
+                    },
+                ],
+            },
+        ],
+    }
+
+    build_entities(case_data)
+    first_product, second_product = case_data["products"]
+    assert first_product["inspections"][0]["caseInspectionRef"] == (
+        "case-inspection:recheck:ordinal-1"
+    )
+    assert first_product["inspections"][0]["caseInspectionRef"] == (
+        second_product["inspections"][0]["caseInspectionRef"]
+    )
+    assert first_product["inspections"][1]["caseInspectionRef"] == (
+        "case-inspection:recheck:ordinal-2"
+    )
+    assert first_product["inspections"][1]["caseInspectionRef"] == (
+        second_product["inspections"][1]["caseInspectionRef"]
+    )

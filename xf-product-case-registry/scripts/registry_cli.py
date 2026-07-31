@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 import httpx
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 TEXT_THRESHOLD = 30
 MAX_ZIP_FILES = 1_000
 MAX_ZIP_BYTES = 1024 * 1024 * 1024
@@ -69,6 +69,11 @@ STAGE_LABELS = {
     "RECHECK": "复查",
     "CASE": "案卷",
 }
+CASE_INSPECTION_STAGE_LABELS = {
+    "INITIAL_CHECK": "initial",
+    "RECHECK": "recheck",
+}
+CASE_INSPECTION_REF_RE = re.compile(r"^[a-z][a-z0-9-]*:")
 
 
 class RegistryError(RuntimeError):
@@ -611,6 +616,37 @@ def entity_value(entity: dict[str, Any], field_path: str) -> Any:
     return current
 
 
+def inspection_date_group_value(inspection: dict[str, Any]) -> str:
+    value = inspection.get("inspectionDate")
+    return str(value).strip() if value is not None else ""
+
+
+def generated_case_inspection_ref(stage: str, inspection_date: str, ordinal: int) -> str:
+    stage_label = CASE_INSPECTION_STAGE_LABELS.get(stage, "unknown")
+    if inspection_date:
+        return f"case-inspection:{stage_label}:{inspection_date}"
+    return f"case-inspection:{stage_label}:ordinal-{ordinal}"
+
+
+def populate_case_inspection_refs(products: list[dict[str, Any]]) -> None:
+    """为未显式分组的产品检查补齐可跨产品共享的案卷级检查引用。"""
+    for product in products:
+        stage_ordinals: dict[str, int] = {}
+        for inspection in product.get("inspections", []):
+            if not isinstance(inspection, dict):
+                continue
+            stage = str(inspection.get("stage", "UNKNOWN"))
+            stage_ordinals[stage] = stage_ordinals.get(stage, 0) + 1
+            explicit_ref = inspection.get("caseInspectionRef")
+            if isinstance(explicit_ref, str) and explicit_ref.strip():
+                continue
+            inspection["caseInspectionRef"] = generated_case_inspection_ref(
+                stage,
+                inspection_date_group_value(inspection),
+                stage_ordinals[stage],
+            )
+
+
 def build_entities(case_data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     case = dict(case_data.get("case") or {})
     project_no = str(case.get("projectNo", ""))
@@ -637,6 +673,7 @@ def build_entities(case_data: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
         entity_map[product["clientRef"]] = product
     case_data["case"] = case
     case_data["products"] = products
+    populate_case_inspection_refs(products)
     return case, entity_map
 
 
@@ -1018,6 +1055,7 @@ def validate_manifest(
         errors.append("products 至少需要一项")
         products = []
     failed_recheck_refs: list[str] = []
+    case_inspection_groups: dict[str, tuple[Any, str]] = {}
     for product_index, product in enumerate(products, start=1):
         add_entity(product, f"products[{product_index}]")
         if not isinstance(product, dict):
@@ -1039,6 +1077,25 @@ def validate_manifest(
                 errors.append(f"{label}.method 不合法")
             if inspection.get("inspectionResult") not in RESULTS:
                 errors.append(f"{label}.inspectionResult 不合法")
+            case_inspection_ref = inspection.get("caseInspectionRef")
+            if case_inspection_ref is not None:
+                if (
+                    not isinstance(case_inspection_ref, str)
+                    or not CASE_INSPECTION_REF_RE.match(case_inspection_ref)
+                ):
+                    errors.append(f"{label}.caseInspectionRef 必须是以小写前缀开头的引用")
+                else:
+                    current_group = (
+                        inspection.get("stage"),
+                        inspection_date_group_value(inspection),
+                    )
+                    existing_group = case_inspection_groups.get(case_inspection_ref)
+                    if existing_group is None:
+                        case_inspection_groups[case_inspection_ref] = current_group
+                    elif existing_group != current_group:
+                        errors.append(
+                            f"案卷检查分组 {case_inspection_ref} 的阶段或检查日期不一致"
+                        )
             if (
                 inspection.get("stage") == "RECHECK"
                 and inspection.get("inspectionResult") == "UNQUALIFIED"
