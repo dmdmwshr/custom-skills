@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 import httpx
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 TEXT_THRESHOLD = 30
 MAX_ZIP_FILES = 1_000
 MAX_ZIP_BYTES = 1024 * 1024 * 1024
@@ -61,6 +61,82 @@ FILE_KINDS = {
 }
 FILE_ROLES = {"PRIMARY", "SOURCE_COPY", "DUPLICATE_COPY", "SUPPORTING_ATTACHMENT"}
 REQUIREMENT_STATUSES = {"PRESENT", "ABSENT", "NOT_REQUIRED", "UNKNOWN"}
+REVIEW_ISSUE_TYPES = {
+    "VALUE_CONFLICT",
+    "LOW_CONFIDENCE",
+    "EXTRACTION_FAILED",
+    "DATA_ANOMALY",
+    "DUPLICATE_CANDIDATE",
+}
+REVIEWABLE_ENTITY_TYPES = {"case", "product", "inspection", "requirement", "document"}
+REVIEWABLE_ENTITY_FIELDS = {
+    "case": {
+        "projectNo",
+        "brigadeCode",
+        "unitName",
+        "unitAddress",
+        "inspectionForm",
+        "caseHandler",
+        "inspector",
+        "caseType",
+        "onlineSale",
+    },
+    "product": {
+        "sequence",
+        "name",
+        "modelSpec",
+        "nominalProducer",
+        "location",
+        "repairStatus",
+        "problemSummary",
+    },
+    "inspection": {
+        "caseInspectionRef",
+        "stage",
+        "method",
+        "inspectionDate",
+        "inspectionResult",
+        "inspectionBase",
+        "inspectionQuantity",
+        "quantityUnit",
+        "marketAccessResult",
+        "qualityInspectionResult",
+        "problemDescription",
+        "submittedSampleName",
+        "reinspectionStatus",
+        "reinspectionApplicationDate",
+        "reinspectionAcceptanceDate",
+        "reinspectionAgency",
+        "reinspectionReportNo",
+        "reinspectionReportDate",
+        "reinspectionResult",
+        "reinspectionNotes",
+    },
+    "requirement": {"scope", "stage", "documentType", "status", "reason"},
+    "document": {
+        "documentType",
+        "documentNo",
+        "issueDate",
+        "stage",
+        "classificationEvidence",
+    },
+}
+IMAGE_MIME_TYPES = {"image/png", "image/jpeg"}
+SUPERVISION_SCREENSHOT_HINTS = ("截图", "监督系统", "监管系统", "产品信息")
+SUPERVISION_SCREENSHOT_HEADERS = (
+    "检查产品信息",
+    "产品名称",
+    "规格型号",
+    "标称生产者",
+    "产品所在部位",
+    "检查基数",
+    "检查数量",
+    "市场准入检查情况",
+    "产品质量现场检查情况",
+)
+SUPERVISION_RECORD_HINTS = ("消防产品监督检查记录", "监督检查记录")
+SUPERVISION_ELECTRONIC_HINTS = ("消防产品", "市场准入", "消防救援", "监督检查")
+SIGNED_SCAN_HINTS = ("扫描", "签字", "签名", "盖章", "手写")
 DIRECT_CRIMINAL_EVIDENCE_RE = re.compile(
     r"刑事案件|刑案|移送\s*(?:公安|公安机关)|公安机关.*移送"
 )
@@ -218,6 +294,23 @@ def extract_pdf_pages(
     return len(reader.pages), page_records
 
 
+def extract_image_page(path: Path, text_root: Path, file_key: str) -> list[dict[str, Any]]:
+    """为图片建立与 PDF 页一致的清点记录，强制进入 OCR 队列。"""
+    file_text_root = text_root / file_key
+    file_text_root.mkdir(parents=True, exist_ok=True)
+    text_path = file_text_root / "page-0001.txt"
+    text_path.write_text("", encoding="utf-8", newline="\n")
+    return [
+        {
+            "page": 1,
+            "textPath": str(text_path.resolve()),
+            "textChars": 0,
+            "needsOcr": True,
+            "inputKind": "IMAGE",
+        }
+    ]
+
+
 def package_hash_for_directory(files: list[dict[str, Any]]) -> str:
     digest = hashlib.sha256()
     for item in sorted(files, key=lambda value: value["relativePath"]):
@@ -282,6 +375,9 @@ def inventory_command(args: argparse.Namespace) -> None:
             page_count, pages = extract_pdf_pages(path, text_root, file_key)
             item["pageCount"] = page_count
             item["pages"] = pages
+        elif mime_type in IMAGE_MIME_TYPES:
+            item["pageCount"] = 1
+            item["pages"] = extract_image_page(path, text_root, file_key)
         files.append(item)
 
     package_sha256 = (
@@ -338,7 +434,16 @@ def inventory_command(args: argparse.Namespace) -> None:
             {
                 "status": "ok",
                 "files": len(files),
-                "pdfPages": sum(item.get("pageCount", 0) for item in files),
+                "pdfPages": sum(
+                    item.get("pageCount", 0)
+                    for item in files
+                    if item["mimeType"] == "application/pdf"
+                ),
+                "imagePages": sum(
+                    item.get("pageCount", 0)
+                    for item in files
+                    if item["mimeType"] in IMAGE_MIME_TYPES
+                ),
                 "needsOcrPages": scanned_pages,
                 "packageSha256": package_sha256,
                 "inventory": str(work_dir / "inventory.json"),
@@ -357,6 +462,7 @@ def run_zerox_page(
     zerox: Path,
     poppler: Path,
     timeout: int,
+    input_kind: str = "PDF",
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     canonical = output_dir / "page.md"
@@ -375,11 +481,11 @@ def run_zerox_page(
         str(source),
         "--output",
         str(output_dir),
-        "--pages",
-        str(page_number),
         "--maintain-format",
         "true",
     ]
+    if input_kind != "IMAGE":
+        arguments.extend(["--pages", str(page_number)])
     if os.name == "nt":
         command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", *arguments]
     else:
@@ -451,6 +557,7 @@ def ocr_command(args: argparse.Namespace) -> None:
             zerox=zerox,
             poppler=poppler,
             timeout=args.timeout,
+            input_kind=page.get("inputKind", "PDF"),
         )
         return {
             "fileRef": item["clientRef"],
@@ -500,6 +607,179 @@ def ocr_command(args: argparse.Namespace) -> None:
     )
     if failures and not args.continue_on_error:
         raise RegistryError(f"{len(failures)} 个 OCR 页失败")
+
+
+SOURCE_KIND_PRIORITY = {
+    "SUPERVISION_SCREENSHOT": 100,
+    "SUPERVISION_ELECTRONIC_PDF_TEXT": 90,
+    "SUPERVISION_RECORD_PDF_TEXT": 85,
+    "SIGNED_SCAN_OCR": 60,
+    "FILENAME_HINT": 10,
+    "UNKNOWN": 0,
+}
+
+FIELD_GROUP_PRIORITIES = {
+    "productIdentity": [
+        "SUPERVISION_SCREENSHOT",
+        "SUPERVISION_ELECTRONIC_PDF_TEXT",
+        "SUPERVISION_RECORD_PDF_TEXT",
+        "SIGNED_SCAN_OCR",
+        "FILENAME_HINT",
+        "UNKNOWN",
+    ],
+    "inspectionFacts": [
+        "SUPERVISION_SCREENSHOT",
+        "SUPERVISION_ELECTRONIC_PDF_TEXT",
+        "SUPERVISION_RECORD_PDF_TEXT",
+        "SIGNED_SCAN_OCR",
+        "FILENAME_HINT",
+        "UNKNOWN",
+    ],
+    "problemDescription": [
+        "SUPERVISION_RECORD_PDF_TEXT",
+        "SUPERVISION_SCREENSHOT",
+        "SUPERVISION_ELECTRONIC_PDF_TEXT",
+        "SIGNED_SCAN_OCR",
+        "FILENAME_HINT",
+        "UNKNOWN",
+    ],
+    "signatureAndHandwrittenCorrection": [
+        "SIGNED_SCAN_OCR",
+        "SUPERVISION_ELECTRONIC_PDF_TEXT",
+        "SUPERVISION_SCREENSHOT",
+        "FILENAME_HINT",
+        "UNKNOWN",
+    ],
+}
+
+
+def source_text(item: dict[str, Any], ocr_by_file_ref: dict[str, list[dict[str, Any]]]) -> str:
+    text_parts: list[str] = []
+    for page in item.get("pages", []):
+        text_path = page.get("textPath")
+        if isinstance(text_path, str):
+            path = Path(text_path)
+            if path.is_file():
+                text_parts.append(path.read_text(encoding="utf-8", errors="replace"))
+    for result in ocr_by_file_ref.get(item["clientRef"], []):
+        markdown_path = result.get("markdownPath")
+        if isinstance(markdown_path, str):
+            path = Path(markdown_path)
+            if path.is_file():
+                text_parts.append(path.read_text(encoding="utf-8", errors="replace"))
+    return "\n".join(text_parts)
+
+
+def contains_any(text: str, hints: tuple[str, ...]) -> bool:
+    return any(hint in text for hint in hints)
+
+
+def supervision_screenshot_header_hits(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", "", text)
+    return [header for header in SUPERVISION_SCREENSHOT_HEADERS if header in normalized]
+
+
+def classify_source(item: dict[str, Any], extracted_text: str) -> tuple[str, str]:
+    """仅说明来源性质；绝不从文件名或 OCR 推断最终业务字段。"""
+    relative_path = str(item["relativePath"])
+    combined = f"{relative_path}\n{extracted_text}"
+    mime_type = item["mimeType"]
+    has_text_layer = any(
+        page.get("textChars", 0) >= TEXT_THRESHOLD for page in item.get("pages", [])
+    )
+    has_ocr = any(page.get("needsOcr") for page in item.get("pages", []))
+    screenshot_headers = supervision_screenshot_header_hits(extracted_text)
+
+    if mime_type in IMAGE_MIME_TYPES and len(screenshot_headers) >= 3:
+        return (
+            "SUPERVISION_SCREENSHOT",
+            "图片 OCR 命中监督系统产品信息表头：" + "、".join(screenshot_headers) + "。",
+        )
+    if (
+        mime_type in IMAGE_MIME_TYPES
+        and screenshot_headers
+        and contains_any(relative_path, SUPERVISION_SCREENSHOT_HINTS)
+    ):
+        return (
+            "SUPERVISION_SCREENSHOT",
+            "图片 OCR 命中产品信息表头，文件名仅作辅助提示："
+            + "、".join(screenshot_headers)
+            + "。",
+        )
+    if mime_type == "application/pdf" and has_text_layer and contains_any(
+        combined, SUPERVISION_RECORD_HINTS
+    ):
+        return "SUPERVISION_RECORD_PDF_TEXT", "PDF 文本层命中消防产品监督检查记录。"
+    if mime_type == "application/pdf" and has_text_layer and contains_any(
+        combined, SUPERVISION_ELECTRONIC_HINTS
+    ):
+        return "SUPERVISION_ELECTRONIC_PDF_TEXT", "PDF 具有可用文本层，作为电子文本候选来源。"
+    if (
+        mime_type == "application/pdf"
+        and has_ocr
+        and (contains_any(combined, SIGNED_SCAN_HINTS) or not has_text_layer)
+    ):
+        return "SIGNED_SCAN_OCR", "PDF 无有效文本层，需 OCR；作为扫描签字/归档候选来源。"
+    if contains_any(relative_path, SUPERVISION_SCREENSHOT_HINTS + SUPERVISION_RECORD_HINTS):
+        return "FILENAME_HINT", "仅文件名提供监督系统或检查记录线索，不能据此确定业务值。"
+    return "UNKNOWN", "未识别可验证来源性质。"
+
+
+def source_analysis_command(args: argparse.Namespace) -> None:
+    work_dir = Path(args.work_dir).resolve()
+    inventory = read_json(work_dir / "inventory.json")
+    ocr_index_path = work_dir / "ocr-index.json"
+    ocr_index = read_json(ocr_index_path) if ocr_index_path.exists() else {"results": []}
+    ocr_by_file_ref: dict[str, list[dict[str, Any]]] = {}
+    for result in ocr_index.get("results", []):
+        if isinstance(result, dict) and result.get("status") == "SUCCESS":
+            file_ref = result.get("fileRef")
+            if isinstance(file_ref, str):
+                ocr_by_file_ref.setdefault(file_ref, []).append(result)
+
+    sources: list[dict[str, Any]] = []
+    for item in inventory["files"]:
+        extracted = source_text(item, ocr_by_file_ref)
+        source_kind, reason = classify_source(item, extracted)
+        sources.append(
+            {
+                "fileRef": item["clientRef"],
+                "relativePath": item["relativePath"],
+                "mimeType": item["mimeType"],
+                "sourceKind": source_kind,
+                "priority": SOURCE_KIND_PRIORITY[source_kind],
+                "classificationReason": reason,
+                "textLayerChars": sum(
+                    int(page.get("textChars", 0)) for page in item.get("pages", [])
+                ),
+                "ocrSucceededPages": len(ocr_by_file_ref.get(item["clientRef"], [])),
+                "fieldGroupPriorities": FIELD_GROUP_PRIORITIES,
+            }
+        )
+
+    output = {
+        "sourceAnalysisVersion": 1,
+        "generatedAt": utc_now(),
+        "packageSha256": inventory["packageSha256"],
+        "doesNotInferBusinessValues": True,
+        "manualValuePolicy": "MANUAL 值最高优先级，自动提取不得覆盖。",
+        "conflictPolicy": (
+            "不同来源提取到不同值时，不自动选择最终业务值；保留双方证据并在 "
+            "case-data.json.reviewItems 写入 VALUE_CONFLICT。"
+        ),
+        "sourceKinds": SOURCE_KIND_PRIORITY,
+        "fieldGroupPriorities": FIELD_GROUP_PRIORITIES,
+        "sources": sources,
+    }
+    target = work_dir / "source-analysis.json"
+    write_json(target, output)
+    print(
+        json.dumps(
+            {"status": "ok", "sources": len(sources), "analysis": str(target)},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 def clean_filename_part(value: str, fallback: str) -> str:
@@ -844,6 +1124,31 @@ def normalize_case_type(case_data: dict[str, Any], case: dict[str, Any]) -> None
     case_data["missingItems"] = retained_missing
 
 
+def generated_review_item_ref(review_item: dict[str, Any]) -> str:
+    """根据待核对项语义生成稳定标识，避免按数组序号导致幂等键漂移。"""
+    semantic_item = {key: value for key, value in review_item.items() if key != "clientRef"}
+    serialized = json.dumps(
+        semantic_item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return f"review:{hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:20]}"
+
+
+def compose_review_items(case_data: dict[str, Any]) -> list[dict[str, Any]]:
+    source_items = case_data.get("reviewItems", [])
+    if not isinstance(source_items, list):
+        raise RegistryError("case-data.reviewItems 必须是数组")
+    review_items: list[dict[str, Any]] = []
+    for source_item in source_items:
+        if not isinstance(source_item, dict):
+            raise RegistryError("case-data.reviewItems 中每项必须是对象")
+        review_item = dict(source_item)
+        client_ref = review_item.get("clientRef")
+        if client_ref is None or not str(client_ref).strip():
+            review_item["clientRef"] = generated_review_item_ref(review_item)
+        review_items.append(review_item)
+    return review_items
+
+
 def compose_command(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir).resolve()
     inventory = read_json(work_dir / "inventory.json")
@@ -852,6 +1157,7 @@ def compose_command(args: argparse.Namespace) -> None:
     split_index = read_json(split_index_path) if split_index_path.exists() else {"items": []}
     case, _ = build_entities(case_data)
     normalize_case_type(case_data, case)
+    review_items = compose_review_items(case_data)
 
     files: list[dict[str, Any]] = []
     upload_map: dict[str, str] = {}
@@ -961,6 +1267,34 @@ def compose_command(args: argparse.Namespace) -> None:
         evidence["sources"] = sources
         evidence_items.append(evidence)
 
+    manifest_review_items: list[dict[str, Any]] = []
+    for source_review_item in review_items:
+        review_item = dict(source_review_item)
+        candidates: list[dict[str, Any]] = []
+        for source_candidate in review_item.get("candidates", []):
+            if not isinstance(source_candidate, dict):
+                candidates.append(source_candidate)
+                continue
+            candidate = dict(source_candidate)
+            candidate_sources: list[dict[str, Any]] = []
+            for source_item in candidate.get("sources", []):
+                if not isinstance(source_item, dict):
+                    candidate_sources.append(source_item)
+                    continue
+                candidate_source = dict(source_item)
+                relative = candidate_source.pop("relativePath", None)
+                if relative:
+                    file_ref = path_to_ref.get(assert_safe_relative(relative))
+                    if not file_ref:
+                        raise RegistryError(f"待核对候选引用了未知文件：{relative}")
+                    candidate_source["fileRef"] = file_ref
+                candidate_sources.append(candidate_source)
+            candidate["sources"] = candidate_sources
+            candidates.append(candidate)
+        if "candidates" in review_item:
+            review_item["candidates"] = candidates
+        manifest_review_items.append(review_item)
+
     manifest = {
         "schemaVersion": "CaseImportManifestV1",
         "source": {
@@ -979,6 +1313,7 @@ def compose_command(args: argparse.Namespace) -> None:
         "documents": documents,
         "fieldEvidence": evidence_items,
         "missingItems": case_data.get("missingItems", []),
+        "reviewItems": manifest_review_items,
     }
     manifest_path = work_dir / "manifest.json"
     upload_map_path = work_dir / "upload-map.json"
@@ -1002,6 +1337,7 @@ def compose_command(args: argparse.Namespace) -> None:
                 "uploadMap": str(upload_map_path),
                 "files": len(files),
                 "documents": len(documents),
+                "reviewItems": len(manifest["reviewItems"]),
             },
             ensure_ascii=False,
             indent=2,
@@ -1245,6 +1581,141 @@ def validate_manifest(
             errors.append(f"missingItems[{index}].fieldPath 不能为空")
         if not str(missing.get("reason", "")).strip():
             errors.append(f"missingItems[{index}].reason 不能为空")
+
+    review_items = manifest.get("reviewItems", [])
+    if not isinstance(review_items, list):
+        errors.append("reviewItems 必须是数组")
+        review_items = []
+    occupied_client_refs = set(entity_map) | set(file_refs)
+    review_item_refs: set[str] = set()
+    for index, review in enumerate(review_items, start=1):
+        label = f"reviewItems[{index}]"
+        if not isinstance(review, dict):
+            errors.append(f"{label} 必须是对象")
+            continue
+        client_ref = review.get("clientRef")
+        if not isinstance(client_ref, str) or not re.fullmatch(r"[a-z]+:.+", client_ref):
+            errors.append(f"{label}.clientRef 必须是稳定的 lowercase 前缀引用")
+        elif client_ref in occupied_client_refs or client_ref in review_item_refs:
+            errors.append(f"clientRef 重复：{client_ref}")
+        else:
+            review_item_refs.add(client_ref)
+        entity_ref = review.get("entityRef")
+        entity = entity_map.get(entity_ref)
+        if not entity:
+            errors.append(f"{label}.entityRef 引用了未知实体：{entity_ref}")
+        entity_type = str(entity_ref).split(":", maxsplit=1)[0]
+        if entity and entity_type not in REVIEWABLE_ENTITY_TYPES:
+            errors.append(f"{label} 不能绑定到 {entity_type} 实体")
+        field_path = review.get("fieldPath")
+        if not isinstance(field_path, str) or not field_path.strip():
+            errors.append(f"{label}.fieldPath 不能为空")
+        elif (
+            entity
+            and review.get("issueType") != "DATA_ANOMALY"
+            and field_path not in REVIEWABLE_ENTITY_FIELDS.get(entity_type, set())
+        ):
+            errors.append(f"{label}.fieldPath 不是可抽取字段：{entity_ref}.{field_path}")
+        if review.get("issueType") not in REVIEW_ISSUE_TYPES:
+            errors.append(f"{label}.issueType 不合法")
+        for value_key in ("currentValue", "incomingValue"):
+            if value_key not in review:
+                continue
+            try:
+                json.dumps(review[value_key], ensure_ascii=False)
+            except (TypeError, ValueError):
+                errors.append(f"{label}.{value_key} 必须是 JSON 值")
+        message = review.get("message")
+        if not isinstance(message, str) or not message.strip() or len(message) > 4_000:
+            errors.append(f"{label}.message 必须是 1—4000 字符")
+        candidates = review.get("candidates")
+        if candidates is None:
+            continue
+        if not isinstance(candidates, list) or not candidates:
+            errors.append(f"{label}.candidates 必须是非空数组")
+            continue
+        if review.get("issueType") == "VALUE_CONFLICT" and len(candidates) < 2:
+            errors.append(f"{label} VALUE_CONFLICT 至少需要两个候选")
+        candidate_refs: set[str] = set()
+        candidate_values: set[str] = set()
+        contains_entity_value = False
+        entity_value_for_review = (
+            entity.get(field_path) if entity and isinstance(field_path, str) else None
+        )
+        for candidate_index, candidate in enumerate(candidates, start=1):
+            candidate_label = f"{label}.candidates[{candidate_index}]"
+            if not isinstance(candidate, dict):
+                errors.append(f"{candidate_label} 必须是对象")
+                continue
+            if set(candidate) - {"candidateRef", "value", "trustLevel", "sources"}:
+                errors.append(f"{candidate_label} 包含不受支持的字段")
+            candidate_ref = candidate.get("candidateRef")
+            if not isinstance(candidate_ref, str) or not re.fullmatch(r"[a-z]+:.+", candidate_ref):
+                errors.append(f"{candidate_label}.candidateRef 必须是稳定的 lowercase 前缀引用")
+            elif candidate_ref in candidate_refs:
+                errors.append(f"{label} 候选标识重复：{candidate_ref}")
+            else:
+                candidate_refs.add(candidate_ref)
+            if "value" not in candidate:
+                errors.append(f"{candidate_label}.value 不能为空")
+                candidate_value_key = "__missing__"
+            else:
+                try:
+                    candidate_value_key = json.dumps(
+                        candidate["value"], ensure_ascii=False, sort_keys=True
+                    )
+                except (TypeError, ValueError):
+                    errors.append(f"{candidate_label}.value 必须是 JSON 值")
+                    candidate_value_key = "__invalid__"
+                if candidate_value_key in candidate_values:
+                    errors.append(f"{label} 候选值重复：{candidate_ref}")
+                else:
+                    candidate_values.add(candidate_value_key)
+                if candidate.get("value") == entity_value_for_review:
+                    contains_entity_value = True
+            if candidate.get("trustLevel") not in TRUST_LEVELS:
+                errors.append(f"{candidate_label}.trustLevel 不合法")
+            sources = candidate.get("sources")
+            if not isinstance(sources, list) or not sources:
+                errors.append(f"{candidate_label}.sources 至少需要一项")
+                continue
+            for source_index, candidate_source in enumerate(sources, start=1):
+                source_label = f"{candidate_label}.sources[{source_index}]"
+                if not isinstance(candidate_source, dict):
+                    errors.append(f"{source_label} 必须是对象")
+                    continue
+                if set(candidate_source) - {"kind", "fileRef", "page", "value", "evidence"}:
+                    errors.append(f"{source_label} 包含不受支持的字段")
+                if (
+                    not isinstance(candidate_source.get("kind"), str)
+                    or not candidate_source["kind"].strip()
+                ):
+                    errors.append(f"{source_label}.kind 不能为空")
+                source_file_ref = candidate_source.get("fileRef")
+                page = candidate_source.get("page")
+                if page is not None and (
+                    not isinstance(page, int) or isinstance(page, bool) or page < 1
+                ):
+                    errors.append(f"{source_label}.page 必须是正整数")
+                if page is not None and not source_file_ref:
+                    errors.append(f"{source_label}.page 必须关联 fileRef")
+                if source_file_ref:
+                    source_file = file_refs.get(source_file_ref)
+                    if source_file is None:
+                        errors.append(f"{source_label}.fileRef 引用了未知文件：{source_file_ref}")
+                    elif (
+                        isinstance(page, int)
+                        and source_file.get("pageCount")
+                        and page > source_file["pageCount"]
+                    ):
+                        errors.append(f"{source_label}.page 超出文件页数")
+                if (
+                    "value" in candidate_source
+                    and candidate_source["value"] != candidate.get("value")
+                ):
+                    errors.append(f"{source_label}.value 必须等于候选 value")
+        if review.get("issueType") == "VALUE_CONFLICT" and not contains_entity_value:
+            errors.append(f"{label} VALUE_CONFLICT 候选必须包含实体最终值")
 
     case_ref = str(case.get("clientRef", ""))
     case_type = case.get("caseType")
@@ -1499,7 +1970,9 @@ def build_parser() -> argparse.ArgumentParser:
     inventory_parser.add_argument("--work-dir", required=True)
     inventory_parser.set_defaults(func=inventory_command)
 
-    ocr_parser = subparsers.add_parser("ocr", help="只对无有效文本层的 PDF 页运行 Zerox")
+    ocr_parser = subparsers.add_parser(
+        "ocr", help="对无有效文本层的 PDF 页及单页图片运行 Zerox"
+    )
     ocr_parser.add_argument("--work-dir", required=True)
     ocr_parser.add_argument("--zerox", default=str(DEFAULT_ZEROX))
     ocr_parser.add_argument("--poppler", default=str(DEFAULT_POPPLER))
@@ -1507,6 +1980,12 @@ def build_parser() -> argparse.ArgumentParser:
     ocr_parser.add_argument("--timeout", type=int, default=600)
     ocr_parser.add_argument("--continue-on-error", action="store_true")
     ocr_parser.set_defaults(func=ocr_command)
+
+    source_analysis_parser = subparsers.add_parser(
+        "source-analysis", help="分析截图、电子文本与扫描件来源优先级，不推断业务值"
+    )
+    source_analysis_parser.add_argument("--work-dir", required=True)
+    source_analysis_parser.set_defaults(func=source_analysis_command)
 
     split_parser = subparsers.add_parser("split", help="按已核对计划生成规范化 PDF")
     split_parser.add_argument("--work-dir", required=True)

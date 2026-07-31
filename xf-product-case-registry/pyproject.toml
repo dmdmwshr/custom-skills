@@ -1,7 +1,7 @@
 [project]
 name = "xf-product-case-registry"
-version = "0.3.1"
-description = "消防产品案卷 PDF 清点、拆分、manifest 生成与接口导入工具"
+version = "0.4.0"
+description = "消防产品案卷 PDF/截图清点、来源分析、拆分、manifest 生成与接口导入工具"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "httpx>=0.28,<0.29",

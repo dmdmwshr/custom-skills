@@ -1,6 +1,6 @@
 ---
 name: xf-product-case-registry
-description: 清点、哈希、识别、OCR、拆分、规范命名消防产品案卷 PDF 或 ZIP，生成可追溯的 CaseImportManifestV1，并通过消防产品案卷信息登记系统的幂等接口上传和终结导入。用于用户提到 PDF 案卷包、组合扫描件拆分、案卷文件重命名、字段证据/缺失核对、项目包导入 product-cases.meifu.zzxhlyj.top，或样例案卷 32002207C202600033 时；截图转 Excel 仍使用 xf-product-case-filler。
+description: 清点、哈希、识别、OCR、拆分、规范命名消防产品案卷 PDF、监督系统截图或 ZIP，分析电子版/扫描件来源优先级，生成可追溯的 CaseImportManifestV1，并通过消防产品案卷信息登记系统的幂等接口上传和终结导入。用于用户提到 PDF 案卷包、产品信息截图、组合扫描件拆分、案卷文件重命名、字段证据/冲突核对、项目包导入 product-cases.meifu.zzxhlyj.top，或样例案卷 32002207C202600033 时；截图转 Excel 仍使用 xf-product-case-filler。
 ---
 
 # 消防产品案卷提取与导入
@@ -13,6 +13,7 @@ description: 清点、哈希、识别、OCR、拆分、规范命名消防产品�
 - 截图抽取并填写 Excel 使用 `xf-product-case-filler`，不要混用。
 - 原件缺失、OCR 失败或无法确认时写 `UNKNOWN`/`missingItems`，绝不推断为“无”。
 - 人工确认值不得由自动结果覆盖；服务端冲突必须进入待核对。
+- `png`、`jpg`、`jpeg` 一律按单页图片清点并调用 Zerox；OCR 结果只作为证据，不能凭 OCR 结果猜测业务值。
 - 案卷类型按固定优先级归一：具有页码和直接刑事表述的证据才为 `CRIMINAL`；否则任一产品存在整改复查不合格（`RECHECK` + `UNQUALIFIED`）即为 `ADMINISTRATIVE`；其余一律为 `UNKNOWN` 并创建 `caseType` 待核对项。自动路径绝不把未确认案件写为 `NONE`；处罚、罚字、处罚文书或通报本身不足以推定刑案或行案。
 - 文件名只作提示；正文标题、文号、检验类别和关联对象决定文书分类。
 - `检验报告.pdf` 只有正文明确“型式试验/型式检验”时才归为型式检验报告，不能误归为本案抽样送检报告。
@@ -56,7 +57,21 @@ uv run python scripts/registry_cli.py ocr `
 
 默认调用本机 `zerox-local`。失败结果保留在 `ocr-index.json`；先修复失败，不得把未提取内容写成缺失文件。只有 Zerox 结构明显不佳时才按 `zerox-local` 规则回退 MinerU。
 
-### 3. 形成语义数据与拆分计划
+### 3. 分析来源优先级，不直接定值
+
+```powershell
+uv run python scripts/registry_cli.py source-analysis --work-dir "<工作目录>"
+```
+
+检查 `source-analysis.json`。图片需由 OCR 命中“检查产品信息、产品名称、规格型号、标称生产者、产品所在部位、检查基数/数量、市场准入检查情况、产品质量现场检查情况”等表头识别为监督系统截图；文件名只作辅助，不能单独定类。它只输出来源类别和字段组优先级，不生成最终业务值。
+
+- 人工确认值永远最高，自动抽取只能补空值或追加相同值证据。
+- 产品名称/型号、标称生产者、位置、检查基数/数量、市场准入和质量状态优先监督系统截图或电子文本。
+- `problemDescription` 优先消防产品监督检查记录；有明确手写更正时保留扫描件证据并转人工核对。
+- 扫描签字版用于签章、手写更正和归档；低质量 OCR 不得覆盖电子版。
+- 电子版与扫描件出现不同值时，已选正式值可写 `fieldEvidence`；另一候选优先写入 `case-data.json.reviewItems.candidates`（候选值、可信等级、来源文件和页码），不自动择一。旧 `currentValue/incomingValue` 仍兼容；没有 `candidates` 时，`message` 必须写明来源文件与页码。
+
+### 4. 形成语义数据与拆分计划
 
 读取：
 
@@ -72,7 +87,7 @@ uv run python scripts/registry_cli.py ocr `
 
 不要仅凭 `p1` 或文件名假定一页就是一份文书。
 
-### 4. 生成规范化 PDF
+### 5. 生成规范化 PDF
 
 ```powershell
 uv run python scripts/registry_cli.py split `
@@ -81,7 +96,7 @@ uv run python scripts/registry_cli.py split `
 
 文件名固定为 `项目编号_阶段_文书类型_文号或日期_序号.pdf`。脚本只写 `normalized/`，并在 `split-index.json` 保存原文件及页码映射。
 
-### 5. 组装并本地校验 manifest
+### 6. 组装并本地校验 manifest
 
 ```powershell
 uv run python scripts/registry_cli.py compose `
@@ -94,7 +109,7 @@ uv run python scripts/registry_cli.py validate `
 
 必须先消除结构错误、悬空引用和哈希错误。低可信字段可以保留，但要带 `OCR_ONLY` 证据并创建相应 `missingItems` 或待核对信息。
 
-### 6. 接口上传
+### 7. 接口上传
 
 先执行不联网预演：
 

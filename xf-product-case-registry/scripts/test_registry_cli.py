@@ -8,13 +8,16 @@ from pathlib import Path
 import pytest
 from pypdf import PdfWriter
 
+import scripts.registry_cli as registry_cli
 from scripts.registry_cli import (
     RegistryError,
     build_entities,
     compose_command,
     inventory_command,
+    ocr_command,
     read_json,
     safe_extract_zip,
+    source_analysis_command,
     split_command,
     upload_command,
     validate_manifest,
@@ -79,6 +82,7 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
             {
                 "sequence": 1,
                 "name": "直流水枪",
+                "modelSpec": "QZ3.5/7.5",
                 "inspections": [
                     {
                         "stage": "INITIAL_CHECK",
@@ -126,6 +130,44 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
             }
         ],
         "missingItems": [],
+        "reviewItems": [
+            {
+                "entityRef": "product:1",
+                "fieldPath": "modelSpec",
+                "issueType": "VALUE_CONFLICT",
+                "message": "电子版与扫描件型号不一致，保留现有值待核对。",
+                "currentValue": "QZ3.5/7.5",
+                "incomingValue": "QZ3.5/7.5A",
+                "candidates": [
+                    {
+                        "candidateRef": "candidate:product-1-model-spec-current",
+                        "value": "QZ3.5/7.5",
+                        "trustLevel": "MANUAL",
+                        "sources": [
+                            {
+                                "kind": "MANUAL",
+                                "value": "QZ3.5/7.5",
+                                "evidence": "人工确认的现有产品型号",
+                            }
+                        ],
+                    },
+                    {
+                        "candidateRef": "candidate:product-1-model-spec-scan",
+                        "value": "QZ3.5/7.5A",
+                        "trustLevel": "OCR_ONLY",
+                        "sources": [
+                            {
+                                "kind": "SIGNED_SCAN_OCR",
+                                "relativePath": "original/组合件.pdf",
+                                "page": 1,
+                                "value": "QZ3.5/7.5A",
+                                "evidence": "扫描件产品型号栏 OCR 结果",
+                            }
+                        ],
+                    },
+                ],
+            }
+        ],
     }
     case_data_path = work / "case-data.json"
     case_data_path.write_text(
@@ -136,6 +178,34 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     manifest = read_json(work / "manifest.json")
     upload_map = read_json(work / "upload-map.json")["files"]
     assert validate_manifest(manifest, upload_map) == []
+    assert manifest["reviewItems"][0]["clientRef"].startswith("review:")
+    assert manifest["reviewItems"][0]["entityRef"] == "product:1"
+    assert manifest["reviewItems"][0]["currentValue"] == "QZ3.5/7.5"
+    assert manifest["reviewItems"][0]["candidates"][1]["sources"][0]["fileRef"].startswith(
+        "file:orig:"
+    )
+    first_review_ref = manifest["reviewItems"][0]["clientRef"]
+    compose_command(argparse.Namespace(work_dir=str(work), case_data=str(case_data_path)))
+    assert read_json(work / "manifest.json")["reviewItems"][0]["clientRef"] == first_review_ref
+    invalid_review = json.loads(json.dumps(manifest))
+    invalid_review["reviewItems"].append(dict(invalid_review["reviewItems"][0]))
+    assert any(
+        "clientRef 重复：" in error
+        for error in validate_manifest(invalid_review, upload_map)
+    )
+    entity_ref_collision = json.loads(json.dumps(manifest))
+    entity_ref_collision["reviewItems"][0]["clientRef"] = "product:1"
+    assert "clientRef 重复：product:1" in validate_manifest(entity_ref_collision, upload_map)
+    duplicate_candidate = json.loads(json.dumps(manifest))
+    duplicate_candidate["reviewItems"][0]["candidates"][1]["candidateRef"] = (
+        duplicate_candidate["reviewItems"][0]["candidates"][0]["candidateRef"]
+    )
+    assert any(
+        "候选标识重复" in error for error in validate_manifest(duplicate_candidate, upload_map)
+    )
+    legacy_value_conflict = json.loads(json.dumps(manifest))
+    legacy_value_conflict["reviewItems"][0].pop("candidates")
+    assert validate_manifest(legacy_value_conflict, upload_map) == []
     assert len(manifest["files"]) == 4
     assert manifest["products"][0]["clientRef"] == "product:1"
     assert (
@@ -330,6 +400,92 @@ def test_safe_extract_zip_rejects_traversal(tmp_path: Path) -> None:
         output.writestr("../escape.pdf", b"%PDF-1.4\n")
     with pytest.raises(RegistryError, match="不安全"):
         safe_extract_zip(archive, tmp_path / "out")
+
+
+def test_inventory_ocr_and_source_analysis_handles_images_and_source_priority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "32002207C202600033"
+    source.mkdir()
+    (source / "20260731-001.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+    write_blank_pdf(source / "消防产品监督检查记录.pdf", pages=1)
+    write_blank_pdf(source / "现场签字扫描件.pdf", pages=1)
+    work = tmp_path / "work"
+    inventory_command(argparse.Namespace(input=str(source), work_dir=str(work)))
+    inventory = read_json(work / "inventory.json")
+
+    screenshot = next(
+        item for item in inventory["files"] if item["relativePath"] == "20260731-001.png"
+    )
+    assert screenshot["pageCount"] == 1
+    assert screenshot["pages"] == [
+        {
+            "page": 1,
+            "textPath": screenshot["pages"][0]["textPath"],
+            "textChars": 0,
+            "needsOcr": True,
+            "inputKind": "IMAGE",
+        }
+    ]
+    record = next(
+        item for item in inventory["files"] if item["relativePath"] == "消防产品监督检查记录.pdf"
+    )
+    Path(record["pages"][0]["textPath"]).write_text(
+        "消防产品监督检查记录\n产品信息", encoding="utf-8"
+    )
+    record["pages"][0]["textChars"] = 100
+    record["pages"][0]["needsOcr"] = False
+    (work / "inventory.json").write_text(
+        json.dumps(inventory, ensure_ascii=False), encoding="utf-8"
+    )
+
+    zerox = tmp_path / "zerox.cmd"
+    zerox.write_text("fixture", encoding="utf-8")
+    poppler = tmp_path / "poppler"
+    poppler.mkdir()
+    calls: list[dict[str, object]] = []
+
+    def fake_zerox_page(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        output_dir = Path(str(kwargs["output_dir"]))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        markdown = output_dir / "page.md"
+        source_name = Path(str(kwargs["source"])).name
+        markdown.write_text(
+            (
+                "检查产品信息 产品名称 规格型号 标称生产者 产品所在部位 "
+                "检查基数 检查数量 市场准入检查情况 产品质量现场检查情况"
+                if source_name.endswith(".png")
+                else "扫描签字件"
+            ),
+            encoding="utf-8",
+        )
+        return {"status": "SUCCESS", "page": kwargs["page_number"], "markdownPath": str(markdown)}
+
+    monkeypatch.setattr(registry_cli, "run_zerox_page", fake_zerox_page)
+    ocr_command(
+        argparse.Namespace(
+            work_dir=str(work),
+            zerox=str(zerox),
+            poppler=str(poppler),
+            concurrency=1,
+            timeout=10,
+            continue_on_error=False,
+        )
+    )
+    assert any(call["input_kind"] == "IMAGE" for call in calls)
+
+    source_analysis_command(argparse.Namespace(work_dir=str(work)))
+    analysis = read_json(work / "source-analysis.json")
+    classifications = {item["relativePath"]: item["sourceKind"] for item in analysis["sources"]}
+    assert classifications["20260731-001.png"] == "SUPERVISION_SCREENSHOT"
+    assert classifications["消防产品监督检查记录.pdf"] == "SUPERVISION_RECORD_PDF_TEXT"
+    assert classifications["现场签字扫描件.pdf"] == "SIGNED_SCAN_OCR"
+    assert analysis["doesNotInferBusinessValues"] is True
+    assert (
+        analysis["fieldGroupPriorities"]["problemDescription"][0]
+        == "SUPERVISION_RECORD_PDF_TEXT"
+    )
 
 
 def test_undated_case_inspections_share_stage_ordinal_refs() -> None:

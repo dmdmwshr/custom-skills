@@ -2,6 +2,8 @@
 
 `case-data.json` 只保存语义结果；`compose` 会从 `inventory.json` 与 `split-index.json` 补齐包信息、文件哈希、页数和本地上传映射。
 
+先运行 `source-analysis`。它只给出来源类别与字段组优先级，不会也不得生成最终业务字段值。
+
 ## 最小结构
 
 ```json
@@ -105,6 +107,67 @@
   "classificationEvidence": "正文首页检验类别明确为型式试验"
 }
 ```
+
+### 同一文书的电子版、扫描件与附件
+
+`fileLinks` 已显式填写 `relationRole` 时，`compose` 原样保留，绝不按文件名改写。每个逻辑文书可链接多个物理文件：
+
+- 监督系统电子版：`PRIMARY`；
+- 同文书扫描签字版：`SOURCE_COPY`，必须保留；
+- 重复扫描副本：`DUPLICATE_COPY`；
+- 与正文配套的图片、清单等：`SUPPORTING_ATTACHMENT`；
+- 没有电子版时，扫描签字版可以为 `PRIMARY`。
+
+电子版优先用于印刷字段抽取，扫描签字版优先用于签章、手写更正和归档。二者的字段提取不同，不得自动覆盖：已选正式值可保留 `fieldEvidence`，另一候选值写入 `reviewItems`；不要把与正式实体值不一致的候选也写为 `fieldEvidence`。
+
+## 待核对项 `reviewItems`
+
+`reviewItems` 是可选数组。每项必须有稳定且全清单唯一的 `clientRef`、已知 `entityRef`、可落库的 `fieldPath`、`issueType` 和 `message`。`compose` 会为缺少 `clientRef` 的项按其语义内容补 `review:<hash>`；已提供的标识原样保留，但重复或与案卷、产品、检查、资料要求、文件、文书的 `clientRef` 冲突会校验失败。旧版 `currentValue`、`incomingValue` 仍兼容；推荐用 `candidates` 为每个候选提供稳定 `candidateRef`、值、可信等级和物理来源。`VALUE_CONFLICT` 填写 `candidates` 时必须至少两个、候选标识和值均不重复，并包含正式实体值。支持：`VALUE_CONFLICT`、`LOW_CONFIDENCE`、`EXTRACTION_FAILED`、`DATA_ANOMALY`、`DUPLICATE_CANDIDATE`。
+
+```json
+{
+  "reviewItems": [
+    {
+      "clientRef": "review:product-1-model-spec-conflict",
+      "entityRef": "product:1",
+      "fieldPath": "modelSpec",
+      "issueType": "VALUE_CONFLICT",
+      "message": "监督系统截图 original/产品信息截图.png 第1页与扫描签字件 original/监督检查记录扫描件.pdf 第1页型号不一致，未自动覆盖人工确认值。",
+      "currentValue": "YB-1000",
+      "incomingValue": "YB-1000D",
+      "candidates": [
+        {
+          "candidateRef": "candidate:product-1-model-current",
+          "value": "YB-1000",
+          "trustLevel": "MANUAL",
+          "sources": [
+            {
+              "kind": "MANUAL",
+              "evidence": "人工确认的现有产品型号"
+            }
+          ]
+        },
+        {
+          "candidateRef": "candidate:product-1-model-scan",
+          "value": "YB-1000D",
+          "trustLevel": "OCR_ONLY",
+          "sources": [
+            {
+              "kind": "SIGNED_SCAN_OCR",
+              "relativePath": "original/监督检查记录扫描件.pdf",
+              "page": 1,
+              "value": "YB-1000D",
+              "evidence": "扫描签字件产品型号栏 OCR 结果"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`candidates.sources` 复用字段证据来源结构：`kind`、`fileRef`、`page`、`value`、`evidence`。在 `case-data.json` 可用 `relativePath` 代替 `fileRef`，`compose` 会转换；页码必须关联存在的文件，来源 `value` 若填写必须与候选值一致。不要把 OCR 无法读取写成 `ABSENT`；使用 `EXTRACTION_FAILED` 或 `LOW_CONFIDENCE`，并保留来源页码。`reviewItems` 本身没有 `candidates` 时，`message` 必须写明各候选的来源文件和页码。
 
 可用路径：
 
