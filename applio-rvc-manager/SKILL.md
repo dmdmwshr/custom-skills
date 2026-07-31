@@ -1,6 +1,6 @@
 ---
 name: applio-rvc-manager
-description: 管理本机 Applio 与 RVC 音色模型，包括安装、升级、启动、停止、状态核验，获取和验证 .pth/.index/ZIP，中文命名与目录管理，语音或歌声推理参数、跨语言转换、训练准备，以及 GPU、内存、端口、模型不显示、下载失败或界面打不开等故障诊断。用户提到 Applio、RVC、声音转换、音色模型下载或安装时使用。
+description: 管理本机 Applio 与 RVC 音色模型，并为 ComfyUI 视频准备可复现的对白音频。包括安装、升级、启动、停止、状态核验，获取和验证 .pth/.index/ZIP，中文命名与目录管理，文字转角色语音、现有录音换音色、跨语言转换、按镜头切分与锁定音频、口型和音频驱动工作流交接，以及 GPU、内存、端口、模型不显示、下载失败或界面打不开等故障诊断。用户提到 Applio、RVC、声音转换、角色配音、ComfyUI 视频对白或音色模型时使用。
 ---
 
 # Applio RVC 管理
@@ -14,12 +14,14 @@ description: 管理本机 Applio 与 RVC 音色模型，包括安装、升级、
 5. 将外部 `.pth` 视为不可信序列化文件。安装前用 Applio 内置 Python 运行 `scripts/inspect-rvc-model.py`，必须使用 `torch.load(..., weights_only=True)`。
 6. 原始音频保存在 Applio 目录之外。不要把唯一原件放进 `assets\audios`，因为界面的清理功能会删除该目录内音频。
 7. 停止进程时只处理已由安装路径或监听端口确认的 Applio PID，禁止按名称批量结束所有 `python.exe`。
+8. 区分“最终对白”和“音色参考”：最终对白直接决定视频口型和时长；音色参考只让视频模型模仿声音特征，不能保证沿用 Applio 的精确音色、节奏或波形。
 
 ## 任务路由
 
 - 本机部署、启动、停止、升级或状态问题：先读 `references/local-installation.md`，再运行只读审计脚本。
 - 获取、安装、改名、迁移、备份或清理模型：读 `references/model-management.md`。
-- 文字转语音、中文转日语角色、说话或唱歌参数、长音频转换、与 ComfyUI 视频的音频交接：读 `references/inference-guide.md`。
+- 文字转语音、中文转日语角色、说话或唱歌参数、长音频转换：读 `references/inference-guide.md`。
+- 为 ComfyUI 制作对白、选择音频驱动工作流、管理镜头音频或排查口型错位：读 `references/comfyui-video-handoff.md`；需要调整 RVC 参数时再读 `references/inference-guide.md`。
 - 界面打不开、端口冲突、模型不显示、显存或内存异常、下载失败：读 `references/troubleshooting.md`。
 
 ## 标准工作流
@@ -55,13 +57,14 @@ description: 管理本机 Applio 与 RVC 音色模型，包括安装、升级、
   --index "D:\Program_Files\Applio\logs\示例\example.index"
 ```
 
-### 3. 文字转角色音色
+### 3. 制作视频对白
 
-1. 在 TTS 页输入文字或 UTF-8 `.txt`，选择与文本语言一致的 EdgeTTS 音色。
-2. Applio 会先生成 `tts_output.wav`，再用所选 RVC `.pth/.index` 生成 `tts_rvc_output.wav`。
-3. EdgeTTS 不需要下载本地 TTS 模型，但需要联网；目标角色音色仍需要 RVC 模型。
-4. 用于视频时，先锁定文案、语速、停顿和最终 RVC 音频，再把最终音频交给 ComfyUI 做口型或音频驱动。
-5. 将最终音频复制到项目目录，并记录 EdgeTTS 音色、语速、RVC 模型哈希和推理参数；不要只保存在 `assets\audios`。
+1. 从 `assets/applio-comfyui-audio-record.md` 复制项目记录模板，先冻结分镜号、说话人、台词版本和目标工作流。
+2. 有表演录音时走 `干声 → RVC`；只有文字时走 `文字/UTF-8 TXT → EdgeTTS → RVC`。
+3. 一次只测试一个镜头和一个说话人；使用 10–20 秒样本确定模型、Pitch、Embedder、Index Rate 和 Protect。
+4. 每个说话镜头导出独立 WAV，记录模型与音频 SHA-256。锁定文件不得原位覆盖，修改时增加版本号。
+5. 根据 `references/comfyui-video-handoff.md` 将音频标记为 `final_dialogue` 或 `voice_reference`，再选择对应 ComfyUI 工作流。
+6. 项目目录保存母版；ComfyUI `input` 只放可重建的暂存副本。视频生成后按镜头核对口型、时长、说话人和音色。
 
 ### 4. 转换与验收
 
@@ -87,5 +90,5 @@ description: 管理本机 Applio 与 RVC 音色模型，包括安装、升级、
 - 新增、保留或失败的模型及其目录；
 - `.pth/.index` 配对、安全加载、哈希和 Applio 可见性；
 - 模型来源、训练语言和授权不确定性；
-- 测试所用文字或音频、EdgeTTS 音色、RVC 参数、输出路径和已知限制；
+- 测试所用文字或音频、EdgeTTS 音色、RVC 参数、镜头号、音频角色、SHA-256、ComfyUI 工作流和已知限制；
 - 尚未完成的下载、推理或人工试听步骤。

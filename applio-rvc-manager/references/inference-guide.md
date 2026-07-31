@@ -22,15 +22,6 @@ Applio 3.6.4 的 TTS 不是单独的本地语音模型。它以 EdgeTTS 为中�
 - EdgeTTS 音色清单来自 `rvc\lib\tools\tts_voices.json`，在线服务可用性和音色数量应以现场查询为准。
 - 需要完全离线、可训练或更强韵律控制时，应另选专用 TTS 项目和模型，不要把它误认为 Applio 内置能力。
 
-## 与 ComfyUI 视频流程交接
-
-1. 先完成台词、语速、停顿和情绪设计。
-2. 有现成录音时直接用 RVC；只有文字时使用 EdgeTTS → RVC。
-3. 对每个说话镜头导出独立最终 WAV，固定模型哈希、Pitch、Embedder、Index Rate、Protect、采样率和响度。
-4. 把最终 WAV 保存到 ComfyUI 工作区对应项目目录，再交给 IA2V、S2V、InfiniteTalk、HuMo 或 LTX 音画工作流。
-5. 口型和画面生成后不要随意替换语速不同的音频。台词改变时，只重做受影响的音频和说话镜头。
-6. 音乐、环境声和音效单独分轨；Applio 只负责对白音色，不负责整部视频的混音和声音设计。
-
 ## 输入质量
 
 优先使用：
