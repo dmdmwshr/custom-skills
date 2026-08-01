@@ -1,5 +1,7 @@
 # case-data.json 格式
 
+格式与工作流说明版本：`0.6.0`。
+
 `case-data.json` 只保存语义结果；`compose` 会从 `inventory.json` 与 `split-index.json` 补齐包信息、文件哈希、页数和本地上传映射。
 
 先运行 `source-analysis`。它只给出来源类别与字段组优先级，不会也不得生成最终业务字段值。
@@ -86,6 +88,60 @@
 - 父检查引用：每条检查的 `caseInspectionRef`，用于把同一次案卷级检查下的多个产品分组；
 - 文书和资料要求缺少 `clientRef` 时的顺序引用。
 
+## 案卷、父检查与受检产品层级
+
+层级固定为：
+
+1. `case`：案卷；
+2. `caseInspectionRef`：案卷下某一次初查或复查父检查；
+3. `product` 与其 `inspections[]`：该次检查实际涉及的受检产品及检查方式、结果。
+
+检查级文书必须同时输出：
+
+- `stage`：`INITIAL_CHECK` 或 `RECHECK`；
+- `caseInspectionRefs`：唯一定位该文书所属的父检查；
+- `inspectionRefs`：该父检查下、文书实际涉及的产品检查记录；
+- `productRefs`：与上述产品检查对应的产品。
+
+正式 `CaseImportManifestV1` 已支持 `caseInspectionRefs`。已确认归属时，`case-data.json` 与最终 manifest 的 `stage`、唯一父检查引用及产品检查引用必须一致；`inspectionRefs` 只列实际涉及的产品检查，父检查级文书可使用空数组。无法唯一确认父检查时，`case-data` 将父检查引用和产品检查引用置空；正式 manifest 省略 `stage/caseInspectionRefs`、保留 `inspectionRefs=[]`，并创建 `CaseDocument.stage` 待核对项，禁止由文件名补值。
+
+检查归属证据优先级固定为：正文明确出现“复查/整改复查”或初查表述 > 文号及被送达文书、监督检查记录等关联记录 > 同类型检查日期排序（最早一次为初查、后续为复查）。日期排序只能在同一案卷、同类型检查且无冲突时使用。文件名、目录名、页序号和单一日期只能作提示，不能单独作为证据。
+
+检查级文书示例：
+
+```json
+{
+  "clientRef": "document:inspection-record-initial-0036",
+  "documentType": "PRODUCT_INSPECTION_RECORD",
+  "documentNo": "〔2026〕第0036号",
+  "issueDate": "2026-05-19",
+  "stage": "INITIAL_CHECK",
+  "caseInspectionRefs": ["case-inspection:initial:2026-05-19"],
+  "productRefs": ["product:1"],
+  "inspectionRefs": ["inspection:1:initial_check"],
+  "classificationEvidence": "正文为首次监督检查记录，文号0036，日期2026-05-19，与父检查及产品检查一致"
+}
+```
+
+自动归属时可增加本地 `stageEvidence`（`compose` 会消费它，但不会把该辅助对象写入正式 manifest）：
+
+```json
+{
+  "method": "BODY_TEXT",
+  "inspectionDate": "2026-05-19",
+  "sources": [
+    {
+      "kind": "PDF_TEXT",
+      "relativePath": "original/消防产品监督检查记录.pdf",
+      "page": 1,
+      "evidence": "正文标题及检查形式明确为首次监督检查"
+    }
+  ]
+}
+```
+
+关联记录使用 `method=DOCUMENT_LINK`，并填写 `relatedInspectionRef`、`relatedDocumentRef` 或 `relatedDocumentNo`；送达回证优先继承被送达文书的父检查，不因送达日期更晚而改判复查。`fieldEvidence` 中 `entityRef=document:<引用>`、`fieldPath=stage` 的正文来源也会参与同一判定。`FILENAME_HINT` 只能保留提示，不能触发阶段写入。
+
 ## 产品级网售
 
 `onlineSale` 只属于产品，枚举为 `YES`、`NO`、`UNKNOWN`。同一案卷有四个产品且仅一个来自网售时，只给对应产品写 `YES`；其余产品必须按各自证据写 `NO` 或 `UNKNOWN`。`fieldEvidence`、`missingItems` 和 `reviewItems` 的 `entityRef` 必须是对应 `product:<序号>`，不得指向案卷。
@@ -100,6 +156,7 @@
   "documentType": "TYPE_TEST_REPORT",
   "documentNo": "ZB2018M3262",
   "productRefs": ["product:1"],
+  "caseInspectionRefs": [],
   "inspectionRefs": [],
   "versions": [
     {
@@ -118,6 +175,10 @@
   "classificationEvidence": "正文首页检验类别明确为型式试验"
 }
 ```
+
+该 `TYPE_TEST_REPORT` 示例是案卷/产品材料，所以不填写 `stage`。`case-data` 可用空 `caseInspectionRefs` 表示不适用，`compose` 在正式 manifest 中省略该可选字段；必需字段 `inspectionRefs` 保持空数组。CCC 证书、技术鉴定资料等执行相同规则，不得仅因材料出现在初查或复查目录中就绑定检查。
+
+`ONSITE_PHOTO` 必须由正文分组标题、照片水印/说明或关联监督检查记录唯一定位初查或复查父检查。照片能明确对应产品时再填写一致的 `inspectionRefs` 与 `productRefs`；只能确定父检查时两者可为空。仅文件名、拍摄日期或日期排序不足时，正式 manifest 省略 `stage/caseInspectionRefs`、保留 `inspectionRefs=[]`，并创建 `CaseDocument.stage` 的 `LOW_CONFIDENCE`。
 
 ### 正式双版本与重复来源
 

@@ -1,10 +1,12 @@
 # 系统接口流程
 
+工作流说明版本：`0.6.0`。
+
 生产地址：`https://product-cases.meifu.zzxhlyj.top`
 
 系统按既定决策没有账号、令牌或身份隔离。固定请求头 `X-Product-Case-Client: web-v1` 只是降低跨站浏览器滥用，不是凭据。
 
-## 顺序
+## 正式顺序
 
 1. `GET /api/ready`
 2. `POST /api/v1/import-jobs`
@@ -13,6 +15,10 @@
 5. `POST /api/v1/import-jobs/{id}/validate`
 6. 用户确认后 `POST /api/v1/import-jobs/{id}/finalize`
 7. 独立执行 `sync-document-versions`，处理相同包哈希已终结但新 manifest 增加正式版本的情况
+
+以上“上传 → validate/finalize → sync-document-versions”是一个完整流程。`sync-document-versions` 不替代导入校验或终结，也不得在 finalize 前执行正式写入。
+
+正式同步时脚本必须读取同一工作目录的 `upload-state.json`，核对 `finalized=true`、存在 `jobId`，并确认 `packageSha256` 与当前 manifest 相同；缺失或不一致立即停止。`--dry-run` 只做预览，不执行 PUT。
 
 创建任务需要：
 
@@ -27,6 +33,14 @@
 - `storageKind`
 - `sha256`
 - PDF 时的 `pageCount`
+
+原 ZIP、原 PDF、组合扫描件、截图和重复副本上传后统一属于只读留档来源及 `fileLinks` 证据历史。前端栏目使用“文书与附件”；服务端逻辑文书只有 `ELECTRONIC`（电子版）和 `SCANNED`（扫描件）两个正式版本槽位，不设置第三种正式版本类别。
+
+## 检查级文书关联
+
+正式 `CaseImportManifestV1` 已支持 `caseInspectionRefs`。已确认归属的检查级文书输出一个父检查引用；`inspectionRefs` 只列该父检查下实际涉及的产品检查，可以在仅确定父检查时为空数组。两组引用必须与文书 `stage` 一致。阶段未知时省略 `stage/caseInspectionRefs`、输出 `inspectionRefs=[]`，并提交 `CaseDocument.stage` 的 `LOW_CONFIDENCE` 待核对项。
+
+`ONSITE_PHOTO` 同样属于检查级文书，不能只凭文件名归入初查或复查。`TYPE_TEST_REPORT`、CCC 证书、技术鉴定资料等案卷/产品材料不输出检查引用。
 
 失败时保留 `upload-state.json`，使用相同 manifest、原包哈希和幂等键续传。不得新建另一案卷来绕过冲突。
 

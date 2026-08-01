@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 import httpx
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 TEXT_THRESHOLD = 30
 MAX_ZIP_FILES = 1_000
 MAX_ZIP_BYTES = 1024 * 1024 * 1024
@@ -151,12 +151,26 @@ STAGE_LABELS = {
     "INITIAL_CHECK": "初查",
     "RECHECK": "复查",
     "CASE": "案卷",
+    "UNKNOWN": "阶段待核对",
 }
 CASE_INSPECTION_STAGE_LABELS = {
     "INITIAL_CHECK": "initial",
     "RECHECK": "recheck",
 }
 CASE_INSPECTION_REF_RE = re.compile(r"^[a-z][a-z0-9-]*:")
+DOCUMENT_ASSOCIATION_SCOPES = {"CASE", "PRODUCT", "INSPECTION"}
+INSPECTION_REQUIRED_DOCUMENT_TYPES = {"ONSITE_PHOTO"}
+# 这三类均为案卷/产品资质材料。即使文件夹、文件名或 OCR 文本中出现
+# “初查”“复查”，也不能据此绑定本案检查事件；产品关联仍可保留。
+NON_INSPECTION_DOCUMENT_TYPES = {
+    "TYPE_TEST_REPORT",
+    "CCC_CERTIFICATE",
+    "TECHNICAL_APPRAISAL_CERTIFICATE",
+}
+STAGE_EVIDENCE_METHODS = {"MANUAL", "BODY_TEXT", "DOCUMENT_LINK", "DATE_ORDER", "UNKNOWN"}
+RECHECK_BODY_RE = re.compile(r"整改\s*复查|复查")
+INITIAL_CHECK_BODY_RE = re.compile(r"初查|初次检查|首次检查|第一次检查")
+FILENAME_SOURCE_KINDS = {"FILENAME", "FILE_NAME", "FILENAME_HINT"}
 
 
 class RegistryError(RuntimeError):
@@ -981,6 +995,766 @@ def build_entities(case_data: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     return case, entity_map
 
 
+def unique_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip() and item not in result:
+            result.append(item)
+    return result
+
+
+def case_inspection_indexes(
+    products: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, Any]]]:
+    inspection_index: dict[str, dict[str, str]] = {}
+    parent_groups: dict[str, dict[str, Any]] = {}
+    for product in products:
+        if not isinstance(product, dict):
+            continue
+        product_ref = str(product.get("clientRef", ""))
+        for inspection in product.get("inspections", []):
+            if not isinstance(inspection, dict):
+                continue
+            inspection_ref = str(inspection.get("clientRef", ""))
+            parent_ref = str(inspection.get("caseInspectionRef", ""))
+            stage = str(inspection.get("stage", ""))
+            inspection_date = inspection_date_group_value(inspection)
+            if not inspection_ref or not parent_ref:
+                continue
+            inspection_index[inspection_ref] = {
+                "caseInspectionRef": parent_ref,
+                "productRef": product_ref,
+                "stage": stage,
+                "inspectionDate": inspection_date,
+            }
+            group = parent_groups.setdefault(
+                parent_ref,
+                {
+                    "stage": stage,
+                    "inspectionDate": inspection_date,
+                    "inspectionRefs": [],
+                    "productRefs": [],
+                    "consistent": True,
+                },
+            )
+            if group["stage"] != stage or group["inspectionDate"] != inspection_date:
+                group["consistent"] = False
+            if inspection_ref not in group["inspectionRefs"]:
+                group["inspectionRefs"].append(inspection_ref)
+            if product_ref and product_ref not in group["productRefs"]:
+                group["productRefs"].append(product_ref)
+    return inspection_index, parent_groups
+
+
+def document_association_scope(document: dict[str, Any]) -> str:
+    explicit_scope = document.get("associationScope")
+    if explicit_scope is not None and explicit_scope not in DOCUMENT_ASSOCIATION_SCOPES:
+        raise RegistryError(
+            f"文书 {document.get('clientRef')} associationScope 必须为 CASE、PRODUCT 或 INSPECTION"
+        )
+    document_type = str(document.get("documentType", ""))
+    if document_type in NON_INSPECTION_DOCUMENT_TYPES:
+        return "PRODUCT" if document.get("productRefs") else "CASE"
+    if explicit_scope:
+        return str(explicit_scope)
+    if document_type in INSPECTION_REQUIRED_DOCUMENT_TYPES:
+        return "INSPECTION"
+    if any(
+        document.get(field) not in (None, "", [])
+        for field in ("stage", "caseInspectionRefs", "inspectionRefs", "stageEvidence")
+    ):
+        return "INSPECTION"
+    return "PRODUCT" if document.get("productRefs") else "CASE"
+
+
+def stage_sources(document: dict[str, Any]) -> list[dict[str, Any]]:
+    stage_evidence = document.get("stageEvidence")
+    if stage_evidence is None:
+        return []
+    if not isinstance(stage_evidence, dict):
+        raise RegistryError(f"文书 {document.get('clientRef')} stageEvidence 必须是对象")
+    method = stage_evidence.get("method", "UNKNOWN")
+    if method not in STAGE_EVIDENCE_METHODS:
+        raise RegistryError(
+            f"文书 {document.get('clientRef')} stageEvidence.method 不合法：{method}"
+        )
+    sources = stage_evidence.get("sources", [])
+    if not isinstance(sources, list):
+        raise RegistryError(f"文书 {document.get('clientRef')} stageEvidence.sources 必须是数组")
+    return [dict(source) for source in sources if isinstance(source, dict)]
+
+
+def body_stage_from_sources(
+    sources: list[dict[str, Any]],
+) -> tuple[str | None, list[dict[str, Any]]]:
+    detected: set[str] = set()
+    accepted_sources: list[dict[str, Any]] = []
+    for source in sources:
+        kind = str(source.get("kind", "")).strip().upper()
+        evidence = str(source.get("evidence", "")).strip()
+        page = source.get("page")
+        if (
+            kind in FILENAME_SOURCE_KINDS
+            or not source_has_file_locator(source)
+            or not isinstance(page, int)
+            or isinstance(page, bool)
+            or page < 1
+            or not evidence
+        ):
+            continue
+        source_stages: set[str] = set()
+        if RECHECK_BODY_RE.search(evidence):
+            source_stages.add("RECHECK")
+        if INITIAL_CHECK_BODY_RE.search(evidence):
+            source_stages.add("INITIAL_CHECK")
+        if source_stages:
+            detected.update(source_stages)
+            accepted_sources.append(source)
+    return (next(iter(detected)) if len(detected) == 1 else None), accepted_sources
+
+
+def stage_evidence_value(document: dict[str, Any], key: str) -> Any:
+    stage_evidence = document.get("stageEvidence")
+    if isinstance(stage_evidence, dict) and key in stage_evidence:
+        return stage_evidence.get(key)
+    return document.get(key)
+
+
+def matching_parent_refs(
+    parent_groups: dict[str, dict[str, Any]],
+    stage: str | None,
+    inspection_date: str | None,
+    product_refs: list[str] | None = None,
+) -> list[str]:
+    matches: list[str] = []
+    for parent_ref, group in parent_groups.items():
+        if not group.get("consistent"):
+            continue
+        if stage and group.get("stage") != stage:
+            continue
+        if inspection_date and group.get("inspectionDate") != inspection_date:
+            continue
+        if product_refs and not all(ref in group.get("productRefs", []) for ref in product_refs):
+            continue
+        matches.append(parent_ref)
+    return sorted(matches)
+
+
+def direct_document_parent(
+    document: dict[str, Any],
+    inspection_index: dict[str, dict[str, str]],
+    parent_groups: dict[str, dict[str, Any]],
+) -> tuple[str | None, list[str], str | None]:
+    for field in ("inspectionRefs", "caseInspectionRefs"):
+        raw_refs = document.get(field, [])
+        if not isinstance(raw_refs, list) or any(
+            not isinstance(ref, str) or not ref.strip() for ref in raw_refs
+        ):
+            return None, [], f"{field} 必须是非空字符串引用数组"
+    inspection_refs = unique_string_list(document.get("inspectionRefs"))
+    related_ref = stage_evidence_value(document, "relatedInspectionRef")
+    if isinstance(related_ref, str) and related_ref.strip() and related_ref not in inspection_refs:
+        inspection_refs.append(related_ref)
+    related_refs = unique_string_list(stage_evidence_value(document, "relatedInspectionRefs"))
+    raw_related_refs = stage_evidence_value(document, "relatedInspectionRefs")
+    if raw_related_refs is not None and (
+        not isinstance(raw_related_refs, list)
+        or any(not isinstance(ref, str) or not ref.strip() for ref in raw_related_refs)
+    ):
+        return None, [], "relatedInspectionRefs 必须是非空字符串引用数组"
+    for inspection_ref in related_refs:
+        if inspection_ref not in inspection_refs:
+            inspection_refs.append(inspection_ref)
+
+    parent_refs = set(unique_string_list(document.get("caseInspectionRefs")))
+    unknown_inspection_refs = [ref for ref in inspection_refs if ref not in inspection_index]
+    if unknown_inspection_refs:
+        return None, [], "关联了未知产品检查：" + "、".join(unknown_inspection_refs)
+    parent_refs.update(
+        inspection_index[inspection_ref]["caseInspectionRef"] for inspection_ref in inspection_refs
+    )
+    unknown_parent_refs = sorted(ref for ref in parent_refs if ref not in parent_groups)
+    if unknown_parent_refs:
+        return None, [], "关联了未知案卷级检查：" + "、".join(unknown_parent_refs)
+    if len(parent_refs) > 1:
+        return None, [], "同一文书关联到多个案卷级检查：" + "、".join(sorted(parent_refs))
+    if not parent_refs:
+        return None, inspection_refs, None
+    parent_ref = next(iter(parent_refs))
+    if not parent_groups[parent_ref].get("consistent"):
+        return None, [], f"案卷级检查 {parent_ref} 的阶段或日期不一致"
+    return parent_ref, inspection_refs, None
+
+
+def append_document_stage_review(
+    review_items: list[dict[str, Any]], document_ref: str, message: str
+) -> None:
+    if any(
+        isinstance(item, dict)
+        and item.get("entityRef") == document_ref
+        and item.get("fieldPath") == "stage"
+        and item.get("issueType") == "LOW_CONFIDENCE"
+        for item in review_items
+    ):
+        return
+    review_item = {
+        "entityRef": document_ref,
+        "fieldPath": "stage",
+        "issueType": "LOW_CONFIDENCE",
+        "message": message,
+    }
+    review_item["clientRef"] = generated_review_item_ref(review_item)
+    review_items.append(review_item)
+
+
+def append_document_data_anomaly(
+    review_items: list[dict[str, Any]], document_ref: str, message: str
+) -> None:
+    if any(
+        isinstance(item, dict)
+        and item.get("entityRef") == document_ref
+        and item.get("fieldPath") == "stage"
+        and item.get("issueType") == "DATA_ANOMALY"
+        for item in review_items
+    ):
+        return
+    review_item = {
+        "entityRef": document_ref,
+        "fieldPath": "stage",
+        "issueType": "DATA_ANOMALY",
+        "message": message,
+    }
+    review_item["clientRef"] = generated_review_item_ref(review_item)
+    review_items.append(review_item)
+
+
+def append_document_stage_conflict(
+    review_items: list[dict[str, Any]],
+    document_ref: str,
+    manual_stage: str,
+    body_stage: str,
+    manual_sources: list[dict[str, Any]],
+    body_sources: list[dict[str, Any]],
+) -> None:
+    if any(
+        isinstance(item, dict)
+        and item.get("entityRef") == document_ref
+        and item.get("fieldPath") == "stage"
+        and item.get("issueType") == "VALUE_CONFLICT"
+        for item in review_items
+    ):
+        return
+    if not manual_sources:
+        manual_sources = [
+            {"kind": "MANUAL", "value": manual_stage, "evidence": "人工确认的检查阶段"}
+        ]
+    review_item = {
+        "entityRef": document_ref,
+        "fieldPath": "stage",
+        "issueType": "VALUE_CONFLICT",
+        "message": "正文阶段与人工确认阶段冲突；保留人工值，不自动覆盖。",
+        "currentValue": manual_stage,
+        "incomingValue": body_stage,
+        "candidates": [
+            {
+                "candidateRef": f"candidate:{document_ref.replace(':', '-')}-stage-manual",
+                "value": manual_stage,
+                "trustLevel": "MANUAL",
+                "sources": manual_sources,
+            },
+            {
+                "candidateRef": f"candidate:{document_ref.replace(':', '-')}-stage-body",
+                "value": body_stage,
+                "trustLevel": "CORROBORATED",
+                "sources": body_sources,
+            },
+        ],
+    }
+    review_item["clientRef"] = generated_review_item_ref(review_item)
+    review_items.append(review_item)
+
+
+def apply_document_parent_binding(
+    document: dict[str, Any],
+    parent_ref: str,
+    inspection_refs: list[str],
+    parent_groups: dict[str, dict[str, Any]],
+    inspection_index: dict[str, dict[str, str]],
+    method: str,
+    sources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    group = parent_groups[parent_ref]
+    stage = str(group["stage"])
+    valid_inspection_refs = [
+        inspection_ref
+        for inspection_ref in inspection_refs
+        if inspection_ref in inspection_index
+        and inspection_index[inspection_ref]["caseInspectionRef"] == parent_ref
+    ]
+    product_refs = unique_string_list(document.get("productRefs"))
+    for inspection_ref in valid_inspection_refs:
+        product_ref = inspection_index[inspection_ref]["productRef"]
+        if product_ref and product_ref not in product_refs:
+            product_refs.append(product_ref)
+    document["stage"] = stage
+    document["caseInspectionRefs"] = [parent_ref]
+    document["inspectionRefs"] = valid_inspection_refs
+    document["productRefs"] = product_refs
+    return {
+        "documentRef": str(document["clientRef"]),
+        "associationScope": "INSPECTION",
+        "status": "RESOLVED",
+        "stage": stage,
+        "caseInspectionRefs": [parent_ref],
+        "inspectionRefs": valid_inspection_refs,
+        "resolutionMethod": method,
+        "resolutionEvidence": sources,
+    }
+
+
+def unresolved_document_binding(
+    document: dict[str, Any], review_items: list[dict[str, Any]], reason: str
+) -> dict[str, Any]:
+    document.pop("stage", None)
+    document["caseInspectionRefs"] = []
+    document["inspectionRefs"] = []
+    append_document_stage_review(
+        review_items,
+        str(document["clientRef"]),
+        reason + "；阶段保持 UNKNOWN，禁止仅按文件名自动归属。",
+    )
+    return {
+        "documentRef": str(document["clientRef"]),
+        "associationScope": "INSPECTION",
+        "status": "NEEDS_REVIEW",
+        "stage": "UNKNOWN",
+        "caseInspectionRefs": [],
+        "inspectionRefs": [],
+        "resolutionMethod": "UNKNOWN",
+        "resolutionEvidence": [],
+    }
+
+
+def stage_binding_source(
+    parent_ref: str, inspection_refs: list[str], method: str, sources: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    rule_source = {
+        "kind": "RULE",
+        "value": {
+            "caseInspectionRef": parent_ref,
+            "inspectionRefs": inspection_refs,
+            "method": method,
+        },
+        "evidence": f"按 {method} 规则唯一关联案卷级检查 {parent_ref}。",
+    }
+    return [*sources, rule_source]
+
+
+def resolve_document_stage_bindings(
+    case_data: dict[str, Any],
+    documents: list[dict[str, Any]],
+    review_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    products = case_data.get("products")
+    product_items = products if isinstance(products, list) else []
+    inspection_index, parent_groups = case_inspection_indexes(product_items)
+    evidence_items = case_data.get("fieldEvidence")
+    evidence_items = evidence_items if isinstance(evidence_items, list) else []
+    manual_stage_by_document: dict[str, str] = {}
+    manual_stage_sources_by_document: dict[str, list[dict[str, Any]]] = {}
+    field_stage_sources_by_document: dict[str, list[dict[str, Any]]] = {}
+    for evidence in evidence_items:
+        if not (
+            isinstance(evidence, dict)
+            and evidence.get("fieldPath") == "stage"
+            and evidence.get("value") in STAGES
+            and isinstance(evidence.get("entityRef"), str)
+        ):
+            continue
+        evidence_document_ref = str(evidence["entityRef"])
+        evidence_sources = evidence.get("sources")
+        if isinstance(evidence_sources, list):
+            field_stage_sources_by_document.setdefault(evidence_document_ref, []).extend(
+                dict(source) for source in evidence_sources if isinstance(source, dict)
+            )
+        if evidence.get("trustLevel") == "MANUAL":
+            manual_stage_by_document[evidence_document_ref] = str(evidence["value"])
+            manual_stage_sources_by_document[evidence_document_ref] = (
+                [dict(source) for source in evidence_sources if isinstance(source, dict)]
+                if isinstance(evidence_sources, list)
+                else []
+            )
+
+    binding_by_ref: dict[str, dict[str, Any]] = {}
+    pending_links: list[dict[str, Any]] = []
+    pending_dates: list[dict[str, Any]] = []
+    generated_stage_evidence: list[dict[str, Any]] = []
+    stage_sources_by_document: dict[str, list[dict[str, Any]]] = {}
+    preferred_stage_by_document: dict[str, str] = {}
+
+    for document in documents:
+        document_ref = str(document["clientRef"])
+        scope = document_association_scope(document)
+        document["associationScope"] = scope
+        document_type = str(document.get("documentType", ""))
+        if document_type in NON_INSPECTION_DOCUMENT_TYPES:
+            had_stage_binding = any(
+                document.get(field) not in (None, "", [])
+                for field in ("stage", "caseInspectionRefs", "inspectionRefs")
+            )
+            document.pop("stage", None)
+            document["caseInspectionRefs"] = []
+            document["inspectionRefs"] = []
+            if had_stage_binding:
+                append_document_data_anomaly(
+                    review_items,
+                    document_ref,
+                    "型式检验报告属于案卷/产品资料，不得绑定本案初查或复查；已移除错误阶段关联。",
+                )
+            binding_by_ref[document_ref] = {
+                "documentRef": document_ref,
+                "associationScope": scope,
+                "status": "NOT_APPLICABLE",
+                "stage": None,
+                "caseInspectionRefs": [],
+                "inspectionRefs": [],
+                "resolutionMethod": "NOT_APPLICABLE",
+                "resolutionEvidence": [],
+            }
+            continue
+        if scope != "INSPECTION":
+            document.pop("stage", None)
+            document["caseInspectionRefs"] = []
+            document["inspectionRefs"] = []
+            binding_by_ref[document_ref] = {
+                "documentRef": document_ref,
+                "associationScope": scope,
+                "status": "NOT_APPLICABLE",
+                "stage": None,
+                "caseInspectionRefs": [],
+                "inspectionRefs": [],
+                "resolutionMethod": "NOT_APPLICABLE",
+                "resolutionEvidence": [],
+            }
+            continue
+
+        sources = [
+            *stage_sources(document),
+            *field_stage_sources_by_document.get(document_ref, []),
+        ]
+        stage_sources_by_document[document_ref] = sources
+        body_stage, body_sources = body_stage_from_sources(sources)
+        body_mentions_initial = any(
+            INITIAL_CHECK_BODY_RE.search(str(source.get("evidence", ""))) for source in body_sources
+        )
+        body_mentions_recheck = any(
+            RECHECK_BODY_RE.search(str(source.get("evidence", ""))) for source in body_sources
+        )
+        if body_mentions_initial and body_mentions_recheck:
+            binding_by_ref[document_ref] = unresolved_document_binding(
+                document, review_items, "正文证据同时出现初查与复查表述，无法唯一判定"
+            )
+            continue
+
+        manual_stage = manual_stage_by_document.get(document_ref)
+        preferred_stage = manual_stage or body_stage
+        if preferred_stage:
+            preferred_stage_by_document[document_ref] = preferred_stage
+        explicit_stage = document.get("stage") if document.get("stage") in STAGES else None
+        if manual_stage and body_stage and manual_stage != body_stage:
+            append_document_stage_conflict(
+                review_items,
+                document_ref,
+                manual_stage,
+                body_stage,
+                manual_stage_sources_by_document.get(document_ref, []),
+                body_sources,
+            )
+        elif body_stage and explicit_stage and body_stage != explicit_stage:
+            explicit_stage = body_stage
+
+        parent_ref, inspection_refs, direct_error = direct_document_parent(
+            document, inspection_index, parent_groups
+        )
+        if direct_error:
+            binding_by_ref[document_ref] = unresolved_document_binding(
+                document, review_items, direct_error
+            )
+            continue
+        if parent_ref:
+            parent_stage = str(parent_groups[parent_ref]["stage"])
+            required_stage = preferred_stage or explicit_stage
+            if required_stage and parent_stage != required_stage:
+                binding_by_ref[document_ref] = unresolved_document_binding(
+                    document,
+                    review_items,
+                    f"正文/人工阶段 {required_stage} 与关联检查阶段 {parent_stage} 冲突",
+                )
+                continue
+            method = "MANUAL" if manual_stage else ("BODY_TEXT" if body_stage else "DOCUMENT_LINK")
+            binding_sources = stage_binding_source(
+                parent_ref, inspection_refs, method, body_sources if body_stage else sources
+            )
+            binding = apply_document_parent_binding(
+                document,
+                parent_ref,
+                inspection_refs,
+                parent_groups,
+                inspection_index,
+                method,
+                binding_sources,
+            )
+            binding_by_ref[document_ref] = binding
+            generated_stage_evidence.append(
+                {
+                    "entityRef": document_ref,
+                    "fieldPath": "stage",
+                    "value": binding["stage"],
+                    "trustLevel": (
+                        "MANUAL"
+                        if method == "MANUAL"
+                        else "CORROBORATED"
+                        if method == "BODY_TEXT"
+                        else "DETERMINISTIC"
+                    ),
+                    "sources": binding_sources,
+                }
+            )
+            continue
+
+        date_hint_value = stage_evidence_value(document, "inspectionDate")
+        date_hint = str(date_hint_value).strip() if date_hint_value else None
+        if preferred_stage:
+            product_refs = unique_string_list(document.get("productRefs"))
+            matches = matching_parent_refs(parent_groups, preferred_stage, date_hint, product_refs)
+            if not matches and date_hint is None:
+                issue_date = str(document.get("issueDate", "")).strip()
+                matches = matching_parent_refs(
+                    parent_groups, preferred_stage, issue_date or None, product_refs
+                )
+            if len(matches) == 1:
+                parent_ref = matches[0]
+                method = "MANUAL" if manual_stage else "BODY_TEXT"
+                binding_sources = stage_binding_source(
+                    parent_ref, [], method, body_sources if body_stage else sources
+                )
+                binding = apply_document_parent_binding(
+                    document,
+                    parent_ref,
+                    [],
+                    parent_groups,
+                    inspection_index,
+                    method,
+                    binding_sources,
+                )
+                binding_by_ref[document_ref] = binding
+                generated_stage_evidence.append(
+                    {
+                        "entityRef": document_ref,
+                        "fieldPath": "stage",
+                        "value": binding["stage"],
+                        "trustLevel": "MANUAL" if method == "MANUAL" else "CORROBORATED",
+                        "sources": binding_sources,
+                    }
+                )
+                continue
+
+        related_document_ref = stage_evidence_value(document, "relatedDocumentRef")
+        related_document_no = stage_evidence_value(document, "relatedDocumentNo")
+        if related_document_ref or related_document_no:
+            pending_links.append(document)
+        else:
+            pending_dates.append(document)
+
+    for _ in range(len(pending_links) + 1):
+        progressed = False
+        remaining: list[dict[str, Any]] = []
+        for document in pending_links:
+            document_ref = str(document["clientRef"])
+            related_ref = stage_evidence_value(document, "relatedDocumentRef")
+            if not related_ref:
+                related_no = str(stage_evidence_value(document, "relatedDocumentNo") or "").strip()
+                matching_documents = [
+                    candidate
+                    for candidate in documents
+                    if candidate is not document
+                    and str(candidate.get("documentNo", "")).strip() == related_no
+                ]
+                related_ref = (
+                    matching_documents[0].get("clientRef") if len(matching_documents) == 1 else None
+                )
+            related_binding = binding_by_ref.get(str(related_ref)) if related_ref else None
+            if not related_binding:
+                remaining.append(document)
+                continue
+            if related_binding.get("status") != "RESOLVED":
+                binding_by_ref[document_ref] = unresolved_document_binding(
+                    document, review_items, "关联文书自身尚未唯一归属初查或复查"
+                )
+                progressed = True
+                continue
+            parent_ref = str(related_binding["caseInspectionRefs"][0])
+            explicit_stage = document.get("stage") if document.get("stage") in STAGES else None
+            required_stage = preferred_stage_by_document.get(document_ref) or explicit_stage
+            if required_stage and required_stage != related_binding.get("stage"):
+                binding_by_ref[document_ref] = unresolved_document_binding(
+                    document, review_items, "本文件阶段与关联文书阶段冲突"
+                )
+                progressed = True
+                continue
+            inherited_inspection_refs = unique_string_list(related_binding.get("inspectionRefs"))
+            sources = stage_sources_by_document.get(document_ref, [])
+            binding_sources = stage_binding_source(
+                parent_ref, inherited_inspection_refs, "DOCUMENT_LINK", sources
+            )
+            binding = apply_document_parent_binding(
+                document,
+                parent_ref,
+                inherited_inspection_refs,
+                parent_groups,
+                inspection_index,
+                "DOCUMENT_LINK",
+                binding_sources,
+            )
+            binding_by_ref[document_ref] = binding
+            generated_stage_evidence.append(
+                {
+                    "entityRef": document_ref,
+                    "fieldPath": "stage",
+                    "value": binding["stage"],
+                    "trustLevel": "DETERMINISTIC",
+                    "sources": binding_sources,
+                }
+            )
+            progressed = True
+        pending_links = remaining
+        if not progressed:
+            break
+    pending_dates.extend(pending_links)
+
+    date_candidates_by_type: dict[str, list[dict[str, Any]]] = {}
+    for document in documents:
+        if document.get("associationScope") == "INSPECTION":
+            date_candidates_by_type.setdefault(str(document.get("documentType", "")), []).append(
+                document
+            )
+    unresolved_refs = {str(document["clientRef"]) for document in pending_dates}
+    for _document_type, type_documents in date_candidates_by_type.items():
+        if _document_type in INSPECTION_REQUIRED_DOCUMENT_TYPES:
+            # 现场照片的文件名或拍摄/制成日期不足以证明初查或复查归属。
+            continue
+        if not any(str(document["clientRef"]) in unresolved_refs for document in type_documents):
+            continue
+        valid_groups = [
+            (parent_ref, group)
+            for parent_ref, group in parent_groups.items()
+            if group.get("consistent") and str(group.get("inspectionDate", ""))
+        ]
+        dated_documents = [
+            document for document in type_documents if str(document.get("issueDate", "")).strip()
+        ]
+        document_dates = [
+            str(document.get("issueDate", "")).strip() for document in dated_documents
+        ]
+        group_dates = [str(group.get("inspectionDate", "")) for _, group in valid_groups]
+        if (
+            len(dated_documents) != len(type_documents)
+            or len(type_documents) != len(valid_groups)
+            or len(set(document_dates)) != len(document_dates)
+            or len(set(group_dates)) != len(group_dates)
+        ):
+            continue
+        sorted_documents = sorted(dated_documents, key=lambda item: str(item["issueDate"]))
+        sorted_groups = sorted(valid_groups, key=lambda item: str(item[1]["inspectionDate"]))
+        if not sorted_groups or sorted_groups[0][1].get("stage") != "INITIAL_CHECK":
+            continue
+        if any(group.get("stage") != "RECHECK" for _, group in sorted_groups[1:]):
+            continue
+        for document, (parent_ref, _) in zip(sorted_documents, sorted_groups, strict=True):
+            document_ref = str(document["clientRef"])
+            if document_ref not in unresolved_refs:
+                continue
+            explicit_stage = document.get("stage") if document.get("stage") in STAGES else None
+            parent_stage = str(parent_groups[parent_ref]["stage"])
+            required_stage = preferred_stage_by_document.get(document_ref) or explicit_stage
+            if required_stage and required_stage != parent_stage:
+                continue
+            product_refs = unique_string_list(document.get("productRefs"))
+            if product_refs and not all(
+                product_ref in parent_groups[parent_ref].get("productRefs", [])
+                for product_ref in product_refs
+            ):
+                continue
+            binding_sources = stage_binding_source(parent_ref, [], "DATE_ORDER", [])
+            binding = apply_document_parent_binding(
+                document,
+                parent_ref,
+                [],
+                parent_groups,
+                inspection_index,
+                "DATE_ORDER",
+                binding_sources,
+            )
+            binding_by_ref[document_ref] = binding
+            generated_stage_evidence.append(
+                {
+                    "entityRef": document_ref,
+                    "fieldPath": "stage",
+                    "value": binding["stage"],
+                    "trustLevel": "DETERMINISTIC",
+                    "sources": binding_sources,
+                }
+            )
+            unresolved_refs.remove(document_ref)
+
+    for document in pending_dates:
+        document_ref = str(document["clientRef"])
+        if document_ref in unresolved_refs:
+            binding_by_ref[document_ref] = unresolved_document_binding(
+                document,
+                review_items,
+                "正文、关联检查/文书和同类型日期顺序均不足以确定唯一父检查",
+            )
+
+    resolved_stage_by_ref = {
+        document_ref: binding["stage"]
+        for document_ref, binding in binding_by_ref.items()
+        if binding.get("status") == "RESOLVED"
+    }
+    retained_evidence: list[Any] = []
+    for evidence in evidence_items:
+        if not isinstance(evidence, dict):
+            retained_evidence.append(evidence)
+            continue
+        document_ref = str(evidence.get("entityRef", ""))
+        if evidence.get("fieldPath") != "stage" or document_ref not in binding_by_ref:
+            retained_evidence.append(evidence)
+            continue
+        if evidence.get("value") == resolved_stage_by_ref.get(document_ref):
+            retained_evidence.append(evidence)
+        elif evidence.get("trustLevel") == "MANUAL":
+            retained_evidence.append(evidence)
+            append_document_data_anomaly(
+                review_items,
+                document_ref,
+                "人工阶段证据尚未能落到唯一父检查，需人工补选案卷级检查。",
+            )
+    existing_evidence_keys = {
+        (item.get("entityRef"), item.get("fieldPath"), item.get("value"))
+        for item in retained_evidence
+        if isinstance(item, dict)
+    }
+    for evidence in generated_stage_evidence:
+        key = (evidence["entityRef"], evidence["fieldPath"], evidence["value"])
+        if key not in existing_evidence_keys:
+            retained_evidence.append(evidence)
+            existing_evidence_keys.add(key)
+    case_data["fieldEvidence"] = retained_evidence
+    return [binding_by_ref[str(document["clientRef"])] for document in documents]
+
+
 def failed_recheck_inspection_refs(products: list[dict[str, Any]]) -> list[str]:
     return [
         str(inspection["clientRef"])
@@ -1177,13 +1951,13 @@ def compose_command(args: argparse.Namespace) -> None:
     split_index = read_json(split_index_path) if split_index_path.exists() else {"items": []}
     case, _ = build_entities(case_data)
     normalize_case_type(case_data, case)
+    review_items = compose_review_items(case_data)
     source_documents = case_data.get("documents", [])
     if not isinstance(source_documents, list):
         raise RegistryError("case-data.documents 必须是数组")
     prepared_documents: list[dict[str, Any]] = []
     prepared_document_refs: set[str] = set()
     prepared_document_by_ref: dict[str, dict[str, Any]] = {}
-    prepared_document_identities: dict[tuple[str, str, str, str], str] = {}
     for index, source_document in enumerate(source_documents, start=1):
         if not isinstance(source_document, dict):
             raise RegistryError(f"case-data.documents[{index}] 必须是对象")
@@ -1196,6 +1970,14 @@ def compose_command(args: argparse.Namespace) -> None:
             raise RegistryError(f"文书 clientRef 重复：{document_ref}")
         prepared_document_refs.add(document_ref)
         prepared_document_by_ref[document_ref] = document
+        prepared_documents.append(document)
+
+    document_stage_bindings = resolve_document_stage_bindings(
+        case_data, prepared_documents, review_items
+    )
+    prepared_document_identities: dict[tuple[str, str, str, str], str] = {}
+    for document in prepared_documents:
+        document_ref = str(document["clientRef"])
         identity = normalized_document_identity(document)
         identity_owner = prepared_document_identities.get(identity)
         if identity_owner:
@@ -1204,7 +1986,14 @@ def compose_command(args: argparse.Namespace) -> None:
                 "必须合并为一条文书并保留全部原始来源"
             )
         prepared_document_identities[identity] = document_ref
-        prepared_documents.append(document)
+    write_json(
+        work_dir / "document-stage-bindings.json",
+        {
+            "bindingVersion": 1,
+            "generatedAt": utc_now(),
+            "bindings": document_stage_bindings,
+        },
+    )
 
     split_items = split_index.get("items", [])
     if not isinstance(split_items, list):
@@ -1222,7 +2011,17 @@ def compose_command(args: argparse.Namespace) -> None:
         split_stage = split_item.get("stage")
         target_stage = target_document.get("stage")
         stage_matches = split_stage == target_stage or (
-            split_stage == "CASE" and target_stage in (None, "")
+            target_stage in (None, "")
+            and (
+                (
+                    target_document.get("associationScope") == "INSPECTION"
+                    and split_stage == "UNKNOWN"
+                )
+                or (
+                    target_document.get("associationScope") != "INSPECTION"
+                    and split_stage == "CASE"
+                )
+            )
         )
         if not stage_matches or split_item.get("documentType") != target_document.get(
             "documentType"
@@ -1255,11 +2054,6 @@ def compose_command(args: argparse.Namespace) -> None:
                 else {}
             ),
             **({"sourcePageEnd": record["sourcePageEnd"]} if record.get("sourcePageEnd") else {}),
-            **(
-                {"documentVersionKind": record["documentVersionKind"]}
-                if record.get("documentVersionKind")
-                else {}
-            ),
         }
         files.append(manifest_file)
         upload_map[client_ref] = str(Path(record["absolutePath"]).resolve())
@@ -1306,7 +2100,20 @@ def compose_command(args: argparse.Namespace) -> None:
     documents: list[dict[str, Any]] = []
     file_by_ref = {item["clientRef"]: item for item in files}
     document_candidate_state: dict[str, dict[str, bool]] = {}
-    for document in prepared_documents:
+    for prepared_document in prepared_documents:
+        document = dict(prepared_document)
+        for local_field in (
+            "associationScope",
+            "stageEvidence",
+            "relatedInspectionRef",
+            "relatedInspectionRefs",
+            "relatedDocumentRef",
+            "relatedDocumentNo",
+            "inspectionDate",
+        ):
+            document.pop(local_field, None)
+        if not document.get("caseInspectionRefs"):
+            document.pop("caseInspectionRefs", None)
         document_ref = str(document["clientRef"])
         candidates = split_items_by_document.get(document_ref, [])
         candidates_by_kind: dict[str, list[dict[str, Any]]] = {
@@ -1412,7 +2219,6 @@ def compose_command(args: argparse.Namespace) -> None:
             ),
         }
 
-    review_items = compose_review_items(case_data)
     for document in documents:
         document_ref = document["clientRef"]
         versions = document["versions"]
@@ -1449,6 +2255,7 @@ def compose_command(args: argparse.Namespace) -> None:
             }
             review_item["clientRef"] = generated_review_item_ref(review_item)
             review_items.append(review_item)
+
         extra_source_keys = sorted(
             (key for key in linked_source_keys - selected_source_keys if isinstance(key[0], str)),
             key=lambda key: (str(key[0]), int(key[1] or 0), int(key[2] or 0)),
@@ -1482,6 +2289,11 @@ def compose_command(args: argparse.Namespace) -> None:
             review_item["clientRef"] = generated_review_item_ref(review_item)
             review_items.append(review_item)
 
+    resolved_case_data = dict(case_data)
+    resolved_case_data["documents"] = prepared_documents
+    resolved_case_data["reviewItems"] = review_items
+    write_json(work_dir / "case-data.resolved.json", resolved_case_data)
+
     requirements: list[dict[str, Any]] = []
     for index, source_requirement in enumerate(case_data.get("documentRequirements", []), start=1):
         requirement = dict(source_requirement)
@@ -1492,6 +2304,19 @@ def compose_command(args: argparse.Namespace) -> None:
     evidence_items: list[dict[str, Any]] = []
     for source_evidence in case_data.get("fieldEvidence", []):
         evidence = dict(source_evidence)
+        if evidence.get("fieldPath") == "stage" and str(evidence.get("entityRef", "")).startswith(
+            "document:"
+        ):
+            matching_document = next(
+                (
+                    document
+                    for document in documents
+                    if document.get("clientRef") == evidence.get("entityRef")
+                ),
+                None,
+            )
+            if not matching_document or matching_document.get("stage") != evidence.get("value"):
+                continue
         sources: list[dict[str, Any]] = []
         for source_item in evidence.get("sources", []):
             evidence_source = dict(source_item)
@@ -1573,6 +2398,8 @@ def compose_command(args: argparse.Namespace) -> None:
                 "status": "ok",
                 "manifest": str(manifest_path),
                 "uploadMap": str(upload_map_path),
+                "resolvedCaseData": str(work_dir / "case-data.resolved.json"),
+                "documentStageBindings": str(work_dir / "document-stage-bindings.json"),
                 "files": len(files),
                 "documents": len(documents),
                 "reviewItems": len(manifest["reviewItems"]),
@@ -1612,6 +2439,10 @@ def validate_manifest(
         errors.append("case.onlineSale 已停用；网售情况必须分别填写在 products[].onlineSale")
 
     entity_map: dict[str, dict[str, Any]] = {}
+    product_entity_refs: set[str] = set()
+    inspection_entity_refs: set[str] = set()
+    inspection_parent_by_ref: dict[str, str] = {}
+    inspection_product_by_ref: dict[str, str] = {}
 
     def add_entity(entity: Any, label: str) -> None:
         if not isinstance(entity, dict):
@@ -1631,11 +2462,14 @@ def validate_manifest(
         errors.append("products 至少需要一项")
         products = []
     failed_recheck_refs: list[str] = []
-    case_inspection_groups: dict[str, tuple[Any, str]] = {}
+    case_inspection_groups: dict[str, dict[str, Any]] = {}
     for product_index, product in enumerate(products, start=1):
         add_entity(product, f"products[{product_index}]")
         if not isinstance(product, dict):
             continue
+        product_ref = product.get("clientRef")
+        if isinstance(product_ref, str) and product_ref:
+            product_entity_refs.add(product_ref)
         if not str(product.get("name", "")).strip():
             errors.append(f"products[{product_index}].name 不能为空")
         if product.get("onlineSale") not in TRI_STATES:
@@ -1649,6 +2483,11 @@ def validate_manifest(
             add_entity(inspection, label)
             if not isinstance(inspection, dict):
                 continue
+            inspection_ref = inspection.get("clientRef")
+            if isinstance(inspection_ref, str) and inspection_ref:
+                inspection_entity_refs.add(inspection_ref)
+                if isinstance(product_ref, str) and product_ref:
+                    inspection_product_by_ref[inspection_ref] = product_ref
             if inspection.get("stage") not in STAGES:
                 errors.append(f"{label}.stage 不合法")
             if inspection.get("method") not in METHODS:
@@ -1662,15 +2501,31 @@ def validate_manifest(
                 ):
                     errors.append(f"{label}.caseInspectionRef 必须是以小写前缀开头的引用")
                 else:
-                    current_group = (
-                        inspection.get("stage"),
-                        inspection_date_group_value(inspection),
-                    )
+                    if isinstance(inspection_ref, str) and inspection_ref:
+                        inspection_parent_by_ref[inspection_ref] = case_inspection_ref
+                    current_group = {
+                        "stage": inspection.get("stage"),
+                        "inspectionDate": inspection_date_group_value(inspection),
+                        "inspectionRefs": [],
+                        "productRefs": [],
+                    }
                     existing_group = case_inspection_groups.get(case_inspection_ref)
                     if existing_group is None:
                         case_inspection_groups[case_inspection_ref] = current_group
-                    elif existing_group != current_group:
+                        existing_group = current_group
+                    elif (
+                        existing_group["stage"] != current_group["stage"]
+                        or existing_group["inspectionDate"] != current_group["inspectionDate"]
+                    ):
                         errors.append(f"案卷检查分组 {case_inspection_ref} 的阶段或检查日期不一致")
+                    if isinstance(inspection_ref, str) and inspection_ref:
+                        existing_group["inspectionRefs"].append(inspection_ref)
+                    if (
+                        isinstance(product_ref, str)
+                        and product_ref
+                        and product_ref not in existing_group["productRefs"]
+                    ):
+                        existing_group["productRefs"].append(product_ref)
             if (
                 inspection.get("stage") == "RECHECK"
                 and inspection.get("inspectionResult") == "UNQUALIFIED"
@@ -1732,12 +2587,10 @@ def validate_manifest(
             errors.append(str(error))
         if file_item.get("storageKind") not in FILE_KINDS:
             errors.append(f"{label}.storageKind 不合法")
-        document_version_kind = file_item.get("documentVersionKind")
-        if file_item.get("storageKind") == "NORMALIZED_FILE":
-            if document_version_kind not in SPLIT_DOCUMENT_VERSION_KINDS:
-                errors.append(f"{label}.documentVersionKind 不合法")
-        elif document_version_kind is not None:
-            errors.append(f"{label} 只有规范化 PDF 可以填写 documentVersionKind")
+        if "documentVersionKind" in file_item:
+            errors.append(
+                f"{label}.documentVersionKind 仅属于本地拆分索引，不得写入正式 ManifestFile"
+            )
         if not re.fullmatch(r"sha256:[a-f0-9]{64}", str(file_item.get("sha256", ""))):
             errors.append(f"{label}.sha256 格式错误")
         source_ref = file_item.get("sourceFileRef")
@@ -1750,7 +2603,8 @@ def validate_manifest(
             if source_ref and source_ref not in file_refs:
                 errors.append(f"规范化文件引用了未知 sourceFileRef：{source_ref}")
 
-    document_review_requirements: set[tuple[str, str]] = set()
+    document_review_requirements: set[tuple[str, str, str]] = set()
+    document_stage_evidence_requirements: set[tuple[str, str]] = set()
     version_file_owners: dict[str, str] = {}
     document_identity_owners: dict[tuple[str, str, str, str], str] = {}
     manifest_documents = manifest.get("documents", [])
@@ -1771,12 +2625,113 @@ def validate_manifest(
             )
         else:
             document_identity_owners[identity] = document_ref
-        for ref in document.get("productRefs", []):
-            if ref not in entity_map:
-                errors.append(f"文书引用了未知 productRef：{ref}")
-        for ref in document.get("inspectionRefs", []):
-            if ref not in entity_map:
-                errors.append(f"文书引用了未知 inspectionRef：{ref}")
+        product_refs = document.get("productRefs", [])
+        if not isinstance(product_refs, list):
+            errors.append(f"documents[{index}].productRefs 必须是数组")
+            product_refs = []
+        string_product_refs = [ref for ref in product_refs if isinstance(ref, str)]
+        if len(string_product_refs) != len(product_refs):
+            errors.append(f"documents[{index}].productRefs 每项必须是字符串")
+        if len(string_product_refs) != len(set(string_product_refs)):
+            errors.append(f"documents[{index}].productRefs 不得重复")
+        for ref in product_refs:
+            if not isinstance(ref, str) or ref not in product_entity_refs:
+                errors.append(f"文书 productRefs 只能引用产品实体：{ref}")
+
+        inspection_refs = document.get("inspectionRefs", [])
+        if not isinstance(inspection_refs, list):
+            errors.append(f"documents[{index}].inspectionRefs 必须是数组")
+            inspection_refs = []
+        string_inspection_refs = [ref for ref in inspection_refs if isinstance(ref, str)]
+        if len(string_inspection_refs) != len(inspection_refs):
+            errors.append(f"documents[{index}].inspectionRefs 每项必须是字符串")
+        if len(string_inspection_refs) != len(set(string_inspection_refs)):
+            errors.append(f"documents[{index}].inspectionRefs 不得重复")
+        for ref in inspection_refs:
+            if not isinstance(ref, str) or ref not in inspection_entity_refs:
+                errors.append(f"文书 inspectionRefs 只能引用产品检查实体：{ref}")
+
+        case_inspection_refs = document.get("caseInspectionRefs", [])
+        if not isinstance(case_inspection_refs, list):
+            errors.append(f"documents[{index}].caseInspectionRefs 必须是数组")
+            case_inspection_refs = []
+        string_case_inspection_refs = [ref for ref in case_inspection_refs if isinstance(ref, str)]
+        if len(string_case_inspection_refs) != len(case_inspection_refs):
+            errors.append(f"documents[{index}].caseInspectionRefs 每项必须是字符串")
+        if len(string_case_inspection_refs) != len(set(string_case_inspection_refs)):
+            errors.append(f"documents[{index}].caseInspectionRefs 不得重复")
+        for ref in case_inspection_refs:
+            if not isinstance(ref, str) or ref not in case_inspection_groups:
+                errors.append(f"文书引用了未知 caseInspectionRef：{ref}")
+
+        document_type = str(document.get("documentType", ""))
+        document_stage = document.get("stage")
+        if document_stage is not None and document_stage not in STAGES:
+            errors.append(f"documents[{index}].stage 不合法")
+        if document_type in NON_INSPECTION_DOCUMENT_TYPES:
+            if document_stage is not None or case_inspection_refs or inspection_refs:
+                errors.append(
+                    f"documents[{index}] {document_type} 属于案卷/产品资料，不得关联检查阶段"
+                )
+        else:
+            is_inspection_document = bool(
+                document_type in INSPECTION_REQUIRED_DOCUMENT_TYPES
+                or document_stage is not None
+                or case_inspection_refs
+                or inspection_refs
+            )
+            if document_stage is not None:
+                if len(case_inspection_refs) != 1:
+                    errors.append(
+                        f"documents[{index}] 已确定检查阶段时必须唯一关联一个 caseInspectionRef"
+                    )
+                else:
+                    parent_ref = str(case_inspection_refs[0])
+                    group = case_inspection_groups.get(parent_ref)
+                    if group and group.get("stage") != document_stage:
+                        errors.append(
+                            f"documents[{index}].stage 与父检查 {parent_ref} 的阶段不一致"
+                        )
+                    if group:
+                        for product_ref in product_refs:
+                            if (
+                                isinstance(product_ref, str)
+                                and product_ref in product_entity_refs
+                                and product_ref not in group.get("productRefs", [])
+                            ):
+                                errors.append(
+                                    f"documents[{index}].productRefs 中的 {product_ref} "
+                                    f"不属于父检查 {parent_ref}"
+                                )
+                    for inspection_ref in inspection_refs:
+                        if (
+                            inspection_ref in inspection_entity_refs
+                            and inspection_ref not in inspection_parent_by_ref
+                        ):
+                            errors.append(
+                                f"documents[{index}] 关联的产品检查 {inspection_ref} "
+                                "缺少 caseInspectionRef，无法验证父检查归属"
+                            )
+                        if (
+                            inspection_ref in inspection_parent_by_ref
+                            and inspection_parent_by_ref[inspection_ref] != parent_ref
+                        ):
+                            errors.append(
+                                f"documents[{index}].inspectionRefs 必须全部属于父检查 {parent_ref}"
+                            )
+                        owner_product_ref = inspection_product_by_ref.get(str(inspection_ref))
+                        if owner_product_ref and owner_product_ref not in product_refs:
+                            errors.append(
+                                f"documents[{index}] 关联产品检查 {inspection_ref} 时"
+                                f" productRefs 必须包含 {owner_product_ref}"
+                            )
+                document_stage_evidence_requirements.add((document_ref, str(document_stage)))
+            elif case_inspection_refs or inspection_refs:
+                errors.append(
+                    f"documents[{index}] 未确定 stage 时不得保留 caseInspectionRefs/inspectionRefs"
+                )
+            elif is_inspection_document:
+                document_review_requirements.add((document_ref, "stage", "LOW_CONFIDENCE"))
         versions = document.get("versions")
         if not isinstance(versions, list):
             errors.append(f"documents[{index}].versions 必须是数组")
@@ -1817,8 +2772,6 @@ def validate_manifest(
                 errors.append(f"{version_label} 只能引用 NORMALIZED_FILE")
             if version_file.get("mimeType") != "application/pdf":
                 errors.append(f"{version_label} 只能引用 PDF")
-            if version_file.get("documentVersionKind") != kind:
-                errors.append(f"{version_label}.kind 与规范化文件版本类型不一致")
             source_file_ref = version_file.get("sourceFileRef")
             if isinstance(source_file_ref, str):
                 selected_source_keys.add(
@@ -1829,8 +2782,12 @@ def validate_manifest(
                     )
                 )
 
+        file_links = document.get("fileLinks", [])
+        if not isinstance(file_links, list) or not file_links:
+            errors.append(f"documents[{index}].fileLinks 至少需要一项原始来源")
+            file_links = []
         linked_source_keys: set[tuple[str, Any, Any]] = set()
-        for link in document.get("fileLinks", []):
+        for link in file_links:
             if not isinstance(link, dict) or link.get("fileRef") not in file_refs:
                 errors.append(f"文书引用了未知 fileRef：{link}")
             elif link.get("relationRole") not in FILE_ROLES:
@@ -1860,9 +2817,9 @@ def validate_manifest(
                 f"documents[{index}] 正式版本缺少原始来源 fileLinks：" + "、".join(missing_sources)
             )
         if not versions:
-            document_review_requirements.add((document_ref, "LOW_CONFIDENCE"))
+            document_review_requirements.add((document_ref, "versions", "LOW_CONFIDENCE"))
         if versions and linked_source_keys - selected_source_keys:
-            document_review_requirements.add((document_ref, "DUPLICATE_CANDIDATE"))
+            document_review_requirements.add((document_ref, "versions", "DUPLICATE_CANDIDATE"))
 
     for index, requirement in enumerate(manifest.get("documentRequirements", []), start=1):
         add_entity(requirement, f"documentRequirements[{index}]")
@@ -1875,6 +2832,7 @@ def validate_manifest(
             if ref and ref not in entity_map:
                 errors.append(f"资料要求引用了未知 {key}：{ref}")
 
+    document_stage_evidence_keys: set[tuple[str, str]] = set()
     for index, evidence in enumerate(manifest.get("fieldEvidence", []), start=1):
         if not isinstance(evidence, dict):
             errors.append(f"fieldEvidence[{index}] 必须是对象")
@@ -1900,11 +2858,21 @@ def validate_manifest(
         if not isinstance(sources, list) or not sources:
             errors.append(f"fieldEvidence[{index}].sources 至少需要一项")
             continue
+        if (
+            str(entity_ref).startswith("document:")
+            and evidence.get("fieldPath") == "stage"
+            and evidence.get("value") in STAGES
+        ):
+            document_stage_evidence_keys.add((str(entity_ref), str(evidence["value"])))
         for evidence_source in sources:
             if isinstance(evidence_source, dict):
                 file_ref = evidence_source.get("fileRef")
                 if file_ref and file_ref not in file_refs:
                     errors.append(f"字段证据引用了未知 fileRef：{file_ref}")
+
+    for document_ref, stage in sorted(document_stage_evidence_requirements):
+        if (document_ref, stage) not in document_stage_evidence_keys:
+            errors.append(f"文书 {document_ref} 的 stage={stage} 必须具有字段证据")
 
     for index, missing in enumerate(manifest.get("missingItems", []), start=1):
         if not isinstance(missing, dict):
@@ -2058,13 +3026,17 @@ def validate_manifest(
             errors.append(f"{label} VALUE_CONFLICT 候选必须包含实体最终值")
 
     review_resolution_keys = {
-        (str(item.get("entityRef", "")), str(item.get("issueType", "")))
+        (
+            str(item.get("entityRef", "")),
+            str(item.get("fieldPath", "")),
+            str(item.get("issueType", "")),
+        )
         for item in review_items
-        if isinstance(item, dict) and item.get("fieldPath") == "versions"
+        if isinstance(item, dict)
     }
-    for document_ref, issue_type in sorted(document_review_requirements):
-        if (document_ref, issue_type) not in review_resolution_keys:
-            errors.append(f"文书 {document_ref} 的 versions 必须创建 {issue_type} 待核对项")
+    for document_ref, field_path, issue_type in sorted(document_review_requirements):
+        if (document_ref, field_path, issue_type) not in review_resolution_keys:
+            errors.append(f"文书 {document_ref} 的 {field_path} 必须创建 {issue_type} 待核对项")
 
     case_ref = str(case.get("clientRef", ""))
     case_type = case.get("caseType")
@@ -2231,6 +3203,25 @@ def sync_document_versions_command(args: argparse.Namespace) -> None:
     errors = validate_manifest(manifest, upload_files)
     if errors:
         raise RegistryError("同步文书版本前本地校验失败：\n- " + "\n- ".join(errors))
+    if not args.dry_run:
+        upload_state_path = manifest_path.parent / "upload-state.json"
+        if not upload_state_path.is_file():
+            raise RegistryError(
+                f"正式同步文书版本前必须先完成 upload validate/finalize；缺少 {upload_state_path}"
+            )
+        upload_state = read_json(upload_state_path)
+        if upload_state.get("finalized") is not True or not upload_state.get("jobId"):
+            raise RegistryError("正式同步文书版本前必须先完成同一案卷包的 validate/finalize")
+        package_sha256 = str(manifest.get("source", {}).get("packageSha256", ""))
+        state_package_sha256 = upload_state.get("packageSha256")
+        if state_package_sha256:
+            if state_package_sha256 != package_sha256:
+                raise RegistryError("upload-state.json 属于另一案卷包，拒绝同步文书版本")
+        elif upload_state.get("manifestSha256") != file_sha256(manifest_path):
+            raise RegistryError(
+                "旧版 upload-state.json 无案卷包哈希且不匹配当前 manifest，"
+                "请先重新执行 upload 以确认 finalize 状态"
+            )
 
     api_base = args.api_base.rstrip("/")
     parsed = urlsplit(api_base)
@@ -2264,6 +3255,24 @@ def sync_document_versions_command(args: argparse.Namespace) -> None:
         ready = response_json(client.get(f"{api_base}/api/ready"), "readiness")
         if ready.get("status") != "ready":
             raise RegistryError(f"服务未就绪：{ready}")
+        # 本地 upload-state 只能用于断点续传，不能单独作为正式版本写入的
+        # 授权依据。回读服务端导入任务，避免状态文件被复制、过期或伪造后绕过
+        # 同一案卷包的四步导入与 finalize。
+        server_job = response_json(
+            client.get(f"{api_base}/api/v1/import-jobs/{upload_state['jobId']}"),
+            "核验已终结导入任务",
+        )
+        if server_job.get("status") not in {"FINALIZED", "NEEDS_REVIEW"}:
+            raise RegistryError(
+                "正式同步文书版本前，服务端导入任务必须已终结为 FINALIZED 或 NEEDS_REVIEW"
+            )
+        if server_job.get("packageSha256") != package_sha256:
+            raise RegistryError("服务端导入任务包哈希与当前 manifest 不一致，拒绝同步文书版本")
+        result_summary = server_job.get("resultSummary")
+        if not isinstance(result_summary, dict) or result_summary.get("projectNo") != project_no:
+            raise RegistryError(
+                "服务端导入任务项目编号与当前 manifest 不一致或缺失，拒绝同步文书版本"
+            )
         cases_result = response_json(
             client.get(
                 f"{api_base}/api/v1/cases",
@@ -2470,8 +3479,12 @@ def upload_command(args: argparse.Namespace) -> None:
     state.setdefault("stateVersion", 1)
     state.setdefault("manifestSha256", manifest_sha256)
     state.setdefault("uploadedFileRefs", [])
+    package_sha256 = str(manifest["source"]["packageSha256"])
+    if state.get("packageSha256") not in (None, package_sha256):
+        raise RegistryError("upload-state.json 属于另一案卷包，拒绝混用")
+    state["packageSha256"] = package_sha256
 
-    package_hash = manifest["source"]["packageSha256"].split(":", 1)[1]
+    package_hash = package_sha256.split(":", 1)[1]
     idempotency_key = f"xfpcr-v1-{package_hash}"
     headers = {WRITE_HEADER: WRITE_HEADER_VALUE, "Origin": origin}
     timeout = httpx.Timeout(args.timeout, read=max(args.timeout, 300.0))
@@ -2643,7 +3656,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync_versions_parser = subparsers.add_parser(
         "sync-document-versions",
-        help="不依赖导入任务状态，按唯一文书身份幂等同步电子版/扫描件",
+        help="仅在同一导入任务已 finalize 后，按唯一文书身份幂等同步电子版/扫描件",
     )
     sync_versions_parser.add_argument("--manifest", required=True)
     sync_versions_parser.add_argument("--upload-map", required=True)

@@ -18,6 +18,7 @@ from scripts.registry_cli import (
     inventory_command,
     ocr_command,
     read_json,
+    resolve_document_stage_bindings,
     safe_extract_zip,
     source_analysis_command,
     split_command,
@@ -75,7 +76,7 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
                 "sourceRelativePath": "组合件.pdf",
                 "pageStart": 2,
                 "pageEnd": 2,
-                "stage": "INITIAL_CHECK",
+                "stage": "CASE",
                 "documentType": "TYPE_TEST_REPORT",
                 "documentLabel": "型式检验报告",
                 "documentNoOrDate": "ZB2018M3262",
@@ -189,9 +190,15 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
                 "documentType": "SERVICE_RECEIPT",
                 "documentNo": "〔2026〕第0001号",
                 "issueDate": "2026-05-19",
+                "associationScope": "INSPECTION",
                 "stage": "INITIAL_CHECK",
+                "caseInspectionRefs": ["case-inspection:initial:2026-05-19"],
                 "productRefs": ["product:1"],
                 "inspectionRefs": ["inspection:1:initial_check"],
+                "stageEvidence": {
+                    "method": "DOCUMENT_LINK",
+                    "relatedInspectionRef": "inspection:1:initial_check",
+                },
                 "versions": [
                     {
                         "relativePath": split_index["items"][0]["relativePath"],
@@ -205,7 +212,7 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
                 "documentType": "TYPE_TEST_REPORT",
                 "documentNo": "ZB2018M3262",
                 "issueDate": "2026-05-19",
-                "stage": "INITIAL_CHECK",
+                "associationScope": "PRODUCT",
                 "productRefs": ["product:1"],
                 "inspectionRefs": [],
                 "versions": [],
@@ -217,6 +224,29 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
                         "pageEnd": 2,
                     }
                 ],
+            },
+            {
+                "clientRef": "document:onsite-photo-unknown",
+                "documentType": "ONSITE_PHOTO",
+                "productRefs": [],
+                "inspectionRefs": [],
+                "versions": [],
+                "fileLinks": [
+                    {
+                        "relativePath": "original/案卷截图.png",
+                        "relationRole": "SOURCE_COPY",
+                    }
+                ],
+                "stageEvidence": {
+                    "method": "UNKNOWN",
+                    "sources": [
+                        {
+                            "kind": "FILENAME_HINT",
+                            "relativePath": "original/案卷截图.png",
+                            "evidence": "文件名包含现场照片。",
+                        }
+                    ],
+                },
             },
         ],
         "fieldEvidence": [
@@ -305,6 +335,7 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     legacy_value_conflict["reviewItems"][0].pop("candidates")
     assert validate_manifest(legacy_value_conflict, upload_map) == []
     assert len(manifest["files"]) == 7
+    assert all("documentVersionKind" not in item for item in manifest["files"])
     assert manifest["products"][0]["clientRef"] == "product:1"
     assert (
         manifest["products"][0]["inspections"][0]["caseInspectionRef"]
@@ -329,6 +360,9 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
         "ELECTRONIC",
         "SCANNED",
     }
+    assert manifest["documents"][0]["caseInspectionRefs"] == ["case-inspection:initial:2026-05-19"]
+    assert "associationScope" not in manifest["documents"][0]
+    assert "stageEvidence" not in manifest["documents"][0]
     assert manifest["documents"][0]["fileLinks"][0]["fileRef"].startswith("file:orig:")
     assert {
         (link.get("pageStart"), link.get("pageEnd"))
@@ -347,6 +381,39 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
         for item in manifest["reviewItems"]
     )
     assert manifest["documents"][1]["versions"] == []
+    assert "stage" not in manifest["documents"][1]
+    assert "caseInspectionRefs" not in manifest["documents"][1]
+    assert manifest["documents"][2]["documentType"] == "ONSITE_PHOTO"
+    assert "stage" not in manifest["documents"][2]
+    assert "caseInspectionRefs" not in manifest["documents"][2]
+    assert manifest["documents"][2]["inspectionRefs"] == []
+    assert any(
+        item["entityRef"] == "document:onsite-photo-unknown"
+        and item["fieldPath"] == "stage"
+        and item["issueType"] == "LOW_CONFIDENCE"
+        for item in manifest["reviewItems"]
+    )
+    resolved_case_data = read_json(work / "case-data.resolved.json")
+    unknown_photo = next(
+        item
+        for item in resolved_case_data["documents"]
+        if item["clientRef"] == "document:onsite-photo-unknown"
+    )
+    assert unknown_photo["associationScope"] == "INSPECTION"
+    assert unknown_photo["caseInspectionRefs"] == []
+    bindings = read_json(work / "document-stage-bindings.json")["bindings"]
+    assert (
+        next(item for item in bindings if item["documentRef"] == "document:service-receipt-1")[
+            "status"
+        ]
+        == "RESOLVED"
+    )
+    assert (
+        next(item for item in bindings if item["documentRef"] == "document:onsite-photo-unknown")[
+            "status"
+        ]
+        == "NEEDS_REVIEW"
+    )
     assert any(
         item["entityRef"] == "case:32002207C202600033" and item["fieldPath"] == "caseType"
         for item in manifest["missingItems"]
@@ -462,13 +529,61 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     for product in legacy_manifest["products"]:
         for inspection in product["inspections"]:
             inspection.pop("caseInspectionRef")
-    assert validate_manifest(legacy_manifest, upload_map) == []
+    assert any(
+        "未知 caseInspectionRef" in error
+        for error in validate_manifest(legacy_manifest, upload_map)
+    )
 
     inconsistent_group = json.loads(json.dumps(manifest))
     inconsistent_group["products"][2]["inspections"][0]["inspectionDate"] = "2026-05-20"
     assert any(
         "案卷检查分组 case-inspection:initial:2026-05-19 的阶段或检查日期不一致" in error
         for error in validate_manifest(inconsistent_group, upload_map)
+    )
+
+    mismatched_document_stage = json.loads(json.dumps(manifest))
+    mismatched_document_stage["documents"][0]["stage"] = "RECHECK"
+    assert any(
+        "与父检查 case-inspection:initial:2026-05-19 的阶段不一致" in error
+        for error in validate_manifest(mismatched_document_stage, upload_map)
+    )
+
+    wrong_inspection_entity = json.loads(json.dumps(manifest))
+    wrong_inspection_entity["documents"][0]["inspectionRefs"] = ["product:1"]
+    assert any(
+        "inspectionRefs 只能引用产品检查实体" in error
+        for error in validate_manifest(wrong_inspection_entity, upload_map)
+    )
+
+    missing_product_owner = json.loads(json.dumps(manifest))
+    missing_product_owner["documents"][0]["productRefs"] = []
+    assert any(
+        "productRefs 必须包含 product:1" in error
+        for error in validate_manifest(missing_product_owner, upload_map)
+    )
+
+    multiple_parent_documents = json.loads(json.dumps(manifest))
+    multiple_parent_documents["documents"][0]["caseInspectionRefs"] = [
+        "case-inspection:initial:2026-05-19",
+        "external:initial-2026-05-19",
+    ]
+    assert any(
+        "必须唯一关联一个 caseInspectionRef" in error
+        for error in validate_manifest(multiple_parent_documents, upload_map)
+    )
+
+    product_outside_parent = json.loads(json.dumps(manifest))
+    product_outside_parent["documents"][0]["productRefs"].append("product:2")
+    assert any(
+        "product:2 不属于父检查 case-inspection:initial:2026-05-19" in error
+        for error in validate_manifest(product_outside_parent, upload_map)
+    )
+
+    orphan_inspection_document = json.loads(json.dumps(manifest))
+    orphan_inspection_document["products"][0]["inspections"][0].pop("caseInspectionRef")
+    assert any(
+        "产品检查 inspection:1:initial_check 缺少 caseInspectionRef" in error
+        for error in validate_manifest(orphan_inspection_document, upload_map)
     )
 
     indirect_criminal_case_data = json.loads(json.dumps(case_data))
@@ -589,7 +704,14 @@ def test_inventory_split_compose_and_dry_run(tmp_path: Path) -> None:
     assert validate_manifest(criminal_manifest, upload_map) == []
 
     indirect_criminal = json.loads(json.dumps(criminal_manifest))
-    indirect_criminal["fieldEvidence"][-1]["sources"][0]["evidence"] = "行政处罚决定书。"
+    criminal_evidence = next(
+        item
+        for item in indirect_criminal["fieldEvidence"]
+        if item["entityRef"] == "case:32002207C202600033"
+        and item["fieldPath"] == "caseType"
+        and item["value"] == "CRIMINAL"
+    )
+    criminal_evidence["sources"][0]["evidence"] = "行政处罚决定书。"
     assert any(
         "刑案必须具有含页码和直接刑事表述" in error
         for error in validate_manifest(indirect_criminal, upload_map)
@@ -755,6 +877,485 @@ def test_undated_case_inspections_share_stage_ordinal_refs() -> None:
     )
 
 
+def test_document_stage_binding_uses_body_then_related_document_and_never_filename() -> None:
+    case_data = {
+        "case": {"projectNo": "32002207C202600033"},
+        "products": [
+            {
+                "sequence": 1,
+                "inspections": [
+                    {
+                        "stage": "INITIAL_CHECK",
+                        "method": "ONSITE",
+                        "inspectionDate": "2026-05-19",
+                        "inspectionResult": "UNQUALIFIED",
+                    },
+                    {
+                        "stage": "RECHECK",
+                        "method": "ONSITE",
+                        "inspectionDate": "2026-05-27",
+                        "inspectionResult": "QUALIFIED",
+                    },
+                ],
+            },
+            {
+                "sequence": 2,
+                "inspections": [
+                    {
+                        "stage": "INITIAL_CHECK",
+                        "method": "ONSITE",
+                        "inspectionDate": "2026-05-19",
+                        "inspectionResult": "UNQUALIFIED",
+                    },
+                    {
+                        "stage": "RECHECK",
+                        "method": "ONSITE",
+                        "inspectionDate": "2026-05-27",
+                        "inspectionResult": "QUALIFIED",
+                    },
+                ],
+            },
+        ],
+        "fieldEvidence": [
+            {
+                "entityRef": "document:manual-stage-wins",
+                "fieldPath": "stage",
+                "value": "INITIAL_CHECK",
+                "trustLevel": "MANUAL",
+                "sources": [{"kind": "MANUAL", "evidence": "人工核对父检查为初查。"}],
+            },
+            {
+                "entityRef": "document:record-initial",
+                "fieldPath": "stage",
+                "value": "INITIAL_CHECK",
+                "trustLevel": "CORROBORATED",
+                "sources": [
+                    {
+                        "kind": "PDF_TEXT",
+                        "relativePath": "original/初查记录电子版.pdf",
+                        "page": 1,
+                        "evidence": "消防产品监督检查记录，正文明确为初查。",
+                    }
+                ],
+            },
+        ],
+    }
+    build_entities(case_data)
+    documents = [
+        {
+            "clientRef": "document:record-initial",
+            "associationScope": "INSPECTION",
+            "documentType": "PRODUCT_INSPECTION_RECORD",
+            "productRefs": [],
+            "inspectionRefs": [],
+        },
+        {
+            "clientRef": "document:photo-recheck",
+            "documentType": "ONSITE_PHOTO",
+            "issueDate": "2026-05-28",
+            "productRefs": [],
+            "inspectionRefs": [],
+            "stageEvidence": {
+                "method": "BODY_TEXT",
+                "sources": [
+                    {
+                        "kind": "SIGNED_SCAN_OCR",
+                        "relativePath": "original/现场照片扫描件.pdf",
+                        "page": 1,
+                        "evidence": "整改复查现场照片，拍摄于2026年5月27日。",
+                    }
+                ],
+            },
+        },
+        {
+            "clientRef": "document:receipt-initial",
+            "associationScope": "INSPECTION",
+            "documentType": "SERVICE_RECEIPT",
+            "issueDate": "2026-05-25",
+            "productRefs": [],
+            "inspectionRefs": [],
+            "stageEvidence": {
+                "method": "DOCUMENT_LINK",
+                "relatedDocumentRef": "document:record-initial",
+            },
+        },
+        {
+            "clientRef": "document:photo-filename-only",
+            "documentType": "ONSITE_PHOTO",
+            "issueDate": "2026-05-20",
+            "productRefs": [],
+            "inspectionRefs": [],
+            "stageEvidence": {
+                "method": "UNKNOWN",
+                "sources": [
+                    {
+                        "kind": "FILENAME_HINT",
+                        "relativePath": "original/复查现场照片.pdf",
+                        "evidence": "文件名写有复查。",
+                    }
+                ],
+            },
+        },
+        {
+            "clientRef": "document:type-report",
+            "documentType": "TYPE_TEST_REPORT",
+            "stage": "RECHECK",
+            "caseInspectionRefs": ["case-inspection:recheck:2026-05-27"],
+            "productRefs": ["product:1"],
+            "inspectionRefs": ["inspection:1:recheck"],
+        },
+        {
+            "clientRef": "document:ccc-certificate",
+            "documentType": "CCC_CERTIFICATE",
+            "stage": "RECHECK",
+            "caseInspectionRefs": ["case-inspection:recheck:2026-05-27"],
+            "productRefs": ["product:1"],
+            "inspectionRefs": ["inspection:1:recheck"],
+        },
+        {
+            "clientRef": "document:technical-appraisal",
+            "documentType": "TECHNICAL_APPRAISAL_CERTIFICATE",
+            "stage": "RECHECK",
+            "caseInspectionRefs": ["case-inspection:recheck:2026-05-27"],
+            "productRefs": ["product:1"],
+            "inspectionRefs": ["inspection:1:recheck"],
+        },
+        {
+            "clientRef": "document:manual-stage-wins",
+            "associationScope": "INSPECTION",
+            "documentType": "ONSITE_UNQUALIFIED_NOTICE",
+            "stage": "INITIAL_CHECK",
+            "caseInspectionRefs": ["case-inspection:initial:2026-05-19"],
+            "productRefs": ["product:1"],
+            "inspectionRefs": ["inspection:1:initial_check"],
+            "stageEvidence": {
+                "method": "BODY_TEXT",
+                "sources": [
+                    {
+                        "kind": "SIGNED_SCAN_OCR",
+                        "relativePath": "original/冲突扫描件.pdf",
+                        "page": 1,
+                        "evidence": "OCR 识别为整改复查通知书。",
+                    }
+                ],
+            },
+        },
+    ]
+    review_items: list[dict[str, object]] = []
+    bindings = resolve_document_stage_bindings(case_data, documents, review_items)
+    by_ref = {document["clientRef"]: document for document in documents}
+    binding_by_ref = {binding["documentRef"]: binding for binding in bindings}
+
+    assert by_ref["document:record-initial"]["stage"] == "INITIAL_CHECK"
+    assert by_ref["document:record-initial"]["caseInspectionRefs"] == [
+        "case-inspection:initial:2026-05-19"
+    ]
+    assert by_ref["document:photo-recheck"]["stage"] == "RECHECK"
+    assert by_ref["document:photo-recheck"]["caseInspectionRefs"] == [
+        "case-inspection:recheck:2026-05-27"
+    ]
+    assert by_ref["document:receipt-initial"]["stage"] == "INITIAL_CHECK"
+    assert binding_by_ref["document:receipt-initial"]["resolutionMethod"] == "DOCUMENT_LINK"
+    assert binding_by_ref["document:photo-filename-only"]["status"] == "NEEDS_REVIEW"
+    assert "stage" not in by_ref["document:photo-filename-only"]
+    assert by_ref["document:photo-filename-only"]["caseInspectionRefs"] == []
+    assert any(
+        item["entityRef"] == "document:photo-filename-only"
+        and item["fieldPath"] == "stage"
+        and item["issueType"] == "LOW_CONFIDENCE"
+        for item in review_items
+    )
+    for document_ref in (
+        "document:type-report",
+        "document:ccc-certificate",
+        "document:technical-appraisal",
+    ):
+        assert "stage" not in by_ref[document_ref]
+        assert by_ref[document_ref]["caseInspectionRefs"] == []
+        assert by_ref[document_ref]["inspectionRefs"] == []
+        assert any(
+            item["entityRef"] == document_ref and item["issueType"] == "DATA_ANOMALY"
+            for item in review_items
+        )
+    assert by_ref["document:manual-stage-wins"]["stage"] == "INITIAL_CHECK"
+    stage_conflict = next(
+        item
+        for item in review_items
+        if item["entityRef"] == "document:manual-stage-wins"
+        and item["issueType"] == "VALUE_CONFLICT"
+    )
+    assert stage_conflict["currentValue"] == "INITIAL_CHECK"
+    assert stage_conflict["incomingValue"] == "RECHECK"
+
+
+def test_document_stage_binding_date_order_is_last_and_ambiguous_stays_unknown() -> None:
+    case_data = {
+        "case": {"projectNo": "32002207C202600033"},
+        "products": [
+            {
+                "sequence": 1,
+                "inspections": [
+                    {
+                        "stage": "INITIAL_CHECK",
+                        "method": "ONSITE",
+                        "inspectionDate": "2026-05-19",
+                        "inspectionResult": "UNQUALIFIED",
+                    },
+                    {
+                        "stage": "RECHECK",
+                        "method": "ONSITE",
+                        "inspectionDate": "2026-05-27",
+                        "inspectionResult": "QUALIFIED",
+                    },
+                ],
+            }
+        ],
+        "fieldEvidence": [],
+    }
+    build_entities(case_data)
+    ordered_documents = [
+        {
+            "clientRef": "document:order-early",
+            "associationScope": "INSPECTION",
+            "documentType": "RECTIFICATION_ORDER",
+            "issueDate": "2026-05-20",
+            "productRefs": [],
+            "inspectionRefs": [],
+        },
+        {
+            "clientRef": "document:order-later",
+            "associationScope": "INSPECTION",
+            "documentType": "RECTIFICATION_ORDER",
+            "issueDate": "2026-05-28",
+            "productRefs": [],
+            "inspectionRefs": [],
+        },
+    ]
+    reviews: list[dict[str, object]] = []
+    bindings = resolve_document_stage_bindings(case_data, ordered_documents, reviews)
+    assert [document["stage"] for document in ordered_documents] == ["INITIAL_CHECK", "RECHECK"]
+    assert {binding["resolutionMethod"] for binding in bindings} == {"DATE_ORDER"}
+    assert reviews == []
+
+    ambiguous_case_data = json.loads(json.dumps(case_data))
+    ambiguous_document = [
+        {
+            "clientRef": "document:record-one-of-two",
+            "associationScope": "INSPECTION",
+            "documentType": "PRODUCT_INSPECTION_RECORD",
+            "issueDate": "2026-05-19",
+            "productRefs": [],
+            "inspectionRefs": [],
+        }
+    ]
+    ambiguous_reviews: list[dict[str, object]] = []
+    ambiguous_binding = resolve_document_stage_bindings(
+        ambiguous_case_data, ambiguous_document, ambiguous_reviews
+    )[0]
+    assert ambiguous_binding["status"] == "NEEDS_REVIEW"
+    assert "stage" not in ambiguous_document[0]
+    assert ambiguous_reviews[0]["fieldPath"] == "stage"
+
+    mismatched_case_data = {
+        "case": {"projectNo": "32002207C202600035"},
+        "products": [
+            {
+                "sequence": 1,
+                "inspections": [
+                    {
+                        "stage": "INITIAL_CHECK",
+                        "method": "ONSITE",
+                        "inspectionDate": "2026-05-19",
+                        "inspectionResult": "UNQUALIFIED",
+                    }
+                ],
+            },
+            {
+                "sequence": 2,
+                "inspections": [
+                    {
+                        "stage": "RECHECK",
+                        "method": "ONSITE",
+                        "inspectionDate": "2026-05-27",
+                        "inspectionResult": "QUALIFIED",
+                    }
+                ],
+            },
+        ],
+        "fieldEvidence": [],
+    }
+    build_entities(mismatched_case_data)
+    mismatched_documents = [
+        {
+            "clientRef": "document:mismatch-early",
+            "associationScope": "INSPECTION",
+            "documentType": "RECTIFICATION_ORDER",
+            "issueDate": "2026-05-20",
+            "productRefs": ["product:2"],
+            "inspectionRefs": [],
+        },
+        {
+            "clientRef": "document:mismatch-later",
+            "associationScope": "INSPECTION",
+            "documentType": "RECTIFICATION_ORDER",
+            "issueDate": "2026-05-28",
+            "productRefs": ["product:1"],
+            "inspectionRefs": [],
+        },
+    ]
+    mismatch_reviews: list[dict[str, object]] = []
+    mismatch_bindings = resolve_document_stage_bindings(
+        mismatched_case_data, mismatched_documents, mismatch_reviews
+    )
+    assert {binding["status"] for binding in mismatch_bindings} == {"NEEDS_REVIEW"}
+    assert all("stage" not in document for document in mismatched_documents)
+    assert len(mismatch_reviews) == 2
+
+
+def test_upload_keeps_create_files_manifest_validate_finalize_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_pdf = tmp_path / "原件.pdf"
+    write_blank_pdf(source_pdf, pages=1)
+    manifest = {
+        "schemaVersion": "CaseImportManifestV1",
+        "source": {
+            "sourceType": "LOCAL_SKILL",
+            "packageName": "四步上传测试",
+            "containerKind": "DIRECTORY",
+            "packageSha256": "sha256:" + "b" * 64,
+            "packageHashMethod": "SORTED_RELATIVE_PATH_AND_FILE_SHA256",
+            "extractedAt": "2026-08-01T00:00:00Z",
+            "extractor": {"name": "xf-product-case-registry", "version": "0.6.0"},
+        },
+        "case": {
+            "clientRef": "case:32002207C202600034",
+            "projectNo": "32002207C202600034",
+            "brigadeCode": "XISHAN",
+            "unitName": "四步上传测试单位",
+            "caseType": "UNKNOWN",
+        },
+        "products": [
+            {
+                "clientRef": "product:1",
+                "sequence": 1,
+                "name": "直流水枪",
+                "onlineSale": "UNKNOWN",
+                "inspections": [
+                    {
+                        "clientRef": "inspection:1:initial_check",
+                        "caseInspectionRef": "case-inspection:initial:2026-05-19",
+                        "stage": "INITIAL_CHECK",
+                        "method": "ONSITE",
+                        "inspectionDate": "2026-05-19",
+                        "inspectionResult": "UNQUALIFIED",
+                    }
+                ],
+            }
+        ],
+        "documentRequirements": [],
+        "files": [
+            {
+                "clientRef": "file:original",
+                "storageKind": "ORIGINAL_FILE",
+                "relativePath": "original/原件.pdf",
+                "sha256": file_sha256(source_pdf),
+                "mimeType": "application/pdf",
+                "pageCount": 1,
+            }
+        ],
+        "documents": [],
+        "fieldEvidence": [],
+        "missingItems": [
+            {
+                "entityRef": "case:32002207C202600034",
+                "fieldPath": "caseType",
+                "reason": "待人工核对。",
+            }
+        ],
+        "reviewItems": [],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    upload_map_path = tmp_path / "upload-map.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    upload_map_path.write_text(
+        json.dumps({"files": {"file:original": str(source_pdf)}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert validate_manifest(manifest, {"file:original": str(source_pdf)}) == []
+
+    calls: list[tuple[str, str]] = []
+    replay_finalized = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal replay_finalized
+        calls.append((request.method, request.url.path))
+        if request.url.path == "/api/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/api/v1/import-jobs":
+            assert request.headers["Idempotency-Key"] == "xfpcr-v1-" + "b" * 64
+            return httpx.Response(
+                200,
+                json={
+                    "job": {
+                        "id": "11111111-1111-4111-8111-111111111111",
+                        "status": "FINALIZED" if replay_finalized else "CREATED",
+                        **({"resultSummary": {"created": 1}} if replay_finalized else {}),
+                    }
+                },
+            )
+        if request.url.path.endswith("/files"):
+            return httpx.Response(200, json={"fileRef": "file:original"})
+        if request.method == "PUT" and request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json={"status": "MANIFEST_ACCEPTED"})
+        if request.url.path.endswith("/validate"):
+            return httpx.Response(200, json={"status": "VALIDATED"})
+        if request.url.path.endswith("/finalize"):
+            return httpx.Response(200, json={"status": "FINALIZED"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    real_client = httpx.Client
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs: object) -> httpx.Client:
+        return real_client(
+            transport=transport,
+            timeout=kwargs.get("timeout"),
+            follow_redirects=False,
+            headers=kwargs.get("headers"),
+        )
+
+    monkeypatch.setattr(registry_cli.httpx, "Client", client_factory)
+    args = argparse.Namespace(
+        manifest=str(manifest_path),
+        upload_map=str(upload_map_path),
+        api_base="https://example.invalid",
+        timeout=10.0,
+        dry_run=False,
+        finalize=True,
+    )
+    upload_command(args)
+    assert calls == [
+        ("GET", "/api/ready"),
+        ("POST", "/api/v1/import-jobs"),
+        ("POST", "/api/v1/import-jobs/11111111-1111-4111-8111-111111111111/files"),
+        ("PUT", "/api/v1/import-jobs/11111111-1111-4111-8111-111111111111/manifest"),
+        ("POST", "/api/v1/import-jobs/11111111-1111-4111-8111-111111111111/validate"),
+        ("POST", "/api/v1/import-jobs/11111111-1111-4111-8111-111111111111/finalize"),
+    ]
+    state = read_json(tmp_path / "upload-state.json")
+    assert state["finalized"] is True
+    assert state["uploadedFileRefs"] == ["file:original"]
+
+    replay_finalized = True
+    calls.clear()
+    upload_command(args)
+    assert calls == [
+        ("GET", "/api/ready"),
+        ("POST", "/api/v1/import-jobs"),
+    ]
+
+
 def test_sync_document_versions_skips_same_hash_and_rejects_non_unique_matches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -782,7 +1383,7 @@ def test_sync_document_versions_skips_same_hash_and_rejects_non_unique_matches(
             "packageSha256": "sha256:" + "a" * 64,
             "packageHashMethod": "SORTED_RELATIVE_PATH_AND_FILE_SHA256",
             "extractedAt": "2026-07-31T00:00:00Z",
-            "extractor": {"name": "xf-product-case-registry", "version": "0.5.0"},
+            "extractor": {"name": "xf-product-case-registry", "version": "0.6.0"},
         },
         "case": {
             "clientRef": "case:32002207C202600033",
@@ -836,7 +1437,6 @@ def test_sync_document_versions_skips_same_hash_and_rejects_non_unique_matches(
                 "sourceFileRef": "file:original-electronic",
                 "sourcePageStart": 1,
                 "sourcePageEnd": 1,
-                "documentVersionKind": "ELECTRONIC",
             },
             {
                 "clientRef": "file:normalized-scanned",
@@ -848,7 +1448,6 @@ def test_sync_document_versions_skips_same_hash_and_rejects_non_unique_matches(
                 "sourceFileRef": "file:original-scanned",
                 "sourcePageStart": 1,
                 "sourcePageEnd": 1,
-                "documentVersionKind": "SCANNED",
             },
         ],
         "documents": [
@@ -858,6 +1457,7 @@ def test_sync_document_versions_skips_same_hash_and_rejects_non_unique_matches(
                 "documentNo": "〔2026〕第0036号",
                 "issueDate": "2026-05-19",
                 "stage": "INITIAL_CHECK",
+                "caseInspectionRefs": ["case-inspection:initial:2026-05-19"],
                 "productRefs": ["product:1"],
                 "inspectionRefs": ["inspection:1:initial_check"],
                 "versions": [
@@ -881,7 +1481,25 @@ def test_sync_document_versions_skips_same_hash_and_rejects_non_unique_matches(
             }
         ],
         "documentRequirements": [],
-        "fieldEvidence": [],
+        "fieldEvidence": [
+            {
+                "entityRef": "document:record-1",
+                "fieldPath": "stage",
+                "value": "INITIAL_CHECK",
+                "trustLevel": "DETERMINISTIC",
+                "sources": [
+                    {
+                        "kind": "RULE",
+                        "value": {
+                            "caseInspectionRef": "case-inspection:initial:2026-05-19",
+                            "inspectionRefs": ["inspection:1:initial_check"],
+                            "method": "DOCUMENT_LINK",
+                        },
+                        "evidence": "按关联检查记录唯一绑定初查。",
+                    }
+                ],
+            }
+        ],
         "missingItems": [
             {
                 "entityRef": "case:32002207C202600033",
@@ -920,11 +1538,36 @@ def test_sync_document_versions_skips_same_hash_and_rejects_non_unique_matches(
         )
         == []
     )
+    sync_args = argparse.Namespace(
+        manifest=str(manifest_path),
+        upload_map=str(upload_map_path),
+        api_base="https://example.invalid",
+        timeout=10.0,
+        dry_run=False,
+    )
+    with pytest.raises(RegistryError, match="必须先完成 upload validate/finalize"):
+        sync_document_versions_command(sync_args)
+    (tmp_path / "upload-state.json").write_text(
+        json.dumps(
+            {
+                "stateVersion": 1,
+                "manifestSha256": file_sha256(manifest_path),
+                "packageSha256": manifest["source"]["packageSha256"],
+                "jobId": "99999999-9999-4999-8999-999999999999",
+                "finalized": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
     server_state = {
         "uploadedKinds": set(),
         "caseMode": "unique",
         "documentMode": "unique",
+        "jobStatus": "NEEDS_REVIEW",
+        "jobPackageSha256": manifest["source"]["packageSha256"],
+        "jobProjectNo": manifest["case"]["projectNo"],
         "serverVersion": 3,
         "failKind": "SCANNED",
         "failRefreshKind": None,
@@ -962,6 +1605,16 @@ def test_sync_document_versions_skips_same_hash_and_rejects_non_unique_matches(
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/ready":
             return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/api/v1/import-jobs/99999999-9999-4999-8999-999999999999":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "99999999-9999-4999-8999-999999999999",
+                    "status": server_state["jobStatus"],
+                    "packageSha256": server_state["jobPackageSha256"],
+                    "resultSummary": {"projectNo": server_state["jobProjectNo"]},
+                },
+            )
         if request.url.path == "/api/v1/cases":
             cases = [
                 {
@@ -1024,13 +1677,7 @@ def test_sync_document_versions_skips_same_hash_and_rejects_non_unique_matches(
         )
 
     monkeypatch.setattr(registry_cli.httpx, "Client", client_factory)
-    args = argparse.Namespace(
-        manifest=str(manifest_path),
-        upload_map=str(upload_map_path),
-        api_base="https://example.invalid",
-        timeout=10.0,
-        dry_run=False,
-    )
+    args = sync_args
     with pytest.raises(RegistryError, match="SCANNED 版本同步失败"):
         sync_document_versions_command(args)
     failed_state = read_json(tmp_path / "document-version-sync-state.json")
@@ -1120,6 +1767,21 @@ def test_sync_document_versions_skips_same_hash_and_rejects_non_unique_matches(
     assert len(server_state["putAttempts"]) == 4
 
     server_state["documentMode"] = "unique"
+    server_state["jobStatus"] = "VALIDATED"
+    with pytest.raises(RegistryError, match="服务端导入任务必须已终结"):
+        sync_document_versions_command(args)
+    assert len(server_state["putAttempts"]) == 4
+    server_state["jobStatus"] = "NEEDS_REVIEW"
+    server_state["jobPackageSha256"] = "sha256:" + "b" * 64
+    with pytest.raises(RegistryError, match="包哈希与当前 manifest 不一致"):
+        sync_document_versions_command(args)
+    assert len(server_state["putAttempts"]) == 4
+    server_state["jobPackageSha256"] = manifest["source"]["packageSha256"]
+    server_state["jobProjectNo"] = "32002207C202699999"
+    with pytest.raises(RegistryError, match="项目编号与当前 manifest 不一致"):
+        sync_document_versions_command(args)
+    assert len(server_state["putAttempts"]) == 4
+    server_state["jobProjectNo"] = manifest["case"]["projectNo"]
     duplicate_local_manifest = json.loads(json.dumps(manifest))
     duplicate_local_document = json.loads(json.dumps(duplicate_local_manifest["documents"][0]))
     duplicate_local_document["clientRef"] = "document:record-duplicate"
