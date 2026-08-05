@@ -55,6 +55,10 @@ class DownloadError(RuntimeError):
     """Expected, user-actionable download failure."""
 
 
+class PauseRequested(DownloadError):
+    """A durable queue asked this transfer to stop at the next safe boundary."""
+
+
 @dataclass(frozen=True)
 class DownloadRequest:
     filename: str
@@ -97,6 +101,74 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     temp = path.with_name(f".{path.name}.tmp")
     temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temp, path)
+
+
+def read_transfer_control(control_file: Path | None) -> str | None:
+    """Read the queue control file without changing it.
+
+    Only ``pause`` and ``stop`` are actionable.  The caller intentionally checks
+    this only between transfer steps: killing a live SFTP/SSH process would make
+    recovery less predictable, while this still leaves at most one remote chunk.
+    """
+
+    if control_file is None or not control_file.exists():
+        return None
+    try:
+        payload = json.loads(control_file.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DownloadError(f"下载控制文件无效：{control_file}") from exc
+    action = str(payload.get("action", "")).strip().lower()
+    return action if action in {"pause", "stop"} else None
+
+
+def ensure_transfer_not_paused(control_file: Path | None) -> None:
+    action = read_transfer_control(control_file)
+    if action:
+        raise PauseRequested(f"队列请求{action}，已在安全边界暂停传输。")
+
+
+def ssh_effective_config(host: str) -> dict[str, str]:
+    """Return the effective OpenSSH config used by both ssh and sftp."""
+
+    result = subprocess.run(
+        ["ssh", "-G", host],
+        text=True,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise DownloadError(f"无法读取 SSH 连接配置：{detail[-800:]}")
+    config: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition(" ")
+        if separator:
+            config[key.strip().lower()] = value.strip()
+    return config
+
+
+def ensure_direct_meifu_route(host: str, expected_hostname: str, allow_proxy_route: bool) -> dict[str, str]:
+    """Refuse an SSH ProxyJump/ProxyCommand route unless explicitly overridden."""
+
+    config = ssh_effective_config(host)
+    proxy_command = config.get("proxycommand", "none").strip().lower()
+    proxy_jump = config.get("proxyjump", "none").strip().lower()
+    effective_host = config.get("hostname", "").strip()
+    if not allow_proxy_route and (proxy_command not in {"", "none"} or proxy_jump not in {"", "none"}):
+        raise DownloadError("SSH 配置包含 ProxyJump 或 ProxyCommand；为避免经 CN2 中转，已拒绝下载。")
+    if expected_hostname and effective_host != expected_hostname:
+        raise DownloadError(
+            f"SSH 别名 {host} 解析到 {effective_host or '空'}，不是要求的美服直连地址 {expected_hostname}。"
+        )
+    return {
+        "alias": host,
+        "hostname": effective_host,
+        "port": config.get("port", ""),
+        "proxycommand": proxy_command,
+        "proxyjump": proxy_jump,
+        "direct_config_verified": not allow_proxy_route,
+    }
 
 
 def normalize_sha256(value: str | None) -> str | None:
@@ -442,6 +514,8 @@ def print_dry_run(request: DownloadRequest, primary: Path, fallback: Path, args:
         },
         "transport": {
             "remote_host": args.host,
+            "expected_hostname": args.expected_hostname,
+            "proxy_route": "rejected unless --allow-proxy-route is supplied",
             "remote_cache": args.remote_cache,
             "chunk_gib": args.chunk_gib,
             "remote_reserve_gib": args.remote_reserve_gib,
@@ -463,6 +537,7 @@ def print_probe(
     primary: Path,
     fallback: Path,
     args: argparse.Namespace,
+    route: dict[str, str],
 ) -> None:
     resolved = resolve_expected_hash(request, probe, args.allow_unverified_source)
     total_size = int(probe["size_bytes"])
@@ -487,10 +562,13 @@ def print_probe(
         "selected_staging_root": str(selection.staging_root),
         "selected_root_free_bytes": selection.free_bytes,
         "storage_reason": selection.reason,
+        "ssh_route": route,
     }, ensure_ascii=False, indent=2))
 
 
 def execute(request: DownloadRequest, args: argparse.Namespace, primary: Path, fallback: Path) -> None:
+    ensure_transfer_not_paused(args.control_file)
+    route = ensure_direct_meifu_route(args.host, args.expected_hostname, args.allow_proxy_route)
     probe = remote_probe(args.host, args.remote_cache, request.source_url)
     request = resolve_expected_hash(request, probe, args.allow_unverified_source)
     total_size = int(probe["size_bytes"])
@@ -534,6 +612,7 @@ def execute(request: DownloadRequest, args: argparse.Namespace, primary: Path, f
     for index in range(chunk_count):
         if index in complete:
             continue
+        ensure_transfer_not_paused(args.control_file)
         size = chunk_size_at(index, total_size, chunk_bytes)
         start = index * chunk_bytes
         remote_part = f"{remote_job}/parts/{index:06d}.part"
@@ -546,6 +625,9 @@ def execute(request: DownloadRequest, args: argparse.Namespace, primary: Path, f
             start=start,
             end=start + size - 1,
         )
+        # If a pause arrives while Meifu was fetching, keep this one verified
+        # remote piece for the later resume instead of starting local traffic.
+        ensure_transfer_not_paused(args.control_file)
         sftp_reget(args.host, remote_part, local_part)
         if local_part.stat().st_size != size:
             raise DownloadError(f"本地分块 {index} 大小不符，保留临时文件等待续传。")
@@ -567,6 +649,7 @@ def execute(request: DownloadRequest, args: argparse.Namespace, primary: Path, f
             "total_bytes": total_size,
         }, ensure_ascii=False))
 
+    ensure_transfer_not_paused(args.control_file)
     if assembled.stat().st_size != total_size:
         raise DownloadError("所有分块完成后，本地合成文件大小仍不正确。")
     verified_sha256 = sha256_file(assembled)
@@ -583,6 +666,7 @@ def execute(request: DownloadRequest, args: argparse.Namespace, primary: Path, f
         "size_bytes": total_size,
         "sha256": verified_sha256,
         "storage_reason": selection.reason,
+        "ssh_route": route,
         "remote_cache_cleaned": remote_job,
     }, ensure_ascii=False, indent=2))
 
@@ -599,6 +683,16 @@ def parse_args() -> argparse.Namespace:
     request_group.add_argument("--allow-unverified-source", action="store_true")
     transport = parser.add_argument_group("中转设置")
     transport.add_argument("--host", default=DEFAULT_HOST)
+    transport.add_argument(
+        "--expected-hostname",
+        default="192.129.128.54",
+        help="美服 SSH 别名应直接解析到的地址；空字符串可关闭地址比对。",
+    )
+    transport.add_argument(
+        "--allow-proxy-route",
+        action="store_true",
+        help="允许 SSH ProxyJump/ProxyCommand；默认拒绝，防止意外经 CN2 或其他跳板中转。",
+    )
     transport.add_argument("--remote-cache", default=DEFAULT_REMOTE_CACHE)
     transport.add_argument("--chunk-gib", type=float, default=DEFAULT_CHUNK_GIB)
     transport.add_argument("--remote-reserve-gib", type=float, default=DEFAULT_REMOTE_RESERVE_GIB)
@@ -609,6 +703,11 @@ def parse_args() -> argparse.Namespace:
     storage.add_argument("--primary-threshold-gib", type=int, default=DEFAULT_PRIMARY_THRESHOLD_GIB)
     storage.add_argument("--local-reserve-gib", type=float, default=DEFAULT_LOCAL_RESERVE_GIB)
     storage.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    parser.add_argument(
+        "--control-file",
+        type=Path,
+        help="队列暂停控制文件；出现 pause/stop 时在下一个安全边界返回 75，不清除续传状态。",
+    )
     parser.add_argument("--probe-only", action="store_true", help="只验证来源范围、哈希线索和存储容量，不创建缓存")
     parser.add_argument("--execute", action="store_true", help="允许创建缓存、传输和写入模型目录")
     return parser.parse_args()
@@ -633,14 +732,23 @@ def main() -> int:
         if args.probe_only and args.execute:
             raise DownloadError("--probe-only 不能与 --execute 同时使用。")
         if args.probe_only:
+            route = ensure_direct_meifu_route(args.host, args.expected_hostname, args.allow_proxy_route)
             probe = remote_probe(args.host, args.remote_cache, request.source_url)
-            print_probe(request, probe, primary, fallback, args)
+            print_probe(request, probe, primary, fallback, args, route)
             return 0
         if not args.execute:
             print_dry_run(request, primary, fallback, args)
             return 0
         execute(request, args, primary, fallback)
         return 0
+    except PauseRequested as exc:
+        print(json.dumps({
+            "status": "paused",
+            "error": str(exc),
+            "control_file": str(args.control_file) if args.control_file else None,
+            "resume": "移除或改写控制文件后，重新运行同一队列即可续传。",
+        }, ensure_ascii=False), file=sys.stderr)
+        return 75
     except (DownloadError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
         print(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2

@@ -45,10 +45,13 @@ description: 管理本机 ComfyUI 的工作流、模型与 AI 创作项目。用
 2. 当前默认根目录是 `D:\Comfy-Desktop\ComfyUI-Shared\models`；D 盘可用空间低于 200 GiB，或不足以容纳“模型 + 传输块 + 预留”时，才回退到 `C:\Users\12070\Documents\ComfyUI\models`。不手改 Desktop 生成的共享路径配置。
 3. 先运行 `scripts/audit_models.py` 盘点两个模型根目录，再用 `scripts/audit_model_dependencies.py` 从模板库提取“已安装 / 缺失 / 未解析”的模型依赖与直链。
 4. 只把类别、来源和文件名都明确的 `missing` 项作为下载候选；`unresolved`、同名多来源、不同精度或不同训练版本必须先人工确认，不能静默替换。
-5. 下载模型前先执行 `scripts/stage_model_download.py` 的 dry-run 或 `--probe-only`；只有当前用户明确要求下载后才加 `--execute`。
+5. 下载模型前先执行 `scripts/stage_model_download.py` 的 dry-run 或 `--probe-only`；只有当前用户明确要求下载后才加 `--execute`。批量下载只允许使用依赖报告中 `download_candidates`，不能把 `unresolved` 或类别冲突条目混入队列。
 6. 执行时使用“官方 HTTPS → 美服 `/root/.cache/comfyui-models` 分块缓存 → SFTP `reget` 本地续传 → SHA-256 → 原子落位”的链路。默认块为 2 GiB，成功的块立即从美服删除，完整任务成功后清理远端任务目录；断线时保留未完成状态以便继续。
-7. 为每个模型登记文件名、类别、相对路径、大小、SHA-256、脱敏来源、许可证、精度/版本、适用工作流和已知显存需求。大模型的实际下载成功不等于显存能完整加载；显存兼容性单独报告。
-8. 模型移动、覆盖或删除属于外部状态变更。默认只生成清单和建议；已有不同文件时下载器拒绝覆盖，删除前先检查工作流、项目 manifest、模型目录登记和 ComfyUI 日志。
+7. 批量任务使用 `scripts/model_download_queue.py`：一个持久 JSON 队列只启动一个模型工作者，且美服最多保留一个当前分块。`pause` 在安全边界暂停；`pause --immediate` 只结束该下载子进程树；任务停止后 `cleanup-remote` 仅删除该队列生成的远端任务目录。失败项标记为 `blocked`，只允许人工 `retry`，不能后台无限重试。
+8. 美服连接只能通过 `meifu主机` 直连 `192.129.128.54:22`；启动前和每个模型传输前都检查有效 SSH 配置，发现 `ProxyJump` 或 `ProxyCommand`、或地址不匹配即拒绝，不能经 CN2 或其他跳板中转。
+9. 后台队列使用唯一计划任务 `\DevProjects\COMFY\AUTO\DEV-COMFY-AUTO-01-ModelDownloadQueue`。它以已验证的 `C:\Users\12070\Documents\ComfyUI\.venv\TaskScripts\pythonw.exe` 启动，`MultipleInstances=IgnoreNew`；创建、查看、精确卸载分别只能用三个生命周期脚本和工作区 `docs/WINDOWS_TASK_CATALOG.md`。
+10. 为每个模型登记文件名、类别、相对路径、大小、SHA-256、脱敏来源、许可证、精度/版本、适用工作流和已知显存需求。大模型的实际下载成功不等于显存能完整加载；显存兼容性单独报告。
+11. 模型移动、覆盖或删除属于外部状态变更。默认只生成清单和建议；已有不同文件时下载器拒绝覆盖，删除前先检查工作流、项目 manifest、模型目录登记和 ComfyUI 日志。
 
 详见 `references/model-management.md`。
 
@@ -104,3 +107,5 @@ projects/<project>/
 - `scripts/model_paths.py`：读取 Comfy Desktop 共享模型路径，并按 D 盘 200 GiB 阈值选择默认/备用落盘位置。
 - `scripts/audit_model_dependencies.py`：从模板 `MarkdownNote` 和模型加载器提取模型依赖、来源与缺口；不下载模型。
 - `scripts/stage_model_download.py`：经美服分块缓存和 SFTP 断点续传下载一项已确认依赖；没有 `--execute` 不产生下载或落盘动作。
+- `scripts/model_download_queue.py`：把已确认候选建成可暂停、单工作者、手动重试的持久下载队列。
+- `scripts/install-model-download-queue-task.ps1`、`show-model-download-queue-task.ps1`、`uninstall-model-download-queue-task.ps1`：唯一后台队列任务的安装、只读查看和精确卸载入口。

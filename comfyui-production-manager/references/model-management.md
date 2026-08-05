@@ -48,6 +48,16 @@ python scripts/audit_model_dependencies.py --workflow-root "<工作区>\workflow
 
 美服每个块会在本机校验、写入合成文件并登记进度后立即删除；完整模型成功落盘后会清理该任务的远端缓存目录。因此美服不需要容纳完整模型，可中转超过其剩余空间的大文件。中断时保留未完成的本地状态和当前美服分块，再次执行同一命令即可续传。
 
+### 直连约束
+
+模型中转只允许 SSH 别名 `meifu主机` 直连 `192.129.128.54:22`。下载器会先读取 `ssh -G meifu主机` 的有效配置，只有同时满足以下条件才联网：
+
+- `hostname = 192.129.128.54`；
+- `proxycommand = none`；
+- `proxyjump = none`。
+
+这只验证本机 SSH 配置层的直连路径；发现 CN2 或其他跳板配置时下载器会拒绝执行，而不是悄悄改走中转。
+
 使用顺序：
 
 ```powershell
@@ -64,6 +74,47 @@ python scripts/stage_model_download.py --dependency-report "<工作区>\models\t
 下载器只接受 HTTPS、受支持的模型扩展名和安全的类别名。优先从 Hugging Face LFS 的 ETag 自动获得 SHA-256；没有可用官方哈希时默认拒绝写入。仅在用户明确接受来源校验风险时，才能传入 `--allow-unverified-source`。
 
 需要登录或同意许可证的 Hugging Face 仓库，先由用户在模型卡完成授权，并在美服以受限权限配置令牌；不得把令牌写入聊天、命令行、工作区、下载报告或 Git。带签名查询参数的 URL 也不得写入可提交的登记文件。
+
+## 批量队列、暂停与缓存回收
+
+当用户已明确要求下载全部“安全候选”时，使用持久队列，而不是在会话中并行启动多个下载：
+
+```powershell
+# 仅从报告中的 download_candidates 建立队列；不会纳入 unresolved 或类别冲突项。
+python scripts/model_download_queue.py initialize
+
+# 单工作者执行，适合由受管计划任务长期运行。
+python scripts/model_download_queue.py run --recover-stale-lock
+
+# 查看当前模型、子进程 PID、暂停请求、已完成和 blocked 计数。
+python scripts/model_download_queue.py status
+
+# 默认等当前 SSH/SFTP 步骤结束后安全暂停；最多保留一个 2 GiB 当前分块。
+python scripts/model_download_queue.py pause
+
+# 需要立即中断时只结束当前下载子进程树；本地 state 和已验证分块保持可续传。
+python scripts/model_download_queue.py pause --immediate
+
+# 移除暂停请求后，再启动同一个受管任务即可续传。
+python scripts/model_download_queue.py resume
+
+# 队列任务确认停止后，精确清理未完成任务在美服上的缓存目录。
+python scripts/model_download_queue.py cleanup-remote
+```
+
+队列文件为 `<工作区>\models\download_queue.json`，控制文件为同目录 `download_queue.control.json`，日志为 `models\logs\model_download_queue.log`。所有状态写入均采用同目录临时文件后原子替换。一个队列锁只允许一个工作者；Windows 计划任务也设置 `MultipleInstances=IgnoreNew`，防止登录触发、手工启动和会话重连堆出多个后台下载。
+
+自动下载只会把单次失败标为 `blocked`，不进行循环重试。处理好模型卡授权、来源链接或磁盘空间后，再明确运行 `retry`。成功下载的模型立即更新 `models/catalog.json`；已有不同文件、完整 SHA-256 不匹配或本地空间不满足预留时都会停止该条目，不覆盖模型目录。
+
+## 后台任务
+
+受管任务的唯一身份是：
+
+```text
+\DevProjects\COMFY\AUTO\DEV-COMFY-AUTO-01-ModelDownloadQueue
+```
+
+安装、查看、卸载分别使用 `install-model-download-queue-task.ps1`、`show-model-download-queue-task.ps1`、`uninstall-model-download-queue-task.ps1`。安装脚本从 ComfyUI 虚拟环境的基础 Python 复制并校验 GUI 子系统启动器到 `C:\Users\12070\Documents\ComfyUI\.venv\TaskScripts\pythonw.exe`，不依赖系统 Python/PATH，也不会开出控制台窗口。任务清单和运行边界以工作区 `docs\WINDOWS_TASK_CATALOG.md` 为准。
 
 ## 登记、清理与删除
 
