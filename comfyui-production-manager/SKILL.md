@@ -1,6 +1,6 @@
 ---
 name: comfyui-production-manager
-description: 管理本机 ComfyUI 的工作流、模型与 AI 创作项目。用户要求整理/去重/归档/命名工作流、检查节点和模型依赖、规划模型目录、准备图像/视频/音频/3D 创作流程、建立项目资产与分镜台账，或询问 ComfyUI MCP/Agent 配置时使用。也用于把工作区母版安全同步到 ComfyUI 运行目录并验证哈希。
+description: 管理本机 ComfyUI 的工作流、模型与 AI 创作项目。用户要求整理/去重/归档/命名工作流、检查模板缺失模型、确认模型存放位置、通过美服分块缓存实现模型断点下载、规划模型目录、准备图像/视频/音频/3D 创作流程、建立项目资产与分镜台账，或询问 ComfyUI MCP/Agent 配置时使用。也用于把工作区母版安全同步到 ComfyUI 运行目录并验证哈希。
 ---
 
 # ComfyUI Production Manager
@@ -41,11 +41,14 @@ description: 管理本机 ComfyUI 的工作流、模型与 AI 创作项目。用
 
 ### 2. 模型管理
 
-1. 先查本地模型和 `extra_model_paths.yaml`，再决定下载；同一模型只保留一个真实文件，工作流引用相对路径。
-2. 按 `checkpoints`、`diffusion_models`、`text_encoders`、`vae`、`loras`、`controlnet`、`clip_vision`、`sam`、`upscale_models`、`audio`、`3d` 等类别盘点。
-3. 为每个模型登记文件名、类别、相对路径、大小、SHA-256（大文件可按需计算）、来源 URL、许可证、精度/版本、适用工作流和已知显存需求。
-4. 工作流缺模型时报告“缺失模型 + 期望目录 + 来源/许可证状态”，不要静默替换模型；不同精度或不同版本必须标为不同变体。
-5. 模型下载、移动或删除属于外部状态变更，执行前确认目标目录和授权；默认只生成清单和建议。
+1. 先读取运行进程实际使用的 `C:\Users\12070\AppData\Roaming\Comfy Desktop\shared_model_paths.yaml`，不要只扫描 ComfyUI 安装目录。
+2. 当前默认根目录是 `D:\Comfy-Desktop\ComfyUI-Shared\models`；D 盘可用空间低于 200 GiB，或不足以容纳“模型 + 传输块 + 预留”时，才回退到 `C:\Users\12070\Documents\ComfyUI\models`。不手改 Desktop 生成的共享路径配置。
+3. 先运行 `scripts/audit_models.py` 盘点两个模型根目录，再用 `scripts/audit_model_dependencies.py` 从模板库提取“已安装 / 缺失 / 未解析”的模型依赖与直链。
+4. 只把类别、来源和文件名都明确的 `missing` 项作为下载候选；`unresolved`、同名多来源、不同精度或不同训练版本必须先人工确认，不能静默替换。
+5. 下载模型前先执行 `scripts/stage_model_download.py` 的 dry-run 或 `--probe-only`；只有当前用户明确要求下载后才加 `--execute`。
+6. 执行时使用“官方 HTTPS → 美服 `/root/.cache/comfyui-models` 分块缓存 → SFTP `reget` 本地续传 → SHA-256 → 原子落位”的链路。默认块为 2 GiB，成功的块立即从美服删除，完整任务成功后清理远端任务目录；断线时保留未完成状态以便继续。
+7. 为每个模型登记文件名、类别、相对路径、大小、SHA-256、脱敏来源、许可证、精度/版本、适用工作流和已知显存需求。大模型的实际下载成功不等于显存能完整加载；显存兼容性单独报告。
+8. 模型移动、覆盖或删除属于外部状态变更。默认只生成清单和建议；已有不同文件时下载器拒绝覆盖，删除前先检查工作流、项目 manifest、模型目录登记和 ComfyUI 日志。
 
 详见 `references/model-management.md`。
 
@@ -98,3 +101,6 @@ projects/<project>/
 - `references/mcp-and-validation.md`：MCP/Agent 边界、节点依赖和运行前检查。
 - `scripts/audit_workflows.py`：扫描 JSON、校验结构、识别精确/规范化重复并输出报告。
 - `scripts/curate_template_candidates.py`：将待整理模板与统一模板库做功能签名对照，只给出候选建议，不自动删除。
+- `scripts/model_paths.py`：读取 Comfy Desktop 共享模型路径，并按 D 盘 200 GiB 阈值选择默认/备用落盘位置。
+- `scripts/audit_model_dependencies.py`：从模板 `MarkdownNote` 和模型加载器提取模型依赖、来源与缺口；不下载模型。
+- `scripts/stage_model_download.py`：经美服分块缓存和 SFTP 断点续传下载一项已确认依赖；没有 `--execute` 不产生下载或落盘动作。
