@@ -1,4 +1,4 @@
 interface:
   display_name: "ComfyUI 生产管理"
-  short_description: "统一管理 ComfyUI 工作流、模型与 AI 创作项目"
-  default_prompt: "使用 $comfyui-production-manager 审计我的 ComfyUI 工作流、模型依赖和创作项目，并按规则整理目录。"
+  short_description: "管理混合模板库、模型依赖与 AI 创作项目"
+  default_prompt: "使用 $comfyui-production-manager 对 ComfyUI 模板库做功能去重、学习价值筛选、模型依赖审计和创作项目管理。"
