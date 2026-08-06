@@ -436,15 +436,16 @@ def wait_for_child(process: subprocess.Popen[str], control_file: Path, log_path:
 
 
 def run_queue(args: argparse.Namespace) -> int:
-    queue = read_json(args.queue)
-    validate_queue(queue)
     require_standard_remote_cache(args.remote_cache)
     if args.network_retry_delay_seconds <= 0:
         raise QueueError("--network-retry-delay-seconds 必须大于 0。")
     route = ensure_direct_meifu_route(args.host, args.expected_hostname, allow_proxy_route=False)
     lock = acquire_lock(args.queue, recover_stale=args.recover_stale_lock)
+    queue: dict[str, Any] | None = None
     processed = 0
     try:
+        queue = read_json(args.queue)
+        validate_queue(queue)
         recovered = recover_unfinished_entries(queue)
         queue["state"] = "running"
         queue["worker"] = {
@@ -577,9 +578,10 @@ def run_queue(args: argparse.Namespace) -> int:
                 append_log(args.log_file, f"模型已阻塞，不自动重试 {entry['id']} exit={exit_code}。")
             save_queue(args.queue, queue)
     finally:
-        queue["worker"] = {"pid": None, "stopped_at": now(), "max_concurrent_models": 1, "max_remote_chunks": 1}
-        queue.pop("active_entry_id", None)
-        save_queue(args.queue, queue)
+        if queue is not None:
+            queue["worker"] = {"pid": None, "stopped_at": now(), "max_concurrent_models": 1, "max_remote_chunks": 1}
+            queue.pop("active_entry_id", None)
+            save_queue(args.queue, queue)
         release_lock(lock)
 
 
@@ -689,31 +691,37 @@ def status_queue(args: argparse.Namespace) -> int:
 
 
 def retry_queue(args: argparse.Namespace) -> int:
-    queue = read_json(args.queue)
-    validate_queue(queue)
-    selected = [entry for entry in queue["entries"] if entry.get("status") == "blocked"]
-    if args.entry_id:
-        selected = [entry for entry in selected if entry.get("id") == args.entry_id]
-    if args.transport_only:
-        selected = [
-            entry for entry in selected
-            if is_transient_transfer_detail(str(entry.get("last_error", "")), returncode=entry.get("last_exit_code"))
-        ]
-    if not selected:
-        selector = "临时传输故障" if args.transport_only else "blocked"
-        raise QueueError(f"没有匹配的 {selector} 模型可重试。")
-    for entry in selected:
-        update_entry(entry, "queued", retry_requested_at=now())
-        clear_network_backoff(entry)
-    queue["state"] = "queued"
-    queue.pop("network_wait", None)
-    save_queue(args.queue, queue)
-    print(json.dumps({
-        "status": "retry_queued",
-        "transport_only": args.transport_only,
-        "entry_ids": [entry["id"] for entry in selected],
-    }, ensure_ascii=False, indent=2))
-    return 0
+    # Acquire the same lock as the worker so a manual retry can never overwrite
+    # in-memory progress held by an active queue process.
+    lock = acquire_lock(args.queue, recover_stale=True)
+    try:
+        queue = read_json(args.queue)
+        validate_queue(queue)
+        selected = [entry for entry in queue["entries"] if entry.get("status") == "blocked"]
+        if args.entry_id:
+            selected = [entry for entry in selected if entry.get("id") == args.entry_id]
+        if args.transport_only:
+            selected = [
+                entry for entry in selected
+                if is_transient_transfer_detail(str(entry.get("last_error", "")), returncode=entry.get("last_exit_code"))
+            ]
+        if not selected:
+            selector = "临时传输故障" if args.transport_only else "blocked"
+            raise QueueError(f"没有匹配的 {selector} 模型可重试。")
+        for entry in selected:
+            update_entry(entry, "queued", retry_requested_at=now())
+            clear_network_backoff(entry)
+        queue["state"] = "queued"
+        queue.pop("network_wait", None)
+        save_queue(args.queue, queue)
+        print(json.dumps({
+            "status": "retry_queued",
+            "transport_only": args.transport_only,
+            "entry_ids": [entry["id"] for entry in selected],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        release_lock(lock)
 
 
 def cleanup_remote_cache(args: argparse.Namespace) -> int:
