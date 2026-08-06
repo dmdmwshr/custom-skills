@@ -46,7 +46,7 @@ python scripts/audit_model_dependencies.py --workflow-root "<工作区>\workflow
 → 本机 SFTP reget 续传 → 本地临时合成 → SHA-256 校验 → 正确模型目录
 ```
 
-美服每个块会在本机校验、写入合成文件并登记进度后立即删除；完整模型成功落盘后会清理该任务的远端缓存目录。因此美服不需要容纳完整模型，可中转超过其剩余空间的大文件。中断时保留未完成的本地状态和当前美服分块，再次执行同一命令即可续传。
+美服每个块会在本机校验、写入合成文件并登记进度后立即删除；完整模型成功落盘后会清理该任务的远端缓存目录。因此美服不需要容纳完整模型，可中转超过其剩余空间的大文件。中断、断网或本机意外关机时保留未完成的本地状态、合成文件和当前美服分块；再次执行同一命令即可续传。SSH/SFTP 配置了 30 秒存活检测、最多 3 次未响应即退出，以免无网络时无限挂住子进程。
 
 ### 直连约束
 
@@ -98,13 +98,18 @@ python scripts/model_download_queue.py pause --immediate
 # 移除暂停请求后，再启动同一个受管任务即可续传。
 python scripts/model_download_queue.py resume
 
+# 仅将以前因 SSH/SFTP/上游临时网络故障误阻塞的条目重新排队。
+python scripts/model_download_queue.py retry --transport-only
+
 # 队列任务确认停止后，精确清理未完成任务在美服上的缓存目录。
 python scripts/model_download_queue.py cleanup-remote
 ```
 
 队列文件为 `<工作区>\models\download_queue.json`，控制文件为同目录 `download_queue.control.json`，日志为 `models\logs\model_download_queue.log`。所有状态写入均采用同目录临时文件后原子替换。一个队列锁只允许一个工作者；Windows 计划任务也设置 `MultipleInstances=IgnoreNew`，防止登录触发、手工启动和会话重连堆出多个后台下载。
 
-自动下载只会把单次失败标为 `blocked`，不进行循环重试。处理好模型卡授权、来源链接或磁盘空间后，再明确运行 `retry`。成功下载的模型立即更新 `models/catalog.json`；已有不同文件、完整 SHA-256 不匹配或本地空间不满足预留时都会停止该条目，不覆盖模型目录。
+队列先做一次美服 SSH 连通性探测；临时 SSH/SFTP 断线、DNS/路由异常以及上游 408/425/429/5xx 会进入 `waiting_for_network`，保留断点并给当前条目写入指数退避时间（首次 15 分钟，最多 6 小时），然后结束本次工作者，不会继续误阻塞后续模型。计划任务每 30 分钟短暂唤醒一次，网络恢复后从原断点继续；用户也可运行 `resume` 立即清除网络退避。突然关机或进程被结束后，下一次带 `--recover-stale-lock` 的受管启动会把遗留的 `running` 条目安全改回 `queued`，不删除任何局部文件或远端分块。
+
+只有模型卡授权、来源链接 4xx、类别/哈希校验、已有不同本地文件或磁盘空间等永久问题才会标为 `blocked`，不自动循环重试。处理完原因后明确运行 `retry`；如果只是旧版本的网络误判，使用 `retry --transport-only`。成功下载的模型立即更新 `models/catalog.json`；已有不同文件、完整 SHA-256 不匹配或本地空间不满足预留时都会停止该条目，不覆盖模型目录。
 
 ## 后台任务
 
@@ -114,7 +119,7 @@ python scripts/model_download_queue.py cleanup-remote
 \DevProjects\COMFY\AUTO\DEV-COMFY-AUTO-01-ModelDownloadQueue
 ```
 
-安装、查看、卸载分别使用 `install-model-download-queue-task.ps1`、`show-model-download-queue-task.ps1`、`uninstall-model-download-queue-task.ps1`。安装脚本从 ComfyUI 虚拟环境的基础 Python 复制并校验 GUI 子系统启动器到 `C:\Users\12070\Documents\ComfyUI\.venv\TaskScripts\pythonw.exe`，不依赖系统 Python/PATH，也不会开出控制台窗口。任务清单和运行边界以工作区 `docs\WINDOWS_TASK_CATALOG.md` 为准。
+安装、查看、卸载分别使用 `install-model-download-queue-task.ps1`、`show-model-download-queue-task.ps1`、`uninstall-model-download-queue-task.ps1`。安装脚本从 ComfyUI 虚拟环境的基础 Python 复制并校验 GUI 子系统启动器到 `C:\Users\12070\Documents\ComfyUI\.venv\TaskScripts\pythonw.exe`，不依赖系统 Python/PATH，也不会开出控制台窗口。任务在登录时和之后每 30 分钟运行一次，`MultipleInstances=IgnoreNew` 保证同一时刻只有一个工作者。任务清单和运行边界以工作区 `docs\WINDOWS_TASK_CATALOG.md` 为准。
 
 ## 登记、清理与删除
 

@@ -22,7 +22,7 @@ $QueueFile = Join-Path $Workspace 'models\download_queue.json'
 $ControlFile = Join-Path $Workspace 'models\download_queue.control.json'
 $QueueLog = Join-Path $Workspace 'models\logs\model_download_queue.log'
 $Catalog = Join-Path $Workspace 'models\catalog.json'
-$Description = '[DEV_TASK_V1][project=comfyui-production-manager][id=AUTO-01][category=AUTO] ComfyUI 模板缺失模型队列：登录后以单工作者、单个美服分块执行；仅直连 meifu主机(192.129.128.54:22)，拒绝 ProxyJump/ProxyCommand；不读取凭据，不覆盖已有模型，支持安全暂停、断点续传和精确缓存清理。'
+$Description = '[DEV_TASK_V1][project=comfyui-production-manager][id=AUTO-01][category=AUTO] ComfyUI 模板缺失模型队列：登录后及每 30 分钟以单工作者、单个美服分块执行；仅直连 meifu主机(192.129.128.54:22)，拒绝 ProxyJump/ProxyCommand；临时网络故障保留断点并等待下次唤醒，意外关机后恢复 running 条目；不读取凭据，不覆盖已有模型，支持安全暂停和精确缓存清理。'
 
 function Get-PeSubsystem {
     param([Parameter(Mandatory)][string]$Path)
@@ -130,11 +130,18 @@ $argumentList = @(
     '--expected-hostname', '192.129.128.54',
     '--remote-cache', '/root/.cache/comfyui-models',
     '--chunk-gib', '2',
+    '--network-retry-delay-seconds', '900',
     '--recover-stale-lock'
 ) -join ' '
 
 $action = New-ScheduledTaskAction -Execute $launcher.Path -Argument $argumentList -WorkingDirectory $SkillScripts
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
+$retryStart = (Get-Date).AddMinutes(5)
+$networkRetryTrigger = New-ScheduledTaskTrigger `
+    -Once `
+    -At $retryStart `
+    -RepetitionInterval (New-TimeSpan -Minutes 30) `
+    -RepetitionDuration (New-TimeSpan -Days 365)
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
@@ -152,7 +159,7 @@ Register-ScheduledTask `
     -TaskName $TaskName `
     -TaskPath $TaskPath `
     -Action $action `
-    -Trigger $trigger `
+    -Trigger @($logonTrigger, $networkRetryTrigger) `
     -Settings $settings `
     -Principal $principal `
     -Description $Description `

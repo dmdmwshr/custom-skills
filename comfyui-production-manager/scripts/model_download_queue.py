@@ -6,7 +6,9 @@ The queue is deliberately conservative:
 * all progress is written atomically to a local JSON queue file;
 * ``pause`` lets the current transfer reach a safe boundary, while
   ``pause --immediate`` asks the worker to terminate its exact child tree;
-* failed sources become ``blocked`` and do not create an automatic retry loop.
+* permanent source or integrity failures become ``blocked`` for manual review;
+* a temporary SSH/SFTP/upstream network outage preserves progress and waits for
+  a later scheduled or manual queue run instead of poisoning later entries.
 
 It invokes ``stage_model_download.py`` for the actual verified, resumable
 Meifu-to-local transfer.  It does not install a model merely because its name
@@ -18,7 +20,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -30,7 +32,15 @@ import time
 from typing import Any
 from urllib.parse import urlsplit
 
-from stage_model_download import DEFAULT_HOST, DEFAULT_REMOTE_CACHE, ensure_direct_meifu_route
+from stage_model_download import (
+    DEFAULT_HOST,
+    DEFAULT_REMOTE_CACHE,
+    TEMPORARY_TRANSFER_EXIT_CODE,
+    TransferUnavailable,
+    ensure_direct_meifu_route,
+    is_transient_transfer_detail,
+    verify_meifu_connection,
+)
 
 
 WORKSPACE = Path(r"D:\12070\Documents\workspaces\Comfy-Codex-Workspace")
@@ -43,6 +53,8 @@ DEFAULT_STAGE_SCRIPT = Path(__file__).with_name("stage_model_download.py")
 DEFAULT_EXPECTED_HOSTNAME = "192.129.128.54"
 DEFAULT_CHUNK_GIB = 2.0
 PAUSE_EXIT_CODE = 75
+DEFAULT_NETWORK_RETRY_DELAY_SECONDS = 15 * 60
+MAX_NETWORK_RETRY_DELAY_SECONDS = 6 * 60 * 60
 QUEUE_SCHEMA = "ComfyUIModelDownloadQueueV1"
 ENTRY_STATES = {"queued", "running", "completed", "blocked", "skipped"}
 FILENAME_RE = re.compile(r"^[^\\/:*?\"<>|]+\.(?:safetensors|ckpt|pth|pt|bin|gguf|onnx)$", re.IGNORECASE)
@@ -140,6 +152,7 @@ def queue_summary(queue: dict[str, Any]) -> dict[str, Any]:
         } if active else None,
         "worker": queue.get("worker", {}),
         "direct_route": queue.get("config", {}).get("direct_route"),
+        "network_wait": queue.get("network_wait"),
         "excluded": queue.get("excluded", {}),
         "updated_at": queue.get("updated_at"),
     }
@@ -282,9 +295,37 @@ def tail_text(path: Path, limit: int = 1600) -> str:
     return text[-limit:].strip()
 
 
+def parse_utc_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def queued_entries(queue: dict[str, Any]) -> list[dict[str, Any]]:
+    return [entry for entry in queue["entries"] if entry.get("status") == "queued"]
+
+
 def next_queued_entry(queue: dict[str, Any]) -> dict[str, Any] | None:
-    queued = [entry for entry in queue["entries"] if entry.get("status") == "queued"]
-    return min(queued, key=lambda entry: (int(entry.get("priority", 0)), str(entry.get("id", "")))) if queued else None
+    current = datetime.now(timezone.utc)
+    eligible = [
+        entry
+        for entry in queued_entries(queue)
+        if (retry_at := parse_utc_timestamp(entry.get("next_attempt_after"))) is None or retry_at <= current
+    ]
+    return min(eligible, key=lambda entry: (int(entry.get("priority", 0)), str(entry.get("id", "")))) if eligible else None
+
+
+def earliest_retry_after(queue: dict[str, Any]) -> str | None:
+    values = [
+        parsed
+        for entry in queued_entries(queue)
+        if (parsed := parse_utc_timestamp(entry.get("next_attempt_after"))) is not None
+    ]
+    return min(values).isoformat() if values else None
 
 
 def update_entry(entry: dict[str, Any], status: str, **fields: Any) -> None:
@@ -293,6 +334,60 @@ def update_entry(entry: dict[str, Any], status: str, **fields: Any) -> None:
     entry["status"] = status
     entry.update(fields)
     entry["updated_at"] = now()
+
+
+def clear_network_backoff(entry: dict[str, Any]) -> None:
+    entry.pop("next_attempt_after", None)
+
+
+def recover_unfinished_entries(queue: dict[str, Any]) -> list[str]:
+    """Recover only entries left running by a killed process or power loss.
+
+    The caller holds the unique queue lock, so a live worker cannot be reset.
+    The single-model downloader's local JSON state and remote partial chunk are
+    deliberately not touched; it will resume them at the next safe attempt.
+    """
+
+    recovered: list[str] = []
+    for entry in queue["entries"]:
+        if entry.get("status") != "running":
+            continue
+        update_entry(
+            entry,
+            "queued",
+            recovered_after_unclean_stop_at=now(),
+            recovery_count=int(entry.get("recovery_count", 0)) + 1,
+        )
+        recovered.append(str(entry.get("id", "")))
+    if recovered:
+        queue.pop("active_entry_id", None)
+        queue["last_recovery"] = {
+            "at": now(),
+            "entry_ids": recovered,
+            "reason": "检测到上次进程未正常结束，已保留断点并重新排队。",
+        }
+    return recovered
+
+
+def network_retry_after(entry: dict[str, Any], base_seconds: int) -> tuple[int, str]:
+    failures = int(entry.get("network_failures", 0)) + 1
+    delay = min(base_seconds * (2 ** max(failures - 1, 0)), MAX_NETWORK_RETRY_DELAY_SECONDS)
+    return failures, (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+
+
+def set_waiting_for_network(
+    queue: dict[str, Any],
+    *,
+    detail: str,
+    retry_after: str | None = None,
+) -> None:
+    queue["state"] = "waiting_for_network"
+    queue["network_wait"] = {
+        "at": now(),
+        "retry_after": retry_after,
+        "detail": detail[-1600:],
+        "resume_policy": "保留断点；计划任务或手动 run/resume 在网络恢复后继续。",
+    }
 
 
 def child_command(entry: dict[str, Any], args: argparse.Namespace) -> list[str]:
@@ -344,10 +439,13 @@ def run_queue(args: argparse.Namespace) -> int:
     queue = read_json(args.queue)
     validate_queue(queue)
     require_standard_remote_cache(args.remote_cache)
+    if args.network_retry_delay_seconds <= 0:
+        raise QueueError("--network-retry-delay-seconds 必须大于 0。")
     route = ensure_direct_meifu_route(args.host, args.expected_hostname, allow_proxy_route=False)
     lock = acquire_lock(args.queue, recover_stale=args.recover_stale_lock)
     processed = 0
     try:
+        recovered = recover_unfinished_entries(queue)
         queue["state"] = "running"
         queue["worker"] = {
             "pid": os.getpid(),
@@ -357,8 +455,21 @@ def run_queue(args: argparse.Namespace) -> int:
             "child_pid": None,
         }
         queue.setdefault("config", {})["direct_route"] = route
+        queue.pop("network_wait", None)
         save_queue(args.queue, queue)
+        if recovered:
+            append_log(args.log_file, f"已从意外停止恢复条目：{', '.join(recovered)}；本地和美服断点保持不变。")
         append_log(args.log_file, f"队列启动；SSH 直连地址={route['hostname']}，无代理跳板。")
+
+        try:
+            verify_meifu_connection(args.host)
+        except TransferUnavailable as exc:
+            queue["worker"]["child_pid"] = None
+            set_waiting_for_network(queue, detail=str(exc))
+            save_queue(args.queue, queue)
+            append_log(args.log_file, f"美服连通性暂不可用；保留队列和断点，等待下次唤醒：{exc}")
+            print(json.dumps({"status": "waiting_for_network", **queue_summary(queue)}, ensure_ascii=False, indent=2))
+            return 0
 
         while True:
             control = read_control(args.control_file)
@@ -377,12 +488,26 @@ def run_queue(args: argparse.Namespace) -> int:
                 return 0
             entry = next_queued_entry(queue)
             if entry is None:
-                queue["state"] = "completed"
                 queue["worker"]["child_pid"] = None
                 queue["worker"]["finished_at"] = now()
+                waiting_until = earliest_retry_after(queue)
+                if queued_entries(queue):
+                    set_waiting_for_network(
+                        queue,
+                        detail="当前队列条目仍在网络退避窗口内，暂不重复发起传输。",
+                        retry_after=waiting_until,
+                    )
+                    save_queue(args.queue, queue)
+                    append_log(args.log_file, f"队列等待网络退避窗口结束：{waiting_until or '未知时间'}。")
+                    print(json.dumps({"status": "waiting_for_network", **queue_summary(queue)}, ensure_ascii=False, indent=2))
+                    return 0
+                queue["state"] = "attention_required" if any(
+                    item.get("status") == "blocked" for item in queue["entries"]
+                ) else "completed"
                 save_queue(args.queue, queue)
                 append_log(args.log_file, "队列没有剩余可启动的模型。")
-                print(json.dumps({"status": "queue_finished", **queue_summary(queue)}, ensure_ascii=False, indent=2))
+                status = "attention_required" if queue["state"] == "attention_required" else "queue_finished"
+                print(json.dumps({"status": status, **queue_summary(queue)}, ensure_ascii=False, indent=2))
                 return 0
 
             update_entry(entry, "running", started_at=now(), last_error=None)
@@ -408,6 +533,7 @@ def run_queue(args: argparse.Namespace) -> int:
             control = read_control(args.control_file)
             if exit_code == 0:
                 update_entry(entry, "completed", completed_at=now(), last_exit_code=0)
+                clear_network_backoff(entry)
                 append_log(args.log_file, f"模型完成 {entry['id']} {entry['filename']}。")
             elif exit_code == PAUSE_EXIT_CODE or hard_stopped or control:
                 update_entry(entry, "queued", last_exit_code=exit_code, pause_requested_at=now())
@@ -420,6 +546,25 @@ def run_queue(args: argparse.Namespace) -> int:
                 append_log(args.log_file, f"模型在安全续传状态暂停 {entry['id']} exit={exit_code}。")
                 print(json.dumps({"status": "paused", **queue_summary(queue)}, ensure_ascii=False, indent=2))
                 return PAUSE_EXIT_CODE
+            elif exit_code == TEMPORARY_TRANSFER_EXIT_CODE:
+                failures, retry_after = network_retry_after(entry, args.network_retry_delay_seconds)
+                detail = tail_text(args.log_file)
+                update_entry(
+                    entry,
+                    "queued",
+                    network_failures=failures,
+                    next_attempt_after=retry_after,
+                    last_exit_code=exit_code,
+                    last_transient_error=detail,
+                )
+                set_waiting_for_network(queue, detail=detail, retry_after=retry_after)
+                save_queue(args.queue, queue)
+                append_log(
+                    args.log_file,
+                    f"模型 {entry['id']} 遇到临时网络故障；未阻塞后续模型，保留断点并等待至 {retry_after}。",
+                )
+                print(json.dumps({"status": "waiting_for_network", **queue_summary(queue)}, ensure_ascii=False, indent=2))
+                return 0
             else:
                 attempts = int(entry.get("attempts", 0)) + 1
                 update_entry(
@@ -511,10 +656,22 @@ def resume_queue(args: argparse.Namespace) -> int:
     queue = read_json(args.queue)
     validate_queue(queue)
     args.control_file.unlink(missing_ok=True)
-    if queue.get("state") in {"paused", "pausing"}:
+    cleared_backoff: list[str] = []
+    if queue.get("state") in {"paused", "pausing", "waiting_for_network", "attention_required", "completed"}:
         queue["state"] = "queued"
+    for entry in queued_entries(queue):
+        if entry.get("next_attempt_after"):
+            clear_network_backoff(entry)
+            entry["updated_at"] = now()
+            cleared_backoff.append(str(entry.get("id", "")))
+    queue.pop("network_wait", None)
     save_queue(args.queue, queue)
-    print(json.dumps({"status": "resumed", "queue": str(args.queue), **queue_summary(queue)}, ensure_ascii=False, indent=2))
+    print(json.dumps({
+        "status": "resumed",
+        "queue": str(args.queue),
+        "cleared_network_backoff_entry_ids": cleared_backoff,
+        **queue_summary(queue),
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -537,14 +694,25 @@ def retry_queue(args: argparse.Namespace) -> int:
     selected = [entry for entry in queue["entries"] if entry.get("status") == "blocked"]
     if args.entry_id:
         selected = [entry for entry in selected if entry.get("id") == args.entry_id]
+    if args.transport_only:
+        selected = [
+            entry for entry in selected
+            if is_transient_transfer_detail(str(entry.get("last_error", "")), returncode=entry.get("last_exit_code"))
+        ]
     if not selected:
-        raise QueueError("没有匹配的 blocked 模型可重试。")
+        selector = "临时传输故障" if args.transport_only else "blocked"
+        raise QueueError(f"没有匹配的 {selector} 模型可重试。")
     for entry in selected:
         update_entry(entry, "queued", retry_requested_at=now())
-    if queue.get("state") == "completed":
-        queue["state"] = "queued"
+        clear_network_backoff(entry)
+    queue["state"] = "queued"
+    queue.pop("network_wait", None)
     save_queue(args.queue, queue)
-    print(json.dumps({"status": "retry_queued", "entry_ids": [entry["id"] for entry in selected]}, ensure_ascii=False, indent=2))
+    print(json.dumps({
+        "status": "retry_queued",
+        "transport_only": args.transport_only,
+        "entry_ids": [entry["id"] for entry in selected],
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -613,6 +781,12 @@ def parse_args() -> argparse.Namespace:
     run.add_argument("--python", type=Path, default=Path(sys.executable))
     run.add_argument("--log-file", type=Path, default=DEFAULT_LOG)
     run.add_argument("--max-models", type=int, help="本次最多启动几个模型；0 可用于只验证队列。")
+    run.add_argument(
+        "--network-retry-delay-seconds",
+        type=int,
+        default=DEFAULT_NETWORK_RETRY_DELAY_SECONDS,
+        help="临时网络故障后的首次等待秒数；后续失败指数退避，最多 6 小时。",
+    )
     run.add_argument("--recover-stale-lock", action="store_true")
     run.set_defaults(handler=run_queue)
 
@@ -633,6 +807,7 @@ def parse_args() -> argparse.Namespace:
     retry = subparsers.add_parser("retry", help="把明确处理过的 blocked 条目重新放入队列")
     retry.add_argument("--queue", type=Path, default=DEFAULT_QUEUE)
     retry.add_argument("--entry-id")
+    retry.add_argument("--transport-only", action="store_true", help="仅重新排队 SSH/SFTP/上游网络临时故障条目。")
     retry.set_defaults(handler=retry_queue)
 
     cleanup = subparsers.add_parser("cleanup-remote", help="在队列停止后释放未完成任务占用的美服缓存")

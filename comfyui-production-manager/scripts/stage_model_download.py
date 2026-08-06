@@ -44,6 +44,7 @@ DEFAULT_REMOTE_CACHE = "/root/.cache/comfyui-models"
 DEFAULT_CHUNK_GIB = 2
 DEFAULT_REMOTE_RESERVE_GIB = 4
 DEFAULT_LOCAL_RESERVE_GIB = 10
+TEMPORARY_TRANSFER_EXIT_CODE = 74
 DEFAULT_CATALOG = Path(
     r"D:\12070\Documents\workspaces\Comfy-Codex-Workspace\models\catalog.json"
 )
@@ -55,8 +56,79 @@ class DownloadError(RuntimeError):
     """Expected, user-actionable download failure."""
 
 
+class TransferUnavailable(DownloadError):
+    """A transient SSH/SFTP/source-network failure; preserving resumable state is safe."""
+
+
 class PauseRequested(DownloadError):
     """A durable queue asked this transfer to stop at the next safe boundary."""
+
+
+# These messages indicate a transport outage or a retryable upstream response.
+# Authentication, permissions, a missing source file, storage exhaustion and
+# integrity errors intentionally remain permanent DownloadError failures.
+TRANSIENT_TRANSFER_PATTERNS = (
+    "unknown error",
+    "connection timed out",
+    "operation timed out",
+    "connection reset",
+    "connection refused",
+    "connection closed",
+    "connection lost",
+    "connection aborted",
+    "network is unreachable",
+    "no route to host",
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "kex_exchange_identification",
+    "broken pipe",
+    "ssh: connect to host",
+    "connection to ",
+    "the requested url returned error: 408",
+    "the requested url returned error: 425",
+    "the requested url returned error: 429",
+    "the requested url returned error: 500",
+    "the requested url returned error: 502",
+    "the requested url returned error: 503",
+    "the requested url returned error: 504",
+    "http 408",
+    "http 425",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+)
+PERMANENT_TRANSFER_PATTERNS = (
+    "permission denied",
+    "authentication failed",
+    "host key verification failed",
+    "the requested url returned error: 400",
+    "the requested url returned error: 401",
+    "the requested url returned error: 403",
+    "the requested url returned error: 404",
+    "http 400",
+    "http 401",
+    "http 403",
+    "http 404",
+    "no space left on device",
+)
+
+
+def is_transient_transfer_detail(detail: str, *, returncode: int | None = None) -> bool:
+    """Classify only clearly retryable transfer errors.
+
+    The caller keeps local and remote partial files untouched when this returns
+    true.  A failed SSH process commonly exits 255; for curl remote scripts the
+    meaningful HTTP message is used instead.
+    """
+
+    normalized = detail.casefold()
+    if any(pattern in normalized for pattern in PERMANENT_TRANSFER_PATTERNS):
+        return False
+    if returncode == 255:
+        return True
+    return any(pattern in normalized for pattern in TRANSIENT_TRANSFER_PATTERNS)
 
 
 @dataclass(frozen=True)
@@ -261,22 +333,37 @@ def run_remote(host: str, script: str) -> str:
         "ssh",
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=20",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
         host,
         "bash",
         "-s",
     ]
     # On Windows, text-mode stdin would translate LF to CRLF.  Bash then sees
     # ``pipefail\r`` and rejects it, so send UTF-8 bytes with Unix newlines.
-    result = subprocess.run(
-        command,
-        input=script.encode("utf-8"),
-        text=False,
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            input=script.encode("utf-8"),
+            text=False,
+            capture_output=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TransferUnavailable(f"美服 SSH 连接超时：{exc}") from exc
     if result.returncode != 0:
         stderr = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
+        if is_transient_transfer_detail(stderr, returncode=result.returncode):
+            raise TransferUnavailable(f"美服连接或来源网络暂不可用：{stderr[-1200:]}")
         raise DownloadError(f"美服命令失败：{stderr[-1200:]}")
     return result.stdout.decode("utf-8", errors="replace").strip()
+
+
+def verify_meifu_connection(host: str) -> None:
+    """Verify a usable direct SSH session before a queue launches a model worker."""
+
+    response = run_remote(host, "printf '%s' 'MEIFU_CONNECTION_OK'\n")
+    if response != "MEIFU_CONNECTION_OK":
+        raise TransferUnavailable("美服 SSH 连通性探测未返回预期结果。")
 
 
 def remote_probe(host: str, cache_root: str, url: str) -> dict[str, Any]:
@@ -372,12 +459,19 @@ def sftp_reget(host: str, remote_path: str, local_path: Path) -> None:
         "sftp",
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=20",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
         "-b", "-",
         host,
     ]
-    result = subprocess.run(command, input=batch, text=True, capture_output=True)
+    try:
+        result = subprocess.run(command, input=batch, text=True, capture_output=True)
+    except subprocess.TimeoutExpired as exc:
+        raise TransferUnavailable(f"本地从美服续传分块超时：{exc}") from exc
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
+        if is_transient_transfer_detail(detail, returncode=result.returncode):
+            raise TransferUnavailable(f"本地到美服网络暂不可用：{detail[-1200:]}")
         raise DownloadError(f"本地从美服续传分块失败：{detail[-1200:]}")
 
 
@@ -749,6 +843,13 @@ def main() -> int:
             "resume": "移除或改写控制文件后，重新运行同一队列即可续传。",
         }, ensure_ascii=False), file=sys.stderr)
         return 75
+    except TransferUnavailable as exc:
+        print(json.dumps({
+            "status": "waiting_for_network",
+            "error": str(exc),
+            "resume": "已保留本地状态和美服当前分块；网络恢复后运行同一队列即可续传。",
+        }, ensure_ascii=False), file=sys.stderr)
+        return TEMPORARY_TRANSFER_EXIT_CODE
     except (DownloadError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
         print(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
