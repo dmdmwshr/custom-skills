@@ -388,9 +388,14 @@ free = shutil.disk_usage('/').free
 print(json.dumps({'size_bytes': size, 'etag': etag, 'content_range': content_range, 'remote_free_bytes': free}))
 PY
 '''
+    response = run_remote(host, script)
+    if not response.strip():
+        raise TransferUnavailable("美服来源探测没有返回数据；已保留断点并等待网络恢复。")
     try:
-        payload = json.loads(run_remote(host, script))
+        payload = json.loads(response)
     except json.JSONDecodeError as exc:
+        if is_transient_transfer_detail(response):
+            raise TransferUnavailable(f"美服来源探测收到临时上游响应：{response[-800:]}") from exc
         raise DownloadError(f"美服探测返回格式无效：{exc}") from exc
     if not isinstance(payload.get("size_bytes"), int) or payload["size_bytes"] <= 0:
         raise DownloadError("来源服务器没有提供可用的文件大小，不能安全进行分块续传。")
@@ -434,7 +439,11 @@ if [ "$actual" -ne "$expected" ]; then
 fi
 sha256sum "$PART" | awk '{{print $1}}'
 '''
-    digest = run_remote(host, script).splitlines()[-1].strip().lower()
+    response = run_remote(host, script)
+    lines = [line.strip() for line in response.splitlines() if line.strip()]
+    if not lines:
+        raise TransferUnavailable("美服分块请求没有返回 SHA-256；已保留当前分块等待网络恢复。")
+    digest = lines[-1].lower()
     if not SHA256_RE.fullmatch(digest):
         raise DownloadError("美服未返回有效的分块 SHA-256。")
     return digest
