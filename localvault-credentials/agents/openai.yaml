@@ -1,0 +1,4 @@
+interface:
+  display_name: "LocalVault 凭据管理"
+  short_description: "管理本机 LocalVault 凭据的安全保存与按需调用"
+  default_prompt: "使用 $localvault-credentials 在本机 LocalVault 中安全新增、查看元数据或按需调用凭据。"
