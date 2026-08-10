@@ -32,6 +32,18 @@ x-edit-policy: edit-source-repo-only
 9. 不知道 CC Switch 的 skills.content_hash 算法时，不手工计算或覆盖 content_hash；同步脚本只更新来源、目录、元数据、时间和登记状态，保留已有 hash，新记录留空。
 10. 同步脚本只添加或更新源仓库当前列出的 skill，不因源目录缺失自动删除安装副本或数据库记录；删除必须按单个 skill 明确核对、备份和执行。
 11. 不为 cc-switch 的零散子功能新建独立 skill；相关管理功能集中维护在本 skill 及其 scripts 目录中。
+12. CC Switch 桌面应用、随附脚本和数据库结构可能随版本升级变化；不得把当前表、字段、目录、启用开关、迁移方式或 content_hash 规则当成永久契约。发现版本或结构变化时先停在只读检查，确认兼容性并备份后再写入。
+
+## 版本升级与数据库结构兼容性备注
+
+CC Switch 可能自动或手动升级。升级可能改变 cc-switch.db 的表、字段、索引、约束、SQLite user_version、settings 配置、安装目录、客户端开关和 content_hash 算法，也可能改变应用对仓库源和安装副本的同步方式。当前脚本只针对已核验的本机结构，不代表未来版本永久兼容。
+
+每次发现 CC Switch 版本变化、数据库更新时间异常、同步报错或应用完成迁移时，按以下顺序处理：
+
+1. 先停止写入，读取应用版本、SQLite PRAGMA user_version、sqlite_master，以及 skill_repos 和 skills 的 PRAGMA table_info；记录实际表名、字段、类型、默认值和约束。
+2. 对照 scripts/skill-repos.py、scripts/sync-custom-skills.ps1 的预期字段做只读兼容性判断；缺少字段、字段类型或约束异常、出现新必填字段、hash 规则不明时，标记为结构不兼容并停止，不猜测、不强行迁移。
+3. CC Switch 升级前和任何直接写库前都保留 SQLite 备份。应用已经把数据库迁移到新结构后，不要未经确认直接用旧备份覆盖新数据库；恢复前先确认版本和迁移方向可逆。
+4. 适配新版本后先跑 dry-run，再核对安装副本、仓库源、skills 登记和启用状态；不要因为旧版本的 content_hash 或表结构看起来相似，就声称新版本已兼容。
 
 ## 自建 skill 生命周期
 
