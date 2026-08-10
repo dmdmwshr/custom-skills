@@ -119,7 +119,13 @@ function Invoke-Git {
         [string[]]$Arguments
     )
 
-    $output = @(& $script:GitPath -C $script:SourceRoot @Arguments 2>&1)
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $script:GitPath -C $script:SourceRoot @Arguments 2>&1)
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
         $details = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
@@ -139,7 +145,13 @@ function Invoke-PythonCode {
 
     $encodedCode = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Code))
     $runnerCode = 'import base64,sys; code=base64.b64decode(sys.argv[1]); sys.argv=sys.argv[:1]+sys.argv[2:]; exec(compile(code, ''<embedded>'', ''exec''))'
-    $output = @(& $script:PythonPath -X utf8 -c $runnerCode $encodedCode @Arguments 2>&1)
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $script:PythonPath -X utf8 -c $runnerCode $encodedCode @Arguments 2>&1)
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
         $details = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
@@ -289,8 +301,8 @@ if (-not [System.StringComparer]::Ordinal.Equals($currentBranch, $Branch)) {
 }
 
 if (-not $SkipRemotePull -and -not $WhatIfPreference) {
-    Invoke-Git @('fetch', '--prune', $Remote) | Out-Null
-    Invoke-Git @('pull', '--ff-only', $Remote, $Branch) | Out-Null
+    Invoke-Git @('fetch', '--prune', '--quiet', $Remote) | Out-Null
+    Invoke-Git @('pull', '--ff-only', '--quiet', $Remote, $Branch) | Out-Null
 }
 
 $afterPullStatus = @(Invoke-Git @('status', '--porcelain', '--untracked-files=all'))
