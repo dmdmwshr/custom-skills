@@ -1,6 +1,6 @@
 ---
 name: cc-switch
-description: 用于管理本机 CC Switch 桌面应用相关的 skills 仓库源、同步来源和 SQLite 记录，包括自建 skill 修改同步、新建安装提示、删除清理、仓库源查询、启停和排障；当前以桌面应用和随附 SQLite 脚本为准，不依赖旧 CLI shim。
+description: 用于通过终端管理本机 CC Switch 自建 skills 的仓库源、提交推送、备份、自动安装、自动更新、SQLite 登记与核验，并处理新增、删除、启停、分支和排障；用户要求安装、更新、同步或维护自建 skill 时触发，默认使用固定 Git、PowerShell、Python 脚本，不通过可视化点击。
 x-custom-skill: true
 x-managed-by: cc-switch
 x-source-repo: dmdmwshr/custom-skills
@@ -9,85 +9,99 @@ x-edit-policy: edit-source-repo-only
 
 # CC Switch
 
-本 skill 用于管理本机 `CC Switch` 桌面应用相关配置，重点是 skills 仓库源的查询、增加、启停、改分支和删除。
+本 skill 集中管理本机 CC Switch 的自建 skills 仓库源、源仓库内容、安装副本和 SQLite 登记。日常安装与更新默认走终端脚本；桌面应用只用于用户明确要求的只读检查或终端链路故障后的人工排查，不作为常规点击入口。
 
 ## 适用范围
 
-- 查询 `C:\Users\12070\.cc-switch\cc-switch.db` 中的 `skill_repos` 与关联 `skills` 记录。
-- 添加新的 skills 仓库源。
-- 启用或停用已有仓库源。
-- 修改已有仓库源的分支。
-- 删除仓库源，并在删除前列出关联 skills。
-- 管理自建 skills 的修改同步、新建安装提示、删除清理和多客户端启用状态核对。
-- 排查 CC Switch 桌面应用、settings、数据库、同步来源、仓库源和安装副本状态。
+- 查询 C:\Users\12070\.cc-switch\cc-switch.db 中的 skill_repos 与关联 skills 记录。
+- 管理自建源 dmdmwshr/custom-skills 的提交、推送、自动安装、自动更新、备份和安装副本核验。
+- 添加、启用、停用、改分支或删除其他 skills 仓库源。
+- 管理自建 skill 的新增、修改、删除和多客户端启用状态。
+- 排查源仓库、安装副本、数据库登记、同步脚本和 CC Switch 桌面应用状态。
 
 ## 硬规则
 
-1. 先查询当前状态，再执行任何变更。
-2. 当前有效入口是桌面应用 `C:\Users\12070\AppData\Local\Programs\CC Switch\cc-switch.exe`；不要把命令行 shim 当作正常入口。
-3. 直接改数据库前必须备份 `C:\Users\12070\.cc-switch\cc-switch.db`。
-4. 删除仓库源前必须先 dry-run，并向用户说明会影响哪些 `skills` 记录。
-5. 默认只删除 `skill_repos` 仓库源记录，不删除 `skills` 表中的已扫描 skill 记录；只有用户明确要求时才连同关联 skills 一起删除。
-6. 不直接修改 `C:\Users\12070\.cc-switch\skills\<skill-name>` 安装副本；自建 skill 内容只改 `C:\Users\12070\.cc-switch\skills\自建skills` 源仓库。
-7. 不为 `cc-switch` 的零散子功能新建独立 skill；后续 cc-switch 管理功能集中维护在本 skill 内。
-8. `C:\Users\12070\.local\bin\cc-switch.cmd` 是旧 CLI shim，指向已不存在的 `D:\Program_Files\CC-Switch-CLI\current\cc-switch.exe`；不得把它作为可用 `cc-switch` 入口。
-9. `settings.json` 中 `skillSyncMethod=auto` 不代表安装副本会在本轮任务内立即刷新；源仓库提交推送后必须显式验证安装副本内容。
-10. 不知道 CC Switch 当前 `content_hash` 算法时，不手工改 `skills.content_hash`；优先保持数据库来源、目录和启用状态正确，并说明 hash 可能滞后。
+1. 先做只读状态检查，再执行任何变更。
+2. 自建 skill 的安装与更新默认只运行 scripts/sync-custom-skills.ps1；不通过可视化应用点击完成常规同步。终端链路失败时报告具体原因并停止，不要静默改走 GUI。
+3. 自建 skill 内容只在 C:\Users\12070\.cc-switch\skills\自建skills 源仓库中修改；C:\Users\12070\.cc-switch\skills 下的安装副本只由同步脚本更新。
+4. 同步前必须确认源仓库已审查、测试、提交并推送，且本地分支为 main、工作区干净、HEAD 与 origin/main 一致；不满足时拒绝安装或更新。
+5. 直接写 SQLite 前必须先创建可恢复备份。同步脚本会先做 SQLite 在线备份，再更新安装副本和 skills 登记。
+6. C:\Users\12070\.local\bin\cc-switch.cmd 是失效旧 CLI shim，指向不存在的 D:\Program_Files\CC-Switch-CLI\current\cc-switch.exe；不得把它当作可用入口，也不得为绕过门禁重新使用它。
+7. Windows PowerShell 中不得用 Copy-Item -LiteralPath "<src>\*" 复制通配符；必须枚举子项并以 LiteralPath 逐项复制。
+8. 源目录、安装副本和备份目标中的重解析点（符号链接、联接等可能跳出边界的路径）一律拒绝处理。
+9. 不知道 CC Switch 的 skills.content_hash 算法时，不手工计算或覆盖 content_hash；同步脚本只更新来源、目录、元数据、时间和登记状态，保留已有 hash，新记录留空。
+10. 同步脚本只添加或更新源仓库当前列出的 skill，不因源目录缺失自动删除安装副本或数据库记录；删除必须按单个 skill 明确核对、备份和执行。
+11. 不为 cc-switch 的零散子功能新建独立 skill；相关管理功能集中维护在本 skill 及其 scripts 目录中。
 
 ## 自建 skill 生命周期
 
-- 修改已安装的自建 skill：只改 `C:\Users\12070\.cc-switch\skills\自建skills\<skill-name>` 源仓库；保持 `name` 与目录名不变；改动完成后默认自动提交并推送；随后通过 CC Switch 桌面应用同步或刷新，让 `C:\Users\12070\.cc-switch\skills\<skill-name>` 安装副本自动更新；最后验证安装副本内容、`skills` 表的来源/目录/启用状态，并仅在明确知道算法时核对或更新 `content_hash`。
-- 新建自建 skill：先在源仓库新建、提交并推送；默认不替用户强行安装，提示用户通过 CC Switch 桌面应用手动安装；安装后再查询 `skills` 表，核对来源、目录、hash 和多客户端启用状态。
-- 删除自建 skill：源仓库目录和 CC 安装侧一起处理；先查 `skills` 表确认该 skill 是否来自 `repo_owner=dmdmwshr` 且 `repo_name=custom-skills`，列出影响；通过 CC Switch 桌面应用卸载或删除安装副本；必要时先备份数据库，再清理对应 `skills` 记录。单删某个 skill 时不要删除 `skill_repos` 中的 `dmdmwshr/custom-skills` 仓库源，除非用户明确要求删除整个自建源。
+- 修改已安装的自建 skill：只改源仓库，保持目录名与 frontmatter 的 name 一致；完成审查和测试后提交、推送，再运行终端同步脚本；最后核对源/安装副本、数据库来源和启用状态。
+- 新建自建 skill：先在源仓库创建并验证 SKILL.md、agents/openai.yaml 和必要脚本，提交并推送；用户要求安装时直接运行终端同步脚本，不要求安装时只完成源仓库交付。
+- 删除自建 skill：先查询 skills 表确认 repo_owner=dmdmwshr、repo_name=custom-skills 和影响范围；备份安装副本与数据库；再对源目录、安装副本和对应登记做精确删除。单删 skill 不删除整个 dmdmwshr/custom-skills 仓库源。
+- 修改仓库源、分支、启用状态或删除仓库源：先用 scripts/skill-repos.py 做 dry-run，再在用户授权后带 --yes 执行；删除前列出关联 skills，默认只删 skill_repos 记录。
 
-## 安装副本同步实操
+## 终端优先同步流程
 
-1. 源仓库改完后先检查并提交推送：
-   ```powershell
-   git -C "C:\Users\12070\.cc-switch\skills\自建skills" status --short
-   git -C "C:\Users\12070\.cc-switch\skills\自建skills" add <changed-files>
-   git -C "C:\Users\12070\.cc-switch\skills\自建skills" commit -m "<message>"
-   git -C "C:\Users\12070\.cc-switch\skills\自建skills" push
-   ```
-2. 等待或刷新 CC Switch 后，必须验证安装副本是否真的更新：
-   ```powershell
-   Test-Path "C:\Users\12070\.cc-switch\skills\<skill-name>\scripts\<new-script>.py"
-   ```
-3. 如果自动同步未即时发生，允许在已提交推送后做一次受控手工同步：先完整备份安装目录到 `C:\Users\12070\.cc-switch\skill-backups\<timestamp>-<skill-name>-before-sync`，再验证目标路径位于 `C:\Users\12070\.cc-switch\skills\<skill-name>` 下，最后复制源目录内容。
-4. Windows PowerShell 中不要用 `Copy-Item -LiteralPath "<src>\*"` 复制通配符；`-LiteralPath` 会把 `*` 当字面路径。应使用 `Get-ChildItem -LiteralPath <src> | ForEach-Object { Copy-Item -LiteralPath $_.FullName ... }`。
-5. 手工同步后做三项验证：关键文件与源仓库字节一致、安装副本的实际命令或 smoke test 通过、`skill-repos.py show --owner dmdmwshr --name custom-skills` 仍显示对应 skill 来源和启用状态正常。
-6. 从 skill 目录运行 Python 脚本或 `py_compile` 后，清理 `__pycache__`，不要让缓存目录混入安装副本或源仓库。
+1. 在源仓库完成检查、测试、提交和推送。不要把未提交文件或未推送提交交给同步脚本。
+2. 先运行 dry-run，只检查源仓库、远端对齐、skill 数量、安装目标和备份位置，不写数据库、不复制文件：
+   ~~~powershell
+   & "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -File "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\sync-custom-skills.ps1" -WhatIf
+   ~~~
+3. dry-run 通过后运行同一脚本完成同步。默认会 fetch --prune、pull --ff-only、创建带时间戳的备份、逐项复制源 skill、更新 SQLite 登记并保留已有 content_hash：
+   ~~~powershell
+   & "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -File "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\sync-custom-skills.ps1"
+   ~~~
+4. 只在已经单独确认远端引用有效、且当前确实需要离线运行时使用 -SkipRemotePull；该参数不会跳过本地干净和 HEAD 对齐检查。
+5. 同步后用固定 Python 查看仓库源和关联 skills，并比较关键文件或全目录 SHA-256；发现不一致时保留备份并停止继续覆盖：
+   ~~~powershell
+   $py = "C:\Users\12070\AppData\Local\Programs\Python\Python312\python.exe"
+   & $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" show --owner dmdmwshr --name custom-skills
+   git -C "C:\Users\12070\.cc-switch\skills\自建skills" status --short --branch
+   ~~~
+
+## 备份与恢复边界
+
+每次真实同步都会创建 C:\Users\12070\.cc-switch\skill-backups\<时间>-custom-skills-before-sync，至少包括：
+
+- cc-switch.db：SQLite 在线备份。
+- installed-copy：同步前已有安装副本的完整副本。
+- previous-live：替换前安装副本的可恢复移动副本。
+- staging：本次同步前准备的源 skill 暂存副本。
+
+脚本只操作源仓库列出的精确 skill 目录，不删除其他安装内容。同步中途出现异常时，先报告错误和备份位置，不删除备份、不强行重试；恢复必须根据备份目录逐项核对后执行。
+
+## 数据库约定
+
+- 自建主源必须在 skill_repos 中登记为 owner=dmdmwshr、name=custom-skills、branch=main、enabled=1；不存在或停用时，同步脚本拒绝写入。
+- 同步脚本按 owner/repository:name 登记 skills，更新名称、描述、目录、来源、分支、说明链接和时间。
+- 已存在 skill 的多客户端启用开关保持不变；新登记的 skill 默认启用当前四个主客户端，较新的额外客户端保持数据库默认关闭。
+- content_hash 只读保留，不把文件 SHA-256 冒充 CC Switch 内部 hash。
 
 ## 默认流程
 
-1. 设置 PowerShell UTF-8 输出。
-2. 确认桌面应用路径和运行状态：
-   ```powershell
-   Get-Item "C:\Users\12070\AppData\Local\Programs\CC Switch\cc-switch.exe"
-   Get-Process cc-switch -ErrorAction SilentlyContinue
-   ```
-3. 读取当前仓库源：
-   ```powershell
-   python scripts/skill-repos.py list
-   ```
-4. 对新增、删除、停用、改分支等数据库变更先执行 `--dry-run`。
-5. 用户确认后，再带 `--yes` 执行真实数据库变更。
-6. 对已安装自建 skill 的内容修改，优先走“源仓库提交推送 -> 桌面应用同步/刷新 -> 安装副本验证”；自动同步未即时发生时，按“安装副本同步实操”受控处理。
-7. 变更后再次 `list` 或 `show`，并验证安装副本内容、来源记录和多客户端启用状态。
+1. 使用固定 Windows PowerShell、固定 Python 3.12 和 Git 做只读预检。
+2. 自建 skill 先在源仓库审查、测试、提交和推送，再用 sync-custom-skills.ps1 dry-run。
+3. dry-run 通过后运行真实同步，读取输出的备份位置和数量。
+4. 用 skill-repos.py show、源/安装副本比较和 git status 做回读核验。
+5. 只有用户明确要求排查 CC Switch 桌面应用时，才检查 C:\Users\12070\AppData\Local\Programs\CC Switch\cc-switch.exe 的文件或进程状态；不因常规同步主动打开、点击或刷新应用。
 
 ## 脚本用法
 
-在本 skill 目录下运行：
+同步脚本位于本 skill 的 scripts/sync-custom-skills.ps1，仓库源登记脚本位于 scripts/skill-repos.py。推荐使用固定解释器：
 
-```powershell
-python scripts/skill-repos.py list
-python scripts/skill-repos.py show --owner dmdmwshr --name custom-skills
-python scripts/skill-repos.py add --owner owner --name repo --branch main --enabled 1 --dry-run
-python scripts/skill-repos.py add --owner owner --name repo --branch main --enabled 1 --yes
-python scripts/skill-repos.py enable --owner owner --name repo --enabled 0 --dry-run
-python scripts/skill-repos.py set-branch --owner owner --name repo --branch main --dry-run
-python scripts/skill-repos.py remove --owner owner --name repo --dry-run
-python scripts/skill-repos.py remove --owner owner --name repo --yes
-```
+~~~powershell
+$ps = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+$py = "C:\Users\12070\AppData\Local\Programs\Python\Python312\python.exe"
+$sync = "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\sync-custom-skills.ps1"
 
-删除测试时，先用 `remove --dry-run` 验证影响范围；不要拿官方源或自建主源做真实删除测试，除非用户明确指定。
+& $ps -NoProfile -File $sync -WhatIf
+& $ps -NoProfile -File $sync
+& $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" list
+& $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" show --owner dmdmwshr --name custom-skills
+& $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" add --owner owner --name repo --branch main --enabled 1 --dry-run
+& $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" enable --owner owner --name repo --enabled 0 --dry-run
+& $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" set-branch --owner owner --name repo --branch main --dry-run
+& $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" remove --owner owner --name repo --dry-run
+~~~
+
+任何真实删除都必须先 dry-run，并且不得拿官方源或自建主源做测试性删除。

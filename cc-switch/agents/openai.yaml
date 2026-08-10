@@ -1,7 +1,7 @@
 interface:
-  display_name: "CC Switch"
-  short_description: "Manage CC Switch skill sources and custom skill lifecycle."
-  default_prompt: "Use $cc-switch to manage CC Switch Desktop skill repository sources, custom skill update sync, new-skill install guidance, deletion cleanup, and SQLite status checks; do not rely on old CLI shims."
+  display_name: "CC Switch 终端技能管理"
+  short_description: "终端优先自动安装、更新、备份、登记和核验自建技能仓库"
+  default_prompt: "使用 $cc-switch 通过终端检查、推送、备份、安装和更新自建技能，不使用可视化点击。"
 
 policy:
   allow_implicit_invocation: true
