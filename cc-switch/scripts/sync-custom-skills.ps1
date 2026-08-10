@@ -137,7 +137,9 @@ function Invoke-PythonCode {
         [string[]]$Arguments
     )
 
-    $output = @(& $script:PythonPath -X utf8 -c $Code @Arguments 2>&1)
+    $encodedCode = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Code))
+    $runnerCode = 'import base64,sys; code=base64.b64decode(sys.argv[1]); sys.argv=sys.argv[:1]+sys.argv[2:]; exec(compile(code, ''<embedded>'', ''exec''))'
+    $output = @(& $script:PythonPath -X utf8 -c $runnerCode $encodedCode @Arguments 2>&1)
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
         $details = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
