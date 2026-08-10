@@ -75,6 +75,59 @@ def manifest(source: Path) -> dict[str, object]:
     }
 
 
+def verify_client(
+    source: Path,
+    detail: dict[str, object],
+    directory: dict[str, object],
+    client_class: type[httpx.Client] = httpx.Client,
+) -> httpx.Client:
+    case_id = str(detail["id"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/cases":
+            return httpx.Response(200, json={"data": [{"id": case_id, "projectNo": PROJECT}]})
+        if request.url.path == f"/api/v2/cases/{case_id}":
+            return httpx.Response(200, json=detail)
+        if request.url.path == f"/api/v2/cases/{case_id}/directory":
+            return httpx.Response(200, json=directory)
+        if request.url.path == "/api/v2/files/file-id":
+            return httpx.Response(200, content=source.read_bytes())
+        raise AssertionError(request.url)
+
+    return client_class(transport=httpx.MockTransport(handler))
+
+
+def detail_for(data: dict[str, object]) -> dict[str, object]:
+    products = data["initialInspection"]["products"]
+    return {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "projectNo": PROJECT,
+        "brigade": {"code": "XISHAN"},
+        "unitName": "合成单位",
+        "inspectionForm": "ROUTINE",
+        "notificationTarget": data["case"]["notificationTarget"],
+        "inspections": [
+            {
+                "id": "initial-id",
+                "stage": "INITIAL_CHECK",
+                "inspectionDate": "2026-08-01",
+                "products": [
+                    {
+                        "id": "product-id",
+                        "name": product["name"],
+                        "modelSpec": product.get("modelSpec"),
+                    }
+                    for product in products
+                ],
+            }
+        ],
+    }
+
+
+def directory_file(source: Path) -> dict[str, object]:
+    return {"id": "file-id", "sha256": file_sha256(source)}
+
+
 def test_explicit_51_slot_map_is_correct() -> None:
     assert len(cli.SLOT_META) == 51
     for code in (
@@ -151,6 +204,55 @@ def test_bom_compose_uses_only_inventory_hash_and_source_relative_path(tmp_path:
         compose_command(argparse.Namespace(work_dir=str(work), case_data=str(case_data)))
 
 
+@pytest.mark.parametrize("work_relative", [".", "work", ".."])
+def test_inventory_rejects_directory_source_and_work_dir_overlap(
+    tmp_path: Path, work_relative: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    work = (
+        source
+        if work_relative == "."
+        else tmp_path
+        if work_relative == ".."
+        else source / work_relative
+    )
+    with pytest.raises(RegistryError, match="不得重叠"):
+        inventory_command(argparse.Namespace(input=str(source), work_dir=str(work)))
+
+
+def test_compose_rejects_duplicate_source_relative_path_for_multiple_file_refs(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    pdf(source_root / "one.pdf")
+    work = tmp_path / "work"
+    inventory_command(argparse.Namespace(input=str(source_root), work_dir=str(work)))
+    data = manifest(source_root / "one.pdf")
+    data.pop("packageSha256")
+    data["files"] = [
+        {
+            "clientRef": "file:one",
+            "sourceRelativePath": "one.pdf",
+            "relativePath": "normalized/one.pdf",
+        },
+        {
+            "clientRef": "file:two",
+            "sourceRelativePath": "one.pdf",
+            "relativePath": "normalized/two.pdf",
+        },
+    ]
+    data["otherAttachments"] = [
+        {"clientRef": "attachment:one", "slotCode": "OTHER_ATTACHMENT", "fileRef": "file:one"},
+        {"clientRef": "attachment:two", "slotCode": "OTHER_ATTACHMENT", "fileRef": "file:two"},
+    ]
+    case_data = tmp_path / "case.json"
+    case_data.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(RegistryError, match="不得供多个 fileRef 复用"):
+        compose_command(argparse.Namespace(work_dir=str(work), case_data=str(case_data)))
+
+
 def test_split_preflights_png_collision_and_never_writes_outside_normalized(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -208,13 +310,14 @@ def test_mineru_uses_explicit_sources_and_records_mapping(
     calls: list[list[str]] = []
     monkeypatch.setattr(cli, "MINERU_SCRIPT", mineru)
     monkeypatch.setattr(cli, "SYSTEM_POWERSHELL", powershell)
-    monkeypatch.setattr(
-        cli.subprocess,
-        "run",
-        lambda command, **_kwargs: (
-            calls.append(command) or subprocess.CompletedProcess(command, 0, "ok", "")
-        ),
-    )
+
+    def successful_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        destination = Path(command[command.index("-Output") + 1])
+        (destination / "result.md").write_text("识别结果", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    monkeypatch.setattr(cli.subprocess, "run", successful_run)
     ocr_command(
         argparse.Namespace(
             work_dir=str(work),
@@ -225,6 +328,20 @@ def test_mineru_uses_explicit_sources_and_records_mapping(
     )
     assert len(calls) == 2 and all(command[-1] == "-NoBuild" for command in calls)
     assert len(read_json(work / "ocr-result.json")["mappings"]) == 2
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "ok", ""),
+    )
+    with pytest.raises(RegistryError, match="未生成非空 Markdown"):
+        ocr_command(
+            argparse.Namespace(
+                work_dir=str(work),
+                output_dir=str(work / "empty-ocr"),
+                relative_path=["one.pdf"],
+                timeout=10,
+            )
+        )
     with pytest.raises(RegistryError, match="显式"):
         ocr_command(
             argparse.Namespace(
@@ -256,6 +373,180 @@ def test_schema_semantics_reject_missing_method_bad_date_and_bad_scope(tmp_path:
         and any("documentDate" in error for error in errors)
         and any("只填写" in error for error in errors)
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("unitName", "错误单位", "unitName"),
+        ("brigade", {"code": "BINHU"}, "案卷关键字段不一致"),
+    ],
+)
+def test_verify_requires_exact_unit_and_brigade(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    detail = detail_for(data)
+    detail[field] = value
+    directory = {
+        "rows": [
+            {
+                "slotKey": "OTHER_ATTACHMENT",
+                "children": [{"title": "附件", "files": [{"id": "file-id"}]}],
+            }
+        ]
+    }
+    with (
+        verify_client(source, detail, directory) as client,
+        pytest.raises(RegistryError, match=message),
+    ):
+        cli.verify_with_client(client, "https://registry.example", data)
+
+
+def document_slot_data(source: Path, code: str) -> dict[str, object]:
+    data = manifest(source)
+    data["otherAttachments"] = []
+    multiplicity, stage = cli.SLOT_META[code]
+    slot: dict[str, object] = {
+        "clientRef": "slot:one",
+        "slotCode": code,
+        "versions": [{"kind": "ELECTRONIC", "fileRef": "file:one"}],
+    }
+    if multiplicity == "INSPECTION":
+        slot["inspectionRef"] = "initial"
+    elif multiplicity == "PRODUCT":
+        data["initialInspection"]["products"] = [
+            {"clientRef": "product:one", "name": "产品", "modelSpec": "M"}
+        ]
+        slot["productRef"] = "product:one"
+    elif multiplicity == "NOTIFICATION_TARGET":
+        data["case"]["notificationTarget"] = "PRODUCTION"
+        slot["notificationTarget"] = "PRODUCTION"
+    else:
+        assert multiplicity == "CASE" and stage is None
+    data["documentSlots"] = [slot]
+    return data
+
+
+def slot_owner(data: dict[str, object], source: Path) -> dict[str, object]:
+    slot = data["documentSlots"][0]
+    multiplicity, _stage = cli.SLOT_META[slot["slotCode"]]
+    owner: dict[str, object] = {"versions": {"ELECTRONIC": directory_file(source)}}
+    if multiplicity == "INSPECTION":
+        owner["inspectionId"] = "initial-id"
+    elif multiplicity == "PRODUCT":
+        owner["productId"] = "product-id"
+    elif multiplicity == "NOTIFICATION_TARGET":
+        owner["notificationTarget"] = "PRODUCTION"
+    return owner
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "AUTHORIZATION_LETTER",
+        "INITIAL_INSPECTION_RECORD",
+        "INITIAL_CCC_CERTIFICATE",
+        "ILLEGAL_PRODUCT_NOTIFICATION_LETTER",
+    ],
+)
+def test_verify_rejects_ambiguous_fixed_slot_owner(tmp_path: Path, code: str) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = document_slot_data(source, code)
+    owner = slot_owner(data, source)
+    directory = {"rows": [{"slotKey": code, "children": [owner, owner.copy()]}]}
+    with (
+        verify_client(source, detail_for(data), directory) as client,
+        pytest.raises(RegistryError, match="目录 owner 不唯一或缺失"),
+    ):
+        cli.verify_with_client(client, "https://registry.example", data)
+
+
+@pytest.mark.parametrize("actual_kinds", [{"SCANNED"}, {"ELECTRONIC", "SCANNED"}])
+def test_verify_requires_exact_remote_slot_version_kinds(
+    tmp_path: Path, actual_kinds: set[str]
+) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    code = "AUTHORIZATION_LETTER"
+    data = document_slot_data(source, code)
+    owner = slot_owner(data, source)
+    owner["versions"] = {kind: directory_file(source) for kind in actual_kinds}
+    directory = {"rows": [{"slotKey": code, "children": [owner]}]}
+    with (
+        verify_client(source, detail_for(data), directory) as client,
+        pytest.raises(RegistryError, match="目录版本种类不一致"),
+    ):
+        cli.verify_with_client(client, "https://registry.example", data)
+
+
+def test_verify_uses_long_read_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    manifest_path, map_path = tmp_path / "manifest.json", tmp_path / "map.json"
+    manifest_path.write_text(json.dumps(data), encoding="utf-8")
+    map_path.write_text(json.dumps({"files": {"file:one": str(source)}}), encoding="utf-8")
+    directory = {
+        "rows": [
+            {
+                "slotKey": "OTHER_ATTACHMENT",
+                "children": [{"title": "附件", "files": [{"id": "file-id"}]}],
+            }
+        ]
+    }
+    captured: dict[str, object] = {}
+    real_client = httpx.Client
+
+    def client_factory(**kwargs: object) -> httpx.Client:
+        captured.update(kwargs)
+        return verify_client(source, detail_for(data), directory, real_client)
+
+    monkeypatch.setattr(cli.httpx, "Client", client_factory)
+    verify_command(
+        argparse.Namespace(
+            manifest=str(manifest_path),
+            upload_map=str(map_path),
+            api_base="https://registry.example",
+            timeout=60.0,
+        )
+    )
+    timeout = captured["timeout"]
+    assert isinstance(timeout, httpx.Timeout) and timeout.read == 300.0
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (RegistryError("业务校验失败"), "ERROR: 业务校验失败"),
+        (httpx.ReadTimeout("read timed out"), "ERROR: 网络传输失败，请检查连接后重试"),
+    ],
+)
+def test_main_returns_single_line_error_for_business_and_transport_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error: Exception,
+    expected: str,
+) -> None:
+    def fail(_args: argparse.Namespace) -> None:
+        raise error
+
+    monkeypatch.setattr(cli, "verify_command", fail)
+    status = cli.main(
+        [
+            "verify",
+            "--manifest",
+            "unused.json",
+            "--upload-map",
+            "unused-map.json",
+            "--api-base",
+            "https://registry.example",
+        ]
+    )
+    assert status == 2 and capsys.readouterr().err == expected + "\n"
 
 
 def test_reference_v2_example_is_readable_and_valid_after_product_owner_fix() -> None:
@@ -304,6 +595,7 @@ def test_finalized_unverified_retries_read_only_and_origin_is_bound(
                     "id": case_id,
                     "projectNo": PROJECT,
                     "brigade": {"code": "XISHAN"},
+                    "unitName": "合成单位",
                     "inspectionForm": "ROUTINE",
                     "notificationTarget": "UNKNOWN",
                     "inspections": [
@@ -412,6 +704,7 @@ def test_uploading_state_with_existing_case_recovers_without_second_post(
                     "id": case_id,
                     "projectNo": PROJECT,
                     "brigade": {"code": "XISHAN"},
+                    "unitName": "合成单位",
                     "inspectionForm": "ROUTINE",
                     "notificationTarget": "UNKNOWN",
                     "inspections": [

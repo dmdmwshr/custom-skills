@@ -225,6 +225,8 @@ def inventory_command(args: argparse.Namespace) -> None:
         safe_extract_zip(source, root)
         package_sha, container = file_sha256(source), "ARCHIVE"
     elif source.is_dir():
+        if inside(source, work) or inside(work, source):
+            raise RegistryError("目录输入与 work-dir 不得重叠或互为父子目录")
         root, container, package_sha = source, "DIRECTORY", ""
     else:
         raise RegistryError("输入必须是目录或 ZIP")
@@ -380,6 +382,11 @@ def ocr_command(args: argparse.Namespace) -> None:
             raise RegistryError(
                 f"MinerU 处理失败：{relative}：{(completed.stderr or completed.stdout)[-1000:]}"
             )
+        markdown_files = [
+            path for path in destination.rglob("*.md") if path.is_file() and path.stat().st_size > 0
+        ]
+        if not markdown_files:
+            raise RegistryError(f"MinerU 未生成非空 Markdown：{relative}")
         mappings.append(
             {
                 "sourceRelativePath": safe,
@@ -775,6 +782,7 @@ def compose_command(args: argparse.Namespace) -> None:
     )
     upload: dict[str, str] = {}
     normalized_files = []
+    source_refs: set[str] = set()
     if not isinstance(manifest.get("files"), list):
         raise RegistryError("case-data.files 必须是数组")
     for item in manifest["files"]:
@@ -791,6 +799,12 @@ def compose_command(args: argparse.Namespace) -> None:
             safe_relative(item["sourceRelativePath"]),
             safe_relative(item["relativePath"]),
         )
+        if source_rel in source_refs:
+            raise RegistryError(
+                f"同一 sourceRelativePath 不得供多个 fileRef 复用：{source_rel}；"
+                "请先生成独立规范 PDF"
+            )
+        source_refs.add(source_rel)
         source = sources.get(source_rel)
         if not source or source.get("mimeType") != "application/pdf":
             raise RegistryError(f"sourceRelativePath 必须指向 inventory/split 中 PDF：{source_rel}")
@@ -876,6 +890,7 @@ def verify_with_client(
         client.get(f"{api_base}/api/v2/cases/{case_id}/directory"), "读取目录"
     )
     case_map = {
+        "unitName": "unitName",
         "unitAddress": "unitAddress",
         "handler": "caseHandler",
         "inspector": "inspector",
@@ -884,9 +899,12 @@ def verify_with_client(
         "inspectionForm": "inspectionForm",
         "notificationTarget": "notificationTarget",
     }
-    if detail.get("projectNo") != manifest["case"]["projectNo"] or detail.get("brigade", {}).get(
-        "code"
-    ) not in (None, manifest["case"]["brigadeCode"]):
+    brigade = detail.get("brigade")
+    if (
+        detail.get("projectNo") != manifest["case"]["projectNo"]
+        or not isinstance(brigade, dict)
+        or brigade.get("code") != manifest["case"]["brigadeCode"]
+    ):
         raise RegistryError("案卷关键字段不一致")
     for local, remote in case_map.items():
         if local in manifest["case"] and detail.get(remote) != manifest["case"][local]:
@@ -965,38 +983,48 @@ def verify_with_client(
         if len(row_matches) != 1:
             raise RegistryError(f"目录槽位不唯一或缺失：{code}")
         children = row_matches[0].get("children", [])
+        if not isinstance(children, list):
+            raise RegistryError(f"目录 children 不是数组：{code}")
         if multiplicity == "CASE":
-            owner = children[0] if children else row_matches[0]
+            candidates = [
+                child
+                for child in children
+                if isinstance(child, dict) and isinstance(child.get("versions"), dict)
+            ]
+            if not candidates and isinstance(row_matches[0].get("versions"), dict):
+                candidates = [row_matches[0]]
         elif multiplicity == "INSPECTION":
-            owner = next(
-                (
-                    child
-                    for child in children
-                    if child.get("inspectionId") == actual_inspections[stage].get("id")
-                ),
-                None,
-            )
+            candidates = [
+                child
+                for child in children
+                if isinstance(child, dict)
+                and child.get("inspectionId") == actual_inspections[stage].get("id")
+            ]
         elif multiplicity == "PRODUCT":
-            owner = next(
-                (
-                    child
-                    for child in children
-                    if child.get("productId") == remote_product_by_ref[slot["productRef"]].get("id")
-                ),
-                None,
-            )
+            candidates = [
+                child
+                for child in children
+                if isinstance(child, dict)
+                and child.get("productId") == remote_product_by_ref[slot["productRef"]].get("id")
+            ]
         else:
-            owner = next(
-                (
-                    child
-                    for child in children
-                    if child.get("notificationTarget") == slot["notificationTarget"]
+            candidates = [
+                child
+                for child in children
+                if isinstance(child, dict)
+                and (
+                    child.get("notificationTarget") == slot["notificationTarget"]
                     or child.get("key") == slot["notificationTarget"]
-                ),
-                None,
-            )
-        if not isinstance(owner, dict) or not isinstance(owner.get("versions"), dict):
+                )
+            ]
+        if len(candidates) != 1:
+            raise RegistryError(f"目录 owner 不唯一或缺失：{code}")
+        owner = candidates[0]
+        if not isinstance(owner.get("versions"), dict):
             raise RegistryError(f"目录 owner 缺失：{code}")
+        expected_versions = {version["kind"] for version in slot["versions"]}
+        if set(owner["versions"]) != expected_versions:
+            raise RegistryError(f"目录版本种类不一致：{code}")
         for version in slot["versions"]:
             remote = owner["versions"].get(version["kind"])
             if not isinstance(remote, dict):
@@ -1047,7 +1075,9 @@ def load_inputs(manifest_path: str, map_path: str) -> tuple[Path, dict[str, Any]
 def verify_command(args: argparse.Namespace) -> None:
     _path, manifest, _upload = load_inputs(args.manifest, args.upload_map)
     api_base, _origin = origin_of(args.api_base)
-    with httpx.Client(timeout=args.timeout, follow_redirects=False) as client:
+    with httpx.Client(
+        timeout=httpx.Timeout(args.timeout, read=max(args.timeout, 300.0)), follow_redirects=False
+    ) as client:
         print(json.dumps(verify_with_client(client, api_base, manifest), ensure_ascii=False))
 
 
@@ -1237,6 +1267,9 @@ def main(argv: list[str] | None = None) -> int:
         args.func(args)
     except RegistryError as error:
         print(f"ERROR: {error}", file=sys.stderr)
+        return 2
+    except httpx.TransportError:
+        print("ERROR: 网络传输失败，请检查连接后重试", file=sys.stderr)
         return 2
     return 0
 
