@@ -1,183 +1,63 @@
 ---
 name: xf-product-case-registry
-description: v0.6.0 清点、哈希、识别、OCR、拆分、规范命名消防产品案卷 PDF、监督系统截图或 ZIP，按案卷、案卷级检查、受检产品层级归属检查文书与现场照片，为逻辑文书选择电子版和扫描件各最多一份规范 PDF，生成可追溯的 CaseImportManifestV1，并通过消防产品案卷信息登记系统的幂等接口导入及同步文书版本。用于用户提到 PDF 案卷包、产品信息截图、组合扫描件拆分、案卷文件重命名、字段证据/冲突核对、项目包导入 product-cases.meifu.zzxhlyj.top，或样例案卷 32002207C202600033 时；截图转 Excel 仍使用 xf-product-case-filler。
+description: 仅适配消防产品案卷信息登记系统现有 V2 网站：在本地清点和核对消防产品案卷 PDF、ZIP 或监督系统截图，按 51 个固定文书槽位生成 CaseImportManifestV2，并在用户直接授权后走 V2 四步接口导入。用于用户提到产品案卷包、规范 PDF、V2 导入清单、固定文书槽位或 product-cases.meifu.zzxhlyj.top 的案卷导入；截图 Excel 台账仍使用 xf-product-case-filler。
 ---
 
-# 消防产品案卷提取与导入
+# 消防产品案卷 V2 本地整理与导入
 
-文档与工作流说明版本：`0.6.0`。
+只适配当前消防产品案卷信息登记系统 V2。不得改动网站、数据库、接口、部署或 `xf-product-case-filler`。
 
-把原案卷包视为只读证据，所有文本、OCR、拆分文件、manifest 和上传状态均写入独立工作目录。不得覆盖、重命名或删除原 PDF/ZIP。
+## 先读的契约
 
-## 固定边界
+执行 V2 导入前，读取以下两个生产契约；它们是字段、枚举、槽位编码和示例的唯一事实源：
 
-- PDF/ZIP 清点、拆分命名、系统导入使用本 skill。
-- 截图抽取并填写 Excel 使用 `xf-product-case-filler`，不要混用。
-- 原件缺失、OCR 失败或无法确认时写 `UNKNOWN`/`missingItems`，绝不推断为“无”。
-- 人工确认值不得由自动结果覆盖；服务端冲突必须进入待核对。
-- `png`、`jpg`、`jpeg` 一律按单页图片清点并调用 Zerox；OCR 结果只作为证据，不能凭 OCR 结果猜测业务值。
-- 网售情况属于单个产品，只能填写 `products[].onlineSale=YES|NO|UNKNOWN`；不得在案卷层填写或把一个网售产品扩散到同案其他产品。
-- 业务层级固定为“案卷 → 案卷级检查 → 受检产品”。初查、复查是案卷级检查；现场判定、抽样送检是该次检查下的检查方式；产品结论仍归属于受检产品。
-- 检查级文书（含 `ONSITE_PHOTO`）必须唯一关联一次初查或复查父检查。正式 `CaseImportManifestV1` 已支持 `caseInspectionRefs`：已确认归属时输出一个父检查引用；`inspectionRefs` 只列实际关联的产品检查，可在文书仅能确定父检查时为空数组，但不得指向其他父检查。
-- 每个逻辑文书的正式版本只允许 `ELECTRONIC`、`SCANNED` 各一份，且只能引用规范化 PDF；截图、原始组合件和重复副本仅保留为 `fileLinks`/字段证据，不能成为正式版本。
-- 前端统一使用“文书与附件”。服务端文书只设电子版和扫描件两个正式版本槽位；原 ZIP、原 PDF、组合件、截图和重复副本统一作为只读留档来源与证据映射，不设第三种正式版本类别。
-- 案卷类型按固定优先级归一：具有页码和直接刑事表述的证据才为 `CRIMINAL`；否则任一产品存在整改复查不合格（`RECHECK` + `UNQUALIFIED`）即为 `ADMINISTRATIVE`；其余一律为 `UNKNOWN` 并创建 `caseType` 待核对项。自动路径绝不把未确认案件写为 `NONE`；处罚、罚字、处罚文书或通报本身不足以推定刑案或行案。
-- 文件名只作提示；正文标题、文号、检验类别和关联对象决定文书分类。
-- 检查归属按固定优先级判定：正文明确写明“复查/整改复查”或初查表述 > 文号及关联记录 > 同类型检查日期排序（最早一次为初查、后续为复查）。日期排序只能在同一案卷、同类型文书、对象一致且不存在冲突时使用；`ONSITE_PHOTO` 不得仅靠文件名或日期排序归属。证据不足时归属判定为 `UNKNOWN`：正式 manifest 省略 `stage`、`caseInspectionRefs`，保留必需的 `inspectionRefs=[]`，并创建 `CaseDocument.stage` 的 `LOW_CONFIDENCE` 待核对项。
-- `检验报告.pdf` 只有正文明确“型式试验/型式检验”时才归为型式检验报告，不能误归为本案抽样送检报告。
-- `TYPE_TEST_REPORT`、CCC 证书、技术鉴定资料等属于案卷/产品材料，不得仅因出现在某次检查包中而绑定初查或复查。
-- 检查阶段只允许初查、整改复查；现场判定和抽样送检是检查方法。复检只作为抽样送检记录下的单次子流程，不能写成检查阶段或与整改复查混用。
-- 未经用户明确要求，不运行浏览器自动化。
+- `references/CaseImportManifestV2.schema.json`
+- `references/CaseImportManifestV2.example.json`
 
-## 环境
+不要使用或生成 `CaseImportManifestV1`、V1 接口、来源审计字段、审核项或 `ReviewIssue`。`scripts/registry_cli.py` 只实现 V2 的清点、MinerU 辅助识别、拆分、组装、校验、四步导入和只读核验；不存在独立的文书版本同步步骤。
 
-在本 skill 目录使用固定 Python 3.12 环境：
+## 不可突破的边界
 
-```powershell
-uv sync --python 3.12
-uv run python scripts/registry_cli.py --help
-```
+- 把原 PDF、ZIP、图片和本地提取结果视为本地证据。不得上传、转交或提供给外部审核模型；未确认信息只保留在本地，或在 V2 清单中按契约省略/填写 `UNKNOWN`。
+- 默认优先使用 PDF 的电子文本层。扫描页只可用本机 MinerU 处理。外部 Zerox 需要用户对第三方传输作出明确授权；本版本默认禁用，当前任务不得调用。
+- 文件名只能辅助定位。依据电子正文、页面内容、文号、日期和明确关联决定槽位；证据不足时不要猜测、不要上传。
+- V2 有现有的 51 个固定文书槽位；每个普通槽位最多一个电子版和一个扫描件，现场照片只允许扫描件。其他附件使用独立的 `OTHER_ATTACHMENT`，不占用正式双版本槽位。
+- 清单中的每个文件必须被一个 `documentSlots[].versions[].fileRef` 或 `otherAttachments[].fileRef` 引用；不得存在未关联文件。
+- 同一来源需要映射到多个逻辑槽位时，为每个槽位复制出独立的规范 PDF，并在 `files` 中使用独立 `clientRef` 和 `relativePath`。不得让一个上传文件同时充当多个逻辑槽位。
+- 上传会写入生产网站。只在用户直接授权具体案卷包和目标网站后执行；任何冲突、哈希不一致、槽位不明或未确认内容均停止，不绕过校验。
 
-脚本只在当前 Zerox 子进程中把 `D:\Program_Files\poppler\Library\bin` 放到 `PATH` 前端，不修改系统或全局 PATH。
+## 本地整理流程
 
-## 标准流程
+1. 在原案卷目录之外创建工作目录，清点文件、页数和 SHA-256；保留原件不改名、不覆盖、不删除。
+2. 读取电子文本层；对没有可靠文本层的扫描页，仅在本机调用 MinerU。保留页码与来源映射，无法识别时停在本地。
+3. 依据 `references/document-classification.md` 将每一份可确认的规范 PDF 映射到一个 V2 槽位或其他附件；先完成所有文件关联，再编写 manifest。
+4. 依据 `references/case-data-format.md` 和生产 Schema 组装 `CaseImportManifestV2`。用 Schema 校验 JSON，并逐项核对：包哈希、文件哈希、初查、可选复查、稳定引用、51 个槽位规则、双版本限制和无未关联文件。
+5. 先向用户展示本地清单摘要：项目编号、文件数、各槽位的电子版/扫描件、其他附件、未确认且未上传的内容。未获直接授权时到此结束。
 
-### 1. 清点与文本层提取
+## 命令边界
 
-工作目录必须位于原案卷目录之外：
+- 使用 `uv run --python 3.12 python scripts/registry_cli.py inventory ...` 清点原目录或 ZIP；目录包哈希由相对路径和逐文件哈希确定。
+- `ocr` 必须用一个或多个 `--relative-path` 明确选择扫描型 PDF/图片，输出必须位于工作目录内。它通过当前 `PATH` 中已核验的 PowerShell 7 读取 MinerU 的无 BOM UTF-8 包装脚本；不要改写全局 PowerShell、Node 或 PATH，也不要把已有可靠文本层的电子 PDF 批量交给 MinerU。
+- `split` 的计划项必须写明原文件、起止页和 `normalized/` 下的唯一 PDF 路径；脚本拒绝覆盖已有结果。
+- `compose` 使用的本地 `case-data.files[]` 需要同时写 `sourceRelativePath`（清点或拆分结果）与 `relativePath`（上传相对路径）。包哈希只能来自 `inventory.json`。
+- `validate` 与 `upload --dry-run` 都不写网站；正式导入必须显式使用 `upload --finalize`。导入完成后用 `verify` 逐项核对案卷、检查、产品、目录版本和下载文件哈希。
+- 上传状态与目标网站、包哈希和 manifest 哈希绑定。服务端已写入但网络核验中断时，只允许续做只读核验，不得二次导入或覆盖人工数据。
 
-```powershell
-uv run python scripts/registry_cli.py inventory `
-  "<案卷目录或ZIP>" --work-dir "<独立工作目录>"
-```
+## V2 四步导入
 
-检查：
+具体请求顺序和停止条件见 `references/api-workflow.md`：
 
-- `inventory.json`：本地路径、页数、文本层和待 OCR 页；
-- `source-directory-manifest.json`：可上传的去本机路径清单；
-- `text/`：逐页文本层结果。
+1. 创建导入任务；
+2. 流式上传已关联的规范 PDF；
+3. 提交 `CaseImportManifestV2`；
+4. 终结导入，由服务端进行 Schema 与语义校验并事务写入。
 
-### 2. 仅 OCR 扫描页
+不得访问 `/api/v1`，不得添加第五步“版本同步”，不得将未关联来源文件作为附件兜底上传。导入完成后仅记录服务端返回的结果；不要额外提交本地证据、OCR 原文或未确认项给审核模型。
 
-执行前先核对 `zerox-local` 当前模型端点。若端点会把页面内容发送到外部模型服务，真实案卷、执法文书或其他敏感材料必须先取得用户对该第三方数据传输的明确授权；不得把“本机启动命令”误称为“内容仅在本机处理”。未获授权时停止 OCR，保留 `needsOcrPages` 和中间清单，继续处理已有可靠文本层的内容，且不得把未识别写成“无”。检查端点时不得输出 `.env.local` 中的密钥。
+## 参考资料
 
-```powershell
-uv run python scripts/registry_cli.py ocr `
-  --work-dir "<工作目录>" --concurrency 1
-```
-
-默认调用本机 `zerox-local`。失败结果保留在 `ocr-index.json`；先修复失败，不得把未提取内容写成缺失文件。只有 Zerox 结构明显不佳时才按 `zerox-local` 规则回退 MinerU。
-
-### 3. 分析来源优先级，不直接定值
-
-```powershell
-uv run python scripts/registry_cli.py source-analysis --work-dir "<工作目录>"
-```
-
-检查 `source-analysis.json`。图片需由 OCR 命中“检查产品信息、产品名称、规格型号、标称生产者、产品所在部位、检查基数/数量、市场准入检查情况、产品质量现场检查情况”等表头识别为监督系统截图；文件名只作辅助，不能单独定类。它只输出来源类别和字段组优先级，不生成最终业务值。
-
-- 人工确认值永远最高，自动抽取只能补空值或追加相同值证据。
-- 产品名称/型号、标称生产者、位置、检查基数/数量、市场准入和质量状态优先监督系统截图或电子文本。
-- `problemDescription` 优先消防产品监督检查记录；有明确手写更正时保留扫描件证据并转人工核对。
-- 扫描签字版用于签章、手写更正和归档；低质量 OCR 不得覆盖电子版。
-- 电子版与扫描件出现不同值时，已选正式值可写 `fieldEvidence`；另一候选优先写入 `case-data.json.reviewItems.candidates`（候选值、可信等级、来源文件和页码），不自动择一。旧 `currentValue/incomingValue` 仍兼容；没有 `candidates` 时，`message` 必须写明来源文件与页码。
-
-### 4. 形成语义数据与拆分计划
-
-读取：
-
-- `references/case-data-format.md`
-- `references/document-classification.md`
-
-逐页核对标题、文号、日期、产品、阶段、对象和案卷类型，编写：
-
-- `case-data.json`：案卷、产品、阶段检查、文书、证据和缺失项；`CRIMINAL` 必须提供含文件、页码和直接刑事表述的字段证据，`UNKNOWN` 必须建立 `caseType` 待核对项。`ADMINISTRATIVE` 的规则证据由 `compose` 生成，其 `value.inspectionRef` 引用整改复查不合格记录；
-- `split-plan.json`：组合 PDF 的经确认页码范围；每项必须写与 `case-data.documents[].clientRef` 完全一致的稳定 `documentRef`，并写 `documentVersionKind=ELECTRONIC|SCANNED|UNKNOWN`；无法可靠判断时明确写 `UNKNOWN`，不得猜测。
-
-每条产品检查的 `caseInspectionRef` 可由人工显式指定；未指定时 `compose` 会按阶段和检查日期生成共享父检查引用，无日期时按同阶段同序位生成。不要把不同阶段或不同日期的记录填写为同一引用。
-
-已确认归属的检查级文书在 `case-data.json` 中填写 `stage` 和唯一 `caseInspectionRefs`；`inspectionRefs` 只列实际涉及的受检产品检查，没有产品级对象时使用空数组。可用 `stageEvidence.sources` 保存正文文件、页码和摘要，用 `relatedInspectionRef`、`relatedDocumentRef` 或 `relatedDocumentNo` 保存关联记录。若不能唯一定位父检查，不得仅凭文件名猜测；`compose` 省略正式 `stage/caseInspectionRefs`、输出 `inspectionRefs=[]`，并建立 `CaseDocument.stage` 待核对项。案卷/产品材料不填 `stage/caseInspectionRefs`，`inspectionRefs=[]`。
-
-不要仅凭 `p1` 或文件名假定一页就是一份文书。
-
-### 5. 生成规范化 PDF
-
-```powershell
-uv run python scripts/registry_cli.py split `
-  --work-dir "<工作目录>" --plan "<split-plan.json>"
-```
-
-文件名固定为 `项目编号_阶段_文书类型_文号或日期_电子版或扫描件_序号.pdf`。`UNKNOWN` 使用“版本待核对”，但不得进入 `documents[].versions`。脚本只写 `normalized/`，并在 `split-index.json` 保存 `documentRef`、`documentVersionKind`、原文件及页码映射；缺少或无法匹配 `documentRef` 时立即失败。
-
-### 6. 组装并本地校验 manifest
-
-```powershell
-uv run python scripts/registry_cli.py compose `
-  --work-dir "<工作目录>" --case-data "<case-data.json>"
-
-uv run python scripts/registry_cli.py validate `
-  --manifest "<工作目录>\manifest.json" `
-  --upload-map "<工作目录>\upload-map.json"
-```
-
-必须先消除结构错误、悬空引用和哈希错误。低可信字段可以保留，但要带 `OCR_ONLY` 证据并创建相应 `missingItems` 或待核对信息。
-
-校验层级关系：检查级文书的 `caseInspectionRefs` 必须指向同案唯一父检查；`inspectionRefs` 必须指向该父检查下的产品检查，且产品已列入 `productRefs`。文书 `stage`、父检查阶段和产品检查阶段必须一致。`ONSITE_PHOTO` 也执行相同规则；仅有照片文件名或拍摄日期时不能自动归入初查/复查。
-
-`documents[].versions` 只保存每种类型选出的最佳规范 PDF；同一 `documentRef + kind` 只有一个候选时由 `compose` 自动选入，存在多个候选时必须在 `case-data` 显式选定一个，否则不猜测。`compose` 会把该 `documentRef` 的所有候选原文件与页码写入 `fileLinks`，未选候选强制创建 `DUPLICATE_CANDIDATE`；`UNKNOWN` 强制创建 `LOW_CONFIDENCE`。同一 `stage + documentType + documentNo + issueDate` 出现两条逻辑文书会校验失败，必须先合并来源。
-
-### 7. 上传并完成 validate/finalize
-
-先执行不联网预演：
-
-```powershell
-uv run python scripts/registry_cli.py upload `
-  --manifest "<工作目录>\manifest.json" `
-  --upload-map "<工作目录>\upload-map.json" `
-  --api-base "https://product-cases.meifu.zzxhlyj.top" `
-  --dry-run
-```
-
-确认后正式上传并终结：
-
-```powershell
-uv run python scripts/registry_cli.py upload `
-  --manifest "<工作目录>\manifest.json" `
-  --upload-map "<工作目录>\upload-map.json" `
-  --api-base "https://product-cases.meifu.zzxhlyj.top" `
-  --finalize
-```
-
-上传状态写入工作目录的 `upload-state.json`，失败后使用同一命令续传。幂等键由原包哈希确定；重复执行不得增加案卷、产品、阶段检查或文件数量。
-
-正式顺序固定为：创建导入任务 → 上传文件 → 提交 manifest → 服务端 `validate` → 用户确认后 `finalize` → `sync-document-versions`。正式同步命令会核对同一案卷包的 `upload-state.json` 已完成 finalize；不得绕过四步导入直接写正式版本。
-
-### 8. 独立同步文书版本
-
-导入任务可能因相同包哈希已 `FINALIZED` 而直接返回旧结果。无论是否发生幂等重放，导入后都运行：
-
-```powershell
-uv run python scripts/registry_cli.py sync-document-versions `
-  --manifest "<工作目录>\manifest.json" `
-  --upload-map "<工作目录>\upload-map.json" `
-  --api-base "https://product-cases.meifu.zzxhlyj.top" `
-  --dry-run
-
-uv run python scripts/registry_cli.py sync-document-versions `
-  --manifest "<工作目录>\manifest.json" `
-  --upload-map "<工作目录>\upload-map.json" `
-  --api-base "https://product-cases.meifu.zzxhlyj.top"
-```
-
-命令按项目编号唯一定位案卷，再按阶段、文书类型、文号和日期唯一匹配文书；无匹配或多匹配时写入 `document-version-sync-state.json` 并停止猜测。相同 SHA-256 直接跳过；不同内容以服务器当前文书版本号执行乐观锁 PUT，同一命令可安全重跑。
-
-## 完成条件
-
-- 原件哈希与清点时一致；
-- 每个规范化 PDF 都能回溯原文件及页码；
-- manifest 本地校验通过；
-- 服务端 `/api/ready` 正常；
-- `validate` 和 `finalize` 均成功；
-- 返回的新增、冲突、缺失、跳过明细已保存；
-- 前端待核对项与无法确认内容一致。
-- `document-version-sync-state.json` 为 `DONE`，或所有 `NEEDS_REVIEW` 项已人工处理。
+- `references/CaseImportManifestV2.schema.json`：生产 JSON Schema、51 个固定槽位编码和版本限制。
+- `references/CaseImportManifestV2.example.json`：最小完整示例。
+- `references/case-data-format.md`：本地证据到 V2 清单的映射规则。
+- `references/document-classification.md`：文件分类、版本选择和多槽位复制规则。
+- `references/api-workflow.md`：V2 四步接口流程与停止条件。

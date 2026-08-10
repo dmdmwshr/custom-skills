@@ -1,69 +1,30 @@
-# 系统接口流程
+# V2 四步导入接口
 
-工作流说明版本：`0.6.0`。
+本流程只适用于现有网站 V2。所有业务请求位于 `/api/v2`；V1 已退休，不提供兼容或迁移路径。
 
-生产地址：`https://product-cases.meifu.zzxhlyj.top`
+## 前置条件
 
-系统按既定决策没有账号、令牌或身份隔离。固定请求头 `X-Product-Case-Client: web-v1` 只是降低跨站浏览器滥用，不是凭据。
+- 本地已依据 `CaseImportManifestV2.schema.json` 校验 manifest。
+- 所有 `files` 都是规范 PDF，均有 SHA-256，且每个文件都已关联一个正式槽位版本或一个 `OTHER_ATTACHMENT`。
+- 原始证据、OCR 原文、未确认字段和人工核对笔记留在本地，不随请求上传。
+- 用户已直接授权当前案卷包写入目标网站。
 
-## 正式顺序
+## 固定顺序
 
-1. `GET /api/ready`
-2. `POST /api/v1/import-jobs`
-3. `POST /api/v1/import-jobs/{id}/files`，每个文件一个 multipart 请求
-4. `PUT /api/v1/import-jobs/{id}/manifest`
-5. `POST /api/v1/import-jobs/{id}/validate`
-6. 用户确认后 `POST /api/v1/import-jobs/{id}/finalize`
-7. 独立执行 `sync-document-versions`，处理相同包哈希已终结但新 manifest 增加正式版本的情况
+1. `POST /api/v2/import-jobs`：使用包哈希和导入元数据创建或取得幂等导入任务。
+2. `POST /api/v2/import-jobs/{id}/files`：逐个 multipart 上传清单中已关联的规范 PDF。文件哈希、引用或类型不一致时停止。
+3. `PUT /api/v2/import-jobs/{id}/manifest`：提交 `CaseImportManifestV2`。不得提交 V1 清单、审核项、来源证据或未关联文件。
+4. `POST /api/v2/import-jobs/{id}/finalize`：由服务端执行 Schema 与语义校验，并以事务方式写入案卷、检查、产品、文件和槽位版本。
 
-以上“上传 → validate/finalize → sync-document-versions”是一个完整流程。`sync-document-versions` 不替代导入校验或终结，也不得在 finalize 前执行正式写入。
+## 停止条件
 
-正式同步时脚本必须读取同一工作目录的 `upload-state.json`，核对 `finalized=true`、存在 `jobId`，并确认 `packageSha256` 与当前 manifest 相同；缺失或不一致立即停止。`--dry-run` 只做预览，不执行 PUT。
+- 第 1 至 3 步返回冲突、哈希不一致、引用不存在、槽位不匹配或 PDF 不合规时，停止；不要创建替代任务绕过错误。
+- 第 4 步失败时保留本地工作目录和服务端返回结果，修正本地清单后再由用户决定是否重试。
+- 不得调用已退休的旧接口、旧 `validate` 接口或旧的独立版本同步接口。V2 的四步流程已经覆盖正式槽位版本写入。
 
-创建任务需要：
+## 本地安全门禁与核验
 
-- `Idempotency-Key`：由原包 SHA-256 稳定生成；
-- `sourceType=LOCAL_SKILL`；
-- 包名、容器类型、包哈希、哈希方法和 extractor 版本。
-
-文件 multipart 字段：
-
-- `file`
-- `relativePath`
-- `storageKind`
-- `sha256`
-- PDF 时的 `pageCount`
-
-原 ZIP、原 PDF、组合扫描件、截图和重复副本上传后统一属于只读留档来源及 `fileLinks` 证据历史。前端栏目使用“文书与附件”；服务端逻辑文书只有 `ELECTRONIC`（电子版）和 `SCANNED`（扫描件）两个正式版本槽位，不设置第三种正式版本类别。
-
-## 检查级文书关联
-
-正式 `CaseImportManifestV1` 已支持 `caseInspectionRefs`。已确认归属的检查级文书输出一个父检查引用；`inspectionRefs` 只列该父检查下实际涉及的产品检查，可以在仅确定父检查时为空数组。两组引用必须与文书 `stage` 一致。阶段未知时省略 `stage/caseInspectionRefs`、输出 `inspectionRefs=[]`，并提交 `CaseDocument.stage` 的 `LOW_CONFIDENCE` 待核对项。
-
-`ONSITE_PHOTO` 同样属于检查级文书，不能只凭文件名归入初查或复查。`TYPE_TEST_REPORT`、CCC 证书、技术鉴定资料等案卷/产品材料不输出检查引用。
-
-失败时保留 `upload-state.json`，使用相同 manifest、原包哈希和幂等键续传。不得新建另一案卷来绕过冲突。
-
-## 文书版本独立同步
-
-四步导入任务对相同 `packageSha256` 会返回既有 `FINALIZED` 结果，不能依靠再次 finalize 回填后来新增的 `documents[].versions`。因此必须独立运行：
-
-```powershell
-uv run python scripts/registry_cli.py sync-document-versions `
-  --manifest "<工作目录>\manifest.json" `
-  --upload-map "<工作目录>\upload-map.json" `
-  --api-base "https://product-cases.meifu.zzxhlyj.top"
-```
-
-命令执行顺序：
-
-1. `GET /api/ready`；
-2. `GET /api/v1/cases?projectNo=...`，只接受一个项目编号完全相同的活动案卷；
-3. `GET /api/v1/cases/{caseId}/documents`；
-4. 按 `stage + documentType + documentNo + issueDate` 完全匹配，必须且只能命中一个活动文书；
-5. 相同 kind 的服务器文件 SHA-256 与本地一致时跳过；
-6. 不同时调用 `PUT /api/v1/documents/{id}/versions/{kind}`，multipart 包含 `file` 与 `expectedDocumentVersion`；
-7. 每次 PUT 后刷新文书，确保第二种版本使用新的乐观锁版本号；
-8. 每个跳过、待处理、上传中、PUT 已受理、成功或失败结果都立即原子写入 `document-version-sync-state.json`。
-
-同步前先拒绝本地清单中重复的 `stage + documentType + documentNo + issueDate`，避免两条本地文书连续覆盖同一服务端槽位。无匹配、多匹配或服务器文书版本号无效时不猜测，写入 `document-version-sync-state.json` 并报告待处理。PUT 或随后的刷新失败时写 `FAILED`、失败阶段、错误摘要以及“远端写入是否可能已成功”，保留此前成功项后返回非零；用同一 manifest 重跑时，相同哈希跳过，只补未完成槽位。
+- `upload --dry-run` 只做本地 Schema、业务归属、PDF、页数和哈希校验，不建立网络连接。
+- 正式写入必须显式增加 `--finalize`；脚本在写入前检查服务就绪状态和项目编号不存在。
+- `upload-state.json` 同时绑定目标网站来源、包哈希和 manifest 哈希。发现同编号案卷且没有同一任务的本地完成状态时立即停止，不能用导入覆盖网页人工数据。
+- 服务端终结成功后先记录“已写入、待核验”，再读取案卷详情、固定目录和每份文件进行哈希核对。网络中断后重跑只允许续做只读核验，不会再次终结任务。

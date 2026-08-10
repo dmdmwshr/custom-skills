@@ -1,0 +1,83 @@
+{
+  "schemaVersion": "CaseImportManifestV2",
+  "packageSha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "createdAt": "2026-08-03T12:00:00Z",
+  "extractor": { "name": "manual-or-local-client", "version": "2.0.0" },
+  "case": {
+    "projectNo": "32002207C202600033",
+    "brigadeCode": "XISHAN",
+    "unitName": "锡山区东湖塘鑫源生鲜超市",
+    "unitAddress": "锡山区东港镇东湖塘宜东苑社区底层商铺51号",
+    "inspectionForm": "ROUTINE",
+    "handler": "朱大海（主）、袁鹏",
+    "inspector": "朱大海（主）、袁鹏",
+    "documentRecipient": "王超",
+    "notificationTarget": "UNKNOWN"
+  },
+  "initialInspection": {
+    "clientRef": "inspection:initial",
+    "stage": "INITIAL_CHECK",
+    "inspectionDate": "2026-05-19",
+    "products": [
+      {
+        "clientRef": "product:initial:1",
+        "name": "直流水枪",
+        "modelSpec": "QZ3.5/7.5",
+        "nominalProducer": "高邮市顺威消防科技有限公司",
+        "location": "一层走道",
+        "method": "ONSITE",
+        "result": "UNQUALIFIED",
+        "onlineSale": "UNKNOWN",
+        "maintenance": "UNKNOWN",
+        "marketAccessMode": "CCC",
+        "problemDescription": "一层走道部位使用的直流水枪跌落试验后出现破裂。"
+      }
+    ]
+  },
+  "recheckInspection": {
+    "clientRef": "inspection:recheck",
+    "stage": "RECHECK",
+    "inspectionDate": "2026-05-27",
+    "products": [
+      {
+        "clientRef": "product:recheck:1",
+        "name": "直流水枪",
+        "modelSpec": "QZ3.5/7.5",
+        "method": "ONSITE",
+        "result": "QUALIFIED"
+      }
+    ]
+  },
+  "files": [
+    {
+      "clientRef": "file:type-test",
+      "relativePath": "32002207C202600033_07_型式检验报告（初查）_产品1_电子版.pdf",
+      "sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "mimeType": "application/pdf",
+      "pageCount": 10
+    },
+    {
+      "clientRef": "file:initial-record",
+      "relativePath": "32002207C202600033_03_消防产品监督检查记录表（初查）_扫描件.pdf",
+      "sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "mimeType": "application/pdf",
+      "pageCount": 2
+    }
+  ],
+  "documentSlots": [
+    {
+      "clientRef": "slot:initial:type-test:product-1",
+      "slotCode": "INITIAL_TYPE_TEST_REPORT",
+      "productRef": "product:initial:1",
+      "documentNo": "Zb2018M3262",
+      "versions": [{ "kind": "ELECTRONIC", "fileRef": "file:type-test" }]
+    },
+    {
+      "clientRef": "slot:initial:inspection-record",
+      "slotCode": "INITIAL_INSPECTION_RECORD",
+      "inspectionRef": "inspection:initial",
+      "versions": [{ "kind": "SCANNED", "fileRef": "file:initial-record" }]
+    }
+  ],
+  "otherAttachments": []
+}
