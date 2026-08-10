@@ -1,0 +1,15 @@
+[Unit]
+Description=Clean stale Meifu download cache chunks
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+Environment=MEIFU_DOWNLOAD_CACHE_STALE_HOURS=72
+Environment=MEIFU_DOWNLOAD_CACHE_MIN_FREE_GIB=8
+ExecStart=/usr/local/sbin/meifu-download-cache-gc
+PrivateTmp=yes
+NoNewPrivileges=yes

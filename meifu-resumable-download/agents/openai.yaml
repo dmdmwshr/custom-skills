@@ -1,0 +1,4 @@
+interface:
+  display_name: "Meifu 断点下载"
+  short_description: "通过 Meifu 分块缓存稳定下载大文件并支持断点续传"
+  default_prompt: "使用 $meifu-resumable-download 通过 Meifu 分块缓存下载此链接，并保存到指定绝对路径。"
