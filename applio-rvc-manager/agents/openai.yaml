@@ -1,4 +1,4 @@
 interface:
-  display_name: "Applio 音色与视频对白"
-  short_description: "管理 Applio 音色并为 ComfyUI 准备可复现的视频对白"
-  default_prompt: "使用 $applio-rvc-manager 为当前 ComfyUI 视频项目制作、锁定并记录可复现的角色对白音频。"
+  display_name: "Applio 声音训练与生成"
+  short_description: "统一管理 Applio 声音训练、RVC 模型与 TTS 生成"
+  default_prompt: "使用 $applio-rvc-manager 按 Applio 规范完成声音数据集、RVC 模型训练或 TTS 加 RVC 音频生成，并记录可复现参数。"
