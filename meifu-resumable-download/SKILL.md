@@ -10,25 +10,40 @@ description: 通过 Meifu 分块缓存稳定下载任意 HTTPS 大文件，并�
 使用受控链路“来源链接 → Meifu 临时分块 → 本机 SFTP 续传 → 完整文件校验 → 原子落盘”。它不是公开网页代理，也不提供任意人可访问的转发接口。
 
 - 仅处理当前用户直接提供或明确批准的 HTTP(S) 直链；默认仅允许 HTTPS。
-- 用户明确要求下载大模型，或说明网络不稳定、下载中断时，优先使用本 skill；普通小文件、网页浏览、Git 克隆和软件包管理不要因此绕行。
-- 要求明确的绝对输出路径；目标已有不同文件时拒绝覆盖。
-- 模型、安装包、可执行文件和依赖包优先要求官方 SHA-256。未提供时可计算结果哈希，但不得把“已下载”表述为“已验证来源”。
-- 含签名参数或访问令牌的链接视为敏感信息：使用 `--url-stdin__ 传入，不写入可提交文件、日志或状态文件。
-- 不要把 Meifu 暴露为公共下载 API；不要改用 ProxyJump、ProxyCommand 或其他跳板。
+- 要求绝对输出路径。也可用 `--storage-root` 加 `--target` 指定“存储根目录 + 安全相对目标”；相对目标不得是绝对路径或含 `..`，最终文件不能逃出指定根目录。
+- 模型、安装包、可执行文件和依赖包优先要求官方 SHA-256。没有官方哈希时可计算结果哈希，但不能表述为“已验证来源”。
+- 带签名参数或令牌的链接只能经 `--url-stdin` 传入；不能写入命令行、队列、日志、状态文件或 Git。
+- 拒绝 ProxyJump、ProxyCommand 和其他跳板；不把 Meifu 暴露为公共下载接口。
+- 同一输出路径始终只允许一个传输。输出锁、队列锁和原子状态文件共同阻止重复启动与并发写入。
+
+## 后台运行方式
+
+公共直链的大文件必须使用 `scripts/meifu_download_queue.py`：
+
+1. `enqueue` 只写入本地持久队列，不连接 Meifu，也不启动传输。
+2. `start` 只请求已安装的 Windows 计划任务处理默认队列；它绝不创建 Codex 的后台子进程。
+3. Windows 后台任务才运行长传输，严格一次只处理一个文件和一个 Meifu 分块；断网时保留断点并按退避时间自动续传。
+4. `status` 只读取本地队列、锁和控制状态，不连接 Meifu。
+
+计划任务只在当前用户明确授权后安装。安装、查看和精确卸载入口见 `docs/WINDOWS_TASK_CATALOG.md`。任务未安装时，`start` 会安全拒绝，不会退回到 Codex 进程树。
+
+单文件 `download_via_meifu.py --execute` 只作为带签名链接或人工值守排障的例外：默认也会脱离调用终端，但不会获得持久队列的周期唤醒。不要在 Codex 当前会话使用 `--foreground` 跑长传输。
 
 ## 使用流程
 
-1. 先确认链接、输出位置、大小级别和是否有官方 SHA-256。对于 ComfyUI 模型，先由 `comfyui-production-manager__ 确认类别、版本、许可证和最终目录。
-2. 不加 `--execute__ 运行脚本，确认脱敏来源、输出路径、传输方式和续传状态。
-3. 需要检查 Range 支持、远端和本机空间时使用 `--probe-only__；它不会创建缓存。
-4. 只有用户已直接批准下载时才加 `--execute__。发生短暂网络错误时保留状态和当前远端块；使用相同链接与输出路径重跑即可续传。
-5. 完成后核对输出大小、SHA-256 和“来源已验证/仅计算哈希”状态；不要自动执行、安装或导入下载文件。
+1. 确认链接、输出位置、大小级别和官方 SHA-256。ComfyUI 模型先由 `comfyui-production-manager` 确认类别、版本、许可证和最终目录。
+2. 用不带 `--execute` 的单文件命令检查脱敏来源和输出规则；需要验证 Range 支持、远端和本机空间时使用 `--probe-only`。
+3. 用户直接批准下载后，对无签名公共直链逐项 `enqueue`，再一次 `start` 请求 Windows 后台任务。
+4. 只用 `status` 轮询。运行中重复请求会在创建子进程前返回“已有传输正在进行”。
+5. 完成后核对输出大小、SHA-256 和“来源已验证/仅计算哈希”状态；不自动执行、安装或导入下载文件。
 
 常用调用形式：
 
-    python scripts/download_via_meifu.py --url "https://example.invalid/file.bin" --output "D:\Downloads\file.bin"
+    python scripts/download_via_meifu.py --url "https://example.invalid/file.bin" --storage-root "D:\aimodels" --target "speech\tts\model.bin"
     python scripts/download_via_meifu.py --url "https://example.invalid/file.bin" --output "D:\Downloads\file.bin" --probe-only
-    python scripts/download_via_meifu.py --url "https://example.invalid/file.bin" --output "D:\Downloads\file.bin" --sha256 <官方哈希> --execute
+    python scripts/meifu_download_queue.py enqueue --url "https://example.invalid/file.bin" --storage-root "D:\aimodels" --target "speech\tts\model.bin" --sha256 <官方哈希>
+    python scripts/meifu_download_queue.py start
+    python scripts/meifu_download_queue.py status
 
 签名链接不放入命令行：
 
@@ -36,25 +51,20 @@ description: 通过 Meifu 分块缓存稳定下载任意 HTTPS 大文件，并�
 
 ## 与 ComfyUI skill 的分工
 
-- `comfyui-production-manager__：判断缺失模型、模型类别、许可证、目标目录、模型清单和显存影响。
+- `comfyui-production-manager`：判断缺失模型、模型类别、许可证、目标目录、模型清单和显存影响。
 - 本 skill：只负责通用传输、续传、缓存和文件完整性。
-- 已存在的 ComfyUI 模型队列只用于兼容其已创建的队列；新的通用下载不要写入模型队列，也不要绕过模型 skill 的模型审查。
+- ComfyUI 通过 `delegate_model_downloads.py` 把已批准候选写入本队列；不要再运行它的旧直连下载器或旧模型队列。
 
 ## Meifu 缓存维护
 
-部署或更新服务端清理器前，先运行：
+本 skill 只使用 `/root/.cache/meifu-downloads`。成功完成时立即清理本任务的本地暂存和远端目录；暂停、断网或重启时保留断点。
 
-    powershell -ExecutionPolicy Bypass -File scripts/deploy_meifu_cache_gc.ps1
-
-确认 dry-run 后，用户授权的部署使用：
-
-    powershell -ExecutionPolicy Bypass -File scripts/deploy_meifu_cache_gc.ps1 -Apply
-
-清理器只管理两个固定缓存根，默认在无活动 72 小时后回收残留任务；当 Meifu 可用空间低于 8 GiB 时，再按最早无活动任务回收。详见 `references/transport-and-cache.md__。
+服务端清理器默认在任务无活动 72 小时后回收残留缓存；可用空间低于 8 GiB 时按最早无活动任务继续回收。旧 ComfyUI 缓存是单独的遗留范围，不由本 skill 新建、迁移或删除。详见 `references/transport-and-cache.md`。
 
 ## 资源
 
-- `scripts/download_via_meifu.py__：通用单文件分块下载器。
-- `scripts/deploy_meifu_cache_gc.ps1__：部署或更新 Meifu 定时清理器。
-- `assets/meifu-download-cache-gc.*__：服务端清理脚本与 systemd 单元模板。
-- `references/transport-and-cache.md__：传输、缓存、续传和安全边界。
+- `scripts/download_via_meifu.py`：通用单文件分块传输器；`--status` 只读轮询。
+- `scripts/meifu_download_queue.py`：公共直链的持久单工作队列；`start` 只唤醒 Windows 后台任务。
+- `scripts/install-meifu-download-queue-task.ps1`、`show-meifu-download-queue-task.ps1`、`uninstall-meifu-download-queue-task.ps1`：唯一后台队列任务的生命周期入口。
+- `scripts/deploy_meifu_cache_gc.ps1`：部署或更新 Meifu 缓存清理器。
+- `references/transport-and-cache.md`：传输、缓存、续传和安全边界。

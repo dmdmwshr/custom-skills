@@ -37,89 +37,45 @@ python scripts/audit_model_dependencies.py --workflow-root "<工作区>\workflow
 
 模型名称相同不等于模型等价；禁止将 fp16/fp8、不同版本、不同训练集或不同 LoRA 静默替换。
 
-## 美服分块断点下载
+## 委托给通用 Meifu 队列
 
-默认链路为：
-
-```text
-官方 HTTPS 来源 → 美服 /root/.cache/comfyui-models 的 2 GiB 临时块
-→ 本机 SFTP reget 续传 → 本地临时合成 → SHA-256 校验 → 正确模型目录
-```
-
-美服每个块会在本机校验、写入合成文件并登记进度后立即删除；完整模型成功落盘后会清理该任务的远端缓存目录。因此美服不需要容纳完整模型，可中转超过其剩余空间的大文件。中断、断网或本机意外关机时保留未完成的本地状态、合成文件和当前美服分块；再次执行同一命令即可续传。SSH/SFTP 配置了 30 秒存活检测、最多 3 次未响应即退出，以免无网络时无限挂住子进程。
-
-### 直连约束
-
-模型中转只允许 SSH 别名 `meifu主机` 直连 `192.129.128.54:22`。下载器会先读取 `ssh -G meifu主机` 的有效配置，只有同时满足以下条件才联网：
-
-- `hostname = 192.129.128.54`；
-- `proxycommand = none`；
-- `proxyjump = none`。
-
-这只验证本机 SSH 配置层的直连路径；发现 CN2 或其他跳板配置时下载器会拒绝执行，而不是悄悄改走中转。
-
-使用顺序：
-
-```powershell
-# 只显示请求、来源和落盘规则，不联网、不写入。
-python scripts/stage_model_download.py --dependency-report "<工作区>\models\template_dependency_report.json" --model "模型文件名.safetensors"
-
-# 只读验证来源是否支持 Range、来源哈希线索、美服空间和最终落盘位置。
-python scripts/stage_model_download.py --dependency-report "<工作区>\models\template_dependency_report.json" --model "模型文件名.safetensors" --probe-only
-
-# 用户明确批准后才会下载、传输、校验、登记和清理缓存。
-python scripts/stage_model_download.py --dependency-report "<工作区>\models\template_dependency_report.json" --model "模型文件名.safetensors" --execute
-```
-
-下载器只接受 HTTPS、受支持的模型扩展名和安全的类别名。优先从 Hugging Face LFS 的 ETag 自动获得 SHA-256；没有可用官方哈希时默认拒绝写入。仅在用户明确接受来源校验风险时，才能传入 `--allow-unverified-source`。
-
-需要登录或同意许可证的 Hugging Face 仓库，先由用户在模型卡完成授权，并在美服以受限权限配置令牌；不得把令牌写入聊天、命令行、工作区、下载报告或 Git。带签名查询参数的 URL 也不得写入可提交的登记文件。
-
-## 批量队列、暂停与缓存回收
-
-当用户已明确要求下载全部“安全候选”时，使用持久队列，而不是在会话中并行启动多个下载：
-
-```powershell
-# 仅从报告中的 download_candidates 建立队列；不会纳入 unresolved 或类别冲突项。
-python scripts/model_download_queue.py initialize
-
-# 单工作者执行，适合由受管计划任务长期运行。
-python scripts/model_download_queue.py run --recover-stale-lock
-
-# 查看当前模型、子进程 PID、暂停请求、已完成和 blocked 计数。
-python scripts/model_download_queue.py status
-
-# 默认等当前 SSH/SFTP 步骤结束后安全暂停；最多保留一个 2 GiB 当前分块。
-python scripts/model_download_queue.py pause
-
-# 需要立即中断时只结束当前下载子进程树；本地 state 和已验证分块保持可续传。
-python scripts/model_download_queue.py pause --immediate
-
-# 移除暂停请求后，再启动同一个受管任务即可续传。
-python scripts/model_download_queue.py resume
-
-# 仅将以前因 SSH/SFTP/上游临时网络故障误阻塞的条目重新排队。
-python scripts/model_download_queue.py retry --transport-only
-
-# 队列任务确认停止后，精确清理未完成任务在美服上的缓存目录。
-python scripts/model_download_queue.py cleanup-remote
-```
-
-队列文件为 `<工作区>\models\download_queue.json`，控制文件为同目录 `download_queue.control.json`，日志为 `models\logs\model_download_queue.log`。所有状态写入均采用同目录临时文件后原子替换。一个队列锁只允许一个工作者；Windows 计划任务也设置 `MultipleInstances=IgnoreNew`，防止登录触发、手工启动和会话重连堆出多个后台下载。
-
-队列先做一次美服 SSH 连通性探测；临时 SSH/SFTP 断线、DNS/路由异常以及上游 408/425/429/5xx 会进入 `waiting_for_network`，保留断点并给当前条目写入指数退避时间（首次 15 分钟，最多 6 小时），然后结束本次工作者，不会继续误阻塞后续模型。计划任务每 30 分钟短暂唤醒一次，网络恢复后从原断点继续；用户也可运行 `resume` 立即清除网络退避。突然关机或进程被结束后，下一次带 `--recover-stale-lock` 的受管启动会把遗留的 `running` 条目安全改回 `queued`，不删除任何局部文件或远端分块。
-
-只有模型卡授权、来源链接 4xx、类别/哈希校验、已有不同本地文件或磁盘空间等永久问题才会标为 `blocked`，不自动循环重试。处理完原因后在队列任务停止时明确运行 `retry`；如果只是旧版本的网络误判，使用 `retry --transport-only`。`retry` 会取得同一把队列锁，运行中的工作者不会被并发覆盖。成功下载的模型立即更新 `models/catalog.json`；已有不同文件、完整 SHA-256 不匹配或本地空间不满足预留时都会停止该条目，不覆盖模型目录。
-
-## 后台任务
-
-受管任务的唯一身份是：
+ComfyUI 不再维护自己的远端缓存、SFTP 传输器或后台下载任务。职责严格分开：
 
 ```text
-\DevProjects\COMFY\AUTO\DEV-COMFY-AUTO-01-ModelDownloadQueue
+ComfyUI：已批准候选、模型类别、模型根目录、下载后登记
+通用 Meifu 下载器：HTTPS 分块缓存、SFTP 续传、哈希、原子落盘、单工作者与缓存回收
+Windows 计划任务：在 Codex 之外运行通用队列，并在登录/网络恢复后唤醒它
 ```
 
-安装、查看、卸载分别使用 `install-model-download-queue-task.ps1`、`show-model-download-queue-task.ps1`、`uninstall-model-download-queue-task.ps1`。安装脚本从 ComfyUI 虚拟环境的基础 Python 复制并校验 GUI 子系统启动器到 `C:\Users\12070\Documents\ComfyUI\.venv\TaskScripts\pythonw.exe`，不依赖系统 Python/PATH，也不会开出控制台窗口。任务在登录时和之后每 30 分钟运行一次，`MultipleInstances=IgnoreNew` 保证同一时刻只有一个工作者。任务清单和运行边界以工作区 `docs\WINDOWS_TASK_CATALOG.md` 为准。
+只使用 `download_candidates` 中唯一类别、单一无签名 HTTPS 来源和安全文件名都明确的条目。带签名参数、需要登录或需要接受许可证的链接不能写入持久队列；先由用户完成授权并提供可安全持久化的来源，绝不把令牌写入聊天、命令行、工作区或 Git。
+
+```powershell
+# 只做本地准备：按指定模型根目录逐项写入通用队列和 ComfyUI 委托清单；不联网、不启动传输。
+python scripts/delegate_model_downloads.py prepare --dependency-report "<工作区>\models\template_dependency_report.json" --model-root "D:\Comfy-Desktop\ComfyUI-Shared\models"
+
+# 当前用户已明确批准下载，且通用后台任务已单独安装后，才请求 Windows 后台任务开始队列。
+python scripts/delegate_model_downloads.py prepare --dependency-report "<工作区>\models\template_dependency_report.json" --model-root "D:\Comfy-Desktop\ComfyUI-Shared\models" --start
+
+# 只读查看模型委托和通用队列；不会连接 Meifu 或启动下载。
+python scripts/delegate_model_downloads.py status
+
+# 文件完成落盘后，计算最终 SHA-256 并更新 models\catalog.json；不会执行或导入模型。
+python scripts/delegate_model_downloads.py reconcile
+```
+
+`--model-root` 是精确的存储根目录；省略时，脚本按 Comfy Desktop 的共享路径和空间规则选择根目录。候选的类别与文件名被传给通用下载器作为安全相对目标，因此文件不能逃出该模型根目录。通用队列始终一次只处理一个文件和一个 Meifu 分块，并为同一输出路径设置锁，避免重复传输和并发写入。
+
+通用缓存根是 `/root/.cache/meifu-downloads`。完整校验与原子落盘后会清理自己的临时目录；断网、断电或临时上游错误保留本地状态和当前远端块，并以 15 分钟起始、最长 6 小时的退避自动续传。无活动超过 72 小时，或 Meifu 可用空间低于 8 GiB 时，通用缓存清理器会按最旧任务精确回收。它不会删除 ComfyUI 模型目录或其他缓存根。
+
+唯一传输后台任务由 `meifu-resumable-download` 管理：
+
+```text
+\DevProjects\MEIFU\AUTO\DEV-MEIFU-AUTO-01-DownloadQueue
+```
+
+该任务在当前用户登录时和每 30 分钟唤醒一次，使用 GUI Python 启动器和 `IgnoreNew` 并发策略。Codex 的入队、启动和查询均为短操作；实际传输不在 Codex 的命令进程中运行。安装、更新、启停或卸载该任务必须获得当前用户明确授权。
+
+原来的 `stage_model_download.py`、`model_download_queue.py` 和 ComfyUI 旧任务已退役：前两者只保留旧状态审计，传输型命令会安全退出；旧任务的停用或迁移不是本 skill 同步的一部分，必须单独授权后才执行。
 
 ## 登记、清理与删除
 

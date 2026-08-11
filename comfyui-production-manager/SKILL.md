@@ -1,6 +1,6 @@
 ---
 name: comfyui-production-manager
-description: 管理本机 ComfyUI 的工作流、模型与 AI 创作项目。用户要求整理/去重/归档/命名工作流、检查模板缺失模型、确认模型存放位置、通过美服分块缓存实现模型断点下载、规划模型目录、准备图像/视频/音频/3D 创作流程、建立项目资产与分镜台账，或询问 ComfyUI MCP/Agent 配置时使用。模型之外的大文件下载改由 `meifu-resumable-download` 处理；本 skill 仍负责模型类别、来源、许可证、目录和登记。也用于把工作区母版安全同步到 ComfyUI 运行目录并验证哈希。
+description: 管理本机 ComfyUI 的工作流、模型与 AI 创作项目。用户要求整理/去重/归档/命名工作流、检查模板缺失模型、确认模型存放位置、规划模型目录、准备图像/视频/音频/3D 创作流程、建立项目资产与分镜台账，或询问 ComfyUI MCP/Agent 配置时使用。模型传输统一委托 `meifu-resumable-download` 的 Windows 单工作队列；本 skill 只负责模型类别、来源、许可证、目标目录和下载后的登记。也用于把工作区母版安全同步到 ComfyUI 运行目录并验证哈希。
 ---
 
 # ComfyUI Production Manager
@@ -45,13 +45,12 @@ description: 管理本机 ComfyUI 的工作流、模型与 AI 创作项目。用
 2. 当前默认根目录是 `D:\Comfy-Desktop\ComfyUI-Shared\models`；D 盘可用空间低于 200 GiB，或不足以容纳“模型 + 传输块 + 预留”时，才回退到 `C:\Users\12070\Documents\ComfyUI\models`。不手改 Desktop 生成的共享路径配置。
 3. 先运行 `scripts/audit_models.py` 盘点两个模型根目录，再用 `scripts/audit_model_dependencies.py` 从模板库提取“已安装 / 缺失 / 未解析”的模型依赖与直链。
 4. 只把类别、来源和文件名都明确的 `missing` 项作为下载候选；`unresolved`、同名多来源、不同精度或不同训练版本必须先人工确认，不能静默替换。
-5. 下载模型前先执行 `scripts/stage_model_download.py` 的 dry-run 或 `--probe-only`；只有当前用户明确要求下载后才加 `--execute`。批量下载只允许使用依赖报告中 `download_candidates`，不能把 `unresolved` 或类别冲突条目混入队列。新建模型传输优先委托 `meifu-resumable-download`，完成后再由本 skill 执行模型目录与清单登记。
-6. 模型传输使用“官方 HTTPS → 美服受控分块缓存 → SFTP `reget` 本地续传 → SHA-256 → 原子落位”的链路。默认块为 2 GiB，成功的块立即从美服删除，完整任务成功后清理远端任务目录；SSH/SFTP 使用存活探测，断线、短暂上游 5xx/429 或意外关机时保留未完成的本地 state、合成文件和美服当前分块，以便继续。既有 `model_download_queue.py` 只兼容已经创建的模型队列，不用于模型之外的通用下载。
-7. 批量任务使用 `scripts/model_download_queue.py`：一个持久 JSON 队列只启动一个模型工作者，且美服最多保留一个当前分块。`pause` 在安全边界暂停；`pause --immediate` 只结束该下载子进程树；任务停止后 `cleanup-remote` 仅删除该队列生成的远端任务目录。临时 SSH/SFTP/上游网络故障进入 `waiting_for_network` 并按退避时间等待下次计划任务或手动 `resume`，绝不把后续模型逐个标记为失败；来源、授权、哈希、磁盘等永久问题才标记为 `blocked`，允许人工 `retry` 或 `retry --transport-only`。
-8. 美服连接只能通过 `meifu主机` 直连 `192.129.128.54:22`；启动前和每个模型传输前都检查有效 SSH 配置，发现 `ProxyJump` 或 `ProxyCommand`、或地址不匹配即拒绝，不能经 CN2 或其他跳板中转。
-9. 后台队列使用唯一计划任务 `\DevProjects\COMFY\AUTO\DEV-COMFY-AUTO-01-ModelDownloadQueue`。它以已验证的 `C:\Users\12070\Documents\ComfyUI\.venv\TaskScripts\pythonw.exe` 启动，`MultipleInstances=IgnoreNew`，登录时和每 30 分钟唤醒一次；启动时会回收已停止进程遗留的 `running` 条目并从原断点恢复。创建、查看、精确卸载分别只能用三个生命周期脚本和工作区 `docs/WINDOWS_TASK_CATALOG.md`。
-10. 为每个模型登记文件名、类别、相对路径、大小、SHA-256、脱敏来源、许可证、精度/版本、适用工作流和已知显存需求。大模型的实际下载成功不等于显存能完整加载；显存兼容性单独报告。
-11. 模型移动、覆盖或删除属于外部状态变更。默认只生成清单和建议；已有不同文件时下载器拒绝覆盖，删除前先检查工作流、项目 manifest、模型目录登记和 ComfyUI 日志。
+5. 只允许 `download_candidates` 中类别、文件名和无签名 HTTPS 来源均明确的 `missing` 项进入下载准备；`unresolved`、类别冲突、带签名链接以及不同精度/训练版本必须人工确认，不能静默替换。
+6. 使用 `scripts/delegate_model_downloads.py prepare` 把候选逐项委托给 `meifu-resumable-download`。通过 `--model-root` 配置精确模型根目录，或由共享路径规则选择根目录；通用队列收到的是“存储根目录 + 类别/文件名”的安全相对目标，不能逃出模型根目录。
+7. 实际传输只由通用技能的 Windows 后台任务承担：官方 HTTPS → `/root/.cache/meifu-downloads` 分块缓存 → 本机 SFTP 续传 → SHA-256 → 原子落位。Codex 只可准备、请求后台任务启动和查询状态；队列始终只有一个工作者、一个输出文件和一个 Meifu 分块。断网、断电和临时上游错误保留断点并自动退避续传。
+8. 文件落盘后运行 `scripts/delegate_model_downloads.py reconcile`，由本 skill 计算最终 SHA-256 并更新 `models/catalog.json`；它不执行、安装或导入模型。下载成功不等于显存可完整加载，显存兼容性单独报告。
+9. `stage_model_download.py` 和 `model_download_queue.py` 是只保留状态审计的旧兼容入口，所有可能传输、清理或修改旧队列的命令都会安全退出。不得新建或恢复旧 ComfyUI 下载任务；已有旧任务的停用/迁移属于单独的 Windows 计划任务变更，必须获得当前用户明确授权。
+10. 模型移动、覆盖或删除属于外部状态变更。默认只生成清单和建议；已有不同文件时通用下载器拒绝覆盖，删除前先检查工作流、项目 manifest、模型目录登记和 ComfyUI 日志。
 
 详见 `references/model-management.md`。
 
@@ -106,6 +105,6 @@ projects/<project>/
 - `scripts/curate_template_candidates.py`：将待整理模板与统一模板库做功能签名对照，只给出候选建议，不自动删除。
 - `scripts/model_paths.py`：读取 Comfy Desktop 共享模型路径，并按 D 盘 200 GiB 阈值选择默认/备用落盘位置。
 - `scripts/audit_model_dependencies.py`：从模板 `MarkdownNote` 和模型加载器提取模型依赖、来源与缺口；不下载模型。
-- `scripts/stage_model_download.py`：经美服分块缓存和 SFTP 断点续传下载一项已确认依赖；没有 `--execute` 不产生下载或落盘动作。
-- `scripts/model_download_queue.py`：把已确认候选建成可暂停、单工作者、可从网络故障和意外停止恢复的持久下载队列。
-- `scripts/install-model-download-queue-task.ps1`、`show-model-download-queue-task.ps1`、`uninstall-model-download-queue-task.ps1`：唯一后台队列任务的安装、只读查看和精确卸载入口。
+- `scripts/delegate_model_downloads.py`：把依赖报告的安全候选委托给通用 Meifu 队列，支持可配置模型根目录、只读状态和下载后目录登记；本身不传输模型。
+- `scripts/stage_model_download.py`、`scripts/model_download_queue.py`：旧直连下载兼容入口；只保留审计能力，不能启动传输。
+- `scripts/show-model-download-queue-task.ps1`、`scripts/uninstall-model-download-queue-task.ps1`：旧任务的只读查看与精确卸载入口。旧安装脚本会拒绝创建任务，改由通用 Meifu 技能管理唯一后台队列任务。

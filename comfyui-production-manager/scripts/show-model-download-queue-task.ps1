@@ -7,6 +7,7 @@ $OutputEncoding = [Console]::OutputEncoding
 
 $TaskPath = '\DevProjects\COMFY\AUTO\'
 $TaskName = 'DEV-COMFY-AUTO-01-ModelDownloadQueue'
+$ReplacementTask = '\DevProjects\MEIFU\AUTO\DEV-MEIFU-AUTO-01-DownloadQueue'
 $Workspace = 'D:\12070\Documents\workspaces\Comfy-Codex-Workspace'
 $VenvPython = 'C:\Users\12070\Documents\ComfyUI\.venv\Scripts\python.exe'
 $QueueScript = Join-Path $PSScriptRoot 'model_download_queue.py'
@@ -16,6 +17,8 @@ $ControlFile = Join-Path $Workspace 'models\download_queue.control.json'
 $task = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
 if (-not $task) {
     [pscustomobject]@{
+        Lifecycle = 'legacy_read_only'
+        ReplacementTask = $ReplacementTask
         Installed = $false
         TaskPath = $TaskPath
         TaskName = $TaskName
@@ -37,6 +40,8 @@ if ((Test-Path -LiteralPath $VenvPython -PathType Leaf) -and (Test-Path -Literal
 }
 
 [pscustomobject]@{
+    Lifecycle = 'legacy_read_only'
+    ReplacementTask = $ReplacementTask
     Installed = $true
     TaskPath = $TaskPath
     TaskName = $TaskName

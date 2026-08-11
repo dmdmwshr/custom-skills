@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Durable, single-worker queue for missing ComfyUI template models.
+"""Retired compatibility entry point for the former ComfyUI model queue.
 
 The queue is deliberately conservative:
 * one model worker and one Meifu cache chunk at a time;
@@ -10,10 +10,10 @@ The queue is deliberately conservative:
 * a temporary SSH/SFTP/upstream network outage preserves progress and waits for
   a later scheduled or manual queue run instead of poisoning later entries.
 
-It invokes ``stage_model_download.py`` for the actual verified, resumable
-Meifu-to-local transfer.  It does not install a model merely because its name
-appears in a workflow report: only the report's pre-approved download candidates
-are admitted to the queue.
+New model transfers must use ``delegate_model_downloads.py`` and the generic
+``meifu-resumable-download`` Windows queue.  The old implementation remains
+only so existing queue files can be inspected without changing or deleting
+their state.  Its transfer-capable commands now return a safe no-op.
 """
 
 from __future__ import annotations
@@ -831,6 +831,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
+        if args.command != "status":
+            print(json.dumps({
+                "status": "retired_no_op",
+                "message": "ComfyUI 旧下载队列已迁移到通用 Meifu 下载队列；未启动、修改或清理任何旧传输。",
+                "replacement": "使用 delegate_model_downloads.py prepare/status/reconcile。",
+            }, ensure_ascii=False))
+            return 0
         return int(args.handler(args))
     except QueueError as exc:
         print(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
