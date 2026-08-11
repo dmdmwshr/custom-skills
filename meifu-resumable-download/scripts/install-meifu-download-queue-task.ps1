@@ -15,6 +15,7 @@ $StableId = 'AUTO-01'
 $Python = 'C:\Users\12070\AppData\Local\Programs\Python\Python312\python.exe'
 $QueueRoot = Join-Path $env:LOCALAPPDATA 'MeifuDownloadQueue'
 $TaskPython = Join-Path $QueueRoot 'TaskScripts\pythonw.exe'
+$TaskPythonConfig = Join-Path $QueueRoot 'pyvenv.cfg'
 $QueueScript = Join-Path $PSScriptRoot 'meifu_download_queue.py'
 $Downloader = Join-Path $PSScriptRoot 'download_via_meifu.py'
 $QueueFile = Join-Path $QueueRoot 'queue.json'
@@ -82,7 +83,44 @@ function Ensure-TaskPython {
     if ($taskHash -eq $consoleHash) {
         throw '受管 GUI 启动器与控制台 Python 相同，拒绝创建可能闪窗的任务。'
     }
-    return [pscustomobject]@{ Path = $TaskPython; Sha256 = $taskHash; Subsystem = 2 }
+
+    # A copied Windows launcher is not self-contained.  Keep its venv-style
+    # home record directly above TaskScripts so Python can find the verified
+    # base standard library instead of opening a hidden initialization error.
+    $config = "home = $basePrefix`r`ninclude-system-site-packages = false`r`n"
+    $writeConfig = $true
+    if (Test-Path -LiteralPath $TaskPythonConfig -PathType Leaf) {
+        try {
+            $writeConfig = ([System.IO.File]::ReadAllText($TaskPythonConfig, [System.Text.UTF8Encoding]::new($false)) -ne $config)
+        }
+        catch {
+            $writeConfig = $true
+        }
+    }
+    if ($writeConfig) {
+        [System.IO.File]::WriteAllText($TaskPythonConfig, $config, [System.Text.UTF8Encoding]::new($false))
+    }
+
+    # Validate the exact copied GUI launcher before it becomes a Scheduled
+    # Task action.  The bounded probe never touches the queue or Meifu.
+    $probe = Start-Process -FilePath $TaskPython `
+        -ArgumentList '-B -c "import encodings; raise SystemExit(0)"' `
+        -PassThru
+    if (-not $probe.WaitForExit(15000)) {
+        Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
+        throw "受管 GUI 启动器未能在 15 秒内完成本地标准库探测：$TaskPython"
+    }
+    if ($probe.ExitCode -ne 0) {
+        throw "受管 GUI 启动器无法加载标准库，退出码：$($probe.ExitCode)"
+    }
+    $configHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $TaskPythonConfig).Hash
+    return [pscustomobject]@{
+        Path = $TaskPython
+        Sha256 = $taskHash
+        Subsystem = 2
+        ConfigPath = $TaskPythonConfig
+        ConfigSha256 = $configHash
+    }
 }
 
 foreach ($required in @($QueueScript, $Downloader)) {
