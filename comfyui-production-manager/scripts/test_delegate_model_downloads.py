@@ -9,6 +9,7 @@ remote transfer.
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -121,6 +122,57 @@ class DelegateModelDownloadTests(unittest.TestCase):
             self.assertEqual(catalog["models"][0]["absolute_path"], str(target))
             self.assertEqual(catalog["models"][0]["transport"], "meifu_resumable_download_queue")
             self.assertEqual(manifest["entries"][0]["registration_status"], "registered")
+
+    def test_manifest_lease_rejects_a_second_comfyui_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest_path = Path(temporary) / "manifest.json"
+            lease = MODULE.create_manifest_lease(manifest_path, operation="test")
+            try:
+                with self.assertRaises(MODULE.DelegateError):
+                    MODULE.create_manifest_lease(manifest_path, operation="test")
+            finally:
+                lease.release()
+
+    def test_stale_manifest_snapshot_cannot_overwrite_newer_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest_path = root / "manifest.json"
+            queue_path = root / "queue.json"
+            MODULE.save_manifest(
+                manifest_path,
+                MODULE.manifest_template(root / "models", queue_path),
+                operation="test_setup",
+            )
+            fresh = MODULE.read_manifest(manifest_path, root / "models", queue_path)
+            stale = copy.deepcopy(fresh)
+
+            fresh["generic_queue"] = "first-writer"
+            with MODULE.create_manifest_lease(manifest_path, operation="first_writer") as lease:
+                MODULE.save_manifest(manifest_path, fresh, operation="first_writer", lease=lease)
+
+            stale["generic_queue"] = "stale-writer"
+            with MODULE.create_manifest_lease(manifest_path, operation="stale_writer") as lease:
+                with self.assertRaises(MODULE.DelegateError):
+                    MODULE.save_manifest(manifest_path, stale, operation="stale_writer", lease=lease)
+
+            current = MODULE.read_manifest(manifest_path, root / "models", queue_path)
+            self.assertEqual(current["generic_queue"], "first-writer")
+            self.assertEqual(current["write_state"]["revision"], 2)
+
+    def test_pre_lease_manifest_is_upgraded_on_next_safe_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest_path = root / "manifest.json"
+            queue_path = root / "queue.json"
+            legacy = MODULE.manifest_template(root / "models", queue_path)
+            legacy.pop("write_state")
+            MODULE.atomic_write_json(manifest_path, legacy)
+            manifest = MODULE.read_manifest(manifest_path, root / "models", queue_path)
+            self.assertEqual(MODULE.manifest_revision(manifest), 0)
+            MODULE.save_manifest(manifest_path, manifest, operation="legacy_upgrade")
+            upgraded = MODULE.read_manifest(manifest_path, root / "models", queue_path)
+            self.assertEqual(upgraded["write_state"]["revision"], 1)
+            self.assertEqual(upgraded["write_state"]["write_protocol"], MODULE.MANIFEST_WRITE_PROTOCOL)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,9 @@ WINDOWS_TASK_FULL_NAME = f"{WINDOWS_TASK_PATH}{WINDOWS_TASK_NAME}"
 QUEUE_SCHEMA = "MeifuDownloadQueueV1"
 CONTROL_SCHEMA = "MeifuDownloadQueueControlV1"
 LOCK_SCHEMA = "MeifuDownloadQueueLockV1"
+MANIFEST_SCHEMA = "MeifuDownloadQueueManifestV1"
+MANIFEST_LOCK_SCHEMA = "MeifuDownloadQueueManifestLeaseV1"
+MANIFEST_WRITE_PROTOCOL = "lease-compare-and-replace-v1"
 ENTRY_STATES = {"queued", "running", "completed", "blocked"}
 LOCK_INITIALIZATION_GRACE_SECONDS = 120
 DEFAULT_RETRY_DELAY_SECONDS = 15 * 60
@@ -84,6 +87,33 @@ def read_json_object(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def queue_manifest_metadata(queue: dict[str, Any]) -> dict[str, Any]:
+    """Return validated write metadata, accepting pre-lease V1 queues once."""
+    metadata = queue.get("manifest")
+    if metadata is None:
+        return {
+            "schema": MANIFEST_SCHEMA,
+            "revision": 0,
+            "write_protocol": MANIFEST_WRITE_PROTOCOL,
+        }
+    if not isinstance(metadata, dict):
+        raise QueueError("队列写入元数据无效，未尝试覆盖原文件。")
+    revision = metadata.get("revision")
+    if (
+        metadata.get("schema") != MANIFEST_SCHEMA
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+        or metadata.get("write_protocol") != MANIFEST_WRITE_PROTOCOL
+    ):
+        raise QueueError("队列写入元数据不匹配，未尝试覆盖原文件。")
+    return metadata
+
+
+def queue_revision(queue: dict[str, Any]) -> int:
+    return int(queue_manifest_metadata(queue)["revision"])
+
+
 def queue_template() -> dict[str, Any]:
     return {
         "schema": QUEUE_SCHEMA,
@@ -92,6 +122,11 @@ def queue_template() -> dict[str, Any]:
         "updated_at": now(),
         "entries": [],
         "worker": {"pid": None, "max_concurrent_downloads": 1, "max_remote_chunks": 1},
+        "manifest": {
+            "schema": MANIFEST_SCHEMA,
+            "revision": 0,
+            "write_protocol": MANIFEST_WRITE_PROTOCOL,
+        },
     }
 
 
@@ -105,11 +140,6 @@ def read_queue(path: Path, *, allow_missing: bool = False) -> dict[str, Any]:
         raise QueueError("下载队列无法解析；未尝试覆盖原文件。")
     validate_queue(queue)
     return queue
-
-
-def save_queue(path: Path, queue: dict[str, Any]) -> None:
-    queue["updated_at"] = now()
-    atomic_write_json(path, queue)
 
 
 def append_log(path: Path, message: str) -> None:
@@ -126,6 +156,10 @@ def process_is_running(process_id: int | None) -> bool:
 
 def queue_lock_path(queue_path: Path) -> Path:
     return queue_path.with_name(f".{queue_path.name}.lock")
+
+
+def queue_manifest_lock_path(queue_path: Path) -> Path:
+    return queue_path.with_name(f".{queue_path.name}.manifest.lock")
 
 
 def lock_age_seconds(path: Path) -> float | None:
@@ -164,6 +198,42 @@ class QueueLock:
             pass
         finally:
             self.released = True
+
+
+@dataclass
+class QueueManifestLease:
+    """A short-lived single-writer lease for queue.json read-modify-write work."""
+
+    path: Path
+    queue_path: Path
+    token: str
+    operation: str
+    released: bool = False
+
+    def assert_owner(self) -> None:
+        if self.released:
+            raise QueueError("队列清单写入租约已经释放。")
+        owner = read_json_object(self.path)
+        if owner is None or owner.get("token") != self.token:
+            raise QueueError("队列清单写入租约所有者已变化，拒绝覆盖。")
+
+    def release(self) -> None:
+        if self.released:
+            return
+        try:
+            owner = read_json_object(self.path)
+            if owner is not None and owner.get("token") == self.token:
+                self.path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        finally:
+            self.released = True
+
+    def __enter__(self) -> "QueueManifestLease":
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.release()
 
 
 def create_queue_lock(queue_path: Path, *, recover_stale: bool, phase: str) -> QueueLock:
@@ -214,6 +284,56 @@ def create_queue_lock(queue_path: Path, *, recover_stale: bool, phase: str) -> Q
     return QueueLock(path=path, token=token)
 
 
+def create_queue_manifest_lease(queue_path: Path, *, operation: str) -> QueueManifestLease:
+    """Claim one short queue-manifest writer; never hold this through a transfer."""
+    path = queue_manifest_lock_path(queue_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or not path.is_file():
+            raise QueueError("队列清单写入锁不是普通文件，拒绝处理。")
+        owner = read_json_object(path) or {}
+        process_id = owner.get("pid")
+        if isinstance(process_id, int) and process_is_running(process_id):
+            raise QueueError("另一个任务正在写入下载队列；请稍后重试，未覆盖任何条目。")
+        age = lock_age_seconds(path)
+        if not isinstance(process_id, int) and age is not None and age < LOCK_INITIALIZATION_GRACE_SECONDS:
+            raise QueueError("发现正在初始化的队列写入锁；两分钟后仍未就绪再人工确认。")
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise QueueError("无法精确回收已停止的队列写入锁。") from exc
+
+    token = hashlib.sha256(
+        f"{os.getpid()}:{time.time_ns()}:{queue_path}:{operation}".encode("utf-8")
+    ).hexdigest()
+    try:
+        descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    except FileExistsError as exc:
+        raise QueueError("无法获得队列清单写入租约，可能有另一个请求刚刚到达。") from exc
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(
+                {
+                    "schema": MANIFEST_LOCK_SCHEMA,
+                    "pid": os.getpid(),
+                    "token": token,
+                    "operation": operation,
+                    "created_at": now(),
+                    "queue": str(queue_path),
+                },
+                handle,
+                ensure_ascii=False,
+            )
+            handle.write("\n")
+    except Exception:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return QueueManifestLease(path=path, queue_path=queue_path, token=token, operation=operation)
+
+
 def claim_queue_lock(queue_path: Path, token: str) -> QueueLock:
     path = queue_lock_path(queue_path)
     owner = read_json_object(path)
@@ -222,6 +342,50 @@ def claim_queue_lock(queue_path: Path, token: str) -> QueueLock:
     lock = QueueLock(path=path, token=token)
     lock.update_owner(process_id=os.getpid(), phase="running")
     return lock
+
+
+def commit_queue(
+    path: Path,
+    queue: dict[str, Any],
+    *,
+    lease: QueueManifestLease,
+    operation: str,
+) -> None:
+    """Atomically replace queue.json only when its read revision still matches."""
+    if str(lease.queue_path.resolve(strict=False)).casefold() != str(path.resolve(strict=False)).casefold():
+        raise QueueError("队列清单写入租约不属于当前队列。")
+    lease.assert_owner()
+    expected_revision = queue_revision(queue)
+    current = read_queue(path, allow_missing=True)
+    if queue_revision(current) != expected_revision:
+        raise QueueError("队列清单已被其他任务更新；请重新读取后再提交，未覆盖已有条目。")
+    metadata = dict(queue_manifest_metadata(queue))
+    metadata.update(
+        {
+            "schema": MANIFEST_SCHEMA,
+            "revision": expected_revision + 1,
+            "write_protocol": MANIFEST_WRITE_PROTOCOL,
+            "last_mutation": {"operation": operation, "pid": os.getpid(), "at": now()},
+        }
+    )
+    queue["manifest"] = metadata
+    queue["updated_at"] = now()
+    validate_queue(queue)
+    atomic_write_json(path, queue)
+
+
+def save_queue(
+    path: Path,
+    queue: dict[str, Any],
+    *,
+    operation: str = "worker",
+    lease: QueueManifestLease | None = None,
+) -> None:
+    if lease is not None:
+        commit_queue(path, queue, lease=lease, operation=operation)
+        return
+    with create_queue_manifest_lease(path, operation=operation) as write_lease:
+        commit_queue(path, queue, lease=write_lease, operation=operation)
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -237,6 +401,7 @@ def parse_timestamp(value: Any) -> datetime | None:
 def validate_queue(queue: dict[str, Any]) -> None:
     if queue.get("schema") != QUEUE_SCHEMA or not isinstance(queue.get("entries"), list):
         raise QueueError("队列结构不匹配，拒绝继续。")
+    queue_manifest_metadata(queue)
     for entry in queue["entries"]:
         if not isinstance(entry, dict) or entry.get("status") not in ENTRY_STATES:
             raise QueueError("队列中存在未知条目状态，拒绝继续。")
@@ -248,6 +413,7 @@ def validate_queue(queue: dict[str, Any]) -> None:
 
 
 def summary(queue: dict[str, Any]) -> dict[str, Any]:
+    metadata = queue_manifest_metadata(queue)
     counts = {state: 0 for state in sorted(ENTRY_STATES)}
     active: dict[str, Any] | None = None
     for entry in queue["entries"]:
@@ -261,6 +427,8 @@ def summary(queue: dict[str, Any]) -> dict[str, Any]:
         "active": active,
         "worker": queue.get("worker", {}),
         "updated_at": queue.get("updated_at"),
+        "manifest_revision": metadata["revision"],
+        "last_manifest_mutation": metadata.get("last_mutation"),
     }
 
 
@@ -386,17 +554,21 @@ def run_queue_with_lock(args: argparse.Namespace, lock: QueueLock) -> int:
         raise QueueError("找不到通用单文件下载器。")
     queue: dict[str, Any] | None = None
     try:
-        queue = read_queue(args.queue)
-        recovered = recover_interrupted_entries(queue)
-        queue["state"] = "running"
-        queue["worker"] = {
-            "pid": os.getpid(),
-            "started_at": now(),
-            "child_pid": None,
-            "max_concurrent_downloads": 1,
-            "max_remote_chunks": 1,
-        }
-        save_queue(args.queue, queue)
+        # The worker lock is acquired before this short manifest lease.  An
+        # enqueue that was already in flight therefore commits first; the
+        # worker then reads that newest revision before taking responsibility.
+        with create_queue_manifest_lease(args.queue, operation="worker_start") as write_lease:
+            queue = read_queue(args.queue)
+            recovered = recover_interrupted_entries(queue)
+            queue["state"] = "running"
+            queue["worker"] = {
+                "pid": os.getpid(),
+                "started_at": now(),
+                "child_pid": None,
+                "max_concurrent_downloads": 1,
+                "max_remote_chunks": 1,
+            }
+            save_queue(args.queue, queue, operation="worker_start", lease=write_lease)
         if recovered:
             append_log(args.log_file, f"已恢复意外停止的条目：{', '.join(recovered)}；断点保持不变。")
 
@@ -549,12 +721,15 @@ def ensure_queue_not_running(queue_path: Path) -> None:
 
 
 def enqueue(args: argparse.Namespace) -> int:
-    ensure_queue_not_running(args.queue)
-    queue = read_queue(args.queue, allow_missing=True)
-    entry = make_entry(args, queue)
-    queue["entries"].append(entry)
-    queue["state"] = "queued"
-    save_queue(args.queue, queue)
+    # Check the worker lock *inside* the same lease as read-modify-write, so a
+    # just-starting worker cannot be handed an older in-memory queue snapshot.
+    with create_queue_manifest_lease(args.queue, operation="enqueue") as write_lease:
+        ensure_queue_not_running(args.queue)
+        queue = read_queue(args.queue, allow_missing=True)
+        entry = make_entry(args, queue)
+        queue["entries"].append(entry)
+        queue["state"] = "queued"
+        save_queue(args.queue, queue, operation="enqueue", lease=write_lease)
     print(json.dumps({"status": "queued", "entry_id": entry["id"], **summary(queue)}, ensure_ascii=False, indent=2))
     return 0
 
@@ -645,10 +820,14 @@ def resume(args: argparse.Namespace) -> int:
 def status(args: argparse.Namespace) -> int:
     queue = read_queue(args.queue, allow_missing=True)
     owner = read_json_object(queue_lock_path(args.queue)) or {}
+    manifest_owner = read_json_object(queue_manifest_lock_path(args.queue)) or {}
     payload = {
         "status": "ok" if args.queue.exists() else "not_initialized",
         "worker_lock_active": process_is_running(owner.get("pid")),
         "worker_pid": owner.get("pid") if isinstance(owner.get("pid"), int) else None,
+        "manifest_write_active": process_is_running(manifest_owner.get("pid")),
+        "manifest_write_pid": manifest_owner.get("pid") if isinstance(manifest_owner.get("pid"), int) else None,
+        "manifest_write_operation": manifest_owner.get("operation"),
         "control": read_control(args.control_file),
         **summary(queue),
     }

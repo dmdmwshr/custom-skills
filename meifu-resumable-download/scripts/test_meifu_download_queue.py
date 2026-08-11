@@ -7,8 +7,10 @@ These tests do not start a worker, connect to Meifu, or create a Scheduled Task.
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -114,6 +116,81 @@ class GenericQueueTests(unittest.TestCase):
                     MODULE.create_queue_lock(queue_path, recover_stale=False, phase="launching")
             finally:
                 lock.release()
+
+    def test_manifest_lease_rejects_a_second_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            queue_path = Path(temporary) / "queue.json"
+            lease = MODULE.create_queue_manifest_lease(queue_path, operation="test")
+            try:
+                with self.assertRaises(MODULE.QueueError):
+                    MODULE.create_queue_manifest_lease(queue_path, operation="test")
+            finally:
+                lease.release()
+
+    def test_external_process_cannot_enqueue_while_manifest_lease_is_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue_path = root / "queue.json"
+            lease = MODULE.create_queue_manifest_lease(queue_path, operation="test_owner")
+            try:
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-B",
+                        "-X",
+                        "utf8",
+                        str(SCRIPT),
+                        "enqueue",
+                        "--queue",
+                        str(queue_path),
+                        "--url",
+                        "https://example.com/external.bin",
+                        "--output",
+                        str(root / "external.bin"),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15,
+                )
+            finally:
+                lease.release()
+            self.assertEqual(result.returncode, 2)
+            self.assertFalse(queue_path.exists())
+
+    def test_stale_manifest_snapshot_cannot_overwrite_newer_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            queue_path = Path(temporary) / "queue.json"
+            MODULE.save_queue(queue_path, MODULE.queue_template(), operation="test_setup")
+            fresh = MODULE.read_queue(queue_path)
+            stale = copy.deepcopy(fresh)
+
+            fresh["state"] = "first_writer"
+            with MODULE.create_queue_manifest_lease(queue_path, operation="first_writer") as lease:
+                MODULE.save_queue(queue_path, fresh, operation="first_writer", lease=lease)
+
+            stale["state"] = "stale_writer"
+            with MODULE.create_queue_manifest_lease(queue_path, operation="stale_writer") as lease:
+                with self.assertRaises(MODULE.QueueError):
+                    MODULE.save_queue(queue_path, stale, operation="stale_writer", lease=lease)
+
+            current = MODULE.read_queue(queue_path)
+            self.assertEqual(current["state"], "first_writer")
+            self.assertEqual(current["manifest"]["revision"], 2)
+
+    def test_pre_lease_v1_queue_is_upgraded_on_its_next_safe_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            queue_path = Path(temporary) / "queue.json"
+            legacy = MODULE.queue_template()
+            legacy.pop("manifest")
+            MODULE.atomic_write_json(queue_path, legacy)
+            queue = MODULE.read_queue(queue_path)
+            self.assertEqual(MODULE.queue_revision(queue), 0)
+            MODULE.save_queue(queue_path, queue, operation="legacy_upgrade")
+            upgraded = MODULE.read_queue(queue_path)
+            self.assertEqual(upgraded["manifest"]["revision"], 1)
+            self.assertEqual(upgraded["manifest"]["write_protocol"], MODULE.MANIFEST_WRITE_PROTOCOL)
 
     def test_start_only_requests_the_windows_task_not_a_codex_child_process(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
