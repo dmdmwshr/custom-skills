@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "default_year_root": "E:\\文件夹\\1、工作\\2、产品，科技，联网检测\\1、产品监督\\26年",
+  "default_year_root": "E:\\文件夹\\1、工作\\2、产品科技联网\\1、产品监督\\26年",
   "output_file": "{year}年产品监督底册问题汇总.docx",
   "review_json_file": "{year}年产品监督底册问题汇总.review.json",
   "source_discovery": {

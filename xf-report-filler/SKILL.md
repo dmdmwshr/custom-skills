@@ -34,11 +34,11 @@ x-edit-policy: edit-source-repo-only
 
 ```powershell
 python scripts/monthly_workflow_audit.py `
-  --bulletin-dir "E:\文件夹\1、工作\2、产品科技联网\1、产品监督\26\月度通报\2607_通报" `
+  --bulletin-dir "E:\文件夹\1、工作\2、产品科技联网\1、产品监督\26年\1、月度通报\2607_通报" `
   --bulletin-year 2026 `
-  --bulletin-month 6 `
+  --bulletin-month 7 `
   --score-year 2026 `
-  --score-month 5
+  --score-month 6
 ```
 
 审计确认后整理目录：
@@ -88,6 +88,8 @@ python scripts/monthly_grade_register.py `
   --month-dir "<通报月份目录>\5月巡查" `
   --year 2026 `
   --month 5 `
+  --bulletin-year 2026 `
+  --bulletin-month 6 `
   --dry-run
 ```
 
@@ -95,7 +97,7 @@ python scripts/monthly_grade_register.py `
 
 ```powershell
 python scripts/annual_product_problem_summary.py `
-  --year-root "E:\文件夹\1、工作\2、产品科技联网\1、产品监督\26" `
+  --year-root "E:\文件夹\1、工作\2、产品科技联网\1、产品监督\26年" `
   --year 2026 `
   --dry-run `
   --review-json "<审计输出.json>"
@@ -120,7 +122,8 @@ python scripts/sync_monthly_templates.py --apply
 ## 月度硬规则
 
 - 通报月份目录和成绩月份巡查目录分开：`6月通报` 根层放 6 月当月表，`6月通报\5月巡查` 放 5 月巡查成绩源和成品。
-- 外部模板事实源固定在 `resources/monthly_workflow.json` 的绝对路径；`模板\月通报模板` 是唯一标准模板文件夹，根层放当月通报表和工作动态模板，`（X-1）月巡查` 放用户维护的成绩材料模板；成绩材料模板文件和标准子文件夹使用 `YYYY年（X-1）月...` 命名；产品档案和成绩总表等生成底稿保存在 skill 内。
+- 外部模板事实源固定在 `resources/monthly_workflow.json` 的绝对路径；知识库模板库中的 `月通报模板` 是唯一标准模板文件夹，根层放当月通报表和工作动态模板，`（X-1）月巡查` 放用户维护的成绩材料模板；成绩材料模板文件和标准子文件夹使用 `YYYY年（X-1）月...` 命名；产品档案和成绩总表等生成底稿保存在 skill 内。
+- 生成 `6月巡查` 成绩时，文件名和成绩数据仍按 6 月；但 `2026年6月消防产品监督成绩` 内各大队产品监督档案的评查日期按通报月份写，例如 `2607_通报\6月巡查` 写 `2026年7月`。
 - `产品巡查底册（不发）` 和 `基础信息考评截图（不发）` 是数据源，不标 `【待补】`。
 - 根层两张表在当月 25 号最终数据确认前，文件名前加 `【待补】`；表格内不写 `【待补】`，待确认单元格只用红色底色标记。
 - 产品底册黄色高亮问题属于私账：不进入成品，不参与扣分。

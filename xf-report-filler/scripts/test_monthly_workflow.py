@@ -22,6 +22,9 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
         self.assertTrue(Path(config["template_sources"]["external_root"]).is_absolute())
         self.assertTrue(Path(config["template_sources"]["bulletin_skeleton"]).is_absolute())
         self.assertTrue(Path(config["template_sources"]["score_skeleton"]).is_absolute())
+        self.assertIn("知识库（物料，模板，依据文件，教学文件，名单清单）", config["template_sources"]["external_root"])
+        self.assertIn("26年产品科技工作计划.xls", config["data_sources"]["work_plan"]["path"])
+        self.assertIn("26年\\2、案卷信息采集\\产品案卷数据.xlsx", config["data_sources"]["case_data"]["path"])
 
     def test_template_and_real_score_dir_names_are_centralized(self):
         config = workflow.load_config()

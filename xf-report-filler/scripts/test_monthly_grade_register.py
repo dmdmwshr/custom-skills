@@ -83,6 +83,32 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
         self.assertEqual((info["score_year"], info["score_month"]), (2026, 1))
         self.assertEqual(info["score_month_key"], "2026-01")
 
+    def test_resolve_bulletin_month_from_yymm_bulletin_folder(self):
+        info = mgr.resolve_bulletin_month(
+            r"C:\workspace\26年\1、月度通报\2607_通报\6月巡查",
+            score_year=2026,
+            score_month=6,
+        )
+        self.assertEqual((info["bulletin_year"], info["bulletin_month"]), (2026, 7))
+        self.assertEqual(info["source"], "bulletin_folder")
+
+    def test_resolve_bulletin_month_falls_back_to_next_score_month(self):
+        info = mgr.resolve_bulletin_month(
+            r"C:\workspace\6月巡查",
+            score_year=2026,
+            score_month=6,
+        )
+        self.assertEqual((info["bulletin_year"], info["bulletin_month"]), (2026, 7))
+        self.assertEqual(info["source"], "score_month_plus_one")
+
+    def test_resolve_bulletin_month_infers_cross_year_from_month_folder(self):
+        info = mgr.resolve_bulletin_month(
+            r"C:\workspace\1月通报\12月巡查",
+            score_year=2026,
+            score_month=12,
+        )
+        self.assertEqual((info["bulletin_year"], info["bulletin_month"]), (2027, 1))
+
     def test_build_generated_history_record_uses_score_month(self):
         record = mgr.build_generated_history_record(
             2026,
@@ -310,6 +336,27 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
             self.assertEqual(record["deductions"][0]["value"], 0.2)
             self.assertEqual(record["ignored_yellow_errors"][0]["description"], "卷内应有的某文书缺失（私账问题）")
             self.assertNotIn("私账问题", mgr.product_office_text(record))
+
+    def test_product_archive_review_date_uses_bulletin_month(self):
+        batch = mgr.build_product_batch(
+            [
+                {
+                    "大队": "梁溪大队",
+                    "short": "梁溪",
+                    "题名": "测试案卷",
+                    "编号": "3202",
+                    "立卷人": "张三",
+                    "检查人": "李四",
+                    "no_case": False,
+                    "deductions": [],
+                }
+            ],
+            2026,
+            6,
+            inspection_year=2026,
+            inspection_month=7,
+        )
+        self.assertEqual(batch[0]["fields"]["评查日期"], "2026年7月")
 
     def test_write_personal_stats_marks_product_person_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:

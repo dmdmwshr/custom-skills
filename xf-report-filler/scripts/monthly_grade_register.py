@@ -61,6 +61,7 @@ NO_UNQUALIFIED_PRODUCT_CASE_TEXT = "本月未完成不合格消防产品案卷"
 INVALID_MONITOR_CONTACTS = {"消防机构", "机构联系人", "联系人"}
 YEAR_MONTH_PATTERN = re.compile(r"(\d{4})年(\d{1,2})月")
 MONTH_ONLY_PATTERN = re.compile(r"(\d{1,2})月")
+BULLETIN_CODE_PATTERN = re.compile(r"(?<!\d)(\d{2})(\d{2})_通报(?!\d)")
 WORKFLOW_CONFIG = monthly_workflow.load_config()
 PERSONAL_RULES = WORKFLOW_CONFIG.get("personal_stats_rules", {})
 PENDING_FILL_RGB = PERSONAL_RULES.get("mismatch_fill_color", "FFFF0000")
@@ -188,6 +189,14 @@ def previous_month(year, month):
     return year, month - 1
 
 
+def next_month(year, month):
+    year = int(year)
+    month = int(month)
+    if month == 12:
+        return year + 1, 1
+    return year, month + 1
+
+
 def build_score_month_info(registration_year, registration_month, source):
     return {
         "registration_year": int(registration_year),
@@ -209,6 +218,68 @@ def extract_registration_month_from_text(text, default_year=None):
     if match and default_year is not None:
         return int(default_year), int(match.group(1))
     return None
+
+
+def extract_bulletin_month_from_text(text):
+    text = str(text or "")
+    if "通报" not in text:
+        return None
+    match = BULLETIN_CODE_PATTERN.search(text)
+    if match:
+        year = 2000 + int(match.group(1))
+        month = int(match.group(2))
+        if 1 <= month <= 12:
+            return year, month
+    match = YEAR_MONTH_PATTERN.search(text)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    match = MONTH_ONLY_PATTERN.search(text)
+    if match:
+        return None, int(match.group(1))
+    return None
+
+
+def infer_bulletin_year(score_year, score_month, bulletin_month):
+    score_year = int(score_year)
+    score_month = int(score_month)
+    bulletin_month = int(bulletin_month)
+    if score_month == 12 and bulletin_month == 1:
+        return score_year + 1
+    return score_year
+
+
+def resolve_bulletin_month(path_like=None, score_year=None, score_month=None, bulletin_year=None, bulletin_month=None):
+    if bulletin_month is not None:
+        if not 1 <= int(bulletin_month) <= 12:
+            raise ValueError(f"通报月份必须在 1-12 之间：{bulletin_month}")
+        resolved_year = int(bulletin_year) if bulletin_year is not None else infer_bulletin_year(score_year, score_month, bulletin_month)
+        return {
+            "bulletin_year": resolved_year,
+            "bulletin_month": int(bulletin_month),
+            "bulletin_month_key": make_month_key(resolved_year, bulletin_month),
+            "source": "argument",
+        }
+    if path_like:
+        path = Path(path_like)
+        for part in reversed(path.parts):
+            resolved = extract_bulletin_month_from_text(part)
+            if resolved:
+                year, month = resolved
+                if year is None:
+                    year = infer_bulletin_year(score_year, score_month, month)
+                return {
+                    "bulletin_year": int(year),
+                    "bulletin_month": int(month),
+                    "bulletin_month_key": make_month_key(year, month),
+                    "source": "bulletin_folder",
+                }
+    year, month = next_month(score_year, score_month)
+    return {
+        "bulletin_year": year,
+        "bulletin_month": month,
+        "bulletin_month_key": make_month_key(year, month),
+        "source": "score_month_plus_one",
+    }
 
 
 def resolve_registration_month(path_like=None, default_year=None, fallback_date=None, allow_runtime_fallback=True):
@@ -627,7 +698,9 @@ def general_key(record, index):
     raise KeyError(f"template.json 中找不到一般要素 {index}")
 
 
-def build_product_batch(product_records, year, month):
+def build_product_batch(product_records, year, month, inspection_year=None, inspection_month=None):
+    inspection_year = int(inspection_year if inspection_year is not None else year)
+    inspection_month = int(inspection_month if inspection_month is not None else month)
     template = load_product_template_record()
     batch = []
     for item in product_records:
@@ -635,7 +708,7 @@ def build_product_batch(product_records, year, month):
         record["fields"].update(
             {
                 "被检查单位": item["大队"],
-                "评查日期": f"{year}年{month}月",
+                "评查日期": f"{inspection_year}年{inspection_month}月",
                 "题名": item["题名"],
                 "编号": item["编号"],
                 "立卷人": item["立卷人"],
@@ -1680,12 +1753,12 @@ def write_report_doc(template_path, output_path, product_records, monitor_detail
         word.Quit()
 
 
-def generate_product_docs(product_records, product_output_dir, year, month, force, template_path=None):
+def generate_product_docs(product_records, product_output_dir, year, month, force, template_path=None, inspection_year=None, inspection_month=None):
     if product_output_dir.exists() and force:
         for path in product_output_dir.glob("*产品监督档案.doc"):
             path.unlink()
     product_output_dir.mkdir(parents=True, exist_ok=True)
-    batch = build_product_batch(product_records, year, month)
+    batch = build_product_batch(product_records, year, month, inspection_year=inspection_year, inspection_month=inspection_month)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as handle:
         json.dump(batch, handle, ensure_ascii=False, indent=2)
         batch_path = Path(handle.name)
@@ -1723,6 +1796,13 @@ def run(args):
     month_dir = require_path(args.month_dir, "月份目录")
     include_score_office_record = getattr(args, "include_score_office_record", False)
     current_month_info = build_score_month_info(args.year, args.month, "argument")
+    bulletin_month_info = resolve_bulletin_month(
+        month_dir,
+        score_year=args.year,
+        score_month=args.month,
+        bulletin_year=getattr(args, "bulletin_year", None),
+        bulletin_month=getattr(args, "bulletin_month", None),
+    )
     templates, template_info = load_monthly_templates(
         args.template_dir,
         allow_snapshot_fallback=args.dry_run,
@@ -1800,6 +1880,12 @@ def run(args):
                         "month_key": current_month_info["score_month_key"],
                         "source": current_month_info["source"],
                     },
+                    "bulletin_month": {
+                        "year": bulletin_month_info["bulletin_year"],
+                        "month": bulletin_month_info["bulletin_month"],
+                        "month_key": bulletin_month_info["bulletin_month_key"],
+                        "source": bulletin_month_info["source"],
+                    },
                     "products": [
                         {
                             "大队": item["大队"],
@@ -1855,7 +1941,16 @@ def run(args):
 
     if personal_template.resolve() == personal_output.resolve():
         raise FileNotFoundError("月份目录缺少个人执法统计表模板，不能用已生成成品覆盖自身")
-    generate_product_docs(product_records, product_dir, args.year, args.month, args.force, templates["product_archive_detail"])
+    generate_product_docs(
+        product_records,
+        product_dir,
+        args.year,
+        args.month,
+        args.force,
+        templates["product_archive_detail"],
+        inspection_year=bulletin_month_info["bulletin_year"],
+        inspection_month=bulletin_month_info["bulletin_month"],
+    )
     write_product_summary(
         templates["product_summary"],
         product_dir / "产品监督成绩总表.xlsx",
@@ -1929,6 +2024,12 @@ def run(args):
             "month_key": current_month_info["score_month_key"],
             "source": current_month_info["source"],
         },
+        "bulletin_month": {
+            "year": bulletin_month_info["bulletin_year"],
+            "month": bulletin_month_info["bulletin_month"],
+            "month_key": bulletin_month_info["bulletin_month_key"],
+            "source": bulletin_month_info["source"],
+        },
         "product_dir": str(product_dir),
         "product_scores": {item["short"]: item["score"] for item in product_records},
         "product_score_guard": product_score_guard,
@@ -1964,6 +2065,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只解析并输出数据，不写入文件")
     parser.add_argument("--template-dir", help="临时覆盖月度模板根目录；默认使用 monthly_workflow.json 的外部事实源")
     parser.add_argument("--no-history-update", action="store_true", help="生成文件但不更新联网通报历史台账")
+    parser.add_argument("--bulletin-year", type=int, help="通报所属年份；默认从上级通报目录识别")
+    parser.add_argument("--bulletin-month", type=int, help="通报所属月份；默认从上级通报目录识别")
     parser.add_argument(
         "--include-score-office-record",
         action="store_true",
