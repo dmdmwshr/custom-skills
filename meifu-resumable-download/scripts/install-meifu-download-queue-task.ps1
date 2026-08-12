@@ -16,11 +16,14 @@ $Python = 'C:\Users\12070\AppData\Local\Programs\Python\Python312\python.exe'
 $QueueRoot = Join-Path $env:LOCALAPPDATA 'MeifuDownloadQueue'
 $TaskPython = Join-Path $QueueRoot 'TaskScripts\pythonw.exe'
 $TaskPythonConfig = Join-Path $QueueRoot 'pyvenv.cfg'
-$QueueScript = Join-Path $PSScriptRoot 'meifu_download_queue.py'
-$Downloader = Join-Path $PSScriptRoot 'download_via_meifu.py'
+$SourceQueueScript = Join-Path $PSScriptRoot 'meifu_download_queue.py'
+$SourceDownloader = Join-Path $PSScriptRoot 'download_via_meifu.py'
+$RuntimeRoot = Join-Path $QueueRoot 'Runtime'
+$RuntimeManifest = Join-Path $QueueRoot 'runtime.json'
 $QueueFile = Join-Path $QueueRoot 'queue.json'
 $ControlFile = Join-Path $QueueRoot 'queue.control.json'
 $QueueLog = Join-Path $QueueRoot 'queue.log'
+$AuditLog = Join-Path $QueueRoot 'queue.audit.jsonl'
 $Description = '[DEV_TASK_V1][project=meifu-resumable-download][id=AUTO-01][category=AUTO] 通用 Meifu 下载队列：登录后及每 30 分钟以单工作者、单个美服分块处理已批准的无签名 HTTPS 下载；仅直连 meifu主机(192.129.128.54:22)，拒绝代理跳板；Codex 只入队、启动和查状态，不承载传输；临时断网保留本地和美服断点并自动退避续传；完成后清理单任务缓存，残留缓存仍受 72 小时/8GiB 清理器约束；不读取凭据、不执行下载文件。'
 
 function Get-PeSubsystem {
@@ -43,6 +46,119 @@ function Get-PeSubsystem {
         throw "未知 PE 可选头格式：0x$('{0:X}' -f $magic)"
     }
     return [System.BitConverter]::ToUInt16($bytes, $optionalOffset + 68)
+}
+
+function Assert-PlainFile {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Description)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "$Description 不是可用的普通文件：$Path"
+    }
+}
+
+function Assert-PlainDirectory {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Description)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "$Description 不是可用的普通目录：$Path"
+    }
+}
+
+function Write-AtomicUtf8File {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Content)
+
+    $directory = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        Assert-PlainFile -Path $Path -Description '运行时清单'
+    }
+    elseif (Test-Path -LiteralPath $Path) {
+        throw "运行时清单目标不是普通文件：$Path"
+    }
+    $temporary = Join-Path $directory ('.{0}.{1}.tmp' -f (Split-Path -Leaf $Path), [guid]::NewGuid().ToString('N'))
+    [System.IO.File]::WriteAllText($temporary, $Content, [System.Text.UTF8Encoding]::new($false))
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        [System.IO.File]::Replace($temporary, $Path, $null)
+    }
+    else {
+        [System.IO.File]::Move($temporary, $Path)
+    }
+}
+
+function Ensure-QueueRuntime {
+    foreach ($required in @($SourceQueueScript, $SourceDownloader)) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "安装前缺少必需脚本：$required"
+        }
+        Assert-PlainFile -Path $required -Description '技能源脚本'
+    }
+
+    New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
+    Assert-PlainDirectory -Path $RuntimeRoot -Description '下载队列运行时根目录'
+    $queueHash = ((Get-FileHash -Algorithm SHA256 -LiteralPath $SourceQueueScript).Hash).ToLowerInvariant()
+    $downloaderHash = ((Get-FileHash -Algorithm SHA256 -LiteralPath $SourceDownloader).Hash).ToLowerInvariant()
+    $runtimeVersion = 'v1-{0}-{1}' -f $queueHash.Substring(0, 12), $downloaderHash.Substring(0, 12)
+    $runtimeDirectory = Join-Path $RuntimeRoot $runtimeVersion
+    $runtimeQueueScript = Join-Path $runtimeDirectory 'meifu_download_queue.py'
+    $runtimeDownloader = Join-Path $runtimeDirectory 'download_via_meifu.py'
+
+    if (Test-Path -LiteralPath $runtimeDirectory) {
+        Assert-PlainDirectory -Path $runtimeDirectory -Description '既有下载队列运行时目录'
+        foreach ($runtimeFile in @($runtimeQueueScript, $runtimeDownloader)) {
+            if (-not (Test-Path -LiteralPath $runtimeFile -PathType Leaf)) {
+                throw "既有运行时目录不完整，拒绝覆盖：$runtimeDirectory"
+            }
+            Assert-PlainFile -Path $runtimeFile -Description '既有运行时脚本'
+        }
+        if (((Get-FileHash -Algorithm SHA256 -LiteralPath $runtimeQueueScript).Hash).ToLowerInvariant() -ne $queueHash -or
+            ((Get-FileHash -Algorithm SHA256 -LiteralPath $runtimeDownloader).Hash).ToLowerInvariant() -ne $downloaderHash) {
+            throw "既有运行时版本与当前技能源哈希不一致，拒绝覆盖：$runtimeDirectory"
+        }
+    }
+    else {
+        $stagingDirectory = Join-Path $RuntimeRoot ('.staging-{0}' -f [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $stagingDirectory -ErrorAction Stop | Out-Null
+        try {
+            Copy-Item -LiteralPath $SourceQueueScript -Destination (Join-Path $stagingDirectory 'meifu_download_queue.py') -ErrorAction Stop
+            Copy-Item -LiteralPath $SourceDownloader -Destination (Join-Path $stagingDirectory 'download_via_meifu.py') -ErrorAction Stop
+            foreach ($stagedFile in @((Join-Path $stagingDirectory 'meifu_download_queue.py'), (Join-Path $stagingDirectory 'download_via_meifu.py'))) {
+                Assert-PlainFile -Path $stagedFile -Description '暂存运行时脚本'
+            }
+            if (((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stagingDirectory 'meifu_download_queue.py')).Hash).ToLowerInvariant() -ne $queueHash -or
+                ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stagingDirectory 'download_via_meifu.py')).Hash).ToLowerInvariant() -ne $downloaderHash) {
+                throw '暂存运行时哈希与技能源不一致。'
+            }
+            Move-Item -LiteralPath $stagingDirectory -Destination $runtimeDirectory -ErrorAction Stop
+        }
+        catch {
+            if (Test-Path -LiteralPath $stagingDirectory) {
+                Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            throw
+        }
+    }
+
+    $manifest = [ordered]@{
+        schema = 'MeifuDownloadRuntimeV1'
+        installed_at = (Get-Date).ToUniversalTime().ToString('o')
+        runtime_dir = $runtimeDirectory
+        queue_script = $runtimeQueueScript
+        downloader = $runtimeDownloader
+        queue_script_sha256 = $queueHash
+        downloader_sha256 = $downloaderHash
+    }
+    Write-AtomicUtf8File -Path $RuntimeManifest -Content (($manifest | ConvertTo-Json -Depth 4) + "`n")
+    return [pscustomobject]@{
+        Version = $runtimeVersion
+        Directory = $runtimeDirectory
+        QueueScript = $runtimeQueueScript
+        Downloader = $runtimeDownloader
+        Manifest = $RuntimeManifest
+        QueueScriptSha256 = $queueHash
+        DownloaderSha256 = $downloaderHash
+    }
 }
 
 function Ensure-TaskPython {
@@ -123,13 +239,8 @@ function Ensure-TaskPython {
     }
 }
 
-foreach ($required in @($QueueScript, $Downloader)) {
-    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-        throw "安装前缺少必需脚本：$required"
-    }
-}
-
 $launcher = Ensure-TaskPython
+$runtime = Ensure-QueueRuntime
 $existing = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
 if ($existing) {
     $backupDirectory = Join-Path $QueueRoot 'task-backups'
@@ -140,11 +251,13 @@ if ($existing) {
 }
 
 $arguments = @(
-    '-B', ('"{0}"' -f $QueueScript), 'scheduled-run',
+    '-B', ('"{0}"' -f $runtime.QueueScript), 'scheduled-run',
     '--queue', ('"{0}"' -f $QueueFile),
     '--control-file', ('"{0}"' -f $ControlFile),
     '--log-file', ('"{0}"' -f $QueueLog),
-    '--downloader', ('"{0}"' -f $Downloader),
+    '--audit-log', ('"{0}"' -f $AuditLog),
+    '--runtime-manifest', ('"{0}"' -f $runtime.Manifest),
+    '--downloader', ('"{0}"' -f $runtime.Downloader),
     '--python', ('"{0}"' -f $Python),
     '--host', 'meifu主机',
     '--expected-hostname', '192.129.128.54',
@@ -154,7 +267,7 @@ $arguments = @(
     '--retry-delay-seconds', '900'
 ) -join ' '
 
-$action = New-ScheduledTaskAction -Execute $launcher.Path -Argument $arguments -WorkingDirectory $PSScriptRoot
+$action = New-ScheduledTaskAction -Execute $launcher.Path -Argument $arguments -WorkingDirectory $runtime.Directory
 $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $retryStart = (Get-Date).AddMinutes(5)
@@ -199,4 +312,5 @@ $info = Get-ScheduledTaskInfo -TaskName $TaskName -TaskPath $TaskPath
     NextRunTime = $info.NextRunTime
     Action = $task.Actions | Select-Object Execute, Arguments, WorkingDirectory
     Launcher = $launcher
+    Runtime = $runtime
 }

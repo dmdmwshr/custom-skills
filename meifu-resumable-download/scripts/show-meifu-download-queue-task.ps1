@@ -10,6 +10,7 @@ $TaskName = 'DEV-MEIFU-AUTO-01-DownloadQueue'
 $QueueRoot = Join-Path $env:LOCALAPPDATA 'MeifuDownloadQueue'
 $QueueFile = Join-Path $QueueRoot 'queue.json'
 $ControlFile = Join-Path $QueueRoot 'queue.control.json'
+$RuntimeManifest = Join-Path $QueueRoot 'runtime.json'
 $QueueScript = Join-Path $PSScriptRoot 'meifu_download_queue.py'
 $Python = 'C:\Users\12070\AppData\Local\Programs\Python\Python312\python.exe'
 
@@ -23,6 +24,10 @@ $control = $null
 if (Test-Path -LiteralPath $ControlFile -PathType Leaf) {
     try { $control = Get-Content -LiteralPath $ControlFile -Encoding UTF8 -Raw | ConvertFrom-Json } catch { $control = 'invalid_json' }
 }
+$runtime = $null
+if (Test-Path -LiteralPath $RuntimeManifest -PathType Leaf) {
+    try { $runtime = Get-Content -LiteralPath $RuntimeManifest -Encoding UTF8 -Raw | ConvertFrom-Json } catch { $runtime = 'invalid_json' }
+}
 
 [pscustomobject]@{
     TaskPath = $TaskPath
@@ -35,6 +40,8 @@ if (Test-Path -LiteralPath $ControlFile -PathType Leaf) {
     QueueState = if ($queue -is [string]) { $queue } elseif ($queue) { $queue.state } else { 'not_initialized' }
     QueueCounts = if ($queue -is [string]) { $null } elseif ($queue) { @($queue.entries | Group-Object status | ForEach-Object { "{0}={1}" -f $_.Name, $_.Count }) -join ', ' } else { $null }
     Control = $control
-    QueueScript = $QueueScript
+    InstalledQueueScript = $QueueScript
+    RuntimeManifest = $RuntimeManifest
+    Runtime = $runtime
     Python = $Python
 }

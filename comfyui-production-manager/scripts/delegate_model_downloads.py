@@ -43,6 +43,7 @@ DEFAULT_GENERIC_SCRIPT = (
     / "scripts"
     / "meifu_download_queue.py"
 )
+GENERIC_REQUESTER = "comfyui-production-manager"
 MANIFEST_SCHEMA = "ComfyUIGenericMeifuDownloadManifestV1"
 MANIFEST_WRITE_STATE_SCHEMA = "ComfyUIGenericMeifuManifestWriteStateV1"
 MANIFEST_LOCK_SCHEMA = "ComfyUIGenericMeifuManifestLeaseV1"
@@ -530,6 +531,8 @@ def prepare(args: argparse.Namespace) -> int:
                             "--storage-root", str(root),
                             "--target", str(Path(candidate.category) / candidate.filename),
                             "--priority", str(priority),
+                            "--requested-by", GENERIC_REQUESTER,
+                            "--request-id", row["id"],
                             *( ["--sha256", candidate.expected_sha256] if candidate.expected_sha256 else [] ),
                         ],
                     )

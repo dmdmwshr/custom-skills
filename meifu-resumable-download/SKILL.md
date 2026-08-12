@@ -23,9 +23,13 @@ description: 通过 Meifu 分块缓存稳定下载任意 HTTPS 大文件，并�
 1. `enqueue` 只写入本地持久队列，不连接 Meifu，也不启动传输。
 2. `start` 只请求已安装的 Windows 计划任务处理默认队列；它绝不创建 Codex 的后台子进程。
 3. Windows 后台任务才运行长传输，严格一次只处理一个文件和一个 Meifu 分块；断网时保留断点并按退避时间自动续传。
-4. `status` 只读取本地队列、锁和控制状态，不连接 Meifu。
+4. `status`、`list` 与 `audit` 只读取本地队列、锁、运行时版本和脱敏审计记录，不连接 Meifu。
 
-多个任务需要共用队列时，任何调用方都只能通过 `enqueue` 写入，不能直接编辑 `queue.json`。每次写入会短暂取得单一写入租约，校验清单版本号后原子替换；租约忙或版本不一致时只会拒绝并提示重新读取，不会覆盖已有条目。实际传输期间不持有该短租约，仍由唯一工作者锁保证顺序下载。
+多个任务需要共用队列时，任何调用方都只能通过受管命令写入，不能直接编辑 `queue.json`。每次写入会短暂取得单一写入租约，校验清单版本号后原子替换；租约忙或版本不一致时只会拒绝并提示重新读取，不会覆盖已有条目。工作者在每个文件开始与结束时重新读取清单，因此其他任务可以在下载期间安全追加、取消未运行条目或调整未运行条目的顺序。
+
+所有会改变清单的操作都必须带稳定的 `--requested-by` 标识和可选的 `--request-id`；工具把“条目编号、公开来源链接、最终存放位置、请求方、顺序、状态和变更原因”写入有上限轮换的本地脱敏审计日志。相同“来源链接 + 输出位置 + SHA-256”重复入队会返回既有条目，不会重复下载；同一输出位置出现不同来源或哈希时安全拒绝。`remove`、`move`、`retry` 只能按 `list` 返回的精确条目编号操作；运行中的条目不能删除或调序。
+
+计划任务不再直接引用会被 CC Switch 替换的安装副本。安装/更新脚本会将已核验的两个运行脚本复制到 `%LOCALAPPDATA%\MeifuDownloadQueue\Runtime\<哈希版本>`，记录哈希清单后再让计划任务引用该不可变版本。若运行时被意外删除或哈希不一致，工作者只把当前条目保留为待续传并安全停止，绝不把后续所有条目批量标记为失败。
 
 计划任务只在当前用户明确授权后安装。安装、查看和精确卸载入口见 `docs/WINDOWS_TASK_CATALOG.md`。任务未安装时，`start` 会安全拒绝，不会退回到 Codex 进程树。
 
@@ -35,17 +39,22 @@ description: 通过 Meifu 分块缓存稳定下载任意 HTTPS 大文件，并�
 
 1. 确认链接、输出位置、大小级别和官方 SHA-256。ComfyUI 模型先由 `comfyui-production-manager` 确认类别、版本、许可证和最终目录。
 2. 用不带 `--execute` 的单文件命令检查脱敏来源和输出规则；需要验证 Range 支持、远端和本机空间时使用 `--probe-only`。
-3. 用户直接批准下载后，对无签名公共直链逐项 `enqueue`，再一次 `start` 请求 Windows 后台任务。
-4. 只用 `status` 轮询。运行中重复请求会在创建子进程前返回“已有传输正在进行”。
+3. 用户直接批准下载后，对无签名公共直链逐项 `enqueue --requested-by <稳定任务标识>`，再一次 `start` 请求 Windows 后台任务。
+4. 只用 `status`、`list`、`audit` 轮询。运行中重复请求会在创建子进程前返回“已有传输正在进行”。需要增删、重排或恢复条目时，先 `list`，再使用精确条目编号和变更原因。
 5. 完成后核对输出大小、SHA-256 和“来源已验证/仅计算哈希”状态；不自动执行、安装或导入下载文件。
 
 常用调用形式：
 
     python scripts/download_via_meifu.py --url "https://example.invalid/file.bin" --storage-root "D:\aimodels" --target "speech\tts\model.bin"
     python scripts/download_via_meifu.py --url "https://example.invalid/file.bin" --output "D:\Downloads\file.bin" --probe-only
-    python scripts/meifu_download_queue.py enqueue --url "https://example.invalid/file.bin" --storage-root "D:\aimodels" --target "speech\tts\model.bin" --sha256 <官方哈希>
+    python scripts/meifu_download_queue.py enqueue --url "https://example.invalid/file.bin" --storage-root "D:\aimodels" --target "speech\tts\model.bin" --sha256 <官方哈希> --requested-by "<稳定任务标识>"
     python scripts/meifu_download_queue.py start
     python scripts/meifu_download_queue.py status
+    python scripts/meifu_download_queue.py list
+    python scripts/meifu_download_queue.py audit --limit 100
+    python scripts/meifu_download_queue.py move --id <条目编号> --before <条目编号> --reason "用户确认的优先级调整" --requested-by "<稳定任务标识>"
+    python scripts/meifu_download_queue.py remove --id <条目编号> --reason "用户取消" --requested-by "<稳定任务标识>"
+    python scripts/meifu_download_queue.py retry --id <条目编号> --reason "运行时已修复" --requested-by "<稳定任务标识>"
 
 签名链接不放入命令行：
 
@@ -66,7 +75,7 @@ description: 通过 Meifu 分块缓存稳定下载任意 HTTPS 大文件，并�
 ## 资源
 
 - `scripts/download_via_meifu.py`：通用单文件分块传输器；`--status` 只读轮询。
-- `scripts/meifu_download_queue.py`：公共直链的持久单工作队列；`start` 只唤醒 Windows 后台任务。
+- `scripts/meifu_download_queue.py`：公共直链的持久单工作队列；`start` 只唤醒 Windows 后台任务，`list/audit/remove/move/retry` 提供可审计的共享清单管理。
 - `scripts/install-meifu-download-queue-task.ps1`、`show-meifu-download-queue-task.ps1`、`uninstall-meifu-download-queue-task.ps1`：唯一后台队列任务的生命周期入口。
 - `scripts/deploy_meifu_cache_gc.ps1`：部署或更新 Meifu 缓存清理器。
 - `references/transport-and-cache.md`：传输、缓存、续传和安全边界。

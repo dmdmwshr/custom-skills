@@ -9,11 +9,13 @@ from __future__ import annotations
 import argparse
 import copy
 import importlib.util
+import io
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 
@@ -34,15 +36,23 @@ def enqueue_args(root: Path, *, url: str = "https://example.com/file.bin") -> ar
         target=None,
         sha256=None,
         priority=100,
+        requested_by="queue-test",
+        request_id="offline-test",
+        audit_log=root / "queue.audit.jsonl",
+        log_file=root / "queue.log",
     )
 
 
 class GenericQueueTests(unittest.TestCase):
+    def invoke_silently(self, callable_object, *args):
+        with redirect_stdout(io.StringIO()):
+            return callable_object(*args)
+
     def test_enqueue_public_link_persists_a_single_safe_entry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             args = enqueue_args(root)
-            self.assertEqual(MODULE.enqueue(args), 0)
+            self.assertEqual(self.invoke_silently(MODULE.enqueue, args), 0)
             queue = MODULE.read_queue(args.queue)
             self.assertEqual(len(queue["entries"]), 1)
             self.assertEqual(queue["entries"][0]["status"], "queued")
@@ -55,13 +65,14 @@ class GenericQueueTests(unittest.TestCase):
                 MODULE.enqueue(args)
             self.assertFalse(args.queue.exists())
 
-    def test_duplicate_output_is_rejected_before_a_worker_starts(self) -> None:
+    def test_different_source_for_same_output_is_rejected_before_a_worker_starts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             args = enqueue_args(root)
-            MODULE.enqueue(args)
+            self.invoke_silently(MODULE.enqueue, args)
+            conflicting = enqueue_args(root, url="https://example.com/other-file.bin")
             with self.assertRaises(MODULE.QueueError):
-                MODULE.enqueue(args)
+                MODULE.enqueue(conflicting)
 
     def test_enqueue_accepts_a_storage_root_and_relative_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -70,7 +81,7 @@ class GenericQueueTests(unittest.TestCase):
             args.output = None
             args.storage_root = str(root / "models")
             args.target = "speech/tts/model.bin"
-            MODULE.enqueue(args)
+            self.invoke_silently(MODULE.enqueue, args)
             queue = MODULE.read_queue(args.queue)
             self.assertEqual(
                 queue["entries"][0]["output"],
@@ -147,6 +158,8 @@ class GenericQueueTests(unittest.TestCase):
                         "https://example.com/external.bin",
                         "--output",
                         str(root / "external.bin"),
+                        "--requested-by",
+                        "external-test",
                     ],
                     capture_output=True,
                     text=True,
@@ -198,6 +211,7 @@ class GenericQueueTests(unittest.TestCase):
             MODULE.save_queue(queue_path, MODULE.queue_template())
             args = argparse.Namespace(
                 queue=queue_path,
+                runtime_manifest=Path(temporary) / "runtime.json",
             )
             calls: list[list[str]] = []
 
@@ -206,9 +220,9 @@ class GenericQueueTests(unittest.TestCase):
                 return MODULE.subprocess.CompletedProcess(command, 0, "", "")
 
             with patch.object(MODULE, "DEFAULT_QUEUE", queue_path), patch.object(
-                MODULE, "run_schtasks", side_effect=fake_schtasks
-            ):
-                self.assertEqual(MODULE.start(args), 0)
+                MODULE, "runtime_manifest_status", return_value={"status": "ready"}
+            ), patch.object(MODULE, "run_schtasks", side_effect=fake_schtasks):
+                self.assertEqual(self.invoke_silently(MODULE.start, args), 0)
             self.assertEqual(
                 calls,
                 [
@@ -216,6 +230,116 @@ class GenericQueueTests(unittest.TestCase):
                     ["/Run", "/TN", MODULE.WINDOWS_TASK_FULL_NAME],
                 ],
             )
+
+    def test_same_source_output_is_idempotent_and_records_only_one_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = enqueue_args(root)
+            self.invoke_silently(MODULE.enqueue, args)
+            self.assertEqual(self.invoke_silently(MODULE.enqueue, args), 0)
+            queue = MODULE.read_queue(args.queue)
+            self.assertEqual(len(queue["entries"]), 1)
+            self.assertTrue(args.audit_log.exists())
+
+    def test_enqueue_can_append_while_worker_lock_is_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue_path = root / "queue.json"
+            lock = MODULE.create_queue_lock(queue_path, recover_stale=False, phase="running")
+            try:
+                self.invoke_silently(MODULE.enqueue, enqueue_args(root))
+            finally:
+                lock.release()
+            queue = MODULE.read_queue(queue_path)
+            self.assertEqual(len(queue["entries"]), 1)
+
+    def test_move_remove_and_retry_use_exact_ids_and_preserve_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = enqueue_args(root, url="https://example.com/first.bin")
+            first.output = str(root / "first.bin")
+            second = enqueue_args(root, url="https://example.com/second.bin")
+            second.output = str(root / "second.bin")
+            self.invoke_silently(MODULE.enqueue, first)
+            self.invoke_silently(MODULE.enqueue, second)
+            queue = MODULE.read_queue(first.queue)
+            first_id, second_id = [entry["id"] for entry in queue["entries"]]
+
+            move_args = argparse.Namespace(
+                queue=first.queue,
+                id=second_id,
+                before=first_id,
+                after=None,
+                reason="test reorder",
+                requested_by="queue-test",
+                request_id="move-test",
+                audit_log=first.audit_log,
+                log_file=first.log_file,
+            )
+            self.assertEqual(self.invoke_silently(MODULE.move, move_args), 0)
+            queue = MODULE.read_queue(first.queue)
+            self.assertEqual(MODULE.ordered_entries(queue)[0]["id"], second_id)
+
+            target = MODULE.find_entry(queue, first_id)
+            assert target is not None
+            MODULE.update_entry(target, "blocked", last_error="offline")
+            MODULE.save_queue(first.queue, queue, operation="test_block")
+            retry_args = argparse.Namespace(
+                queue=first.queue,
+                id=first_id,
+                all_blocked=False,
+                reason="test recovery",
+                requested_by="queue-test",
+                request_id="retry-test",
+                audit_log=first.audit_log,
+                log_file=first.log_file,
+            )
+            self.assertEqual(self.invoke_silently(MODULE.retry, retry_args), 0)
+            queue = MODULE.read_queue(first.queue)
+            self.assertEqual(MODULE.find_entry(queue, first_id)["status"], "queued")
+
+            remove_args = argparse.Namespace(
+                queue=first.queue,
+                id=first_id,
+                reason="test removal",
+                allow_completed=False,
+                requested_by="queue-test",
+                request_id="remove-test",
+                audit_log=first.audit_log,
+                log_file=first.log_file,
+            )
+            self.assertEqual(self.invoke_silently(MODULE.remove, remove_args), 0)
+            queue = MODULE.read_queue(first.queue)
+            self.assertIsNone(MODULE.find_entry(queue, first_id))
+
+    def test_missing_runtime_stops_once_without_blocking_every_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = enqueue_args(root)
+            self.invoke_silently(MODULE.enqueue, args)
+            lock = MODULE.create_queue_lock(args.queue, recover_stale=False, phase="test")
+            worker_args = argparse.Namespace(
+                queue=args.queue,
+                control_file=root / "queue.control.json",
+                log_file=args.log_file,
+                audit_log=args.audit_log,
+                runtime_manifest=root / "missing-runtime.json",
+                downloader=root / "missing-download_via_meifu.py",
+                python=Path(sys.executable),
+                host="meifu主机",
+                expected_hostname="192.129.128.54",
+                chunk_gib=2,
+                remote_reserve_gib=8,
+                local_reserve_gib=4,
+                retry_delay_seconds=1,
+            )
+            self.assertEqual(
+                MODULE.run_queue_with_lock(worker_args, lock),
+                MODULE.RUNTIME_UNAVAILABLE_EXIT_CODE,
+            )
+            queue = MODULE.read_queue(args.queue)
+            self.assertEqual(queue["state"], "runtime_unavailable")
+            self.assertEqual(queue["entries"][0]["status"], "queued")
 
 
 if __name__ == "__main__":
