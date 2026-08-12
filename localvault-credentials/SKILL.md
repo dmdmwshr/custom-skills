@@ -82,6 +82,35 @@ $skillRoot = 'C:\Users\12070\.cc-switch\skills\自建skills\localvault-credentia
 
 对于浏览器登录，优先使用独立的临时 Edge/Playwright 上下文，运行时填写账号和密码，等待用户手动完成验证码，再由脚本提交并验证页面结果。这个调用链不等于把 LocalVault 接入 Codex 内置浏览器。
 
+## 映射式浏览器登录
+
+已获用户明确同意的本地站点可使用映射式入口。映射文件位于
+`$skillRoot\local\accounts.json`，每个站点只能包含 `url`、`username`、
+`secretName` 和 `captcha` 四项；严禁加入密码、Cookie、令牌或验证码内容。该文件被
+Git 精确忽略，所以修改映射不会形成技能版本更新。
+
+浏览器代码和锁定依赖清单位于技能源码，但实际 Playwright 依赖只安装到当前用户的
+本地运行时目录，不会写入技能源码或 CC Switch 安装副本。首次安装或依赖修复时，只运行
+初始化入口；它不读取 LocalVault，也不会发起登录：
+
+```powershell
+& "$skillRoot\scripts\Initialize-LocalVaultBrowserRuntime.ps1"
+```
+
+只有用户明确指定目标站点并要求真实登录时，才使用下面的入口。`Info` 仅显示密钥元数据；
+`Save` 通过系统凭据提示框保存；`Login` 才会读取一次性凭据并打开临时浏览器窗口。验证码、
+MFA 和邮箱验证码仍必须由用户手动完成。
+
+```powershell
+& "$skillRoot\scripts\Invoke-LocalVaultWebLogin.ps1" `
+  -Action Info `
+  -AccountKey 'site-account-key'
+```
+
+运行器只从标准输入接收一次性的账号和密码，不读取现有浏览器配置、Cookie、自动填充或
+会话存储。它优先使用已安装的 Edge，结束后关闭临时上下文；若没有 Edge 或网页结构变化，
+应报告失败，不要降级为读取浏览器数据或绕过验证码。
+
 ## 删除凭据
 
 删除必须使用精确名称并先确认；只有用户明确要求立即删除时才加 `-Force`：

@@ -1,0 +1,11 @@
+{
+  "name": "localvault-browser-login-runtime",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}

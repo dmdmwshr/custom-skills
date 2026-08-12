@@ -17,3 +17,7 @@ logs/
 # Local editor state
 .idea/
 .vscode/
+
+# Local-only site mapping for the LocalVault browser helper.  It may contain a
+# URL, username, secret name, and captcha flag, but never a password.
+localvault-credentials/local/accounts.json
