@@ -1,6 +1,6 @@
 ---
 name: comfyui-production-manager
-description: 管理本机 ComfyUI 的工作流、模型与 AI 创作项目。用户要求整理/去重/归档/命名工作流、检查模板缺失模型、确认模型存放位置、规划模型目录、准备图像/视频/音频/3D 创作流程、建立项目资产与分镜台账，或询问 ComfyUI MCP/Agent 配置时使用。模型下载先按“直连/大小/代理”分流：可直连时走本机直连；必须经代理但小于 2 GiB 时走 CN2 直连；只有必须经代理且大于等于 2 GiB 才委托 `meifu-resumable-download` 的 Windows 单工作队列。本 skill 只负责模型类别、来源、许可证、目标目录和下载后的登记。
+description: 管理本机 ComfyUI 工作流、模型与可追溯的 AI 创作项目。用于整理/审计/归档工作流，检查模型与节点依赖，规划模型下载与存放，以及把小说、剧本、故事提纲或已授权音视频素材转为“事实账、角色与对白、场次节拍、可变时长镜头合同、资产清单、参考图、生成、声音、剪辑和复盘”的完整生产包；也用于 MiniMax H3 的图像/视频/音频参考规划。模型下载先按“直连/大小/代理”分流：可直连时走本机直连；必须经代理但小于 2 GiB 时走 CN2 直连；只有必须经代理且大于等于 2 GiB 才委托 `meifu-resumable-download` 的 Windows 单工作队列。本 skill 只负责模型类别、来源、许可证、目标目录和下载后的登记。
 ---
 
 # ComfyUI Production Manager
@@ -57,25 +57,52 @@ description: 管理本机 ComfyUI 的工作流、模型与 AI 创作项目。用
 
 ### 3. 创作管理
 
-每个创作建立独立项目，不把长视频、实验输出和正式成片混在一起：
+每个创作建立独立项目，不把原始素材、实验输出、代理文件和正式成片混在一起：
 
 ```text
 projects/<project>/
-├── brief/                         # 目标、受众、版权与交付规格
+├── brief/                         # 目标、受众、版权、改编边界与生产包
 ├── assets/{raw,references,generated}/
-├── bible/{characters,scenes,props,style}/
+├── bible/{characters,scenes,props,style,wardrobe}/
 ├── shots/<shot-id>/{inputs,controls,outputs,reviews}/
 ├── prompts/                       # 结构化提示词和负面约束
-├── audio/                         # 台词、音效、音乐和时间轴
+├── audio/{dialogue,voices,sfx,music,mix}/
 ├── workflows/                     # 项目 API/UI 工作流及锁定清单
-├── deliverables/                  # 通过验收的成片
-├── logs/                          # 参数、错误、显存和复盘
+├── deliverables/{cuts,masters,subtitles}/
+├── logs/                          # 参数、错误、显存、审核与复盘
 └── manifest.json                  # 资产、镜头、模型、版本、哈希
 ```
 
-创作顺序：文本拆镜 → 角色/场景/道具 Bible → 参考图和版权登记 → 关键帧 → 3–8 秒镜头生成 → 画面/一致性检查 → 音频与口型 → 剪辑转场 → 成片验收。人物、背景、视角、动作、物品、遮挡和声音必须在镜头表中有明确字段；“固定随机种子”不能替代参考图、控制视频、时序蒙版和分段验收。
+将以下五个对象严格区分，不能合并成“一个镜头表”：
 
-详见 `references/creative-production.md`。
+1. **叙事单元**：一段完整的戏剧任务，例如“围困”“祭祀”或“确认重生”。
+2. **场次**：同一时间、空间和人物关系下连续发生的事件。
+3. **节拍**：一句话、一次反应、一个信息揭示或一次行动转折。
+4. **剪辑镜头**：观众看到的一次取景与剪辑单位。
+5. **生成片段**：模型一次生成或一次补段的素材单位；它可被裁短、拼接或不用。
+
+不要把“一个叙事单元等于一个镜头”，也不要以“每段 4–7 镜头”或“每镜头 5 秒”作为默认规则。剪辑时长必须由可听懂的台词长度、动作完成度、情绪停顿、镜头运动、信息密度和剪辑关系共同决定；模型可生成的片段长度只是技术约束，不能反过来压缩故事。
+
+按以下关卡推进并在每关留下文件证据：
+
+1. **立项与来源**：确认权利、受众、成片规格、原文事实范围和改编边界。
+2. **事实与人物**：先建立章节事实账、角色出场表、未命名群像表、对白/旁白表和时间线；未从原文确认的姓名、关系或台词必须标为“待确认”，不得补造。
+3. **叙事与分镜**：把场次拆成节拍，再形成可变时长的镜头合同；镜头合同必须含入点、出点、可见动作、说话者、画内/画外声音、空间关系和生成策略。
+4. **资产与参考**：为每个角色、服装状态、场景、道具、群像、特效和声音建立资产矩阵，按“已有/待生成/待确认/淘汰”登记；先做可复用的角色和空间锚点，后做镜头专用图。
+5. **受控生成**：先通过静帧、身份、动作和连续性的小测试，再批量生成；一个测试只改变一个主要变量。MiniMax H3 工作流先核实其当前图像、视频和音频参考接口，再按语义分配参考。
+6. **声音与剪辑**：口型镜头先锁定最终台词与声音；对白、环境、音效、音乐分别建轨。先完成叙事粗剪，再做调色、混音、字幕和母版。
+7. **验收与复盘**：同时检查原文覆盖、人物/道具连续性、声音可懂度、镜头节奏、技术规格、工作流/模型/输入哈希和未解决风险。
+
+“3–8 秒”只能作为某些视频模型的首轮小样或衔接片段的常见测试窗口，绝不是剪辑时长规定。对长对白、复杂调度或情绪推进，拆成多个生成片段并在剪辑中衔接；对插入镜头和反应镜头，可远短于该范围。
+
+详见：
+
+- `references/creative-production.md`：所有视频项目的阶段、控制面和验收。
+- `references/novel-video-preproduction.md`：小说/剧本到生产包的事实账、对白、节拍、镜头和资产模板。
+- `references/audiovisual-source-analysis.md`：从已授权视频/音频提取故事与视听语言，再做可追溯 AI 重构的边界与台账。
+- `references/minimax-h3-production.md`：以 MiniMax H3 为主力时的参考素材、提示词、声音与实验梯度。
+
+需要新建生产包时，优先使用 `scripts/init_novel_video_packet.py` 生成不会覆盖既有文件的台账骨架；填完后使用 `scripts/validate_novel_video_packet.py` 做结构检查。两个脚本都不启动 ComfyUI、不下载模型、不生成素材。
 
 ## MCP / Agent 使用边界
 
@@ -100,7 +127,10 @@ projects/<project>/
 
 - `references/workflow-organization.md`：目录、命名、去重、归档和镜像规范。
 - `references/model-management.md`：模型目录、清单字段、依赖锁定和下载检查。
-- `references/creative-production.md`：小说改编、成片重构、段子转视频的项目结构和镜头验收。
+- `references/creative-production.md`：通用 AI 视频生产阶段、画面/声音/剪辑控制和验收。
+- `references/novel-video-preproduction.md`：小说、剧本和故事提纲的事实账、对白、节拍、可变时长镜头与资产生产包。
+- `references/audiovisual-source-analysis.md`：已授权视频/音频的叙事与视听语言提取、重构边界和素材台账。
+- `references/minimax-h3-production.md`：MiniMax H3 的参考输入分工、提示词组织和分层测试。
 - `references/mcp-and-validation.md`：MCP/Agent 边界、节点依赖和运行前检查。
 - `scripts/audit_workflows.py`：扫描 JSON、校验结构、识别精确/规范化重复并输出报告。
 - `scripts/curate_template_candidates.py`：将待整理模板与统一模板库做功能签名对照，只给出候选建议，不自动删除。
@@ -109,3 +139,5 @@ projects/<project>/
 - `scripts/delegate_model_downloads.py`：仅可用于“必须经代理且大于等于 2 GiB”的安全候选，将其委托给通用 Meifu 队列；调用方必须先完成路由判断。可直连的候选走本机直连，必须经代理但小于 2 GiB 的候选走 CN2 直连。该脚本支持可配置模型根目录、只读状态和下载后目录登记；本身不传输模型。
 - `scripts/stage_model_download.py`、`scripts/model_download_queue.py`：旧直连下载兼容入口；只保留审计能力，不能启动传输。
 - `scripts/show-model-download-queue-task.ps1`、`scripts/uninstall-model-download-queue-task.ps1`：旧任务的只读查看与精确卸载入口。旧安装脚本会拒绝创建任务，改由通用 Meifu 技能管理唯一后台队列任务。
+- `scripts/init_novel_video_packet.py`：在已有项目中生成不覆盖的小说影视前期台账骨架。
+- `scripts/validate_novel_video_packet.py`：检查前期生产包是否具备来源、角色对白、节拍、镜头、资产和 H3/声音计划的最低结构。

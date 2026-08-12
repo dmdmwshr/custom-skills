@@ -1,4 +1,4 @@
 interface:
   display_name: "ComfyUI 生产管理"
-  short_description: "管理 ComfyUI 模板、模型审查、下载委托与创作项目"
-  default_prompt: "使用 $comfyui-production-manager 审计 ComfyUI 模板缺失模型，完成模型类别和许可证审查后委托 $meifu-resumable-download 的后台队列传输。"
+  short_description: "管理 ComfyUI 与小说视频的完整可追溯生产流程"
+  default_prompt: "使用 $comfyui-production-manager 将小说章节整理为角色对白、可变时长分镜、资产清单与 MiniMax H3 生产包。"
