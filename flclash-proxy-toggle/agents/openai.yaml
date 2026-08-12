@@ -1,4 +1,4 @@
 interface:
-  display_name: "FlClash 安全配置与代理控制"
-  short_description: "区分桌面持久配置、生成配置和运行态；未经明确要求绝不暂停、退出或结束代理。"
-  default_prompt: "先只读检查 FlClash 的配置层和运行状态；只执行用户明确指定的配置或代理动作，绝不擅自暂停、退出或结束进程。"
+  display_name: "FlClash 安全配置与连接排故"
+  short_description: "安全维护 FlClash、排查连接异常问题与分流路径"
+  default_prompt: "使用 $flclash-proxy-toggle 先只读诊断 FlClash 的本机代理端口、分流路径和运行状态；仅执行明确授权的变更。"

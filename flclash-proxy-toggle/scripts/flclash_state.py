@@ -11,9 +11,11 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlsplit
 
 try:
     import winreg
@@ -31,6 +33,7 @@ SYSTEM_POWERSHELL = Path(
     r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 )
 INTERESTING_GROUPS = {"代理出口", "OpenAI", "OKX", "CN2", "Meifu", "链式代理"}
+ROUTE_GROUPS = ("代理出口", "Meifu", "CN2", "OpenAI", "OKX", "链式代理")
 DATABASE_TABLES = (
     "profiles",
     "scripts",
@@ -39,6 +42,7 @@ DATABASE_TABLES = (
     "proxy_groups",
     "icon_records",
 )
+MAX_CONTROLLER_RESPONSE_BYTES = 2 * 1024 * 1024
 SENSITIVE_LABEL_PATTERN = re.compile(
     r"(?:https?://|ss://|vmess://|vless://|trojan://|"
     r"\b(?:\d{1,3}\.){3}\d{1,3}\b|"
@@ -287,6 +291,261 @@ def system_proxy_enabled() -> bool | None:
         return None
 
 
+def parse_port(value: str | None) -> int | None:
+    try:
+        port = int((value or "").strip())
+    except (TypeError, ValueError):
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def system_proxy_diagnostic(mixed_port: int | None) -> dict[str, Any]:
+    """Return a redacted WinINET proxy summary without changing it."""
+    result: dict[str, Any] = {
+        "enabled": None,
+        "manual_proxy_endpoint_scope": "unavailable",
+        "matches_generated_mixed_port": None,
+        "auto_config_present": None,
+    }
+    if winreg is None:
+        return result
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        ) as key:
+            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            try:
+                proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            except OSError:
+                proxy_server = ""
+            try:
+                auto_config, _ = winreg.QueryValueEx(key, "AutoConfigURL")
+            except OSError:
+                auto_config = ""
+    except OSError:
+        return result
+
+    proxy_text = str(proxy_server or "").strip()
+    lower = proxy_text.casefold()
+    uses_loopback = any(
+        marker in lower for marker in ("127.0.0.1", "localhost", "[::1]", "::1")
+    )
+    result["enabled"] = bool(enabled)
+    result["auto_config_present"] = bool(str(auto_config or "").strip())
+    if not proxy_text:
+        result["manual_proxy_endpoint_scope"] = "not_configured"
+    elif uses_loopback:
+        result["manual_proxy_endpoint_scope"] = "loopback"
+    else:
+        result["manual_proxy_endpoint_scope"] = "non_loopback_or_unknown"
+    if mixed_port is not None and uses_loopback:
+        result["matches_generated_mixed_port"] = bool(
+            re.search(rf"(?<!\d){mixed_port}(?!\d)", proxy_text)
+        )
+    return result
+
+
+def _json_list(text: str) -> list[dict[str, Any]]:
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    values = parsed if isinstance(parsed, list) else [parsed]
+    return [item for item in values if isinstance(item, dict)]
+
+
+def local_proxy_listener_summary(port: int | None) -> dict[str, Any]:
+    """Check only the local mixed-port listener and redact owner details."""
+    result: dict[str, Any] = {"state": "port_not_configured", "reachable": False}
+    if port is None:
+        return result
+
+    reachable = False
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.35)
+            reachable = sock.connect_ex(("127.0.0.1", port)) == 0
+    except OSError:
+        reachable = False
+
+    command = (
+        f"$items = @(Get-NetTCPConnection -State Listen -LocalPort {port} "
+        "-ErrorAction SilentlyContinue); "
+        "$result = foreach ($item in $items) { "
+        "$process = Get-Process -Id $item.OwningProcess -ErrorAction SilentlyContinue; "
+        "[PSCustomObject]@{ ProcessName = if ($process) { $process.ProcessName } "
+        "else { 'unknown' } } }; "
+        "$result | Select-Object -Unique ProcessName | ConvertTo-Json -Compress"
+    )
+    owners = {
+        str(item.get("ProcessName", ""))
+        for item in _json_list(run_powershell(command))
+        if item.get("ProcessName")
+    }
+    if "FlClashCore" in owners and reachable:
+        state = "flclash_core_listening"
+    elif "FlClashCore" in owners:
+        state = "flclash_core_listener_unreachable"
+    elif reachable and owners:
+        state = "other_process_listening"
+    elif reachable:
+        state = "listener_reachable_owner_unavailable"
+    else:
+        state = "not_listening"
+    return {"state": state, "reachable": reachable}
+
+
+def is_loopback_host(host: str | None) -> bool:
+    return (host or "").strip().casefold() in {"127.0.0.1", "localhost", "::1"}
+
+
+def controller_base_url(value: str | None) -> str | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    candidate = raw if re.match(r"^https?://", raw, re.IGNORECASE) else f"http://{raw}"
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or port is None:
+        return None
+    if not is_loopback_host(parsed.hostname):
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def controller_secret(config_text: str) -> str:
+    for line in config_text.splitlines():
+        if not re.match(r"^secret\s*:", line):
+            continue
+        value = line.split(":", 1)[1].strip()
+        if value[:1] in {"'", '"'} and value[-1:] == value[:1]:
+            return value[1:-1]
+        return value.split("#", 1)[0].strip()
+    return ""
+
+
+def controller_json(
+    base_url: str, path: str, secret: str
+) -> tuple[dict[str, Any] | None, bool]:
+    headers = {"Accept": "application/json"}
+    if secret:
+        headers["Authorization"] = f"Bearer {secret}"
+    request = urllib.request.Request(f"{base_url}{path}", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=0.75) as response:
+            payload = response.read(MAX_CONTROLLER_RESPONSE_BYTES + 1)
+    except OSError:
+        return None, False
+    if len(payload) > MAX_CONTROLLER_RESPONSE_BYTES:
+        return None, False
+    try:
+        parsed = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, False
+    return (parsed if isinstance(parsed, dict) else None), isinstance(parsed, dict)
+
+
+def route_category(values: Iterable[Any]) -> str:
+    labels = [str(value).strip() for value in values if str(value).strip()]
+    if any(label.startswith("链式") for label in labels):
+        return "chain"
+    if any(label.startswith("CN2") for label in labels):
+        return "cn2"
+    if any(label.startswith("Meifu") for label in labels):
+        return "meifu"
+    if any(label.upper() == "DIRECT" for label in labels):
+        return "direct"
+    return "other_or_unknown"
+
+
+def controller_connectivity_snapshot(
+    controller_value: str | None, config_text: str
+) -> dict[str, Any]:
+    base_url = controller_base_url(controller_value)
+    if not (controller_value or "").strip():
+        return {"state": "not_configured"}
+    if base_url is None:
+        return {"state": "not_loopback_or_invalid"}
+
+    secret = controller_secret(config_text)
+    proxies, proxies_ok = controller_json(base_url, "/proxies", secret)
+    if not proxies_ok or proxies is None:
+        return {"state": "unavailable"}
+
+    selected_routes: dict[str, str] = {}
+    proxy_map = proxies.get("proxies")
+    if isinstance(proxy_map, dict):
+        for group in ROUTE_GROUPS:
+            proxy = proxy_map.get(group)
+            if isinstance(proxy, dict):
+                selected_routes[group] = route_category([proxy.get("now")])
+
+    result: dict[str, Any] = {
+        "state": "available",
+        "selected_route_by_group": selected_routes,
+        "active_connection_snapshot": "unavailable",
+    }
+    connections, connections_ok = controller_json(base_url, "/connections", secret)
+    if not connections_ok or connections is None:
+        return result
+    items = connections.get("connections")
+    if not isinstance(items, list):
+        return result
+    counts = {"meifu": 0, "cn2": 0, "chain": 0, "direct": 0, "other_or_unknown": 0}
+    for item in items:
+        chains = item.get("chains") if isinstance(item, dict) else []
+        category = route_category(chains if isinstance(chains, list) else [])
+        counts[category] += 1
+    result["active_connection_snapshot"] = "available"
+    result["active_connection_total"] = len(items)
+    result["active_connection_routes"] = counts
+    return result
+
+
+def connectivity_diagnosis(config_text: str, scalar: dict[str, str]) -> dict[str, Any]:
+    """Classify the local proxy path before anyone changes a node or server."""
+    mixed_port = parse_port(scalar.get("mixed-port"))
+    system_proxy = system_proxy_diagnostic(mixed_port)
+    listener = local_proxy_listener_summary(mixed_port)
+    controller = controller_connectivity_snapshot(
+        scalar.get("external-controller"), config_text
+    )
+    interpretation: list[str] = []
+    if (
+        system_proxy.get("enabled")
+        and system_proxy.get("manual_proxy_endpoint_scope") == "loopback"
+    ):
+        if system_proxy.get("matches_generated_mixed_port") is False:
+            interpretation.append("system_proxy_port_mismatch")
+        elif listener.get("state") == "not_listening":
+            interpretation.append("local_proxy_not_listening")
+        elif listener.get("state") == "other_process_listening":
+            interpretation.append("local_port_owned_by_other_process")
+        elif listener.get("state") == "flclash_core_listener_unreachable":
+            interpretation.append("local_proxy_listener_unreachable")
+        elif listener.get("state") == "flclash_core_listening":
+            interpretation.append("local_proxy_listener_ready")
+
+    selected = controller.get("selected_route_by_group")
+    counts = controller.get("active_connection_routes")
+    if isinstance(selected, dict) and isinstance(counts, dict):
+        if selected.get("代理出口") != "cn2" and counts.get("cn2") == 0:
+            interpretation.append("cn2_idle_by_current_selection")
+
+    return {
+        "system_proxy": system_proxy,
+        "local_mixed_port_listener": listener,
+        "controller_runtime": controller,
+        "interpretation": interpretation,
+    }
+
+
 def database_summary(active_profile_id: int | None) -> dict[str, Any]:
     result = file_metadata(DATABASE_PATH)
     if not result["exists"]:
@@ -412,6 +671,11 @@ def main() -> int:
         action="store_true",
         help="转义非 ASCII 字符，适合旧版 PowerShell 管道读取。",
     )
+    parser.add_argument(
+        "--connectivity",
+        action="store_true",
+        help="只读检查本机代理端口、运行时分流与连接归属，不发起外网探测。",
+    )
     args = parser.parse_args()
 
     config_text = read_text(CONFIG_PATH)
@@ -445,6 +709,10 @@ def main() -> int:
             "interesting_proxy_groups": parse_proxy_groups(config_text),
         },
     }
+    if args.connectivity:
+        result["connection_diagnostics"] = connectivity_diagnosis(
+            config_text, scalar
+        )
     print(
         json.dumps(
             result,

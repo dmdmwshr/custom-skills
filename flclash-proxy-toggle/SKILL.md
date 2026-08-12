@@ -1,6 +1,6 @@
 ---
 name: flclash-proxy-toggle
-description: 在 Windows 桌面上安全检查和维护 FlClash，区分桌面持久配置、订阅源配置、客户端覆写、运行时生成配置与 Mihomo 核心状态，并在用户明确要求时切换策略组、暂停或恢复代理。用于用户提到 FlClash、配置文件、database.sqlite、external controller、策略组节点、系统代理、TUN、暂停/恢复/退出代理或 OKX 路由诊断等场景。最高边界是未经用户逐项明确要求绝不暂停、关闭、退出、重启或结束 FlClash 及其核心进程。
+description: 在 Windows 桌面上安全检查、维护和只读排查 FlClash，区分桌面持久配置、订阅源配置、客户端覆写、运行时生成配置与 Mihomo 核心状态，并在用户明确要求时切换策略组、暂停或恢复代理。用于用户提到 FlClash、配置文件、database.sqlite、external controller、策略组节点、系统代理、TUN、暂停/恢复/退出代理、浏览器开启代理后无法联网、ERR_PROXY_CONNECTION_FAILED、节点延迟正常但实际访问超时、Hysteria2/UDP 异常、CN2/Meifu 流量归属异常或 OKX 路由诊断等场景。最高边界是未经用户逐项明确要求绝不暂停、关闭、退出、重启或结束 FlClash 及其核心进程。
 x-custom-skill: true
 x-managed-by: cc-switch
 x-source-repo: dmdmwshr/custom-skills
@@ -12,6 +12,8 @@ x-edit-policy: edit-source-repo-only
 先确认用户要处理的是哪一层，再执行最小动作并回读。配置维护不等于允许改变代理运行状态。
 
 执行配置诊断或变更前，完整读取 [references/configuration-layers.md](references/configuration-layers.md)。
+
+用户报告“开启代理后无网络”、浏览器无法连接代理、节点延迟与实际访问不一致、协议或 CN2/Meifu 流量异常时，还必须完整读取 [references/connection-troubleshooting.md](references/connection-troubleshooting.md)。
 
 任务涉及 Windows 桌面界面、按钮盘点或 UI 设置定位时，还必须完整读取 [references/windows-desktop-ui-map.md](references/windows-desktop-ui-map.md)。该参考记录的是版本化实测，不替代当前窗口截图与可访问文本。
 
@@ -25,6 +27,7 @@ x-edit-policy: edit-source-repo-only
 6. 状态不明时只读检查，不猜测、不连续点击、不尝试靠重启恢复。
 7. 不输出订阅 URL、节点服务器、端口组合、账号、密码、UUID、密钥、Cookie、令牌、短 ID 或可复用代理凭据。
 8. OKX 网络探针只允许公开 REST/WebSocket；不得读取交易凭据或触发账户、授权、下单操作。
+9. 连接故障先核验 Windows 本机系统代理与混合端口监听，不能仅凭节点延迟、订阅条目数量或某个协议失败就修改服务器、刷新订阅、切换路由或重启核心。
 
 ## 五层配置模型
 
@@ -40,17 +43,25 @@ x-edit-policy: edit-source-repo-only
 
 ## 工具顺序
 
-1. 先运行只读脚本：
+1. 用户报告连接、超时、无网络或流量归属异常时，先运行只读诊断：
+
+   ```powershell
+   <项目或可信 Python 解释器> scripts/flclash_state.py --connectivity
+   ```
+
+   它只读取 Windows 本机代理设置、本机混合端口、回环 controller 的只读状态和已汇总的连接归属；不发起外网测速、不读取访问正文、不改变代理状态。
+
+2. 其他配置检查先运行只读脚本：
 
    ```powershell
    <项目或可信 Python 3.11 解释器> scripts/flclash_state.py
    ```
 
-2. 需要看桌面界面时，先限定到 FlClash 窗口，读取截图与无障碍树；按“页面标题 + 控件文本 + 控件角色”唯一确认，不按旧截图坐标盲点。
-3. 需要持久修改时，优先使用 FlClash UI。
-4. 已明确启用 external controller 且只需要运行态策略组操作时，可使用本机 Mihomo HTTP API。
-5. `database.sqlite` 只用于只读审计；直接写库仅限用户明确批准的恢复性维护窗口。
-6. 不使用浏览器自动化，不把内部 helper/service IPC 当作公开 CLI。
+3. 需要看桌面界面时，先限定到 FlClash 窗口，读取截图与无障碍树；按“页面标题 + 控件文本 + 控件角色”唯一确认，不按旧截图坐标盲点。
+4. 需要持久修改时，优先使用 FlClash UI。
+5. 已明确启用 external controller 且只需要运行态策略组操作时，可使用本机 Mihomo HTTP API。
+6. `database.sqlite` 只用于只读审计；直接写库仅限用户明确批准的恢复性维护窗口。
+7. 不使用浏览器自动化，不把内部 helper/service IPC 当作公开 CLI。
 
 只读脚本不得写文件、调用控制器写接口、点击 UI、停止进程或改变系统代理。
 
@@ -82,6 +93,7 @@ x-edit-policy: edit-source-repo-only
 | 动作 | 默认权限 | 必要条件 |
 |---|---|---|
 | 只读状态、文件元数据、数据库表/数量、公开网络探针 | 允许 | 全程脱敏且不改变状态 |
+| 本机连接与流量归属排故 | 允许 | 仅使用 `--connectivity`、回环 controller 和只读路由检查；不触发外网测速、不关闭连接 |
 | 切换现有策略组节点 | 仅用户明确指定时 | 精确组名与目标存在，切换后回读 |
 | 修改桌面设置或 Profile 覆写 | 仅用户明确指定时 | 先定位层级，备份/预览，UI 保存后验证 |
 | external controller 写请求 | 仅用户明确指定运行态动作时 | 仅回环监听，认证按当前配置，精确组名 |
@@ -97,6 +109,14 @@ x-edit-policy: edit-source-repo-only
 2. 核对进程存在性、生成配置/数据库/偏好/源档案的存在与时间、数据库 schema/表计数、TUN/系统代理元数据、external controller 元数据。
 3. 如需核对规则来源，只查询数据库表结构和精确目标的脱敏字段；禁止整表导出 `profiles.url` 或原始 YAML 节点。
 4. 报告“哪个层保存、哪个层生成、哪个层正在运行”，不要笼统说“配置文件”。
+
+### 连接、超时与无网络排故
+
+1. 完整读取 `references/connection-troubleshooting.md`，先执行 `scripts/flclash_state.py --connectivity`；未通过本机混合端口门槛前，不检查或修改服务器。
+2. 先按诊断结果区分本机代理端口不监听、系统代理端口不匹配、端口被其他进程占用、当前分流未命中 CN2、TUN 默认路由异常和可能的 UDP/QUIC 受限；不能把这些情形笼统归因于“节点堵塞”。
+3. 本机代理端口与运行态分流均正常后，才在用户提供的准确时间范围内对照服务器脱敏握手日志；比较 WS/gRPC、Reality 和 Hysteria2 的协议层表现，不记录认证信息或访问正文。
+4. 对节点选择、系统代理、TUN、Windows 路由、订阅刷新、核心重启和服务器配置的任何修复，逐项等待用户明确授权；诊断本身不包含这些动作。
+5. 报告时先给出故障层级和证据，再给出最小的下一步；CN2 无流量必须同时说明上层分流选择，不能只看 CN2 组内的节点选择。
 
 ### 切换策略组
 
@@ -145,9 +165,10 @@ x-edit-policy: edit-source-repo-only
 
 按以下顺序简洁报告：
 
-1. `运行状态`：只读判断及证据。
-2. `配置层`：本次检查或修改属于哪一层。
-3. `执行动作`：精确说明；没有动作就写“未修改”。
-4. `一致性`：UI/数据库/生成配置/核心中已核对哪些。
-5. `安全确认`：明确写“未暂停、未退出、未结束 FlClash 进程”，或如实写出用户授权的对应动作。
-6. `敏感信息`：只说明已脱敏，不输出值。
+1. `故障定位`：先说明本机、分流、协议、路由或服务器中的已证实层级；证据不足时明确写“尚不能确认”。
+2. `运行状态`：只读判断及证据。
+3. `配置层`：本次检查或修改属于哪一层。
+4. `执行动作`：精确说明；没有动作就写“未修改”。
+5. `一致性`：UI/数据库/生成配置/核心中已核对哪些。
+6. `安全确认`：明确写“未暂停、未退出、未结束 FlClash 进程”，或如实写出用户授权的对应动作。
+7. `敏感信息`：只说明已脱敏，不输出值。
