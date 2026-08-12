@@ -10,6 +10,7 @@ import argparse
 import copy
 import importlib.util
 import io
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -47,6 +48,13 @@ class GenericQueueTests(unittest.TestCase):
     def invoke_silently(self, callable_object, *args):
         with redirect_stdout(io.StringIO()):
             return callable_object(*args)
+
+    def invoke_json(self, callable_object, *args):
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            result = callable_object(*args)
+        self.assertEqual(result, 0)
+        return json.loads(stream.getvalue())
 
     def test_enqueue_public_link_persists_a_single_safe_entry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -311,6 +319,37 @@ class GenericQueueTests(unittest.TestCase):
             self.assertEqual(self.invoke_silently(MODULE.remove, remove_args), 0)
             queue = MODULE.read_queue(first.queue)
             self.assertIsNone(MODULE.find_entry(queue, first_id))
+
+    def test_list_returns_a_small_page_and_exact_entry_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for index in range(25):
+                args = enqueue_args(root, url=f"https://example.com/model-{index}.bin")
+                args.output = str(root / f"model-{index}.bin")
+                self.invoke_silently(MODULE.enqueue, args)
+
+            first_page = self.invoke_json(
+                MODULE.list_entries,
+                argparse.Namespace(queue=root / "queue.json", state=None, id=None, limit=20, offset=0),
+            )
+            self.assertEqual(first_page["total_matching"], 25)
+            self.assertEqual(len(first_page["entries"]), 20)
+            self.assertEqual(first_page["next_offset"], 20)
+
+            second_page = self.invoke_json(
+                MODULE.list_entries,
+                argparse.Namespace(queue=root / "queue.json", state=None, id=None, limit=20, offset=20),
+            )
+            self.assertEqual(len(second_page["entries"]), 5)
+            self.assertIsNone(second_page["next_offset"])
+
+            entry_id = first_page["entries"][0]["id"]
+            exact = self.invoke_json(
+                MODULE.list_entries,
+                argparse.Namespace(queue=root / "queue.json", state=None, id=entry_id, limit=20, offset=0),
+            )
+            self.assertEqual(exact["total_matching"], 1)
+            self.assertEqual(exact["entries"][0]["id"], entry_id)
 
     def test_missing_runtime_stops_once_without_blocking_every_entry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

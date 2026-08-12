@@ -23,7 +23,7 @@ description: 通过 Meifu 分块缓存稳定下载任意 HTTPS 大文件，并�
 1. `enqueue` 只写入本地持久队列，不连接 Meifu，也不启动传输。
 2. `start` 只请求已安装的 Windows 计划任务处理默认队列；它绝不创建 Codex 的后台子进程。
 3. Windows 后台任务才运行长传输，严格一次只处理一个文件和一个 Meifu 分块；断网时保留断点并按退避时间自动续传。
-4. `status`、`list` 与 `audit` 只读取本地队列、锁、运行时版本和脱敏审计记录，不连接 Meifu。
+4. `status`、`list` 与 `audit` 只读取本地队列、锁、运行时版本和脱敏审计记录，不连接 Meifu。`list` 和 `audit` 默认每次只返回 20 项，避免把大队列完整回显到 Codex；用页码位置或精确条目编号继续查看。
 
 多个任务需要共用队列时，任何调用方都只能通过受管命令写入，不能直接编辑 `queue.json`。每次写入会短暂取得单一写入租约，校验清单版本号后原子替换；租约忙或版本不一致时只会拒绝并提示重新读取，不会覆盖已有条目。工作者在每个文件开始与结束时重新读取清单，因此其他任务可以在下载期间安全追加、取消未运行条目或调整未运行条目的顺序。
 
@@ -40,7 +40,7 @@ description: 通过 Meifu 分块缓存稳定下载任意 HTTPS 大文件，并�
 1. 确认链接、输出位置、大小级别和官方 SHA-256。ComfyUI 模型先由 `comfyui-production-manager` 确认类别、版本、许可证和最终目录。
 2. 用不带 `--execute` 的单文件命令检查脱敏来源和输出规则；需要验证 Range 支持、远端和本机空间时使用 `--probe-only`。
 3. 用户直接批准下载后，对无签名公共直链逐项 `enqueue --requested-by <稳定任务标识>`，再一次 `start` 请求 Windows 后台任务。
-4. 只用 `status`、`list`、`audit` 轮询。运行中重复请求会在创建子进程前返回“已有传输正在进行”。需要增删、重排或恢复条目时，先 `list`，再使用精确条目编号和变更原因。
+4. 只用 `status`、`list`、`audit` 轮询。运行中重复请求会在创建子进程前返回“已有传输正在进行”。需要增删、重排或恢复条目时，先按页 `list` 或按精确条目编号查看，再使用精确条目编号和变更原因。
 5. 完成后核对输出大小、SHA-256 和“来源已验证/仅计算哈希”状态；不自动执行、安装或导入下载文件。
 
 常用调用形式：
@@ -50,8 +50,9 @@ description: 通过 Meifu 分块缓存稳定下载任意 HTTPS 大文件，并�
     python scripts/meifu_download_queue.py enqueue --url "https://example.invalid/file.bin" --storage-root "D:\aimodels" --target "speech\tts\model.bin" --sha256 <官方哈希> --requested-by "<稳定任务标识>"
     python scripts/meifu_download_queue.py start
     python scripts/meifu_download_queue.py status
-    python scripts/meifu_download_queue.py list
-    python scripts/meifu_download_queue.py audit --limit 100
+    python scripts/meifu_download_queue.py list --limit 20 --offset 0
+    python scripts/meifu_download_queue.py list --id <条目编号>
+    python scripts/meifu_download_queue.py audit --limit 20
     python scripts/meifu_download_queue.py move --id <条目编号> --before <条目编号> --reason "用户确认的优先级调整" --requested-by "<稳定任务标识>"
     python scripts/meifu_download_queue.py remove --id <条目编号> --reason "用户取消" --requested-by "<稳定任务标识>"
     python scripts/meifu_download_queue.py retry --id <条目编号> --reason "运行时已修复" --requested-by "<稳定任务标识>"

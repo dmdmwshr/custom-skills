@@ -66,6 +66,8 @@ MUTABLE_ENTRY_STATES = {"queued", "blocked"}
 AUDIT_SCHEMA = "MeifuDownloadQueueAuditV1"
 AUDIT_MAX_BYTES = 4 * 1024 * 1024
 AUDIT_RETENTION_FILES = 3
+DEFAULT_VIEW_LIMIT = 20
+MAX_VIEW_LIMIT = 100
 LOCK_INITIALIZATION_GRACE_SECONDS = 120
 DEFAULT_RETRY_DELAY_SECONDS = 15 * 60
 MAX_RETRY_DELAY_SECONDS = 6 * 60 * 60
@@ -1358,7 +1360,13 @@ def retry(args: argparse.Namespace) -> int:
         )
     print(
         json.dumps(
-            {"status": "requeued", "entry_ids": [entry["id"] for entry in snapshots], **summary(queue)},
+            {
+                "status": "requeued",
+                "requeued_count": len(snapshots),
+                "entry_ids": [entry["id"] for entry in snapshots[:DEFAULT_VIEW_LIMIT]],
+                "entry_ids_truncated": max(0, len(snapshots) - DEFAULT_VIEW_LIMIT),
+                **summary(queue),
+            },
             ensure_ascii=False,
             indent=2,
         )
@@ -1368,14 +1376,31 @@ def retry(args: argparse.Namespace) -> int:
 
 def list_entries(args: argparse.Namespace) -> int:
     queue = read_queue(args.queue, allow_missing=True)
+    limit = int(getattr(args, "limit", DEFAULT_VIEW_LIMIT))
+    offset = int(getattr(args, "offset", 0))
+    if limit <= 0 or limit > MAX_VIEW_LIMIT:
+        raise QueueError(f"--limit 必须在 1 到 {MAX_VIEW_LIMIT} 之间。")
+    if offset < 0:
+        raise QueueError("--offset 不能小于 0。")
     states = set(args.state or [])
-    entries = [entry for entry in ordered_entries(queue) if not states or entry.get("status") in states]
+    requested_id = str(getattr(args, "id", "") or "").strip()
+    if requested_id:
+        entries = [require_entry_id(queue, requested_id)]
+    else:
+        entries = ordered_entries(queue)
+    entries = [entry for entry in entries if not states or entry.get("status") in states]
+    page = entries[offset : offset + limit]
+    next_offset = offset + len(page)
     print(
         json.dumps(
             {
                 "status": "ok" if args.queue.exists() else "not_initialized",
                 "queue": str(args.queue),
-                "entries": [entry_projection(entry) for entry in entries],
+                "total_matching": len(entries),
+                "offset": offset,
+                "limit": limit,
+                "next_offset": next_offset if next_offset < len(entries) else None,
+                "entries": [entry_projection(entry) for entry in page],
                 **summary(queue),
             },
             ensure_ascii=False,
@@ -1386,8 +1411,8 @@ def list_entries(args: argparse.Namespace) -> int:
 
 
 def show_audit(args: argparse.Namespace) -> int:
-    if args.limit <= 0:
-        raise QueueError("--limit 必须大于 0。")
+    if args.limit <= 0 or args.limit > MAX_VIEW_LIMIT:
+        raise QueueError(f"--limit 必须在 1 到 {MAX_VIEW_LIMIT} 之间。")
     if not args.audit_log.exists():
         print(json.dumps({"status": "not_initialized", "events": []}, ensure_ascii=False, indent=2))
         return 0
@@ -1642,14 +1667,17 @@ def parse_args() -> argparse.Namespace:
     retry_parser.add_argument("--log-file", type=Path, default=DEFAULT_LOG)
     retry_parser.set_defaults(handler=retry)
 
-    list_parser = subparsers.add_parser("list", help="只读列出任务编号、来源链接、输出位置、顺序和状态")
+    list_parser = subparsers.add_parser("list", help="只读分页列出任务编号、来源链接、输出位置、顺序和状态")
     list_parser.add_argument("--queue", type=Path, default=DEFAULT_QUEUE)
     list_parser.add_argument("--state", action="append", choices=sorted(ENTRY_STATES), help="可重复指定，用于按状态筛选。")
+    list_parser.add_argument("--id", help="只显示一个精确条目编号；可与 --state 组合验证状态。")
+    list_parser.add_argument("--limit", type=int, default=DEFAULT_VIEW_LIMIT, help=f"每页条目数，默认 {DEFAULT_VIEW_LIMIT}，最多 {MAX_VIEW_LIMIT}。")
+    list_parser.add_argument("--offset", type=int, default=0, help="从第几个匹配条目开始，默认 0。")
     list_parser.set_defaults(handler=list_entries)
 
     audit_parser = subparsers.add_parser("audit", help="只读查看最近的队列增删排序与工作者审计记录")
     audit_parser.add_argument("--audit-log", type=Path, default=DEFAULT_AUDIT_LOG)
-    audit_parser.add_argument("--limit", type=int, default=100)
+    audit_parser.add_argument("--limit", type=int, default=DEFAULT_VIEW_LIMIT, help=f"最近事件数，默认 {DEFAULT_VIEW_LIMIT}，最多 {MAX_VIEW_LIMIT}。")
     audit_parser.set_defaults(handler=show_audit)
 
     status_parser = subparsers.add_parser("status", help="只读查看本地队列状态")

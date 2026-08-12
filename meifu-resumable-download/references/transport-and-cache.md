@@ -28,7 +28,7 @@
 
 ## 共享队列清单写入协议
 
-多个 Codex 任务、ComfyUI 委托或人工脚本共用通用队列时，调用方不得直接编辑 `queue.json`、临时文件或锁文件，只能调用 `meifu_download_queue.py enqueue`、`pause`、`resume`、`remove`、`move`、`retry` 和只读 `status/list/audit`。
+多个 Codex 任务、ComfyUI 委托或人工脚本共用通用队列时，调用方不得直接编辑 `queue.json`、临时文件或锁文件，只能调用 `meifu_download_queue.py enqueue`、`pause`、`resume`、`remove`、`move`、`retry` 和只读 `status/list/audit`。`list` 和 `audit` 默认只回显 20 项；需要继续查看时使用 `--offset` 分页，或用 `--id` 定位一条任务，避免大输出拖慢桌面端。
 
 1. `enqueue` 在同一短时租约内完成“检查工作者状态 → 读取队列 → 验证输出路径 → 提交”；因此刚启动的工作者会在取得队列责任前读取到最新条目。
 2. 每次提交写入递增的清单版本号，并记录最后一次本地变更。磁盘版本已变化时，旧调用方必须重新读取后再提交。
