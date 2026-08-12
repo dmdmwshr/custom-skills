@@ -1,6 +1,6 @@
 ---
 name: comfyui-production-manager
-description: 管理本机 ComfyUI 的工作流、模型与 AI 创作项目。用户要求整理/去重/归档/命名工作流、检查模板缺失模型、确认模型存放位置、规划模型目录、准备图像/视频/音频/3D 创作流程、建立项目资产与分镜台账，或询问 ComfyUI MCP/Agent 配置时使用。模型传输统一委托 `meifu-resumable-download` 的 Windows 单工作队列；本 skill 只负责模型类别、来源、许可证、目标目录和下载后的登记。也用于把工作区母版安全同步到 ComfyUI 运行目录并验证哈希。
+description: 管理本机 ComfyUI 的工作流、模型与 AI 创作项目。用户要求整理/去重/归档/命名工作流、检查模板缺失模型、确认模型存放位置、规划模型目录、准备图像/视频/音频/3D 创作流程、建立项目资产与分镜台账，或询问 ComfyUI MCP/Agent 配置时使用。模型下载先按“直连/大小/代理”分流：可直连时走本机直连；必须经代理但小于 2 GiB 时走 CN2 直连；只有必须经代理且大于等于 2 GiB 才委托 `meifu-resumable-download` 的 Windows 单工作队列。本 skill 只负责模型类别、来源、许可证、目标目录和下载后的登记。
 ---
 
 # ComfyUI Production Manager
@@ -46,11 +46,12 @@ description: 管理本机 ComfyUI 的工作流、模型与 AI 创作项目。用
 3. 先运行 `scripts/audit_models.py` 盘点两个模型根目录，再用 `scripts/audit_model_dependencies.py` 从模板库提取“已安装 / 缺失 / 未解析”的模型依赖与直链。
 4. 只把类别、来源和文件名都明确的 `missing` 项作为下载候选；`unresolved`、同名多来源、不同精度或不同训练版本必须先人工确认，不能静默替换。
 5. 只允许 `download_candidates` 中类别、文件名和无签名 HTTPS 来源均明确的 `missing` 项进入下载准备；`unresolved`、类别冲突、带签名链接以及不同精度/训练版本必须人工确认，不能静默替换。
-6. 使用 `scripts/delegate_model_downloads.py prepare` 把候选逐项委托给 `meifu-resumable-download`。通过 `--model-root` 配置精确模型根目录，或由共享路径规则选择根目录；通用队列收到的是“存储根目录 + 类别/文件名”的安全相对目标，不能逃出模型根目录。ComfyUI 委托清单和通用队列都采用短时单写入租约、版本校验和原子提交；遇到其他任务正在写入时只重试或查询，不手改 JSON。
-7. 实际传输只由通用技能的 Windows 后台任务承担：官方 HTTPS → `/root/.cache/meifu-downloads` 分块缓存 → 本机 SFTP 续传 → SHA-256 → 原子落位。Codex 只可准备、请求后台任务启动和查询状态；队列始终只有一个工作者、一个输出文件和一个 Meifu 分块。断网、断电和临时上游错误保留断点并自动退避续传。
-8. 文件落盘后运行 `scripts/delegate_model_downloads.py reconcile`，由本 skill 计算最终 SHA-256 并更新 `models/catalog.json`；它不执行、安装或导入模型。下载成功不等于显存可完整加载，显存兼容性单独报告。
-9. `stage_model_download.py` 和 `model_download_queue.py` 是只保留状态审计的旧兼容入口，所有可能传输、清理或修改旧队列的命令都会安全退出。不得新建或恢复旧 ComfyUI 下载任务；已有旧任务的停用/迁移属于单独的 Windows 计划任务变更，必须获得当前用户明确授权。
-10. 模型移动、覆盖或删除属于外部状态变更。默认只生成清单和建议；已有不同文件时通用下载器拒绝覆盖，删除前先检查工作流、项目 manifest、模型目录登记和 ComfyUI 日志。
+6. 对每个已批准候选先确认“是否必须经代理”和文件大小：来源可直连的任意大小走本机直连；必须经代理但小于 2 GiB 的候选走 CN2 直连；两者都不写入 Meifu 队列。代理需求或大小未知时只做探测，不得默认转入 Meifu。
+7. 只有必须经代理且大于等于 2 GiB 的候选，才使用 `scripts/delegate_model_downloads.py prepare` 逐项委托给 `meifu-resumable-download`。通过 `--model-root` 配置精确模型根目录，或由共享路径规则选择根目录；通用队列收到的是“存储根目录 + 类别/文件名”的安全相对目标，不能逃出模型根目录。ComfyUI 委托清单和通用队列都采用短时单写入租约、版本校验和原子提交；遇到其他任务正在写入时只重试或查询，不手改 JSON。
+8. 仅对进入 Meifu 队列的候选，实际传输才由通用技能的 Windows 后台任务承担：官方 HTTPS → `/root/.cache/meifu-downloads` 分块缓存 → 本机 SFTP 续传 → SHA-256 → 原子落位。Codex 只可准备、请求后台任务启动和查询状态；队列始终只有一个工作者、一个输出文件和一个 Meifu 分块。断网、断电和临时上游错误保留断点并自动退避续传。
+9. 文件落盘后运行 `scripts/delegate_model_downloads.py reconcile`，由本 skill 计算最终 SHA-256 并更新 `models/catalog.json`；它不执行、安装或导入模型。下载成功不等于显存可完整加载，显存兼容性单独报告。
+10. `stage_model_download.py` 和 `model_download_queue.py` 是只保留状态审计的旧兼容入口，所有可能传输、清理或修改旧队列的命令都会安全退出。不得新建或恢复旧 ComfyUI 下载任务；已有旧任务的停用/迁移属于单独的 Windows 计划任务变更，必须获得当前用户明确授权。
+11. 模型移动、覆盖或删除属于外部状态变更。默认只生成清单和建议；已有不同文件时通用下载器拒绝覆盖，删除前先检查工作流、项目 manifest、模型目录登记和 ComfyUI 日志。
 
 详见 `references/model-management.md`。
 
@@ -105,6 +106,6 @@ projects/<project>/
 - `scripts/curate_template_candidates.py`：将待整理模板与统一模板库做功能签名对照，只给出候选建议，不自动删除。
 - `scripts/model_paths.py`：读取 Comfy Desktop 共享模型路径，并按 D 盘 200 GiB 阈值选择默认/备用落盘位置。
 - `scripts/audit_model_dependencies.py`：从模板 `MarkdownNote` 和模型加载器提取模型依赖、来源与缺口；不下载模型。
-- `scripts/delegate_model_downloads.py`：把依赖报告的安全候选委托给通用 Meifu 队列，支持可配置模型根目录、只读状态和下载后目录登记；本身不传输模型。
+- `scripts/delegate_model_downloads.py`：仅可用于“必须经代理且大于等于 2 GiB”的安全候选，将其委托给通用 Meifu 队列；调用方必须先完成路由判断。可直连的候选走本机直连，必须经代理但小于 2 GiB 的候选走 CN2 直连。该脚本支持可配置模型根目录、只读状态和下载后目录登记；本身不传输模型。
 - `scripts/stage_model_download.py`、`scripts/model_download_queue.py`：旧直连下载兼容入口；只保留审计能力，不能启动传输。
 - `scripts/show-model-download-queue-task.ps1`、`scripts/uninstall-model-download-queue-task.ps1`：旧任务的只读查看与精确卸载入口。旧安装脚本会拒绝创建任务，改由通用 Meifu 技能管理唯一后台队列任务。

@@ -26,7 +26,13 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
-def write_report(path: Path, source_url: str = "https://example.com/voice.safetensors") -> None:
+def write_report(
+    path: Path,
+    source_url: str = "https://example.com/voice.safetensors",
+    *,
+    requires_proxy: bool = True,
+    size_bytes: int = 2 * 1024 * 1024 * 1024,
+) -> None:
     path.write_text(
         json.dumps(
             {
@@ -36,6 +42,8 @@ def write_report(path: Path, source_url: str = "https://example.com/voice.safete
                         "filename": "voice.safetensors",
                         "category": "checkpoints",
                         "source_url": source_url,
+                        "requires_proxy": requires_proxy,
+                        "size_bytes": size_bytes,
                         "workflow_count": 2,
                         "reference_count": 3,
                         "workflows": ["voice.json"],
@@ -101,6 +109,26 @@ class DelegateModelDownloadTests(unittest.TestCase):
             root = Path(temporary)
             args = prepare_args(root)
             write_report(args.dependency_report, "https://example.com/voice.safetensors?signature=secret")
+            self.assertEqual(MODULE.prepare(args), 0)
+            self.assertFalse(args.generic_queue.exists())
+            manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["entries"], [])
+
+    def test_direct_candidate_is_excluded_before_queue_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = prepare_args(root)
+            write_report(args.dependency_report, requires_proxy=False)
+            self.assertEqual(MODULE.prepare(args), 0)
+            self.assertFalse(args.generic_queue.exists())
+            manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["entries"], [])
+
+    def test_small_proxy_candidate_is_excluded_before_queue_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = prepare_args(root)
+            write_report(args.dependency_report, size_bytes=2 * 1024 * 1024 * 1024 - 1)
             self.assertEqual(MODULE.prepare(args), 0)
             self.assertFalse(args.generic_queue.exists())
             manifest = json.loads(args.manifest.read_text(encoding="utf-8"))

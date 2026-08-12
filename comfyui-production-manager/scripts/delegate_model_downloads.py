@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Prepare and register ComfyUI model downloads through the generic Meifu queue.
+"""Prepare and register Meifu-eligible ComfyUI model downloads.
 
 This script deliberately has no transfer implementation.  It keeps the
-ComfyUI-specific responsibilities (approved dependency candidates, model
-category, chosen storage root, and catalog registration), while every remote
-transfer is owned by ``meifu-resumable-download``'s single Windows worker.
+ComfyUI-specific responsibilities for candidates that have already passed the
+global routing decision: they must require a proxy and be at least 2 GiB.
+Directly reachable candidates are downloaded directly, while proxy-required
+candidates below 2 GiB use CN2; neither is admitted here.  Every admitted
+remote transfer is owned by ``meifu-resumable-download``'s single Windows
+worker.
 """
 
 from __future__ import annotations
@@ -44,6 +47,9 @@ DEFAULT_GENERIC_SCRIPT = (
     / "meifu_download_queue.py"
 )
 GENERIC_REQUESTER = "comfyui-production-manager"
+MEBIBYTE = 1024 * 1024
+MEBIFACTOR = 1024 * MEBIBYTE
+MIN_MEIFU_SIZE_BYTES = 2 * MEBIFACTOR
 MANIFEST_SCHEMA = "ComfyUIGenericMeifuDownloadManifestV1"
 MANIFEST_WRITE_STATE_SCHEMA = "ComfyUIGenericMeifuManifestWriteStateV1"
 MANIFEST_LOCK_SCHEMA = "ComfyUIGenericMeifuManifestLeaseV1"
@@ -67,6 +73,8 @@ class Candidate:
     workflows: list[str]
     workflow_count: int
     reference_count: int
+    requires_proxy: bool
+    size_bytes: int
 
 
 def now() -> str:
@@ -276,6 +284,20 @@ def optional_sha256(value: object) -> str | None:
     return digest
 
 
+def required_bool(row: dict[str, Any], key: str, *, display_name: str) -> bool:
+    value = row.get(key)
+    if not isinstance(value, bool):
+        raise DelegateError(f"候选缺少明确的{display_name}；未写入 Meifu 队列。")
+    return value
+
+
+def required_meifu_size(row: dict[str, Any]) -> int:
+    value = row.get("size_bytes")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise DelegateError("候选缺少有效文件大小；未写入 Meifu 队列。")
+    return value
+
+
 def candidate_from_row(row: object) -> Candidate:
     if not isinstance(row, dict):
         raise DelegateError("依赖报告中的下载候选不是对象。")
@@ -291,7 +313,17 @@ def candidate_from_row(row: object) -> Candidate:
         workflows=sorted(set(workflows)),
         workflow_count=int(row.get("workflow_count") or 0),
         reference_count=int(row.get("reference_count") or 0),
+        requires_proxy=required_bool(row, "requires_proxy", display_name="是否必须经代理标记"),
+        size_bytes=required_meifu_size(row),
     )
+
+
+def ensure_meifu_eligible(candidate: Candidate) -> None:
+    """Reject candidates that belong on direct/CN2 paths before queue mutation."""
+    if not candidate.requires_proxy:
+        raise DelegateError("来源可直连，应走本机直连下载，不得写入 Meifu 队列。")
+    if candidate.size_bytes < MIN_MEIFU_SIZE_BYTES:
+        raise DelegateError("必须经代理但文件小于 2 GiB，应走 CN2 直连下载，不得写入 Meifu 队列。")
 
 
 def choose_model_root(args: argparse.Namespace) -> Path:
@@ -457,6 +489,9 @@ def manifest_row(candidate: Candidate, target: Path, root: Path) -> dict[str, An
         "workflows": candidate.workflows,
         "workflow_count": candidate.workflow_count,
         "reference_count": candidate.reference_count,
+        "requires_proxy": candidate.requires_proxy,
+        "size_bytes": candidate.size_bytes,
+        "transport": "meifu_resumable_download_queue",
         "updated_at": now(),
     }
 
@@ -493,6 +528,7 @@ def prepare(args: argparse.Namespace) -> int:
                 break
             try:
                 candidate = candidate_from_row(raw_candidate)
+                ensure_meifu_eligible(candidate)
                 target = (root / candidate.category / candidate.filename).resolve(strict=False)
                 row = manifest_row(candidate, target, root)
                 existing_file = target.is_file()
@@ -728,7 +764,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    prepare_parser = subparsers.add_parser("prepare", help="仅把已确认 ComfyUI 模型候选委托给通用队列")
+    prepare_parser = subparsers.add_parser("prepare", help="仅把已确认必须经代理且大于等于 2 GiB 的 ComfyUI 模型候选委托给通用队列")
     add_common_paths(prepare_parser)
     prepare_parser.add_argument("--model-root", type=Path)
     prepare_parser.add_argument("--shared-paths-config", type=Path, default=DEFAULT_SHARED_PATHS)

@@ -1,4 +1,4 @@
 interface:
   display_name: "Meifu 断点下载"
-  short_description: "通过 Meifu 与 Windows 单工作队列稳定下载大文件并断点续传"
-  default_prompt: "使用 $meifu-resumable-download 通过 Meifu Windows 后台单工作队列下载此链接，并保存到指定位置。"
+  short_description: "仅处理必须经代理且大于等于 2 GiB 的下载，后台断点续传"
+  default_prompt: "先判断此下载是否可本机直连、是否必须经代理以及是否大于等于 2 GiB：可直连时走本机直连；必须经代理但小于 2 GiB 时走 CN2 直连；仅同时满足必须经代理且大于等于 2 GiB 时，使用 $meifu-resumable-download 通过 Meifu Windows 后台单工作队列下载并保存到指定位置。"

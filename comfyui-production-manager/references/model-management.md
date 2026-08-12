@@ -37,9 +37,16 @@ python scripts/audit_model_dependencies.py --workflow-root "<工作区>\workflow
 
 模型名称相同不等于模型等价；禁止将 fp16/fp8、不同版本、不同训练集或不同 LoRA 静默替换。
 
-## 委托给通用 Meifu 队列
+## 下载路由与 Meifu 委托
 
-ComfyUI 不再维护自己的远端缓存、SFTP 传输器或后台下载任务。职责严格分开：
+ComfyUI 不再维护自己的远端缓存、SFTP 传输器或后台下载任务。先按以下规则选择传输方式，不把所有模型下载都送入 Meifu：
+
+1. 来源可直连：无论文件大小，走本机直连下载，不经过 CN2 或 Meifu。
+2. 来源必须经代理但文件小于 2 GiB：走 CN2 直连下载，不使用 Meifu。
+3. 只有来源必须经代理且文件大于等于 2 GiB：委托通用 Meifu 队列。
+4. 代理需求或大小不明：只做来源与大小探测，确认前不写入 Meifu 队列。
+
+本机直连表示直接向来源站下载；CN2 直连表示本机经既有 CN2 网络链路直接向来源站下载。两者都不经过 Meifu。Meifu 委托链路的职责严格如下：
 
 ```text
 ComfyUI：已批准候选、模型类别、模型根目录、下载后登记
@@ -50,10 +57,10 @@ Windows 计划任务：在 Codex 之外运行通用队列，并在登录/网络�
 只使用 `download_candidates` 中唯一类别、单一无签名 HTTPS 来源和安全文件名都明确的条目。带签名参数、需要登录或需要接受许可证的链接不能写入持久队列；先由用户完成授权并提供可安全持久化的来源，绝不把令牌写入聊天、命令行、工作区或 Git。
 
 ```powershell
-# 只做本地准备：按指定模型根目录逐项写入通用队列和 ComfyUI 委托清单；不联网、不启动传输。
+# 仅对“必须经代理且大于等于 2 GiB”的候选做本地准备：按指定模型根目录逐项写入通用队列和 ComfyUI 委托清单；不联网、不启动传输。
 python scripts/delegate_model_downloads.py prepare --dependency-report "<工作区>\models\template_dependency_report.json" --model-root "D:\Comfy-Desktop\ComfyUI-Shared\models"
 
-# 当前用户已明确批准下载，且通用后台任务已单独安装后，才请求 Windows 后台任务开始队列。
+# 仅在当前用户已明确批准、候选满足 Meifu 门槛且通用后台任务已单独安装后，才请求 Windows 后台任务开始队列。
 python scripts/delegate_model_downloads.py prepare --dependency-report "<工作区>\models\template_dependency_report.json" --model-root "D:\Comfy-Desktop\ComfyUI-Shared\models" --start
 
 # 只读查看模型委托和通用队列；不会连接 Meifu 或启动下载。
@@ -63,7 +70,7 @@ python scripts/delegate_model_downloads.py status
 python scripts/delegate_model_downloads.py reconcile
 ```
 
-`--model-root` 是精确的存储根目录；省略时，脚本按 Comfy Desktop 的共享路径和空间规则选择根目录。候选的类别与文件名被传给通用下载器作为安全相对目标，因此文件不能逃出该模型根目录。通用队列始终一次只处理一个文件和一个 Meifu 分块，并为同一输出路径设置锁，避免重复传输和并发写入。
+`--model-root` 是精确的存储根目录；省略时，脚本按 Comfy Desktop 的共享路径和空间规则选择根目录。只有已确认符合 Meifu 门槛的候选，其类别与文件名才会传给通用下载器作为安全相对目标，因此文件不能逃出该模型根目录。通用队列始终一次只处理一个文件和一个 Meifu 分块，并为同一输出路径设置锁，避免重复传输和并发写入。
 
 `generic_meifu_model_downloads.json` 也只能由 `delegate_model_downloads.py` 写入，不能由多个任务手工合并。`prepare` 与 `reconcile` 通过同一短时写入租约串行化；提交前核对清单版本号并原子替换。若发现另一个任务正在写入、租约异常或版本已变，脚本会拒绝而非覆盖；应稍后重试或先运行只读 `status`。旧清单会在下一次受保护写入时自动补齐版本元数据。即使两个任务同时看到同一候选，通用队列的输出路径锁也会把第二次请求转换为“已入队/已占用”记录，而不会再次传输。
 
