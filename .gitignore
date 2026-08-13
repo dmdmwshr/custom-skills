@@ -21,3 +21,6 @@ logs/
 # Local-only site mapping for the LocalVault browser helper.  It may contain a
 # URL, username, secret name, and captcha flag, but never a password.
 localvault-credentials/local/accounts.json
+
+# Legacy location only. Keep ignored permanently so credentials can never be committed.
+/xf-product-case-registry/admin-upload-config.toml

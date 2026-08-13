@@ -8,14 +8,14 @@
 - 所有 `files` 都是规范 PDF，均有 SHA-256，且每个文件都已关联一个正式槽位版本或一个 `OTHER_ATTACHMENT`。
 - 原始证据、OCR 原文、未确认字段和人工核对笔记留在本地，不随请求上传。
 - 用户已直接授权当前案卷包写入目标网站。
-- `%LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml` 已由用户本人填写。该稳定本地目录不属于 skill 源仓库或安装副本，后续 CC Switch 同步不会覆盖它。不要把真实账号或密码传入命令行。
+- 先用 `init-auth-config` 在绝对路径 `%LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml` 创建空模板并收紧 ACL，再由用户本人填写。该稳定本地目录不属于 skill 源仓库或安装副本；路径含重解析点时 CLI 拒绝使用。不要把真实账号或密码传入命令行。
 
 ## 认证前置流程
 
 1. CLI 用 `tomllib` 读取本地 `[auth]` 下的 `username` 与 `password`，通过同源 `POST /api/auth/login` 登录；失败时只报告 HTTP 状态，不回显响应正文或凭据。
-2. CLI 保持同一个 `httpx.Client` 的 Cookie 容器，并立即请求 `GET /api/auth/session`；登录响应与会话响应的用户 ID、角色、大队绑定和 CSRF 令牌必须一致。
-3. `mustChangePassword=true` 时立即停止，不自动修改密码。会话角色必须是 `ADMIN`，或是 `brigadeCode` 与 manifest 完全一致且有大队绑定的 `BRIGADE`。
-4. 认证成功后，当前进程内的所有业务写请求统一携带目标站同源 `Origin`、`X-Product-Case-Client: web-v2` 和会话返回的 `X-CSRF-Token`。密码、Cookie、CSRF 令牌均不落盘、不写日志、不进入响应摘要。
+2. CLI 保持同一个 `httpx.Client` 的 Cookie 容器，并立即请求 `GET /api/auth/session`；必须收到安全会话 Cookie。登录响应与会话响应的完整身份、`authMethod=SESSION`、用户内与顶层 CSRF 令牌必须一致，`mustChangePassword` 必须显式为 `false`。
+3. `ADMIN` 必须没有任何大队绑定；`BRIGADE` 的平铺及嵌套大队 ID/编号必须一致，且 `brigadeCode` 与 manifest 完全一致。任一条件不满足立即停止，不自动改密或纠正身份。
+4. CSRF 不进入客户端全局请求头。登录 POST 单独携带同源 `Origin`；认证后的每个业务写请求逐次携带目标站同源 `Origin`、`X-Product-Case-Client: web-v2` 和当前 `X-CSRF-Token`。GET 只携带 Cookie。密码、Cookie、CSRF 均不落盘、不写日志、不进入摘要。
 
 ## 固定顺序
 
@@ -34,5 +34,5 @@
 
 - `upload --dry-run` 只做本地 Schema、业务归属、PDF、页数和哈希校验，不建立网络连接。
 - 正式写入必须显式增加 `--finalize`；脚本在写入前检查服务就绪状态和项目编号不存在。
-- `upload-state.json` 同时绑定目标网站来源、包哈希、manifest 哈希，以及非敏感的用户 ID、角色、大队 ID/编号。身份不同或旧状态没有身份绑定时，`upload` 一律拒绝续传；需要时可单独运行 `verify` 做只读核验。
+- `upload-state.json` 采用封闭 V5，只保存进度、不可逆身份摘要、角色和大队编号；不保存用户 ID、大队 ID或完整 `finalize` 响应。终结结果只保留案卷 ID、布尔值和计数白名单，命令只输出核验摘要。它只防止本地误操作，不带 HMAC；服务端授权才是安全边界。身份不同、旧版本或出现额外字段时，`upload` 拒绝续传，可单独运行 `verify`。
 - 服务端终结成功后先记录“已写入、待核验”，再读取案卷详情、固定目录和每份文件进行哈希核对。网络中断后重跑只允许续做只读核验，不会再次终结任务。

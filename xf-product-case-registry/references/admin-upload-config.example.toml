@@ -1,5 +1,6 @@
-# 复制到 %LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml 后，
-# 由用户本人填写。该稳定本地目录不会被 CC Switch 同步覆盖。
+# 优先运行 `registry_cli.py init-auth-config`，在
+# %LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml 创建空模板并收紧 ACL，
+# 再由用户本人填写。该稳定本地目录不会被 CC Switch 同步覆盖。
 # 不要把真实账号或密码写入示例、仓库、日志或聊天。
 [auth]
 username = ""

@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -45,6 +46,16 @@ def auth_session(
     brigade_code: str | None = None,
     must_change_password: bool = False,
 ) -> dict[str, object]:
+    brigade = (
+        {
+            "id": brigade_id,
+            "code": brigade_code,
+            "name": "测试大队",
+            "routePath": "/fixture",
+        }
+        if role == "BRIGADE" and brigade_id and brigade_code
+        else None
+    )
     return {
         "user": {
             "id": TEST_USER_ID,
@@ -53,7 +64,9 @@ def auth_session(
             "role": role,
             "brigadeId": brigade_id,
             "brigadeCode": brigade_code,
-            "brigade": None,
+            "brigade": brigade,
+            "csrfToken": TEST_CSRF,
+            "authMethod": "SESSION",
             "mustChangePassword": must_change_password,
             "version": 1,
         },
@@ -83,8 +96,15 @@ def auth_route(
     if request.url.path == "/api/auth/session":
         assert request.method == "GET"
         assert "__Host-product_case_session=fixture-session" in request.headers.get("cookie", "")
+        assert "x-csrf-token" not in request.headers
+        assert "origin" not in request.headers
         return httpx.Response(200, json=session)
     return None
+
+
+def admin_state_identity() -> dict[str, str | None]:
+    session = auth_session()
+    return cli.state_identity(cli.authenticated_identity(session["user"], session["csrfToken"]))
 
 
 def pdf(path: Path, pages: int = 1) -> None:
@@ -147,6 +167,9 @@ def verify_client(
         auth_response = auth_route(request)
         if auth_response is not None:
             return auth_response
+        if request.method == "GET":
+            assert "x-csrf-token" not in request.headers
+            assert "origin" not in request.headers
         if request.url.path == "/api/v2/cases":
             return httpx.Response(200, json={"data": [{"id": case_id, "projectNo": PROJECT}]})
         if request.url.path == f"/api/v2/cases/{case_id}":
@@ -620,7 +643,9 @@ def test_reference_v2_example_is_readable_and_valid_after_product_owner_fix() ->
 
 
 def test_finalized_unverified_retries_read_only_and_origin_is_bound(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     source = tmp_path / "one.pdf"
     pdf(source)
@@ -637,6 +662,9 @@ def test_finalized_unverified_retries_read_only_and_origin_is_bound(
         auth_response = auth_route(request)
         if auth_response is not None:
             return auth_response
+        if request.method == "GET":
+            assert "x-csrf-token" not in request.headers
+            assert "origin" not in request.headers
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             assert request.headers["origin"] == "https://registry.example"
             assert request.headers["x-csrf-token"] == TEST_CSRF
@@ -657,7 +685,18 @@ def test_finalized_unverified_retries_read_only_and_origin_is_bound(
             return httpx.Response(200, json={})
         if request.url.path.endswith("/finalize"):
             remote["case"] = True
-            return httpx.Response(200, json={"caseId": case_id, "created": True})
+            return httpx.Response(
+                200,
+                json={
+                    "caseId": case_id,
+                    "created": True,
+                    "added": {"products": 0, "slots": 0, "attachments": 1},
+                    "replaced": {"slots": 0},
+                    "conflicts": [],
+                    "skipped": [],
+                    "serverInternalField": "must-not-persist",
+                },
+            )
         if request.url.path == f"/api/v2/cases/{case_id}":
             return httpx.Response(
                 200,
@@ -720,10 +759,17 @@ def test_finalized_unverified_retries_read_only_and_origin_is_bound(
     assert (
         state["status"] == "FINALIZED_UNVERIFIED" and state["origin"] == "https://registry.example"
     )
+    assert "finalizeResult" not in state
+    assert "serverInternalField" not in json.dumps(state)
     count = len(posts)
     remote["fail_verify"] = False
     upload_command(args)
-    assert len(posts) == count and read_json(tmp_path / "upload-state.json")["status"] == "VERIFIED"
+    verified_state = read_json(tmp_path / "upload-state.json")
+    assert len(posts) == count and verified_state["status"] == "VERIFIED"
+    assert set(verified_state["authIdentity"]) == {"digest", "role", "brigadeCode"}
+    output = capsys.readouterr().out
+    assert "manifestSha256" not in output and "serverInternalField" not in output
+    assert TEST_USER_ID not in output and TEST_CSRF not in output
     with pytest.raises(RegistryError, match="origin"):
         upload_command(argparse.Namespace(**{**vars(args), "api_base": "https://other.example"}))
     verify_command(
@@ -757,12 +803,7 @@ def test_uploading_state_with_existing_case_recovers_without_second_post(
             "packageSha256": data["packageSha256"],
             "projectNo": PROJECT,
             "jobId": "job",
-            "authIdentity": {
-                "userId": TEST_USER_ID,
-                "role": "ADMIN",
-                "brigadeId": None,
-                "brigadeCode": None,
-            },
+            "authIdentity": admin_state_identity(),
             "uploadedFileRefs": ["file:one"],
         },
     )
@@ -772,6 +813,9 @@ def test_uploading_state_with_existing_case_recovers_without_second_post(
         auth_response = auth_route(request)
         if auth_response is not None:
             return auth_response
+        if request.method == "GET":
+            assert "x-csrf-token" not in request.headers
+            assert "origin" not in request.headers
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             assert request.headers["origin"] == "https://registry.example"
             assert request.headers["x-csrf-token"] == TEST_CSRF
@@ -879,7 +923,7 @@ def test_auth_config_uses_toml_and_rejects_empty_values(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("session", "message"),
     [
-        (auth_session(must_change_password=True), "必须先在网站修改密码"),
+        (auth_session(must_change_password=True), "必须显式为 false"),
         (
             auth_session(
                 role="BRIGADE",
@@ -931,7 +975,7 @@ def test_matching_brigade_account_is_accepted_and_csrf_is_kept_in_memory(tmp_pat
         return response
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        identity = cli.authenticate_client(
+        identity, write_headers = cli.authenticate_client(
             client,
             "https://registry.example",
             "https://registry.example",
@@ -939,25 +983,21 @@ def test_matching_brigade_account_is_accepted_and_csrf_is_kept_in_memory(tmp_pat
             auth_config(tmp_path),
         )
         assert identity == {
-            "userId": TEST_USER_ID,
+            "digest": identity["digest"],
             "role": "BRIGADE",
-            "brigadeId": "33333333-3333-4333-8333-333333333333",
             "brigadeCode": "XISHAN",
         }
-        assert client.headers["Origin"] == "https://registry.example"
-        assert client.headers["X-CSRF-Token"] == TEST_CSRF
+        assert identity["digest"].startswith("sha256:")
+        assert "Origin" not in client.headers and "X-CSRF-Token" not in client.headers
+        assert write_headers["Origin"] == "https://registry.example"
+        assert write_headers["X-CSRF-Token"] == TEST_CSRF
 
 
 def test_upload_state_rejects_identity_switch_and_legacy_unbound_state() -> None:
-    identity = {
-        "userId": TEST_USER_ID,
-        "role": "ADMIN",
-        "brigadeId": None,
-        "brigadeCode": None,
-    }
+    identity = admin_state_identity()
     with pytest.raises(RegistryError, match="未绑定认证身份"):
         cli.require_same_state_identity({"status": "UPLOADING"}, identity)
-    switched = {**identity, "userId": "44444444-4444-4444-8444-444444444444"}
+    switched = {**identity, "digest": "sha256:" + "4" * 64}
     with pytest.raises(RegistryError, match="禁止切换身份续传"):
         cli.require_same_state_identity({"authIdentity": identity}, switched)
 
@@ -1001,3 +1041,257 @@ def test_verify_help_displays_windows_default_path(
     assert raised.value.code == 0
     output = "".join(capsys.readouterr().out.split())
     assert "%LOCALAPPDATA%/xf-product-case-registry/admin-upload-config.toml" in output
+
+
+def test_auth_config_requires_absolute_non_reparse_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(RegistryError, match="绝对路径"):
+        cli.secure_auth_config_path(Path("relative-auth.toml"))
+    link = tmp_path / "linked"
+    link.mkdir()
+    real_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda candidate: candidate == link or real_is_symlink(candidate),
+    )
+    with pytest.raises(RegistryError, match="重解析点"):
+        cli.secure_auth_config_path(link / "admin-upload-config.toml")
+
+
+def test_init_auth_config_creates_once_and_secures_acl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "local" / "admin-upload-config.toml"
+    secured: list[Path] = []
+    monkeypatch.setattr(cli, "restrict_auth_config_acl", lambda path: secured.append(path))
+    args = argparse.Namespace(auth_config=str(target))
+    cli.init_auth_config_command(args)
+    assert target.read_text(encoding="utf-8") == cli.AUTH_CONFIG_TEMPLATE
+    assert secured == [target]
+    target.write_text('[auth]\nusername = "kept"\npassword = "kept"\n', encoding="utf-8")
+    cli.init_auth_config_command(args)
+    assert 'username = "kept"' in target.read_text(encoding="utf-8")
+    assert secured == [target, target]
+    output = capsys.readouterr().out
+    assert "kept" not in output and "password" not in output
+
+
+def test_init_auth_config_removes_new_file_when_acl_hardening_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "local" / "admin-upload-config.toml"
+
+    def fail_acl(_path: Path) -> None:
+        raise RegistryError("ACL failed")
+
+    monkeypatch.setattr(cli, "restrict_auth_config_acl", fail_acl)
+    with pytest.raises(RegistryError, match="ACL failed"):
+        cli.init_auth_config_command(argparse.Namespace(auth_config=str(target)))
+    assert not target.exists()
+
+
+def test_acl_hardening_grants_only_current_user_and_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "admin-upload-config.toml"
+    target.write_text(cli.AUTH_CONFIG_TEMPLATE, encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append(command)
+        if command[0] == "whoami.exe":
+            return subprocess.CompletedProcess(command, 0, b'"fixture","S-1-5-21-123"\r\n', b"")
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    cli.restrict_auth_config_acl(target)
+    assert calls[1] == [
+        "icacls.exe",
+        str(target),
+        "/inheritance:r",
+        "/grant:r",
+        "*S-1-5-21-123:(R,W)",
+        "*S-1-5-18:(F)",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda payload: payload["user"].pop("authMethod"), "authMethod"),
+        (lambda payload: payload["user"].pop("mustChangePassword"), "显式为 false"),
+        (lambda payload: payload["user"].update({"csrfToken": "wrong"}), "CSRF"),
+        (
+            lambda payload: payload["user"].update(
+                {
+                    "brigadeId": "33333333-3333-4333-8333-333333333333",
+                    "brigadeCode": "XISHAN",
+                    "brigade": {
+                        "id": "33333333-3333-4333-8333-333333333333",
+                        "code": "XISHAN",
+                    },
+                }
+            ),
+            "ADMIN 账户不得绑定大队",
+        ),
+    ],
+)
+def test_authentication_strictly_rejects_malformed_user_contract(
+    tmp_path: Path, mutate: Any, message: str
+) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    session = auth_session()
+    mutate(session)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = auth_route(request, session)
+        if response is None:
+            raise AssertionError(request.url)
+        return response
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(RegistryError, match=message),
+    ):
+        cli.authenticate_client(
+            client,
+            "https://registry.example",
+            "https://registry.example",
+            manifest(source),
+            auth_config(tmp_path),
+        )
+
+
+def test_authentication_rejects_missing_cookie_and_login_session_identity_mismatch(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    config = auth_config(tmp_path)
+    login, session = auth_session(), auth_session()
+    session["user"]["id"] = "55555555-5555-4555-8555-555555555555"
+
+    def mismatch_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/auth/login":
+            return httpx.Response(
+                200,
+                json=login,
+                headers={"Set-Cookie": f"{cli.SESSION_COOKIE_NAME}=fixture; Secure; Path=/"},
+            )
+        if request.url.path == "/api/auth/session":
+            return httpx.Response(200, json=session)
+        raise AssertionError(request.url)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(mismatch_handler)) as client,
+        pytest.raises(RegistryError, match="身份不一致"),
+    ):
+        cli.authenticate_client(
+            client, "https://registry.example", "https://registry.example", manifest(source), config
+        )
+
+    def no_cookie_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=login)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(no_cookie_handler)) as client,
+        pytest.raises(RegistryError, match="Cookie"),
+    ):
+        cli.authenticate_client(
+            client, "https://registry.example", "https://registry.example", manifest(source), config
+        )
+
+
+def test_authentication_rejects_flat_nested_brigade_mismatch_and_missing_expiry(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    config = auth_config(tmp_path)
+    session = auth_session(
+        role="BRIGADE",
+        brigade_id="33333333-3333-4333-8333-333333333333",
+        brigade_code="XISHAN",
+    )
+    session["user"]["brigade"]["code"] = "BINHU"
+
+    def mismatch_handler(request: httpx.Request) -> httpx.Response:
+        response = auth_route(request, session)
+        if response is None:
+            raise AssertionError(request.url)
+        return response
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(mismatch_handler)) as client,
+        pytest.raises(RegistryError, match="平铺与嵌套"),
+    ):
+        cli.authenticate_client(
+            client, "https://registry.example", "https://registry.example", manifest(source), config
+        )
+
+    missing_expiry = auth_session()
+    missing_expiry.pop("absoluteExpiresAt")
+
+    def expiry_handler(request: httpx.Request) -> httpx.Response:
+        response = auth_route(request, missing_expiry)
+        if response is None:
+            raise AssertionError(request.url)
+        return response
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(expiry_handler)) as client,
+        pytest.raises(RegistryError, match="到期时间"),
+    ):
+        cli.authenticate_client(
+            client, "https://registry.example", "https://registry.example", manifest(source), config
+        )
+
+
+def test_state_v5_is_closed_and_stores_only_identity_digest() -> None:
+    state = {
+        "stateVersion": 5,
+        "status": "UPLOADING",
+        "origin": "https://registry.example",
+        "manifestSha256": "sha256:" + "1" * 64,
+        "packageSha256": "sha256:" + "2" * 64,
+        "projectNo": PROJECT,
+        "jobId": "job",
+        "authIdentity": admin_state_identity(),
+        "uploadedFileRefs": [],
+    }
+    cli.validate_upload_state(state)
+    serialized = json.dumps(state)
+    assert (
+        TEST_USER_ID not in serialized
+        and "brigadeId" not in serialized
+        and "userId" not in serialized
+    )
+    with pytest.raises(RegistryError, match="额外字段"):
+        cli.validate_upload_state({**state, "csrfToken": TEST_CSRF})
+
+
+def test_finalize_summary_whitelists_only_boolean_and_counts() -> None:
+    summary = cli.finalize_summary(
+        {
+            "caseId": "11111111-1111-4111-8111-111111111111",
+            "created": True,
+            "added": {"products": 2, "slots": 3, "attachments": 1, "secret": "drop"},
+            "replaced": {"slots": 4},
+            "conflicts": ["details must not persist"],
+            "skipped": ["details must not persist"],
+            "internal": {"password": "drop"},
+        }
+    )
+    assert summary == {
+        "caseId": "11111111-1111-4111-8111-111111111111",
+        "created": True,
+        "addedProducts": 2,
+        "addedSlots": 3,
+        "addedAttachments": 1,
+        "replacedSlots": 4,
+        "conflictCount": 1,
+        "skippedCount": 1,
+    }

@@ -30,17 +30,17 @@ description: 仅适配消防产品案卷信息登记系统现有 V2 网站：在
 
 ## 本地认证配置
 
-1. 仓库只提交空值示例 `references/admin-upload-config.example.toml`。真实文件固定为 `%LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml`；该目录独立于源仓库和安装副本，CC Switch 同步不会覆盖它。
-2. 初次使用时把示例复制到上述默认路径，或填写已创建的真实空配置：
+1. 仓库只提交空值示例 `references/admin-upload-config.example.toml`。真实文件固定为绝对路径 `%LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml`；该目录独立于源仓库和安装副本，CC Switch 同步不会覆盖它。源仓库根和 skill 自身仍永久精确忽略旧位置 `/admin-upload-config.toml`，防止历史文件被误提交。
+2. 初次使用先运行 `uv run --python 3.12 python scripts/registry_cli.py init-auth-config`。命令只在文件不存在时创建以下空模板，并把文件访问控制列表（ACL，即谁能读取和修改文件）收紧为当前用户可读写、Windows `SYSTEM` 可完全控制；已有文件不会被覆盖，只会重新收紧权限：
    ~~~toml
    [auth]
    username = ""
    password = ""
    ~~~
    账号和密码只由用户本人填写；不得在聊天、提交、测试夹具或终端输出中展示真实值。
-3. `upload` 与 `verify` 通过 Windows `LOCALAPPDATA` 环境变量解析上述真实文件；仅在需要使用另一个本地受控文件时通过 `--auth-config <绝对路径>` 覆盖。不要把账号或密码改成命令行参数。
-4. CLI 先向 `POST /api/auth/login` 提交凭据，再用同一 `httpx` 客户端的 Cookie 容器请求 `GET /api/auth/session` 复核身份。首次登录必须改密时立即停止，由用户在网站完成改密后再重试。
-5. `ADMIN` 可处理任一大队；`BRIGADE` 账户仅可处理与 manifest `brigadeCode` 完全一致的大队。所有业务写请求必须同时带目标站同源 `Origin` 和会话返回的 `X-CSRF-Token`。
+3. `upload` 与 `verify` 通过 Windows `LOCALAPPDATA` 环境变量解析上述真实文件；默认路径和 `--auth-config` 覆盖路径都必须是绝对路径，任一父目录或文件是符号链接、联接等重解析点时拒绝使用。不要把账号或密码改成命令行参数。
+4. CLI 先向 `POST /api/auth/login` 提交凭据，再用同一 `httpx` 客户端的 Cookie 容器请求 `GET /api/auth/session` 复核身份。必须收到会话 Cookie；登录与会话中的身份、认证方式、内外层 CSRF 令牌及大队绑定必须完全一致，`mustChangePassword` 必须明确为 `false`，否则停止。
+5. `ADMIN` 必须不绑定大队；`BRIGADE` 账户的平铺与嵌套大队 ID/编号必须一致，且只能处理与 manifest `brigadeCode` 完全一致的大队。CSRF 令牌不写入客户端全局请求头；只有业务写请求逐次携带同源 `Origin`、客户端标识和 `X-CSRF-Token`，所有 GET 仅使用会话 Cookie。
 
 ## 本地整理流程
 
@@ -58,7 +58,7 @@ description: 仅适配消防产品案卷信息登记系统现有 V2 网站：在
 - `compose` 使用的本地 `case-data.files[]` 需要同时写 `sourceRelativePath`（清点或拆分结果）与 `relativePath`（上传相对路径）。包哈希只能来自 `inventory.json`。
 - `validate` 与 `upload --dry-run` 都不写网站；正式导入必须显式使用 `upload --finalize`。导入完成后用 `verify` 逐项核对案卷、检查、产品、目录版本和下载文件哈希。
 - `upload --dry-run` 保持完全离线，不读取认证配置。`upload` 与 `verify` 的原有参数保持兼容，并新增可选 `--auth-config`。
-- 上传状态与目标网站、包哈希、manifest 哈希以及非敏感身份绑定（用户 ID、角色、大队 ID/编号）。服务端已写入但网络核验中断时，只允许同一身份续做只读核验，不得切换身份、二次导入或覆盖人工数据。旧状态若没有身份绑定，不得用 `upload` 续传，只能单独运行 `verify`。
+- `upload-state.json` 使用封闭的 V5 字段集：只保存目标、哈希、任务进度、角色、大队编号及不可逆身份摘要，不保存用户 ID、大队 ID、密码、Cookie、CSRF 或完整服务端响应。终结结果只白名单保存案卷 ID、布尔结果和计数摘要，命令最终也只输出摘要。状态文件只用于防止误续传和误切换身份，不带 HMAC，也不是授权边界；真正的安全边界始终是服务端会话、CSRF 与大队授权。旧状态或额外字段一律拒绝用 `upload` 续传，可单独运行 `verify` 只读核验。
 
 ## V2 四步导入
 

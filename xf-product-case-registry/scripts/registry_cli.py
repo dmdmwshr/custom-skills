@@ -21,15 +21,23 @@ import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
+SESSION_COOKIE_NAME = "__Host-product_case_session"
+AUTH_CONFIG_TEMPLATE = '[auth]\nusername = ""\npassword = ""\n'
+
+
+class RegistryError(RuntimeError):
+    pass
 
 
 def default_auth_config_path() -> Path:
     local_app_data = os.environ.get("LOCALAPPDATA")
     root = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
-    return root / "xf-product-case-registry" / "admin-upload-config.toml"
+    if not root.is_absolute():
+        raise RegistryError("LOCALAPPDATA 必须是绝对路径")
+    return Path(os.path.abspath(root)) / "xf-product-case-registry" / "admin-upload-config.toml"
 
 
 DEFAULT_AUTH_CONFIG = default_auth_config_path()
@@ -108,10 +116,6 @@ SLOT_META: dict[str, tuple[str, str | None]] = {
 PHOTO_SLOTS = {"INITIAL_ONSITE_PHOTO", "RECHECK_ONSITE_PHOTO"}
 
 
-class RegistryError(RuntimeError):
-    pass
-
-
 def utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -134,7 +138,27 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def secure_auth_config_path(path: Path) -> Path:
+    path = path.expanduser()
+    if not path.is_absolute():
+        raise RegistryError("认证配置路径必须是绝对路径")
+    absolute = Path(os.path.abspath(path))
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    for candidate in (absolute, *absolute.parents):
+        if not (candidate.exists() or candidate.is_symlink()):
+            continue
+        try:
+            metadata = candidate.lstat()
+        except OSError as error:
+            raise RegistryError(f"无法检查认证配置路径：{candidate}") from error
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        if candidate.is_symlink() or attributes & reparse_flag:
+            raise RegistryError(f"认证配置路径不允许符号链接、联接或其他重解析点：{candidate}")
+    return absolute
+
+
 def read_auth_config(path: Path) -> tuple[str, str]:
+    path = secure_auth_config_path(path)
     try:
         value = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError as error:
@@ -153,6 +177,63 @@ def read_auth_config(path: Path) -> tuple[str, str]:
     if not isinstance(password, str) or not password:
         raise RegistryError("认证配置中的 auth.password 不能为空")
     return username.strip(), password
+
+
+def restrict_auth_config_acl(path: Path) -> None:
+    if os.name != "nt":
+        raise RegistryError("认证配置 ACL 收紧仅支持 Windows")
+    try:
+        identity = subprocess.run(
+            ["whoami.exe", "/user", "/fo", "csv", "/nh"],
+            check=True,
+            capture_output=True,
+        ).stdout.strip()
+        match = re.search(rb'"(S-1-[0-9-]+)"\s*$', identity)
+        if not match:
+            raise ValueError("current SID missing")
+        current_sid = match.group(1).decode("ascii")
+        subprocess.run(
+            [
+                "icacls.exe",
+                str(path),
+                "/inheritance:r",
+                "/grant:r",
+                f"*{current_sid}:(R,W)",
+                "*S-1-5-18:(F)",
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError, UnicodeError, ValueError) as error:
+        raise RegistryError("无法把认证配置 ACL 收紧为当前用户和 SYSTEM") from error
+
+
+def init_auth_config_command(args: argparse.Namespace) -> None:
+    path = secure_auth_config_path(Path(args.auth_config))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    secure_auth_config_path(path)
+    created = False
+    if not path.exists():
+        try:
+            with path.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(AUTH_CONFIG_TEMPLATE)
+            created = True
+        except OSError as error:
+            raise RegistryError(f"无法创建认证配置：{path}") from error
+    elif not path.is_file():
+        raise RegistryError("认证配置目标必须是普通文件")
+    try:
+        restrict_auth_config_acl(path)
+    except RegistryError:
+        if created:
+            path.unlink(missing_ok=True)
+        raise
+    print(
+        json.dumps(
+            {"status": "created" if created else "secured", "authConfig": str(path)},
+            ensure_ascii=False,
+        )
+    )
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -883,20 +964,67 @@ def origin_of(api_base: str) -> tuple[str, str]:
     return api_base.rstrip("/"), f"{parsed.scheme}://{parsed.netloc}"
 
 
-def authenticated_identity(user: dict[str, Any]) -> dict[str, str | None]:
-    user_id, role = user.get("id"), user.get("role")
+def authenticated_identity(user: dict[str, Any], top_level_csrf: Any) -> dict[str, Any]:
+    user_id, username, display_name = user.get("id"), user.get("username"), user.get("displayName")
+    role, version = user.get("role"), user.get("version")
     brigade_id, brigade_code = user.get("brigadeId"), user.get("brigadeCode")
-    if not isinstance(user_id, str) or role not in {"ADMIN", "BRIGADE"}:
-        raise RegistryError("认证会话缺少有效的用户标识或角色")
-    if brigade_id is not None and not isinstance(brigade_id, str):
-        raise RegistryError("认证会话的 brigadeId 无效")
-    if brigade_code is not None and not isinstance(brigade_code, str):
-        raise RegistryError("认证会话的 brigadeCode 无效")
+    if (
+        not isinstance(user_id, str)
+        or not isinstance(username, str)
+        or not isinstance(display_name, str)
+        or role not in {"ADMIN", "BRIGADE"}
+        or not isinstance(version, int)
+        or isinstance(version, bool)
+        or version < 1
+    ):
+        raise RegistryError("认证会话缺少有效的用户身份字段")
+    if user.get("authMethod") != "SESSION":
+        raise RegistryError("认证会话的 authMethod 必须是 SESSION")
+    if user.get("mustChangePassword") is not False:
+        raise RegistryError("mustChangePassword 必须显式为 false；首次登录请先在网站修改密码")
+    if (
+        not isinstance(top_level_csrf, str)
+        or not top_level_csrf
+        or user.get("csrfToken") != top_level_csrf
+    ):
+        raise RegistryError("用户信息与响应顶层的 CSRF 防护令牌不一致")
+    brigade = user.get("brigade")
+    if role == "ADMIN":
+        if brigade_id is not None or brigade_code is not None or brigade is not None:
+            raise RegistryError("ADMIN 账户不得绑定大队")
+    else:
+        if (
+            not isinstance(brigade_id, str)
+            or not isinstance(brigade_code, str)
+            or not isinstance(brigade, dict)
+            or brigade.get("id") != brigade_id
+            or brigade.get("code") != brigade_code
+            or not isinstance(brigade.get("name"), str)
+            or not isinstance(brigade.get("routePath"), str)
+        ):
+            raise RegistryError("BRIGADE 账户的平铺与嵌套大队绑定不一致")
     return {
         "userId": user_id,
+        "username": username,
+        "displayName": display_name,
         "role": role,
         "brigadeId": brigade_id,
         "brigadeCode": brigade_code,
+        "brigadeName": brigade.get("name") if isinstance(brigade, dict) else None,
+        "brigadeRoutePath": brigade.get("routePath") if isinstance(brigade, dict) else None,
+        "version": version,
+    }
+
+
+def state_identity(identity: dict[str, Any]) -> dict[str, str | None]:
+    stable_identity = {key: identity[key] for key in ("userId", "role", "brigadeId", "brigadeCode")}
+    canonical = json.dumps(
+        stable_identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return {
+        "digest": "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "role": identity["role"],
+        "brigadeCode": identity["brigadeCode"],
     }
 
 
@@ -906,7 +1034,7 @@ def authenticate_client(
     origin: str,
     manifest: dict[str, Any],
     auth_config: Path,
-) -> dict[str, str | None]:
+) -> tuple[dict[str, str | None], dict[str, str]]:
     username, password = read_auth_config(auth_config)
     login = response_json(
         client.post(
@@ -920,30 +1048,30 @@ def authenticate_client(
     login_user, session_user = login.get("user"), session.get("user")
     if not isinstance(login_user, dict) or not isinstance(session_user, dict):
         raise RegistryError("认证响应缺少用户信息")
-    identity = authenticated_identity(session_user)
-    if authenticated_identity(login_user) != identity:
-        raise RegistryError("登录响应与会话身份不一致")
     login_csrf, csrf_token = login.get("csrfToken"), session.get("csrfToken")
+    for label, payload in (("登录", login), ("会话", session)):
+        if not isinstance(payload.get("expiresAt"), str) or not isinstance(
+            payload.get("absoluteExpiresAt"), str
+        ):
+            raise RegistryError(f"{label}响应缺少会话到期时间")
     if not isinstance(csrf_token, str) or not csrf_token or login_csrf != csrf_token:
         raise RegistryError("登录响应与会话的 CSRF 防护令牌不一致")
-    if (
-        login_user.get("mustChangePassword") is True
-        or session_user.get("mustChangePassword") is True
+    login_identity = authenticated_identity(login_user, login_csrf)
+    session_identity = authenticated_identity(session_user, csrf_token)
+    if login_identity != session_identity:
+        raise RegistryError("登录响应与会话身份不一致")
+    if not any(
+        cookie.name == SESSION_COOKIE_NAME and cookie.value for cookie in client.cookies.jar
     ):
-        raise RegistryError("当前账户首次登录必须先在网站修改密码；已停止上传")
+        raise RegistryError("登录成功但未收到安全会话 Cookie")
     brigade_code = manifest["case"]["brigadeCode"]
-    if identity["role"] == "BRIGADE" and (
-        not identity["brigadeId"] or identity["brigadeCode"] != brigade_code
-    ):
+    if session_identity["role"] == "BRIGADE" and session_identity["brigadeCode"] != brigade_code:
         raise RegistryError("当前大队账户与 manifest 的 brigadeCode 不一致")
-    client.headers.update(
-        {
-            "Origin": origin,
-            WRITE_HEADER: WRITE_HEADER_VALUE,
-            "X-CSRF-Token": csrf_token,
-        }
-    )
-    return identity
+    return state_identity(session_identity), {
+        "Origin": origin,
+        WRITE_HEADER: WRITE_HEADER_VALUE,
+        "X-CSRF-Token": csrf_token,
+    }
 
 
 def require_same_state_identity(state: dict[str, Any], identity: dict[str, str | None]) -> None:
@@ -956,6 +1084,150 @@ def require_same_state_identity(state: dict[str, Any], identity: dict[str, str |
         )
     if stored != identity:
         raise RegistryError("当前登录身份与 upload-state 绑定身份不一致；禁止切换身份续传")
+
+
+STATE_BASE_KEYS = {
+    "stateVersion",
+    "status",
+    "origin",
+    "manifestSha256",
+    "packageSha256",
+    "projectNo",
+    "jobId",
+    "authIdentity",
+    "uploadedFileRefs",
+}
+STATE_OPTIONAL_KEYS = {"caseId", "finalizedAt", "finalizeSummary", "verification", "verifiedAt"}
+
+
+def validate_upload_state(state: dict[str, Any]) -> None:
+    if not state:
+        return
+    extra = set(state) - STATE_BASE_KEYS - STATE_OPTIONAL_KEYS
+    missing = STATE_BASE_KEYS - set(state)
+    if extra or missing or state.get("stateVersion") != 5:
+        raise RegistryError("upload-state V5 字段不完整、包含额外字段或版本不受支持")
+    status = state.get("status")
+    if status not in {"UPLOADING", "FINALIZED_UNVERIFIED", "VERIFIED"}:
+        raise RegistryError("upload-state V5 状态无效")
+    if (
+        not isinstance(state.get("origin"), str)
+        or not SHA256.fullmatch(str(state.get("manifestSha256")))
+        or not SHA256.fullmatch(str(state.get("packageSha256")))
+        or not isinstance(state.get("projectNo"), str)
+        or not PROJECT_NO.fullmatch(state["projectNo"])
+        or not isinstance(state.get("jobId"), str)
+        or not state.get("jobId")
+        or not isinstance(state.get("uploadedFileRefs"), list)
+        or any(not isinstance(item, str) for item in state["uploadedFileRefs"])
+        or len(set(state["uploadedFileRefs"])) != len(state["uploadedFileRefs"])
+    ):
+        raise RegistryError("upload-state V5 基础字段无效")
+    identity = state.get("authIdentity")
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != {"digest", "role", "brigadeCode"}
+        or not SHA256.fullmatch(str(identity.get("digest")))
+        or identity.get("role") not in {"ADMIN", "BRIGADE"}
+        or (
+            identity.get("brigadeCode") is not None
+            and not isinstance(identity.get("brigadeCode"), str)
+        )
+        or (identity.get("role") == "ADMIN" and identity.get("brigadeCode") is not None)
+        or (identity.get("role") == "BRIGADE" and not identity.get("brigadeCode"))
+    ):
+        raise RegistryError("upload-state V5 身份摘要无效")
+    if status == "UPLOADING" and set(state) != STATE_BASE_KEYS:
+        raise RegistryError("UPLOADING 状态包含不允许的完成字段")
+    if status in {"FINALIZED_UNVERIFIED", "VERIFIED"}:
+        if not isinstance(state.get("caseId"), str) or not isinstance(
+            state.get("finalizedAt"), str
+        ):
+            raise RegistryError("已终结状态缺少 caseId 或 finalizedAt")
+        summary = state.get("finalizeSummary")
+        if status == "VERIFIED" and summary is None:
+            summary = None
+        elif not isinstance(summary, dict):
+            raise RegistryError("upload-state V5 的 finalizeSummary 无效")
+        if summary is not None:
+            if set(summary) != {
+                "caseId",
+                "created",
+                "addedProducts",
+                "addedSlots",
+                "addedAttachments",
+                "replacedSlots",
+                "conflictCount",
+                "skippedCount",
+            }:
+                raise RegistryError("upload-state V5 的 finalizeSummary 无效")
+            if summary.get("caseId") != state["caseId"] or not isinstance(
+                summary.get("created"), bool
+            ):
+                raise RegistryError("upload-state V5 的 finalizeSummary 身份无效")
+            for key in set(summary) - {"caseId", "created"}:
+                value = summary[key]
+                if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                    raise RegistryError("upload-state V5 的 finalizeSummary 计数无效")
+    if status == "FINALIZED_UNVERIFIED" and set(state) != STATE_BASE_KEYS | {
+        "caseId",
+        "finalizedAt",
+        "finalizeSummary",
+    }:
+        raise RegistryError("FINALIZED_UNVERIFIED 状态字段不封闭")
+    if status == "VERIFIED":
+        complete_keys = STATE_BASE_KEYS | {
+            "caseId",
+            "finalizedAt",
+            "verification",
+            "verifiedAt",
+        }
+        if frozenset(state) not in {
+            frozenset(complete_keys),
+            frozenset(complete_keys | {"finalizeSummary"}),
+        }:
+            raise RegistryError("VERIFIED 状态字段不封闭")
+        verification = state.get("verification")
+        if (
+            not isinstance(verification, dict)
+            or set(verification) != {"caseId", "inspections", "products", "filesVerified"}
+            or verification.get("caseId") != state["caseId"]
+            or not isinstance(state.get("verifiedAt"), str)
+        ):
+            raise RegistryError("VERIFIED 状态核验摘要无效")
+        for key in ("inspections", "products", "filesVerified"):
+            value = verification[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise RegistryError("VERIFIED 状态核验计数无效")
+
+
+def finalize_summary(result: dict[str, Any]) -> dict[str, Any]:
+    case_id, created = result.get("caseId"), result.get("created")
+    added, replaced = result.get("added"), result.get("replaced")
+    conflicts, skipped = result.get("conflicts"), result.get("skipped")
+    if (
+        not isinstance(case_id, str)
+        or not isinstance(created, bool)
+        or not isinstance(added, dict)
+        or not isinstance(replaced, dict)
+        or not isinstance(conflicts, list)
+        or not isinstance(skipped, list)
+    ):
+        raise RegistryError("finalize 响应缺少受支持的摘要字段")
+    counts = {
+        "addedProducts": added.get("products"),
+        "addedSlots": added.get("slots"),
+        "addedAttachments": added.get("attachments"),
+        "replacedSlots": replaced.get("slots"),
+        "conflictCount": len(conflicts),
+        "skippedCount": len(skipped),
+    }
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+        for value in counts.values()
+    ):
+        raise RegistryError("finalize 响应计数无效")
+    return {"caseId": case_id, "created": created, **counts}
 
 
 def exact_case(client: httpx.Client, api_base: str, project_no: str) -> dict[str, Any] | None:
@@ -1191,7 +1463,7 @@ def verify_command(args: argparse.Namespace) -> None:
             api_base,
             origin,
             manifest,
-            Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG)).resolve(),
+            secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
         )
         print(json.dumps(verify_with_client(client, api_base, manifest), ensure_ascii=False))
 
@@ -1216,31 +1488,38 @@ def upload_command(args: argparse.Namespace) -> None:
     manifest_sha, package_sha = file_sha256(path), manifest["packageSha256"]
     state_path = path.parent / "upload-state.json"
     state = read_json(state_path) if state_path.exists() else {}
+    validate_upload_state(state)
+    if state and not set(state["uploadedFileRefs"]).issubset(upload):
+        raise RegistryError("upload-state 包含当前 manifest 中不存在的 fileRef")
     if state and (
         state.get("manifestSha256") != manifest_sha
         or state.get("packageSha256") != package_sha
         or state.get("origin") != origin
     ):
         raise RegistryError("upload-state 与当前清单或 origin 不匹配")
-    headers = {WRITE_HEADER: WRITE_HEADER_VALUE, "Origin": origin}
     with httpx.Client(
         timeout=httpx.Timeout(args.timeout, read=max(args.timeout, 300.0)),
-        headers=headers,
         follow_redirects=False,
     ) as client:
-        identity = authenticate_client(
+        identity, write_headers = authenticate_client(
             client,
             api_base,
             origin,
             manifest,
-            Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG)).resolve(),
+            secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
         )
         require_same_state_identity(state, identity)
         if state.get("status") in {"FINALIZED_UNVERIFIED", "VERIFIED"}:
             verification = verify_with_client(client, api_base, manifest)
             state.update(
-                {"status": "VERIFIED", "verification": verification, "verifiedAt": utc_now()}
+                {
+                    "status": "VERIFIED",
+                    "caseId": verification["caseId"],
+                    "verification": verification,
+                    "verifiedAt": utc_now(),
+                }
             )
+            validate_upload_state(state)
             write_json(state_path, state)
             print(
                 json.dumps(
@@ -1256,8 +1535,15 @@ def upload_command(args: argparse.Namespace) -> None:
             # only safe recovery: never retry a write in this ambiguous state.
             verification = verify_with_client(client, api_base, manifest)
             state.update(
-                {"status": "VERIFIED", "verification": verification, "verifiedAt": utc_now()}
+                {
+                    "status": "VERIFIED",
+                    "caseId": verification["caseId"],
+                    "finalizedAt": utc_now(),
+                    "verification": verification,
+                    "verifiedAt": utc_now(),
+                }
             )
+            validate_upload_state(state)
             write_json(state_path, state)
             print(
                 json.dumps(
@@ -1272,7 +1558,10 @@ def upload_command(args: argparse.Namespace) -> None:
         job = response_json(
             client.post(
                 f"{api_base}/api/v2/import-jobs",
-                headers={"Idempotency-Key": f"xfpcr-v2-{package_sha[7:]}"},
+                headers={
+                    **write_headers,
+                    "Idempotency-Key": f"xfpcr-v2-{package_sha[7:]}",
+                },
                 json={"packageSha256": package_sha},
             ),
             "创建导入任务",
@@ -1292,6 +1581,7 @@ def upload_command(args: argparse.Namespace) -> None:
             "authIdentity": identity,
             "uploadedFileRefs": sorted(uploaded),
         }
+        validate_upload_state(state)
         write_json(state_path, state)
         for item in manifest["files"]:
             if item["clientRef"] in uploaded:
@@ -1300,6 +1590,7 @@ def upload_command(args: argparse.Namespace) -> None:
                 response_json(
                     client.post(
                         f"{api_base}/api/v2/import-jobs/{job_id}/files",
+                        headers=write_headers,
                         params={"relativePath": item["relativePath"]},
                         files={"file": (Path(stream.name).name, stream, "application/pdf")},
                     ),
@@ -1309,27 +1600,47 @@ def upload_command(args: argparse.Namespace) -> None:
             state["uploadedFileRefs"] = sorted(uploaded)
             write_json(state_path, state)
         response_json(
-            client.put(f"{api_base}/api/v2/import-jobs/{job_id}/manifest", json=manifest),
+            client.put(
+                f"{api_base}/api/v2/import-jobs/{job_id}/manifest",
+                headers=write_headers,
+                json=manifest,
+            ),
             "提交清单",
         )
-        result = response_json(
-            client.post(f"{api_base}/api/v2/import-jobs/{job_id}/finalize"), "完成导入"
+        summary = finalize_summary(
+            response_json(
+                client.post(
+                    f"{api_base}/api/v2/import-jobs/{job_id}/finalize",
+                    headers=write_headers,
+                ),
+                "完成导入",
+            )
         )
-        if not isinstance(result.get("caseId"), str):
-            raise RegistryError("finalize 响应缺少 caseId")
         state.update(
             {
                 "status": "FINALIZED_UNVERIFIED",
                 "finalizedAt": utc_now(),
-                "finalizeResult": result,
-                "caseId": result["caseId"],
+                "finalizeSummary": summary,
+                "caseId": summary["caseId"],
             }
         )
+        validate_upload_state(state)
         write_json(state_path, state)
         verification = verify_with_client(client, api_base, manifest)
         state.update({"status": "VERIFIED", "verification": verification, "verifiedAt": utc_now()})
+        validate_upload_state(state)
         write_json(state_path, state)
-    print(json.dumps(state, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "status": "VERIFIED",
+                "caseId": state["caseId"],
+                "finalize": state.get("finalizeSummary"),
+                "verification": state["verification"],
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 def validate_command(args: argparse.Namespace) -> None:
@@ -1371,6 +1682,19 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--manifest", required=True)
     validate.add_argument("--upload-map")
     validate.set_defaults(func=validate_command)
+    init_auth = sub.add_parser(
+        "init-auth-config",
+        help="在稳定本地目录创建空认证配置并收紧 Windows ACL",
+    )
+    init_auth.add_argument(
+        "--auth-config",
+        default=str(DEFAULT_AUTH_CONFIG),
+        help=(
+            "本地 TOML 认证配置；默认使用 "
+            "%%LOCALAPPDATA%%/xf-product-case-registry/admin-upload-config.toml"
+        ),
+    )
+    init_auth.set_defaults(func=init_auth_config_command)
     for name, func in (("upload", upload_command), ("verify", verify_command)):
         command = sub.add_parser(name)
         command.add_argument("--manifest", required=True)
