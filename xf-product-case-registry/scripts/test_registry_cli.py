@@ -25,6 +25,66 @@ from scripts.registry_cli import (
 
 PROJECT = "32002207C202600033"
 ROOT = Path(__file__).resolve().parents[1]
+TEST_CSRF = "csrf-token-value-at-least-32-characters"
+TEST_USER_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def auth_config(tmp_path: Path) -> Path:
+    path = tmp_path / "auth.toml"
+    path.write_text(
+        '[auth]\nusername = "fixture-admin"\npassword = "fixture-password-not-real"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+def auth_session(
+    *,
+    role: str = "ADMIN",
+    brigade_id: str | None = None,
+    brigade_code: str | None = None,
+    must_change_password: bool = False,
+) -> dict[str, object]:
+    return {
+        "user": {
+            "id": TEST_USER_ID,
+            "username": "fixture-admin",
+            "displayName": "测试账户",
+            "role": role,
+            "brigadeId": brigade_id,
+            "brigadeCode": brigade_code,
+            "brigade": None,
+            "mustChangePassword": must_change_password,
+            "version": 1,
+        },
+        "csrfToken": TEST_CSRF,
+        "expiresAt": "2026-08-13T01:00:00Z",
+        "absoluteExpiresAt": "2026-08-13T12:00:00Z",
+    }
+
+
+def auth_route(
+    request: httpx.Request, session: dict[str, object] | None = None
+) -> httpx.Response | None:
+    session = session or auth_session()
+    if request.url.path == "/api/auth/login":
+        assert request.method == "POST"
+        assert request.headers["origin"] == "https://registry.example"
+        return httpx.Response(
+            200,
+            json=session,
+            headers={
+                "Set-Cookie": (
+                    "__Host-product_case_session=fixture-session; Path=/; "
+                    "Secure; HttpOnly; SameSite=Lax"
+                )
+            },
+        )
+    if request.url.path == "/api/auth/session":
+        assert request.method == "GET"
+        assert "__Host-product_case_session=fixture-session" in request.headers.get("cookie", "")
+        return httpx.Response(200, json=session)
+    return None
 
 
 def pdf(path: Path, pages: int = 1) -> None:
@@ -84,6 +144,9 @@ def verify_client(
     case_id = str(detail["id"])
 
     def handler(request: httpx.Request) -> httpx.Response:
+        auth_response = auth_route(request)
+        if auth_response is not None:
+            return auth_response
         if request.url.path == "/api/v2/cases":
             return httpx.Response(200, json={"data": [{"id": case_id, "projectNo": PROJECT}]})
         if request.url.path == f"/api/v2/cases/{case_id}":
@@ -511,6 +574,7 @@ def test_verify_uses_long_read_timeout(tmp_path: Path, monkeypatch: pytest.Monke
             manifest=str(manifest_path),
             upload_map=str(map_path),
             api_base="https://registry.example",
+            auth_config=str(auth_config(tmp_path)),
             timeout=60.0,
         )
     )
@@ -570,7 +634,13 @@ def test_finalized_unverified_retries_read_only_and_origin_is_bound(
     case_id = "11111111-1111-4111-8111-111111111111"
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST":
+        auth_response = auth_route(request)
+        if auth_response is not None:
+            return auth_response
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            assert request.headers["origin"] == "https://registry.example"
+            assert request.headers["x-csrf-token"] == TEST_CSRF
+        if request.method == "POST" and request.url.path.startswith("/api/v2/"):
             posts.append(request.url.path)
         if request.url.path == "/api/ready":
             return httpx.Response(200, json={"status": "ready"})
@@ -639,6 +709,7 @@ def test_finalized_unverified_retries_read_only_and_origin_is_bound(
         manifest=str(manifest_path),
         upload_map=str(map_path),
         api_base="https://registry.example",
+        auth_config=str(auth_config(tmp_path)),
         timeout=10.0,
         dry_run=False,
         finalize=True,
@@ -660,6 +731,7 @@ def test_finalized_unverified_retries_read_only_and_origin_is_bound(
             manifest=str(manifest_path),
             upload_map=str(map_path),
             api_base="https://registry.example",
+            auth_config=str(auth_config(tmp_path)),
             timeout=10.0,
         )
     )
@@ -678,20 +750,32 @@ def test_uploading_state_with_existing_case_recovers_without_second_post(
     cli.write_json(
         tmp_path / "upload-state.json",
         {
-            "stateVersion": 4,
+            "stateVersion": 5,
             "status": "UPLOADING",
             "origin": origin,
             "manifestSha256": file_sha256(manifest_path),
             "packageSha256": data["packageSha256"],
             "projectNo": PROJECT,
             "jobId": "job",
+            "authIdentity": {
+                "userId": TEST_USER_ID,
+                "role": "ADMIN",
+                "brigadeId": None,
+                "brigadeCode": None,
+            },
             "uploadedFileRefs": ["file:one"],
         },
     )
     posts: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST":
+        auth_response = auth_route(request)
+        if auth_response is not None:
+            return auth_response
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            assert request.headers["origin"] == "https://registry.example"
+            assert request.headers["x-csrf-token"] == TEST_CSRF
+        if request.method == "POST" and request.url.path.startswith("/api/v2/"):
             posts.append(request.url.path)
         if request.url.path == "/api/ready":
             return httpx.Response(200, json={"status": "ready"})
@@ -749,6 +833,7 @@ def test_uploading_state_with_existing_case_recovers_without_second_post(
             manifest=str(manifest_path),
             upload_map=str(map_path),
             api_base=origin,
+            auth_config=str(auth_config(tmp_path)),
             timeout=10.0,
             dry_run=False,
             finalize=True,
@@ -781,3 +866,119 @@ def test_dry_run_is_offline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
             finalize=False,
         )
     )
+
+
+def test_auth_config_uses_toml_and_rejects_empty_values(tmp_path: Path) -> None:
+    path = auth_config(tmp_path)
+    assert cli.read_auth_config(path) == ("fixture-admin", "fixture-password-not-real")
+    path.write_text('[auth]\nusername = ""\npassword = ""\n', encoding="utf-8")
+    with pytest.raises(RegistryError, match="username"):
+        cli.read_auth_config(path)
+
+
+@pytest.mark.parametrize(
+    ("session", "message"),
+    [
+        (auth_session(must_change_password=True), "必须先在网站修改密码"),
+        (
+            auth_session(
+                role="BRIGADE",
+                brigade_id="33333333-3333-4333-8333-333333333333",
+                brigade_code="BINHU",
+            ),
+            "brigadeCode 不一致",
+        ),
+    ],
+)
+def test_authentication_stops_for_password_change_or_wrong_brigade(
+    tmp_path: Path, session: dict[str, object], message: str
+) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = auth_route(request, session)
+        if response is None:
+            raise AssertionError(request.url)
+        return response
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(RegistryError, match=message),
+    ):
+        cli.authenticate_client(
+            client,
+            "https://registry.example",
+            "https://registry.example",
+            manifest(source),
+            auth_config(tmp_path),
+        )
+
+
+def test_matching_brigade_account_is_accepted_and_csrf_is_kept_in_memory(tmp_path: Path) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    session = auth_session(
+        role="BRIGADE",
+        brigade_id="33333333-3333-4333-8333-333333333333",
+        brigade_code="XISHAN",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = auth_route(request, session)
+        if response is None:
+            raise AssertionError(request.url)
+        return response
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        identity = cli.authenticate_client(
+            client,
+            "https://registry.example",
+            "https://registry.example",
+            manifest(source),
+            auth_config(tmp_path),
+        )
+        assert identity == {
+            "userId": TEST_USER_ID,
+            "role": "BRIGADE",
+            "brigadeId": "33333333-3333-4333-8333-333333333333",
+            "brigadeCode": "XISHAN",
+        }
+        assert client.headers["Origin"] == "https://registry.example"
+        assert client.headers["X-CSRF-Token"] == TEST_CSRF
+
+
+def test_upload_state_rejects_identity_switch_and_legacy_unbound_state() -> None:
+    identity = {
+        "userId": TEST_USER_ID,
+        "role": "ADMIN",
+        "brigadeId": None,
+        "brigadeCode": None,
+    }
+    with pytest.raises(RegistryError, match="未绑定认证身份"):
+        cli.require_same_state_identity({"status": "UPLOADING"}, identity)
+    switched = {**identity, "userId": "44444444-4444-4444-8444-444444444444"}
+    with pytest.raises(RegistryError, match="禁止切换身份续传"):
+        cli.require_same_state_identity({"authIdentity": identity}, switched)
+
+
+def test_http_error_does_not_echo_response_body() -> None:
+    response = httpx.Response(403, text="password=do-not-log; csrf=do-not-log")
+    with pytest.raises(RegistryError) as raised:
+        cli.response_json(response, "认证")
+    assert str(raised.value) == "认证 失败：HTTP 403"
+
+
+def test_parser_defaults_to_local_ignored_auth_config() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "verify",
+            "--manifest",
+            "manifest.json",
+            "--upload-map",
+            "upload-map.json",
+            "--api-base",
+            "https://registry.example",
+        ]
+    )
+    assert Path(args.auth_config) == cli.DEFAULT_AUTH_CONFIG

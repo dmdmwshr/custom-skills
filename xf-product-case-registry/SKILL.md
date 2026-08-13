@@ -9,10 +9,11 @@ description: 仅适配消防产品案卷信息登记系统现有 V2 网站：在
 
 ## 先读的契约
 
-执行 V2 导入前，读取以下两个生产契约；它们是字段、枚举、槽位编码和示例的唯一事实源：
+执行 V2 导入前，读取以下生产契约；它们是字段、枚举、槽位编码、认证和示例的唯一事实源：
 
 - `references/CaseImportManifestV2.schema.json`
 - `references/CaseImportManifestV2.example.json`
+- `references/api-workflow.md`
 
 不要使用或生成 `CaseImportManifestV1`、V1 接口、来源审计字段、审核项或 `ReviewIssue`。`scripts/registry_cli.py` 只实现 V2 的清点、MinerU 辅助识别、拆分、组装、校验、四步导入和只读核验；不存在独立的文书版本同步步骤。
 
@@ -25,6 +26,21 @@ description: 仅适配消防产品案卷信息登记系统现有 V2 网站：在
 - 清单中的每个文件必须被一个 `documentSlots[].versions[].fileRef` 或 `otherAttachments[].fileRef` 引用；不得存在未关联文件。
 - 同一来源需要映射到多个逻辑槽位时，为每个槽位复制出独立的规范 PDF，并在 `files` 中使用独立 `clientRef` 和 `relativePath`。不得让一个上传文件同时充当多个逻辑槽位。
 - 上传会写入生产网站。只在用户直接授权具体案卷包和目标网站后执行；任何冲突、哈希不一致、槽位不明或未确认内容均停止，不绕过校验。
+- 网站认证只使用本地 `admin-upload-config.toml`。不得把账号、密码、会话 Cookie 或 CSRF 防护令牌写入 manifest、`upload-state.json`、日志、命令行参数或响应摘要。
+
+## 本地认证配置
+
+1. 仓库只提交空值示例 `references/admin-upload-config.example.toml`。真实文件固定为 skill 根目录的 `admin-upload-config.toml`，源仓库根和 skill 自身的 `.gitignore` 均精确忽略它。
+2. 初次使用时复制示例，或填写已创建的真实空配置：
+   ~~~toml
+   [auth]
+   username = ""
+   password = ""
+   ~~~
+   账号和密码只由用户本人填写；不得在聊天、提交、测试夹具或终端输出中展示真实值。
+3. `upload` 与 `verify` 默认读取上述真实文件；仅在需要使用另一个本地受控文件时通过 `--auth-config <绝对路径>` 覆盖。不要把账号或密码改成命令行参数。
+4. CLI 先向 `POST /api/auth/login` 提交凭据，再用同一 `httpx` 客户端的 Cookie 容器请求 `GET /api/auth/session` 复核身份。首次登录必须改密时立即停止，由用户在网站完成改密后再重试。
+5. `ADMIN` 可处理任一大队；`BRIGADE` 账户仅可处理与 manifest `brigadeCode` 完全一致的大队。所有业务写请求必须同时带目标站同源 `Origin` 和会话返回的 `X-CSRF-Token`。
 
 ## 本地整理流程
 
@@ -41,11 +57,14 @@ description: 仅适配消防产品案卷信息登记系统现有 V2 网站：在
 - `split` 的计划项必须写明原文件、起止页和 `normalized/` 下的唯一 PDF 路径；脚本拒绝覆盖已有结果。
 - `compose` 使用的本地 `case-data.files[]` 需要同时写 `sourceRelativePath`（清点或拆分结果）与 `relativePath`（上传相对路径）。包哈希只能来自 `inventory.json`。
 - `validate` 与 `upload --dry-run` 都不写网站；正式导入必须显式使用 `upload --finalize`。导入完成后用 `verify` 逐项核对案卷、检查、产品、目录版本和下载文件哈希。
-- 上传状态与目标网站、包哈希和 manifest 哈希绑定。服务端已写入但网络核验中断时，只允许续做只读核验，不得二次导入或覆盖人工数据。
+- `upload --dry-run` 保持完全离线，不读取认证配置。`upload` 与 `verify` 的原有参数保持兼容，并新增可选 `--auth-config`。
+- 上传状态与目标网站、包哈希、manifest 哈希以及非敏感身份绑定（用户 ID、角色、大队 ID/编号）。服务端已写入但网络核验中断时，只允许同一身份续做只读核验，不得切换身份、二次导入或覆盖人工数据。旧状态若没有身份绑定，不得用 `upload` 续传，只能单独运行 `verify`。
 
 ## V2 四步导入
 
 具体请求顺序和停止条件见 `references/api-workflow.md`：
+
+认证步骤不计入四步业务导入：先登录并回读会话，确认身份、大队范围、无需首次改密，并把 Cookie 与 CSRF 令牌只保留在当前进程内存。
 
 1. 创建导入任务；
 2. 流式上传已关联的规范 PDF；
@@ -61,3 +80,4 @@ description: 仅适配消防产品案卷信息登记系统现有 V2 网站：在
 - `references/case-data-format.md`：本地证据到 V2 清单的映射规则。
 - `references/document-classification.md`：文件分类、版本选择和多槽位复制规则。
 - `references/api-workflow.md`：V2 四步接口流程与停止条件。
+- `references/admin-upload-config.example.toml`：仅含空值的本地认证配置示例。

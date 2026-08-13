@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tomllib
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -19,15 +20,15 @@ import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_AUTH_CONFIG = SKILL_ROOT / "admin-upload-config.toml"
 # MinerU 包装脚本是无 BOM 的 UTF-8。Windows PowerShell 5.1 会按本机 ANSI
 # 代码页误读其中的中文，因此必须使用能原生解析 UTF-8 的 PowerShell 7。
 SYSTEM_POWERSHELL = Path(shutil.which("pwsh.exe") or "__missing_pwsh__")
 MINERU_SCRIPT = Path(r"D:\Program_Files\MinerU-Docker\run-mineru-docker.ps1")
-SCHEMA_PATH = (
-    Path(__file__).resolve().parents[1] / "references" / "CaseImportManifestV2.schema.json"
-)
+SCHEMA_PATH = SKILL_ROOT / "references" / "CaseImportManifestV2.schema.json"
 PROJECT_NO = re.compile(r"^\d{8}[A-Z]\d{9}$")
 SHA256 = re.compile(r"^sha256:[a-f0-9]{64}$")
 CLIENT_REF = re.compile(r"^[a-z][a-z0-9:_-]{0,159}$")
@@ -122,6 +123,26 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RegistryError(f"JSON 顶层必须是对象：{path}")
     return value
+
+
+def read_auth_config(path: Path) -> tuple[str, str]:
+    try:
+        value = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError as error:
+        raise RegistryError(
+            f"认证配置不存在：{path}；请复制 references/admin-upload-config.example.toml 后填写"
+        ) from error
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+        raise RegistryError(f"认证配置无法读取或 TOML 格式错误：{path}") from error
+    auth = value.get("auth")
+    if not isinstance(auth, dict):
+        raise RegistryError("认证配置必须包含 [auth] 段")
+    username, password = auth.get("username"), auth.get("password")
+    if not isinstance(username, str) or not username.strip():
+        raise RegistryError("认证配置中的 auth.username 不能为空")
+    if not isinstance(password, str) or not password:
+        raise RegistryError("认证配置中的 auth.password 不能为空")
+    return username.strip(), password
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -833,7 +854,9 @@ def compose_command(args: argparse.Namespace) -> None:
 
 def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
     if not 200 <= response.status_code < 300:
-        raise RegistryError(f"{label} 失败：HTTP {response.status_code} {response.text[:400]}")
+        # Never echo a response body here. Authentication and validation responses
+        # may contain data that must not be copied into terminals, logs, or task output.
+        raise RegistryError(f"{label} 失败：HTTP {response.status_code}")
     try:
         value = response.json()
     except ValueError as error:
@@ -848,6 +871,81 @@ def origin_of(api_base: str) -> tuple[str, str]:
     if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
         raise RegistryError("api-base 必须是无查询串的 HTTPS 地址")
     return api_base.rstrip("/"), f"{parsed.scheme}://{parsed.netloc}"
+
+
+def authenticated_identity(user: dict[str, Any]) -> dict[str, str | None]:
+    user_id, role = user.get("id"), user.get("role")
+    brigade_id, brigade_code = user.get("brigadeId"), user.get("brigadeCode")
+    if not isinstance(user_id, str) or role not in {"ADMIN", "BRIGADE"}:
+        raise RegistryError("认证会话缺少有效的用户标识或角色")
+    if brigade_id is not None and not isinstance(brigade_id, str):
+        raise RegistryError("认证会话的 brigadeId 无效")
+    if brigade_code is not None and not isinstance(brigade_code, str):
+        raise RegistryError("认证会话的 brigadeCode 无效")
+    return {
+        "userId": user_id,
+        "role": role,
+        "brigadeId": brigade_id,
+        "brigadeCode": brigade_code,
+    }
+
+
+def authenticate_client(
+    client: httpx.Client,
+    api_base: str,
+    origin: str,
+    manifest: dict[str, Any],
+    auth_config: Path,
+) -> dict[str, str | None]:
+    username, password = read_auth_config(auth_config)
+    login = response_json(
+        client.post(
+            f"{api_base}/api/auth/login",
+            headers={"Origin": origin, WRITE_HEADER: WRITE_HEADER_VALUE},
+            json={"username": username, "password": password},
+        ),
+        "登录",
+    )
+    session = response_json(client.get(f"{api_base}/api/auth/session"), "读取登录会话")
+    login_user, session_user = login.get("user"), session.get("user")
+    if not isinstance(login_user, dict) or not isinstance(session_user, dict):
+        raise RegistryError("认证响应缺少用户信息")
+    identity = authenticated_identity(session_user)
+    if authenticated_identity(login_user) != identity:
+        raise RegistryError("登录响应与会话身份不一致")
+    login_csrf, csrf_token = login.get("csrfToken"), session.get("csrfToken")
+    if not isinstance(csrf_token, str) or not csrf_token or login_csrf != csrf_token:
+        raise RegistryError("登录响应与会话的 CSRF 防护令牌不一致")
+    if (
+        login_user.get("mustChangePassword") is True
+        or session_user.get("mustChangePassword") is True
+    ):
+        raise RegistryError("当前账户首次登录必须先在网站修改密码；已停止上传")
+    brigade_code = manifest["case"]["brigadeCode"]
+    if identity["role"] == "BRIGADE" and (
+        not identity["brigadeId"] or identity["brigadeCode"] != brigade_code
+    ):
+        raise RegistryError("当前大队账户与 manifest 的 brigadeCode 不一致")
+    client.headers.update(
+        {
+            "Origin": origin,
+            WRITE_HEADER: WRITE_HEADER_VALUE,
+            "X-CSRF-Token": csrf_token,
+        }
+    )
+    return identity
+
+
+def require_same_state_identity(state: dict[str, Any], identity: dict[str, str | None]) -> None:
+    if not state:
+        return
+    stored = state.get("authIdentity")
+    if not isinstance(stored, dict):
+        raise RegistryError(
+            "现有 upload-state 未绑定认证身份；不得用新版命令续传，请改用 verify 只读核验"
+        )
+    if stored != identity:
+        raise RegistryError("当前登录身份与 upload-state 绑定身份不一致；禁止切换身份续传")
 
 
 def exact_case(client: httpx.Client, api_base: str, project_no: str) -> dict[str, Any] | None:
@@ -1074,10 +1172,17 @@ def load_inputs(manifest_path: str, map_path: str) -> tuple[Path, dict[str, Any]
 
 def verify_command(args: argparse.Namespace) -> None:
     _path, manifest, _upload = load_inputs(args.manifest, args.upload_map)
-    api_base, _origin = origin_of(args.api_base)
+    api_base, origin = origin_of(args.api_base)
     with httpx.Client(
         timeout=httpx.Timeout(args.timeout, read=max(args.timeout, 300.0)), follow_redirects=False
     ) as client:
+        authenticate_client(
+            client,
+            api_base,
+            origin,
+            manifest,
+            Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG)).resolve(),
+        )
         print(json.dumps(verify_with_client(client, api_base, manifest), ensure_ascii=False))
 
 
@@ -1113,6 +1218,14 @@ def upload_command(args: argparse.Namespace) -> None:
         headers=headers,
         follow_redirects=False,
     ) as client:
+        identity = authenticate_client(
+            client,
+            api_base,
+            origin,
+            manifest,
+            Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG)).resolve(),
+        )
+        require_same_state_identity(state, identity)
         if state.get("status") in {"FINALIZED_UNVERIFIED", "VERIFIED"}:
             verification = verify_with_client(client, api_base, manifest)
             state.update(
@@ -1159,13 +1272,14 @@ def upload_command(args: argparse.Namespace) -> None:
             raise RegistryError("导入任务响应缺少 id")
         uploaded = set(state.get("uploadedFileRefs", [])) if previous_job == job_id else set()
         state = {
-            "stateVersion": 4,
+            "stateVersion": 5,
             "status": "UPLOADING",
             "origin": origin,
             "manifestSha256": manifest_sha,
             "packageSha256": package_sha,
             "projectNo": manifest["case"]["projectNo"],
             "jobId": job_id,
+            "authIdentity": identity,
             "uploadedFileRefs": sorted(uploaded),
         }
         write_json(state_path, state)
@@ -1252,6 +1366,11 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--manifest", required=True)
         command.add_argument("--upload-map", required=True)
         command.add_argument("--api-base", required=True)
+        command.add_argument(
+            "--auth-config",
+            default=str(DEFAULT_AUTH_CONFIG),
+            help="本地 TOML 认证配置；默认使用 skill 根目录的 admin-upload-config.toml",
+        )
         command.add_argument("--timeout", type=float, default=60.0)
         command.set_defaults(func=func)
         if name == "upload":
