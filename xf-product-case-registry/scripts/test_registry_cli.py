@@ -969,7 +969,7 @@ def test_http_error_does_not_echo_response_body() -> None:
     assert str(raised.value) == "认证 失败：HTTP 403"
 
 
-def test_parser_defaults_to_local_ignored_auth_config() -> None:
+def test_parser_defaults_to_stable_local_auth_config() -> None:
     args = cli.build_parser().parse_args(
         [
             "verify",
@@ -982,3 +982,22 @@ def test_parser_defaults_to_local_ignored_auth_config() -> None:
         ]
     )
     assert Path(args.auth_config) == cli.DEFAULT_AUTH_CONFIG
+
+
+def test_default_auth_config_uses_local_app_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert cli.default_auth_config_path() == (
+        tmp_path / "xf-product-case-registry" / "admin-upload-config.toml"
+    )
+
+
+def test_verify_help_displays_windows_default_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli.build_parser().parse_args(["verify", "--help"])
+    assert raised.value.code == 0
+    output = "".join(capsys.readouterr().out.split())
+    assert "%LOCALAPPDATA%/xf-product-case-registry/admin-upload-config.toml" in output

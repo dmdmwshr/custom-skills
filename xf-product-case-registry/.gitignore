@@ -4,4 +4,3 @@ __pycache__/
 .ruff_cache/
 *.py[cod]
 eng.traineddata
-/admin-upload-config.toml

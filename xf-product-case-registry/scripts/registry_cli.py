@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import mimetypes
+import os
 import re
 import shutil
 import stat
@@ -23,7 +24,15 @@ from pypdf import PdfReader, PdfWriter
 VERSION = "1.1.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_AUTH_CONFIG = SKILL_ROOT / "admin-upload-config.toml"
+
+
+def default_auth_config_path() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    root = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+    return root / "xf-product-case-registry" / "admin-upload-config.toml"
+
+
+DEFAULT_AUTH_CONFIG = default_auth_config_path()
 # MinerU 包装脚本是无 BOM 的 UTF-8。Windows PowerShell 5.1 会按本机 ANSI
 # 代码页误读其中的中文，因此必须使用能原生解析 UTF-8 的 PowerShell 7。
 SYSTEM_POWERSHELL = Path(shutil.which("pwsh.exe") or "__missing_pwsh__")
@@ -130,7 +139,8 @@ def read_auth_config(path: Path) -> tuple[str, str]:
         value = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError as error:
         raise RegistryError(
-            f"认证配置不存在：{path}；请复制 references/admin-upload-config.example.toml 后填写"
+            f"认证配置不存在：{path}；请把 references/admin-upload-config.example.toml "
+            "复制到默认本地配置路径后填写"
         ) from error
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
         raise RegistryError(f"认证配置无法读取或 TOML 格式错误：{path}") from error
@@ -1369,7 +1379,10 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument(
             "--auth-config",
             default=str(DEFAULT_AUTH_CONFIG),
-            help="本地 TOML 认证配置；默认使用 skill 根目录的 admin-upload-config.toml",
+            help=(
+                "本地 TOML 认证配置；默认使用 "
+                "%%LOCALAPPDATA%%/xf-product-case-registry/admin-upload-config.toml"
+            ),
         )
         command.add_argument("--timeout", type=float, default=60.0)
         command.set_defaults(func=func)

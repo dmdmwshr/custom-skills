@@ -26,19 +26,19 @@ description: 仅适配消防产品案卷信息登记系统现有 V2 网站：在
 - 清单中的每个文件必须被一个 `documentSlots[].versions[].fileRef` 或 `otherAttachments[].fileRef` 引用；不得存在未关联文件。
 - 同一来源需要映射到多个逻辑槽位时，为每个槽位复制出独立的规范 PDF，并在 `files` 中使用独立 `clientRef` 和 `relativePath`。不得让一个上传文件同时充当多个逻辑槽位。
 - 上传会写入生产网站。只在用户直接授权具体案卷包和目标网站后执行；任何冲突、哈希不一致、槽位不明或未确认内容均停止，不绕过校验。
-- 网站认证只使用本地 `admin-upload-config.toml`。不得把账号、密码、会话 Cookie 或 CSRF 防护令牌写入 manifest、`upload-state.json`、日志、命令行参数或响应摘要。
+- 网站认证只使用 `%LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml`，不放在会被 CC Switch 完整替换的 skill 安装目录内。不得把账号、密码、会话 Cookie 或 CSRF 防护令牌写入 manifest、`upload-state.json`、日志、命令行参数或响应摘要。
 
 ## 本地认证配置
 
-1. 仓库只提交空值示例 `references/admin-upload-config.example.toml`。真实文件固定为 skill 根目录的 `admin-upload-config.toml`，源仓库根和 skill 自身的 `.gitignore` 均精确忽略它。
-2. 初次使用时复制示例，或填写已创建的真实空配置：
+1. 仓库只提交空值示例 `references/admin-upload-config.example.toml`。真实文件固定为 `%LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml`；该目录独立于源仓库和安装副本，CC Switch 同步不会覆盖它。
+2. 初次使用时把示例复制到上述默认路径，或填写已创建的真实空配置：
    ~~~toml
    [auth]
    username = ""
    password = ""
    ~~~
    账号和密码只由用户本人填写；不得在聊天、提交、测试夹具或终端输出中展示真实值。
-3. `upload` 与 `verify` 默认读取上述真实文件；仅在需要使用另一个本地受控文件时通过 `--auth-config <绝对路径>` 覆盖。不要把账号或密码改成命令行参数。
+3. `upload` 与 `verify` 通过 Windows `LOCALAPPDATA` 环境变量解析上述真实文件；仅在需要使用另一个本地受控文件时通过 `--auth-config <绝对路径>` 覆盖。不要把账号或密码改成命令行参数。
 4. CLI 先向 `POST /api/auth/login` 提交凭据，再用同一 `httpx` 客户端的 Cookie 容器请求 `GET /api/auth/session` 复核身份。首次登录必须改密时立即停止，由用户在网站完成改密后再重试。
 5. `ADMIN` 可处理任一大队；`BRIGADE` 账户仅可处理与 manifest `brigadeCode` 完全一致的大队。所有业务写请求必须同时带目标站同源 `Origin` 和会话返回的 `X-CSRF-Token`。
 

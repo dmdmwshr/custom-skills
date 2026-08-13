@@ -1,4 +1,4 @@
 interface:
   display_name: "消防产品案卷 V2 导入"
   short_description: "按现有 V2 认证契约完成本地案卷整理、核验与四步接口导入"
-  default_prompt: "使用 $xf-product-case-registry 按 V2 契约在本地核对这个消防产品案卷包；写入前读取本地受忽略的认证配置并复核账号范围，只在我直接授权后执行四步导入。"
+  default_prompt: "使用 $xf-product-case-registry 按 V2 契约在本地核对这个消防产品案卷包；写入前读取 LOCALAPPDATA 稳定目录中的认证配置并复核账号范围，只在我直接授权后执行四步导入。"

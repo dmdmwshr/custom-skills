@@ -1,5 +1,6 @@
-# 复制为 skill 根目录的 admin-upload-config.toml 后，由用户本人填写。
-# 真实文件已被 Git 精确忽略；不要把真实账号或密码写入示例、日志或聊天。
+# 复制到 %LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml 后，
+# 由用户本人填写。该稳定本地目录不会被 CC Switch 同步覆盖。
+# 不要把真实账号或密码写入示例、仓库、日志或聊天。
 [auth]
 username = ""
 password = ""

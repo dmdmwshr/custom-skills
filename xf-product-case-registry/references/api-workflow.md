@@ -8,7 +8,7 @@
 - 所有 `files` 都是规范 PDF，均有 SHA-256，且每个文件都已关联一个正式槽位版本或一个 `OTHER_ATTACHMENT`。
 - 原始证据、OCR 原文、未确认字段和人工核对笔记留在本地，不随请求上传。
 - 用户已直接授权当前案卷包写入目标网站。
-- skill 根目录的 `admin-upload-config.toml` 已由用户本人填写，且仍处于 Git 忽略状态。不要把真实账号或密码传入命令行。
+- `%LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml` 已由用户本人填写。该稳定本地目录不属于 skill 源仓库或安装副本，后续 CC Switch 同步不会覆盖它。不要把真实账号或密码传入命令行。
 
 ## 认证前置流程
 
