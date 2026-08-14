@@ -1,7 +1,7 @@
 interface:
   display_name: "wx-cli"
-  short_description: "Query local WeChat data with wx-cli and export one chat session into a single archive folder."
-  default_prompt: "Use $wx-cli to initialize local wx-cli when needed, inspect WeChat sessions, export one chat to Markdown, and archive direct file messages into the same fixed session folder under D:\\Program_Files\\wx-cli\\output."
+  short_description: "通过 wx-cli 查询微信本地数据并按会话导出聊天与附件归档"
+  default_prompt: "使用 $wx-cli 按需初始化本机 wx-cli，查询微信会话并把聊天记录和直接文件消息归档到同一会话目录。"
 
 policy:
   allow_implicit_invocation: true

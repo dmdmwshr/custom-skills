@@ -1,0 +1,4 @@
+interface:
+  display_name: "消防产品月度通报填报"
+  short_description: "整理月度通报、成绩登记、年度问题汇总与旧版消防产品档案"
+  default_prompt: "使用 $xf-report-filler 根据底册、联网监测源表和月度模板生成通报目录、成绩登记或年度问题汇总。"

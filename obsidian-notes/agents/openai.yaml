@@ -1,4 +1,4 @@
-version: 1
-display_name: Obsidian Notes
-short_description: Read, search, and write local Obsidian notes.
-default_prompt: Read, search, organize, or update Obsidian notes, links, and attachments without treating Obsidian as the primary memory system.
+interface:
+  display_name: "Obsidian 笔记管理"
+  short_description: "查询、整理和更新本机保留的 Obsidian 笔记与附件"
+  default_prompt: "使用 $obsidian-notes 查询、整理或更新本机保留的 Obsidian 笔记、双链和附件。"

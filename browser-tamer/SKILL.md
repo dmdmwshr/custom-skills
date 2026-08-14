@@ -1,6 +1,6 @@
 ---
 name: browser-tamer
-description: 在 Windows 上诊断和管理 Browser Tamer 的安装、HTTP/HTTPS 默认处理器、浏览器配置文件和链接路由规则。用于用户提到 Browser Tamer、按域名或网址打开指定浏览器/Chrome 配置文件、批量增删规则、检查官方 CLI、备份或修改 v6 config.yml、验证默认浏览器，或排查外部链接未命中规则时。优先使用脚本和配置文件，不默认使用桌面视觉控制。
+description: 在 Windows 上诊断和管理 Browser Tamer 的安装、HTTP/HTTPS 默认处理器、浏览器配置文件、域名路由、v6 config.yml 与外部链接未命中问题。优先使用官方 CLI、脚本和配置文件，只有任务需要时才使用桌面视觉控制。
 ---
 
 # Browser Tamer

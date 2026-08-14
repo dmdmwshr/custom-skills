@@ -1,10 +1,6 @@
 ---
 name: flclash-proxy-toggle
-description: 在 Windows 桌面上安全检查、维护和只读排查 FlClash，区分桌面持久配置、订阅源配置、客户端覆写、运行时生成配置与 Mihomo 核心状态，并在用户明确要求时切换策略组、暂停或恢复代理。用于用户提到 FlClash、配置文件、database.sqlite、external controller、策略组节点、系统代理、TUN、暂停/恢复/退出代理、浏览器开启代理后无法联网、ERR_PROXY_CONNECTION_FAILED、节点延迟正常但实际访问超时、Hysteria2/UDP 异常、CN2/Meifu 流量归属异常或 OKX 路由诊断等场景。最高边界是未经用户逐项明确要求绝不暂停、关闭、退出、重启或结束 FlClash 及其核心进程。
-x-custom-skill: true
-x-managed-by: cc-switch
-x-source-repo: dmdmwshr/custom-skills
-x-edit-policy: edit-source-repo-only
+description: 在 Windows 上只读诊断和按当前用户明确要求维护 FlClash，包括配置层级、策略组、系统代理、TUN、核心状态、连接异常及 CN2/Meifu 分流。当前请求未包含的暂停、退出、重启或结束进程等高影响动作，必要时一次性汇总确认。
 ---
 
 # FlClash 安全配置与代理控制
@@ -115,7 +111,7 @@ x-edit-policy: edit-source-repo-only
 1. 完整读取 `references/connection-troubleshooting.md`，先执行 `scripts/flclash_state.py --connectivity`；未通过本机混合端口门槛前，不检查或修改服务器。
 2. 先按诊断结果区分本机代理端口不监听、系统代理端口不匹配、端口被其他进程占用、当前分流未命中 CN2、TUN 默认路由异常和可能的 UDP/QUIC 受限；不能把这些情形笼统归因于“节点堵塞”。
 3. 本机代理端口与运行态分流均正常后，才在用户提供的准确时间范围内对照服务器脱敏握手日志；比较 WS/gRPC、Reality 和 Hysteria2 的协议层表现，不记录认证信息或访问正文。
-4. 对节点选择、系统代理、TUN、Windows 路由、订阅刷新、核心重启和服务器配置的任何修复，逐项等待用户明确授权；诊断本身不包含这些动作。
+4. 当前用户已在当前请求中明确列出的节点选择、系统代理、TUN、Windows 路由、订阅刷新、核心重启或服务器配置修复可直接执行；诊断后新增的高影响动作，应一次性汇总精确对象、影响和恢复方式，必要时最多确认一次，确认后不逐项重复询问。诊断本身不包含未授权的修复动作。
 5. 报告时先给出故障层级和证据，再给出最小的下一步；CN2 无流量必须同时说明上层分流选择，不能只看 CN2 组内的节点选择。
 
 ### 切换策略组

@@ -1,4 +1,4 @@
-version: 1
-display_name: Summarize Link Note
-short_description: Convert normal web links into Markdown note drafts with summarize CLI.
-default_prompt: Convert a normal webpage or article URL into a Markdown note draft with summarize CLI, save it into the fixed summarize output directory, and do not use this skill for PDFs.
+interface:
+  display_name: "网页链接笔记"
+  short_description: "通过 summarize CLI 把普通网页整理为 Markdown 笔记草稿"
+  default_prompt: "使用 $summarize-link-note 把这个普通网页或文章 URL 转为 Markdown 笔记草稿并保存到固定目录。"

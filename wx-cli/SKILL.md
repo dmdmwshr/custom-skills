@@ -1,10 +1,6 @@
 ---
 name: wx-cli
 description: 用于通过本机已安装的 wx-cli 查询微信本地数据、导出聊天记录、按会话归档文件，并把同一会话的聊天文档与文件本体整理到固定目录；当用户提到 wx-cli、微信聊天导出、群聊归档、会话文件整理、微信本地搜索、wx init、sessions、history、search、stats、attachments 或 extract 时使用。
-x-custom-skill: true
-x-managed-by: cc-switch
-x-source-repo: dmdmwshr/custom-skills
-x-edit-policy: edit-source-repo-only
 ---
 
 # wx-cli

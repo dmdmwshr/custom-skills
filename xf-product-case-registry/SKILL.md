@@ -1,6 +1,6 @@
 ---
 name: xf-product-case-registry
-description: 仅适配消防产品案卷信息登记系统现有 V2 网站：在本地清点和核对消防产品案卷 PDF、ZIP 或监督系统截图，按 51 个固定文书槽位生成 CaseImportManifestV2，并在用户直接授权后走 V2 四步接口导入。用于用户提到产品案卷包、规范 PDF、V2 导入清单、固定文书槽位或 product-cases.meifu.zzxhlyj.top 的案卷导入；截图 Excel 台账仍使用 xf-product-case-filler。
+description: 管理消防产品案卷登记系统 V2 的本地清点、51 个文书槽位清单、PDF、ZIP、截图核验及四步生产接口导入。用户提到 V2 案卷包、固定槽位或生产导入时使用；截图 Excel 台账改用 xf-product-case-filler。
 ---
 
 # 消防产品案卷 V2 本地整理与导入
@@ -25,7 +25,7 @@ description: 仅适配消防产品案卷信息登记系统现有 V2 网站：在
 - V2 有现有的 51 个固定文书槽位；每个普通槽位最多一个电子版和一个扫描件，现场照片只允许扫描件。其他附件使用独立的 `OTHER_ATTACHMENT`，不占用正式双版本槽位。
 - 清单中的每个文件必须被一个 `documentSlots[].versions[].fileRef` 或 `otherAttachments[].fileRef` 引用；不得存在未关联文件。
 - 同一来源需要映射到多个逻辑槽位时，为每个槽位复制出独立的规范 PDF，并在 `files` 中使用独立 `clientRef` 和 `relativePath`。不得让一个上传文件同时充当多个逻辑槽位。
-- 上传会写入生产网站。只在用户直接授权具体案卷包和目标网站后执行；任何冲突、哈希不一致、槽位不明或未确认内容均停止，不绕过校验。
+- 上传会写入生产网站。当前消息已明确授权具体案卷包、目标网站和正式导入时，视为直接授权且不重复确认；否则只完成本地清单，并一次性展示精确对象、影响和验证方式后等待授权。任何冲突、哈希不一致、槽位不明或未确认内容均停止，不绕过校验。
 - 网站认证只使用 `%LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml`，不放在会被 CC Switch 完整替换的 skill 安装目录内。不得把账号、密码、会话 Cookie 或 CSRF 防护令牌写入 manifest、`upload-state.json`、日志、命令行参数或响应摘要。
 
 ## 本地认证配置
@@ -48,7 +48,7 @@ description: 仅适配消防产品案卷信息登记系统现有 V2 网站：在
 2. 读取电子文本层；对没有可靠文本层的扫描页，仅在本机调用 MinerU。保留页码与来源映射，无法识别时停在本地。
 3. 依据 `references/document-classification.md` 将每一份可确认的规范 PDF 映射到一个 V2 槽位或其他附件；先完成所有文件关联，再编写 manifest。
 4. 依据 `references/case-data-format.md` 和生产 Schema 组装 `CaseImportManifestV2`。用 Schema 校验 JSON，并逐项核对：包哈希、文件哈希、初查、可选复查、稳定引用、51 个槽位规则、双版本限制和无未关联文件。
-5. 先向用户展示本地清单摘要：项目编号、文件数、各槽位的电子版/扫描件、其他附件、未确认且未上传的内容。未获直接授权时到此结束。
+5. 先生成本地清单摘要：项目编号、文件数、各槽位的电子版/扫描件、其他附件、未确认且未上传的内容。当前消息未直接授权具体案卷包和目标网站正式导入时，到此结束并一次性请求授权；已经明确授权时继续执行，不再次询问。
 
 ## 命令边界
 

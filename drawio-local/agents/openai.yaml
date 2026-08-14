@@ -1,0 +1,4 @@
+interface:
+  display_name: "Draw.io 本地制图"
+  short_description: "创建和更新本机可编辑的流程图、架构图与原生 drawio 文件"
+  default_prompt: "使用 $drawio-local 创建或更新这个可编辑的流程图、架构图或原生 drawio 文件。"

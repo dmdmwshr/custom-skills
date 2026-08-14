@@ -1,6 +1,6 @@
 ---
 name: applio-rvc-manager
-description: 统一管理本机 Applio 的声音数据集、RVC 音色模型、模型训练、索引生成、文字转角色语音、录音换音色、方言与日语音频生成，以及面向 ComfyUI 的对白交接。用户提到 Applio、RVC、声音训练、音色模型、声音克隆、TTS 加 RVC、角色配音、方言/日语声音或 ComfyUI 视频对白时使用；涉及声音训练和生成时默认优先走 Applio，不改用其他后端。
+description: 统一管理本机 Applio 声音数据集、RVC 音色训练、索引、TTS 加 RVC、录音换声、方言或日语配音及 ComfyUI 对白交接。用户提到 Applio、RVC、声音克隆、音色训练或角色配音时使用，并优先采用 Applio 后端。
 ---
 
 # Applio 声音训练与生成

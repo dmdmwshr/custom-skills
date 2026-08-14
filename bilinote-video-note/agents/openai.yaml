@@ -1,4 +1,4 @@
-version: 1
-display_name: BiliNote Video Note
-short_description: Extract bilibili and douyin videos into Obsidian notes via fixed BiliNote script.
-default_prompt: Use $bilinote-video-note to turn this bilibili or douyin link into the fixed Obsidian video note and attachment layout.
+interface:
+  display_name: "BiliNote 视频笔记"
+  short_description: "通过 BiliNote 把 B站和抖音视频整理为 Obsidian 知识笔记"
+  default_prompt: "使用 $bilinote-video-note 把这个 B站或抖音视频链接整理为固定结构的 Obsidian 笔记和附件。"

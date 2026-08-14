@@ -1,6 +1,6 @@
 ---
 name: okxnew-data-operations
-description: 维护和巡检 OKXnew 数据模块的官方公开数据、运行水位与失败状态；固定通过受控浏览器维护 BLS 官方年度发布日历，并在 BEA、Federal Reserve、Census 或 DOL 已登记官方公开路径受阻时执行浏览器补采。用于用户要求检查 OKXnew 数据获取、五源宏观状态、数据监控面板、数据缺口、官方来源重试，或要求定时执行官方浏览器采集时；不用于真实交易、账户数据、凭据、CME 抓取或 OPEC 正文采集。
+description: 巡检 OKXnew 数据模块的官方公开数据、运行水位和失败状态，并通过受控浏览器维护或补采 BLS、BEA、Federal Reserve、Census、DOL 已登记来源。用于数据缺口、监控、重试或定时采集，不用于真实交易、账户或凭据。
 ---
 
 # OKXnew 数据模块运维

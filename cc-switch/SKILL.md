@@ -1,15 +1,13 @@
 ---
 name: cc-switch
-description: 用于通过终端管理本机 CC Switch 自建 skills 的仓库源、提交推送、备份、自动安装、自动更新、SQLite 登记与核验，并处理新增、删除、启停、分支和排障；用户要求安装、更新、同步或维护自建 skill 时触发，默认使用固定 Git、PowerShell、Python 脚本，不通过可视化点击。
-x-custom-skill: true
-x-managed-by: cc-switch
-x-source-repo: dmdmwshr/custom-skills
-x-edit-policy: edit-source-repo-only
+description: 通过终端管理本机 CC Switch 的自建及已登记 skills 仓库源、提交推送、备份、安装更新、SQLite 登记、启停、分支和排障。维护 CC Switch 受管 skill 时使用；只有用户明确选择非受管来源时才改用 skill-installer。
 ---
 
 # CC Switch
 
 本 skill 集中管理本机 CC Switch 的自建 skills 仓库源、源仓库内容、安装副本和 SQLite 登记。日常安装与更新默认走终端脚本；桌面应用只用于用户明确要求的只读检查或终端链路故障后的人工排查，不作为常规点击入口。
+
+当前用户在当前请求中明确指定 skill、仓库和新建、修改、同步、启停或精确删除动作时，视为已授权该范围及必要的验证步骤；常规可恢复操作不重复确认。只有删除范围不清、仓库级删除或可能造成重大且难以恢复的损失时，才一次性确认精确对象、影响和备份位置。
 
 ## 适用范围
 

@@ -1,6 +1,6 @@
 ---
 name: localvault-credentials
-description: Manage local Windows credentials with Microsoft.PowerShell.SecretManagement and SecretStore. Use when the user asks to add, update, inspect, remove, or runtime-inject a credential stored in LocalVault for an explicitly approved local automation task, including browser login helpers.
+description: 管理本机 LocalVault 中由 SecretManagement 和 SecretStore 保存的凭据，包括新增、更新、元数据检查、精确删除和向当前用户批准的本地自动化程序经标准输入临时注入。不得输出明文凭据或传给远程、不明程序。
 ---
 
 # LocalVault 凭据管理
@@ -61,7 +61,7 @@ $skillRoot = 'C:\Users\12070\.cc-switch\skills\自建skills\localvault-credentia
 
 ## 运行时调用
 
-只有在用户明确批准本地自动化程序后，才使用 `Invoke`。子程序必须从标准输入读取一次性 JSON：
+当前消息已明确指定本地自动化程序、目标和调用动作时，视为已批准使用 `Invoke`，无需再次确认。子程序必须从标准输入读取一次性 JSON：
 
 ```json
 {"username":"...","password":"..."}
@@ -113,7 +113,7 @@ MFA 和邮箱验证码仍必须由用户手动完成。
 
 ## 删除凭据
 
-删除必须使用精确名称并先确认；只有用户明确要求立即删除时才加 `-Force`：
+删除必须使用精确名称。当前用户已明确要求删除该名称时视为已授权，可直接加 `-Force`；只有范围不清或批量、难以恢复的删除才最多确认一次：
 
 ```powershell
 & "$skillRoot\scripts\Manage-LocalVaultCredential.ps1" `

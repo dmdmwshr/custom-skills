@@ -1,10 +1,6 @@
 ---
 name: "xf-report-filler"
-description: "根据消防产品底册、联网监测源表和月度模板，整理通报目录并生成产品/联网成绩登记材料；按需生成年度产品问题汇总；也保留旧版消防产品档案 `.doc` 批量填报能力。"
-x-custom-skill: true
-x-managed-by: cc-switch
-x-source-repo: dmdmwshr/custom-skills
-x-edit-policy: edit-source-repo-only
+description: "根据消防产品底册、联网监测源表和月度模板整理通报目录，生成产品或联网成绩登记材料、年度问题汇总及旧版 .doc 档案。用于月度通报、成绩登记和年度汇总；案卷截图台账与 V2 导入分别使用对应专用 skill。"
 ---
 
 # xf-report-filler

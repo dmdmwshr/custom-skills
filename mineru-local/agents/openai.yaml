@@ -1,0 +1,4 @@
+interface:
+  display_name: "MinerU 本地高精度转换"
+  short_description: "在 Zerox 效果不佳时用 Docker MinerU 转换复杂文档"
+  default_prompt: "使用 $mineru-local 在 Zerox 效果不佳或我明确指定时，通过 Docker MinerU 转换这个复杂文档。"

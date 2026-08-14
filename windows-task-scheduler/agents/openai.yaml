@@ -1,0 +1,4 @@
+interface:
+  display_name: "Windows 计划任务管理"
+  short_description: "安全管理项目 Windows 计划任务的创建、更新、核验与精确卸载"
+  default_prompt: "使用 $windows-task-scheduler 只读盘点或按项目清单安全创建、更新、核验和精确卸载 Windows 计划任务。"
