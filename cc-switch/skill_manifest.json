@@ -13,6 +13,7 @@
     "SKILL.md",
     "skill_manifest.json",
     "agents/openai.yaml",
-    "scripts/skill-repos.py"
+    "scripts/skill-repos.py",
+    "scripts/sync-custom-skills.ps1"
   ]
 }

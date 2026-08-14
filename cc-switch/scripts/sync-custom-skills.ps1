@@ -2,13 +2,15 @@
 param(
     [string]$SourceRoot = 'C:\Users\12070\.cc-switch\skills\自建skills',
     [string]$InstallRoot = 'C:\Users\12070\.cc-switch\skills',
+    [string]$CodexSkillsRoot = 'C:\Users\12070\.codex\skills',
     [string]$DatabasePath = 'C:\Users\12070\.cc-switch\cc-switch.db',
     [string]$PythonPath = 'C:\Users\12070\AppData\Local\Programs\Python\Python312\python.exe',
     [string]$Remote = 'origin',
     [string]$Branch = 'main',
     [string]$Owner = 'dmdmwshr',
     [string]$Repository = 'custom-skills',
-    [switch]$SkipRemotePull
+    [switch]$SkipRemotePull,
+    [switch]$SkipCodexClientSync
 )
 
 Set-StrictMode -Version Latest
@@ -220,6 +222,53 @@ function Copy-DirectoryChildren {
     }
 }
 
+function Copy-GitTrackedSkill {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.DirectoryInfo]$SkillDirectory,
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+
+    $skillName = $SkillDirectory.Name
+    $prefix = "$skillName/"
+    $trackedPaths = @(
+        Invoke-Git @('ls-files', '--', $skillName) |
+            ForEach-Object { $_.ToString().Trim() } |
+            Where-Object { $_ }
+    )
+    if ($trackedPaths.Count -eq 0) {
+        throw "Git 中没有已跟踪的 skill 文件：$skillName"
+    }
+
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    foreach ($repositoryPath in $trackedPaths) {
+        $normalizedPath = $repositoryPath.Replace('\', '/')
+        if (-not $normalizedPath.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+            throw "Git 返回了超出 skill 目录的路径：$repositoryPath"
+        }
+
+        $relativePath = $normalizedPath.Substring($prefix.Length)
+        if ([string]::IsNullOrWhiteSpace($relativePath)) {
+            continue
+        }
+
+        $sourcePath = Resolve-FullPath (Join-Path $SourceRoot ($normalizedPath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
+        Assert-PathUnder $sourcePath $SkillDirectory.FullName
+        Assert-File $sourcePath 'Git 已跟踪的 skill 文件'
+
+        $destinationPath = Resolve-FullPath (Join-Path $Destination ($relativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
+        Assert-PathUnder $destinationPath $Destination
+        $destinationParent = Split-Path -Parent $destinationPath
+        New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+        Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $Destination 'SKILL.md') -PathType Leaf)) {
+        throw "Git 暂存副本缺少 SKILL.md：$Destination"
+    }
+}
+
 function New-BackupRoot {
     param(
         [Parameter(Mandatory = $true)]
@@ -245,7 +294,15 @@ function New-BackupRoot {
     }
 
     New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-    foreach ($childName in @('installed-copy', 'previous-live', 'staging')) {
+    foreach ($childName in @(
+        'installed-copy',
+        'previous-live',
+        'failed-install-new',
+        'staging',
+        'codex-previous-live',
+        'codex-staging',
+        'codex-failed-new'
+    )) {
         New-Item -ItemType Directory -Path (Join-Path $backupRoot $childName) -Force | Out-Null
     }
 
@@ -254,6 +311,7 @@ function New-BackupRoot {
 
 $SourceRoot = Resolve-FullPath $SourceRoot
 $InstallRoot = Resolve-FullPath $InstallRoot
+$CodexSkillsRoot = Resolve-FullPath $CodexSkillsRoot
 $DatabasePath = Resolve-FullPath $DatabasePath
 $PythonPath = Resolve-FullPath $PythonPath
 
@@ -263,6 +321,9 @@ if ([System.StringComparer]::OrdinalIgnoreCase.Equals($SourceRoot, $InstallRoot)
 
 Assert-Directory $SourceRoot '自建 skill 源仓库'
 Assert-Directory $InstallRoot 'skill 安装根目录'
+if (-not $SkipCodexClientSync) {
+    Assert-Directory $CodexSkillsRoot 'Codex skill 根目录'
+}
 Assert-File $DatabasePath 'CC Switch 数据库'
 Assert-File $PythonPath '固定 Python 解释器'
 
@@ -476,12 +537,278 @@ finally:
     connection.close()
 '@
 
+$codexSyncCode = @'
+import hashlib
+import json
+import os
+import shutil
+import sqlite3
+import stat
+import sys
+from pathlib import Path
+
+(
+    mode,
+    content_root_text,
+    install_root_text,
+    codex_root_text,
+    database_text,
+    backup_root_text,
+    owner,
+    repository,
+) = sys.argv[1:]
+
+content_root = Path(content_root_text).resolve()
+install_root = Path(install_root_text).resolve()
+codex_root = Path(codex_root_text).resolve()
+database_path = Path(database_text).resolve()
+backup_root = None if backup_root_text == "-" else Path(backup_root_text).resolve()
+reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def lexists(path: Path) -> bool:
+    return os.path.lexists(str(path))
+
+
+def is_reparse(path: Path) -> bool:
+    return bool(getattr(path.lstat(), "st_file_attributes", 0) & reparse_flag)
+
+
+def normalized_resolved(path: Path, *, strict: bool) -> str:
+    return os.path.normcase(os.path.normpath(str(path.resolve(strict=strict))))
+
+
+def assert_plain_tree(root: Path) -> None:
+    if not root.is_dir() or is_reparse(root):
+        raise RuntimeError(f"skill 安装源不是普通目录：{root}")
+    for directory, directory_names, file_names in os.walk(root):
+        directory_path = Path(directory)
+        for name in [*directory_names, *file_names]:
+            child = directory_path / name
+            if is_reparse(child):
+                raise RuntimeError(f"skill 安装源包含重解析点：{child}")
+
+
+def manifest(root: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for directory, _, file_names in os.walk(root):
+        directory_path = Path(directory)
+        for name in sorted(file_names):
+            file_path = directory_path / name
+            relative = os.path.relpath(file_path, root).replace("\\", "/")
+            digest = hashlib.sha256()
+            with file_path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            result[relative] = digest.hexdigest()
+    return result
+
+
+def classify_destination(destination: Path, source: Path) -> str:
+    if not lexists(destination):
+        return "absent"
+    if is_reparse(destination):
+        try:
+            actual = normalized_resolved(destination, strict=True)
+            expected = normalized_resolved(source, strict=True)
+        except OSError as exc:
+            raise RuntimeError(f"Codex skill 链接无法解析：{destination}: {exc}") from exc
+        if actual != expected:
+            raise RuntimeError(
+                f"Codex skill 链接指向非预期来源：{destination} -> {actual}，预期 {expected}"
+            )
+        return "link"
+    if not destination.is_dir():
+        raise RuntimeError(f"Codex skill 目标不是目录：{destination}")
+    if not (destination / "SKILL.md").is_file():
+        raise RuntimeError(f"Codex skill 物理目录缺少 SKILL.md：{destination}")
+    return "physical"
+
+
+if not content_root.is_dir():
+    raise SystemExit(f"skill 内容根目录不存在：{content_root}")
+if not install_root.is_dir():
+    raise SystemExit(f"skill 安装根目录不存在：{install_root}")
+if not codex_root.is_dir() or is_reparse(codex_root):
+    raise SystemExit(f"Codex skill 根目录不存在或是重解析点：{codex_root}")
+
+expected_names = sorted(
+    path.name
+    for path in content_root.iterdir()
+    if path.is_dir() and not path.is_symlink() and (path / "SKILL.md").is_file()
+)
+if not expected_names:
+    raise SystemExit(f"没有找到待同步的 skill：{content_root}")
+
+connection = sqlite3.connect(
+    f"file:{database_path.as_posix()}?mode=ro",
+    uri=True,
+)
+try:
+    rows = connection.execute(
+        "select name, enabled_codex from skills where repo_owner=? and repo_name=?",
+        (owner, repository),
+    ).fetchall()
+finally:
+    connection.close()
+
+enabled_by_name = {str(name): bool(enabled) for name, enabled in rows}
+enabled_names = [name for name in expected_names if enabled_by_name.get(name, True)]
+
+sync_method = "auto"
+settings_path = database_path.parent / "settings.json"
+if settings_path.is_file():
+    settings = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+    configured_method = settings.get("skillSyncMethod")
+    if configured_method is not None:
+        sync_method = str(configured_method).lower()
+if sync_method not in {"auto", "symlink", "copy"}:
+    raise SystemExit(f"不支持的 skill 同步模式：{sync_method}")
+
+destination_kinds: dict[str, str] = {}
+for name in enabled_names:
+    install_source = install_root / name
+    destination = codex_root / name
+    destination_kinds[name] = classify_destination(destination, install_source)
+
+if mode == "validate":
+    print(
+        f"codex_validated={len(enabled_names)} method={sync_method} "
+        f"links={sum(kind == 'link' for kind in destination_kinds.values())} "
+        f"physical={sum(kind == 'physical' for kind in destination_kinds.values())} "
+        f"absent={sum(kind == 'absent' for kind in destination_kinds.values())}"
+    )
+    raise SystemExit(0)
+
+if mode != "sync":
+    raise SystemExit(f"未知 Codex 同步模式：{mode}")
+if backup_root is None or not backup_root.is_dir():
+    raise SystemExit(f"Codex 同步备份根目录不存在：{backup_root}")
+
+previous_root = backup_root / "codex-previous-live"
+staging_root = backup_root / "codex-staging"
+failed_root = backup_root / "codex-failed-new"
+for required_root in (previous_root, staging_root, failed_root):
+    if not required_root.is_dir() or any(required_root.iterdir()):
+        raise SystemExit(f"Codex 同步暂存目录不存在或非空：{required_root}")
+
+source_manifests: dict[str, dict[str, str]] = {}
+published_modes: dict[str, str] = {}
+for name in enabled_names:
+    source = install_root / name
+    assert_plain_tree(source)
+    source_manifests[name] = manifest(source)
+    if not source_manifests[name] or "SKILL.md" not in source_manifests[name]:
+        raise RuntimeError(f"skill 安装源为空或缺少 SKILL.md：{source}")
+
+    stage = staging_root / name
+    kind = destination_kinds[name]
+    prefer_link = sync_method == "symlink" or (
+        sync_method == "auto" and kind in {"absent", "link"}
+    )
+    if prefer_link:
+        try:
+            os.symlink(str(source), str(stage), target_is_directory=True)
+            published_modes[name] = "link"
+        except OSError:
+            if sync_method != "auto":
+                raise
+            shutil.copytree(source, stage)
+            published_modes[name] = "copy"
+    else:
+        shutil.copytree(source, stage)
+        published_modes[name] = "copy"
+
+    if manifest(stage) != source_manifests[name]:
+        raise RuntimeError(f"Codex skill 暂存副本校验失败：{name}")
+
+states: list[dict[str, object]] = []
+try:
+    for name in enabled_names:
+        destination = codex_root / name
+        previous = previous_root / name
+        stage = staging_root / name
+        state: dict[str, object] = {
+            "name": name,
+            "had_existing": lexists(destination),
+            "old_moved": False,
+            "attempted": False,
+            "new_published": False,
+        }
+        states.append(state)
+        if state["had_existing"]:
+            shutil.move(str(destination), str(previous))
+            state["old_moved"] = True
+        state["attempted"] = True
+        shutil.move(str(stage), str(destination))
+        state["new_published"] = True
+
+    for name in enabled_names:
+        destination = codex_root / name
+        source = install_root / name
+        if published_modes[name] == "link":
+            if not is_reparse(destination):
+                raise RuntimeError(f"Codex skill 应为链接但实际不是：{destination}")
+            if normalized_resolved(destination, strict=True) != normalized_resolved(source, strict=True):
+                raise RuntimeError(f"Codex skill 链接目标校验失败：{destination}")
+        elif is_reparse(destination):
+            raise RuntimeError(f"Codex skill 应为物理副本但实际是重解析点：{destination}")
+        if manifest(destination) != source_manifests[name]:
+            raise RuntimeError(f"Codex skill 发布后哈希校验失败：{name}")
+except Exception as sync_error:
+    rollback_errors: list[str] = []
+    for state in reversed(states):
+        name = str(state["name"])
+        destination = codex_root / name
+        previous = previous_root / name
+        failed = failed_root / name
+        try:
+            if state["attempted"] and lexists(destination):
+                shutil.move(str(destination), str(failed))
+            if state["old_moved"] and lexists(previous):
+                shutil.move(str(previous), str(destination))
+            if state["had_existing"] and not lexists(destination):
+                raise RuntimeError("原有目标未恢复")
+            if not state["had_existing"] and lexists(destination):
+                raise RuntimeError("新增目标未撤回")
+        except Exception as rollback_error:
+            rollback_errors.append(f"{name}: {rollback_error}")
+    if rollback_errors:
+        raise SystemExit(
+            f"Codex skill 同步失败且回滚不完整：{sync_error}; "
+            + "; ".join(rollback_errors)
+        ) from sync_error
+    raise SystemExit(f"Codex skill 同步失败，已恢复原状态：{sync_error}") from sync_error
+
+print(
+    f"codex_synced={len(enabled_names)} method={sync_method} "
+    f"links={sum(value == 'link' for value in published_modes.values())} "
+    f"copies={sum(value == 'copy' for value in published_modes.values())}"
+)
+'@
+
 Invoke-PythonCode -Code $registrationCode -Arguments @('validate', $SourceRoot, $DatabasePath, $Owner, $Repository, $Branch) | Out-Null
+if (-not $SkipCodexClientSync) {
+    $codexValidation = Invoke-PythonCode -Code $codexSyncCode -Arguments @(
+        'validate',
+        $SourceRoot,
+        $InstallRoot,
+        $CodexSkillsRoot,
+        $DatabasePath,
+        '-',
+        $Owner,
+        $Repository
+    )
+    $codexValidation | ForEach-Object { Write-Output $_ }
+}
 
 Write-Output "源仓库检查通过：skills=$($skillDirectories.Count) HEAD=$head 远端=$remoteRef"
 if ($WhatIfPreference) {
     Write-Output 'Dry-run：不会创建备份、复制文件或写入数据库。'
     Write-Output "安装根目录：$InstallRoot"
+    if (-not $SkipCodexClientSync) {
+        Write-Output "Codex skill 根目录：$CodexSkillsRoot"
+    }
     Write-Output "数据库：$DatabasePath"
     exit 0
 }
@@ -490,6 +817,7 @@ $backupRoot = New-BackupRoot $DatabasePath
 $databaseBackup = Join-Path $backupRoot 'cc-switch.db'
 $installedBackupRoot = Join-Path $backupRoot 'installed-copy'
 $previousLiveRoot = Join-Path $backupRoot 'previous-live'
+$failedInstallRoot = Join-Path $backupRoot 'failed-install-new'
 $stagingRoot = Join-Path $backupRoot 'staging'
 
 $databaseBackupCode = @'
@@ -512,48 +840,111 @@ print(target)
 Invoke-PythonCode -Code $databaseBackupCode -Arguments @($DatabasePath, $databaseBackup) | Out-Null
 
 $existingCount = 0
-foreach ($skillDirectory in $skillDirectories) {
-    $skillName = $skillDirectory.Name
-    $targetDirectory = Resolve-FullPath (Join-Path $InstallRoot $skillName)
-    if (Test-Path -LiteralPath $targetDirectory) {
-        $backupDirectory = Join-Path $installedBackupRoot $skillName
-        Copy-DirectoryChildren -Source $targetDirectory -Destination $backupDirectory
-        $existingCount++
+$initiallyExisting = @{}
+$movedPrevious = @{}
+$publishedInstalls = @{}
+$codexSyncResult = @()
+
+try {
+    foreach ($skillDirectory in $skillDirectories) {
+        $skillName = $skillDirectory.Name
+        $targetDirectory = Resolve-FullPath (Join-Path $InstallRoot $skillName)
+        $exists = Test-Path -LiteralPath $targetDirectory
+        $initiallyExisting[$skillName] = $exists
+        if ($exists) {
+            $backupDirectory = Join-Path $installedBackupRoot $skillName
+            Copy-DirectoryChildren -Source $targetDirectory -Destination $backupDirectory
+            $existingCount++
+        }
     }
-}
 
-foreach ($skillDirectory in $skillDirectories) {
-    $skillName = $skillDirectory.Name
-    $stagingDirectory = Join-Path $stagingRoot $skillName
-    Copy-DirectoryChildren -Source $skillDirectory.FullName -Destination $stagingDirectory
-    if (-not (Test-Path -LiteralPath (Join-Path $stagingDirectory 'SKILL.md') -PathType Leaf)) {
-        throw "暂存副本缺少 SKILL.md：$stagingDirectory"
+    foreach ($skillDirectory in $skillDirectories) {
+        $skillName = $skillDirectory.Name
+        $stagingDirectory = Join-Path $stagingRoot $skillName
+        Copy-GitTrackedSkill -SkillDirectory $skillDirectory -Destination $stagingDirectory
     }
-}
 
-foreach ($skillDirectory in $skillDirectories) {
-    $skillName = $skillDirectory.Name
-    $targetDirectory = Resolve-FullPath (Join-Path $InstallRoot $skillName)
-    $previousDirectory = Join-Path $previousLiveRoot $skillName
-    $stagingDirectory = Join-Path $stagingRoot $skillName
+    foreach ($skillDirectory in $skillDirectories) {
+        $skillName = $skillDirectory.Name
+        $targetDirectory = Resolve-FullPath (Join-Path $InstallRoot $skillName)
+        $previousDirectory = Join-Path $previousLiveRoot $skillName
+        $stagingDirectory = Join-Path $stagingRoot $skillName
 
-    if (Test-Path -LiteralPath $targetDirectory) {
-        Move-Item -LiteralPath $targetDirectory -Destination $previousDirectory
+        if ($initiallyExisting[$skillName]) {
+            Move-Item -LiteralPath $targetDirectory -Destination $previousDirectory
+            $movedPrevious[$skillName] = $true
+        }
+        Move-Item -LiteralPath $stagingDirectory -Destination $targetDirectory
+        $publishedInstalls[$skillName] = $true
     }
-    Move-Item -LiteralPath $stagingDirectory -Destination $targetDirectory
-}
 
-Invoke-PythonCode -Code $registrationCode -Arguments @('register', $SourceRoot, $DatabasePath, $Owner, $Repository, $Branch) | Out-Null
-
-foreach ($skillDirectory in $skillDirectories) {
-    $targetDirectory = Resolve-FullPath (Join-Path $InstallRoot $skillDirectory.Name)
-    if (-not (Test-Path -LiteralPath (Join-Path $targetDirectory 'SKILL.md') -PathType Leaf)) {
-        throw "同步后安装副本缺少 SKILL.md：$targetDirectory"
+    foreach ($skillDirectory in $skillDirectories) {
+        $targetDirectory = Resolve-FullPath (Join-Path $InstallRoot $skillDirectory.Name)
+        if (-not (Test-Path -LiteralPath (Join-Path $targetDirectory 'SKILL.md') -PathType Leaf)) {
+            throw "同步后安装副本缺少 SKILL.md：$targetDirectory"
+        }
+        Assert-NoReparsePoints $targetDirectory
     }
-    Assert-NoReparsePoints $targetDirectory
+
+    Invoke-PythonCode -Code $registrationCode -Arguments @('register', $SourceRoot, $DatabasePath, $Owner, $Repository, $Branch) | Out-Null
+
+    if (-not $SkipCodexClientSync) {
+        $codexSyncResult = @(
+            Invoke-PythonCode -Code $codexSyncCode -Arguments @(
+                'sync',
+                $SourceRoot,
+                $InstallRoot,
+                $CodexSkillsRoot,
+                $DatabasePath,
+                $backupRoot,
+                $Owner,
+                $Repository
+            )
+        )
+    }
+} catch {
+    $syncFailure = $_.Exception.Message
+    $rollbackErrors = @()
+    $rollbackNames = @($skillDirectories | ForEach-Object { $_.Name })
+    [array]::Reverse($rollbackNames)
+
+    foreach ($skillName in $rollbackNames) {
+        $targetDirectory = Resolve-FullPath (Join-Path $InstallRoot $skillName)
+        $previousDirectory = Join-Path $previousLiveRoot $skillName
+        $failedDirectory = Join-Path $failedInstallRoot $skillName
+        try {
+            if ($publishedInstalls.ContainsKey($skillName) -and (Test-Path -LiteralPath $targetDirectory)) {
+                Move-Item -LiteralPath $targetDirectory -Destination $failedDirectory
+            }
+            if ($movedPrevious.ContainsKey($skillName) -and (Test-Path -LiteralPath $previousDirectory)) {
+                Move-Item -LiteralPath $previousDirectory -Destination $targetDirectory
+            }
+
+            $existsAfterRollback = Test-Path -LiteralPath $targetDirectory
+            if ($initiallyExisting.ContainsKey($skillName) -and $initiallyExisting[$skillName] -ne $existsAfterRollback) {
+                throw '安装副本未恢复到同步前的存在状态。'
+            }
+        } catch {
+            $rollbackErrors += "$skillName：$($_.Exception.Message)"
+        }
+    }
+
+    try {
+        Invoke-PythonCode -Code $databaseBackupCode -Arguments @($databaseBackup, $DatabasePath) | Out-Null
+    } catch {
+        $rollbackErrors += "数据库：$($_.Exception.Message)"
+    }
+
+    if ($rollbackErrors.Count -gt 0) {
+        throw "同步失败且恢复不完整：$syncFailure；$($rollbackErrors -join '；')；备份位置：$backupRoot"
+    }
+    throw "同步失败，安装副本和数据库已恢复：$syncFailure；备份位置：$backupRoot"
 }
 
 Write-Output "同步完成：skills=$($skillDirectories.Count)，已有安装副本备份=$existingCount。"
+if ($codexSyncResult.Count -gt 0) {
+    $codexSyncResult | ForEach-Object { Write-Output $_ }
+}
 Write-Output "备份位置：$backupRoot"
 Write-Output "数据库备份：$databaseBackup"
 Write-Output "源仓库 HEAD：$head"

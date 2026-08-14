@@ -5,14 +5,14 @@ description: 通过终端管理本机 CC Switch 的自建及已登记 skills 仓
 
 # CC Switch
 
-本 skill 集中管理本机 CC Switch 的自建 skills 仓库源、源仓库内容、安装副本和 SQLite 登记。日常安装与更新默认走终端脚本；桌面应用只用于用户明确要求的只读检查或终端链路故障后的人工排查，不作为常规点击入口。
+本 skill 集中管理本机 CC Switch 的自建 skills 仓库源、源仓库内容、安装副本、Codex 实际发现目录和 SQLite 登记。日常安装与更新默认走终端脚本；桌面应用只用于用户明确要求的只读检查或终端链路故障后的人工排查，不作为常规点击入口。
 
 当前用户在当前请求中明确指定 skill、仓库和新建、修改、同步、启停或精确删除动作时，视为已授权该范围及必要的验证步骤；常规可恢复操作不重复确认。只有删除范围不清、仓库级删除或可能造成重大且难以恢复的损失时，才一次性确认精确对象、影响和备份位置。
 
 ## 适用范围
 
 - 查询 C:\Users\12070\.cc-switch\cc-switch.db 中的 skill_repos 与关联 skills 记录。
-- 管理自建源 dmdmwshr/custom-skills 的提交、推送、自动安装、自动更新、备份和安装副本核验。
+- 管理自建源 dmdmwshr/custom-skills 的提交、推送、自动安装、自动更新、备份、安装副本和 Codex 发现目录核验。
 - 添加、启用、停用、改分支或删除其他 skills 仓库源。
 - 管理自建 skill 的新增、修改、删除和多客户端启用状态。
 - 排查源仓库、安装副本、数据库登记、同步脚本和 CC Switch 桌面应用状态。
@@ -20,13 +20,13 @@ description: 通过终端管理本机 CC Switch 的自建及已登记 skills 仓
 ## 硬规则
 
 1. 先做只读状态检查，再执行任何变更。
-2. 自建 skill 的安装与更新默认只运行 scripts/sync-custom-skills.ps1；不通过可视化应用点击完成常规同步。终端链路失败时报告具体原因并停止，不要静默改走 GUI。
-3. 自建 skill 内容只在 C:\Users\12070\.cc-switch\skills\自建skills 源仓库中修改；C:\Users\12070\.cc-switch\skills 下的安装副本只由同步脚本更新。
+2. 自建 skill 的安装与更新默认只运行 scripts/sync-custom-skills.ps1；脚本同时更新 CC Switch 安装副本、SQLite 登记和 Codex 实际发现目录。不通过可视化应用点击完成常规同步；终端链路失败时报告具体原因并停止，不静默改走 GUI。
+3. 自建 skill 内容只在 C:\Users\12070\.cc-switch\skills\自建skills 源仓库中修改；C:\Users\12070\.cc-switch\skills 下的安装副本和 C:\Users\12070\.codex\skills 下的受管入口只由同步脚本更新。
 4. 同步前必须确认源仓库已审查、测试、提交并推送，且本地分支为 main、工作区干净、HEAD 与 origin/main 一致；不满足时拒绝安装或更新。
-5. 直接写 SQLite 前必须先创建可恢复备份。同步脚本会先做 SQLite 在线备份，再更新安装副本和 skills 登记。
+5. 直接写 SQLite 前必须先创建可恢复备份。同步脚本会先做 SQLite 在线备份，再更新安装副本、skills 登记和 Codex 受管入口；同步失败时恢复已替换的安装副本与数据库，Codex 发布阶段也独立回滚。
 6. C:\Users\12070\.local\bin\cc-switch.cmd 是失效旧 CLI shim，指向不存在的 D:\Program_Files\CC-Switch-CLI\current\cc-switch.exe；不得把它当作可用入口，也不得为绕过门禁重新使用它。
 7. Windows PowerShell 中不得用 Copy-Item -LiteralPath "<src>\*" 复制通配符；必须枚举子项并以 LiteralPath 逐项复制。
-8. 源目录、安装副本和备份目标中的重解析点（符号链接、联接等可能跳出边界的路径）一律拒绝处理。
+8. 源目录、CC Switch 安装副本和备份目标中的重解析点（符号链接、联接等可能跳出边界的路径）一律拒绝处理。Codex 受管入口可按 CC Switch 同步模式使用符号链接，但只能精确指向对应安装副本；未知或越界目标必须停止。
 9. 不知道 CC Switch 的 skills.content_hash 算法时，不手工计算或覆盖 content_hash；同步脚本只更新来源、目录、元数据、时间和登记状态，保留已有 hash，新记录留空。
 10. 同步脚本只添加或更新源仓库当前列出的 skill，不因源目录缺失自动删除安装副本或数据库记录；删除必须按单个 skill 明确核对、备份和执行。
 11. 不为 cc-switch 的零散子功能新建独立 skill；相关管理功能集中维护在本 skill 及其 scripts 目录中。
@@ -45,7 +45,7 @@ CC Switch 可能自动或手动升级。升级可能改变 cc-switch.db 的表�
 
 ## 自建 skill 生命周期
 
-- 修改已安装的自建 skill：只改源仓库，保持目录名与 frontmatter 的 name 一致；完成审查和测试后提交、推送，再运行终端同步脚本；最后核对源/安装副本、数据库来源和启用状态。
+- 修改已安装的自建 skill：只改源仓库，保持目录名与 frontmatter 的 name 一致；完成审查和测试后提交、推送，再运行终端同步脚本；最后核对源、安装副本、Codex 发现目录、数据库来源和启用状态。
 - 新建自建 skill：先在源仓库创建并验证 SKILL.md、agents/openai.yaml 和必要脚本，提交并推送；用户要求安装时直接运行终端同步脚本，不要求安装时只完成源仓库交付。
 - 删除自建 skill：先查询 skills 表确认 repo_owner=dmdmwshr、repo_name=custom-skills 和影响范围；备份安装副本与数据库；再对源目录、安装副本和对应登记做精确删除。单删 skill 不删除整个 dmdmwshr/custom-skills 仓库源。
 - 修改仓库源、分支、启用状态或删除仓库源：先用 scripts/skill-repos.py 做 dry-run，再在用户授权后带 --yes 执行；删除前列出关联 skills，默认只删 skill_repos 记录。
@@ -53,16 +53,16 @@ CC Switch 可能自动或手动升级。升级可能改变 cc-switch.db 的表�
 ## 终端优先同步流程
 
 1. 在源仓库完成检查、测试、提交和推送。不要把未提交文件或未推送提交交给同步脚本。
-2. 先运行 dry-run，只检查源仓库、远端对齐、skill 数量、安装目标和备份位置，不写数据库、不复制文件：
+2. 先运行 dry-run，只检查源仓库、远端对齐、skill 数量、安装目标、Codex 受管入口和同步模式，不写数据库、不复制文件：
    ~~~powershell
    & "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -File "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\sync-custom-skills.ps1" -WhatIf
    ~~~
-3. dry-run 通过后运行同一脚本完成同步。默认会 fetch --prune、pull --ff-only、创建带时间戳的备份、逐项复制源 skill、更新 SQLite 登记并保留已有 content_hash：
+3. dry-run 通过后运行同一脚本完成同步。默认会 fetch --prune、pull --ff-only、创建带时间戳的备份、只复制 Git 已跟踪的 skill 文件、更新 SQLite 登记并保留已有 content_hash，随后按 CC Switch 的 Auto 规则把已启用技能发布到 Codex：已有物理目录继续用物理副本，已有链接或缺失入口优先用链接，链接不可创建时回退为物理副本。
    ~~~powershell
    & "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -File "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\sync-custom-skills.ps1"
    ~~~
-4. 只在已经单独确认远端引用有效、且当前确实需要离线运行时使用 -SkipRemotePull；该参数不会跳过本地干净和 HEAD 对齐检查。
-5. 同步后用固定 Python 查看仓库源和关联 skills，并比较关键文件或全目录 SHA-256；发现不一致时保留备份并停止继续覆盖：
+4. 只在已经单独确认远端引用有效、且当前确实需要离线运行时使用 -SkipRemotePull；该参数不会跳过本地干净和 HEAD 对齐检查。-SkipCodexClientSync 只用于已明确隔离 Codex 客户端的恢复或测试，不作为日常同步选项。
+5. 同步后用固定 Python 查看仓库源和关联 skills，并比较源仓库、安装副本、Codex 发现目录的文件清单与 SHA-256；再启动一个新的 Codex 任务验证技能可发现。发现不一致时保留备份并停止继续覆盖：
    ~~~powershell
    $py = "C:\Users\12070\AppData\Local\Programs\Python\Python312\python.exe"
    & $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" show --owner dmdmwshr --name custom-skills
@@ -76,7 +76,11 @@ CC Switch 可能自动或手动升级。升级可能改变 cc-switch.db 的表�
 - cc-switch.db：SQLite 在线备份。
 - installed-copy：同步前已有安装副本的完整副本。
 - previous-live：替换前安装副本的可恢复移动副本。
+- failed-install-new：发生失败时撤回的新安装副本。
 - staging：本次同步前准备的源 skill 暂存副本。
+- codex-previous-live：替换前的 Codex 受管入口。
+- codex-staging：待发布到 Codex 的链接或物理副本。
+- codex-failed-new：发生失败时从 Codex 撤回的新入口。
 
 脚本只操作源仓库列出的精确 skill 目录，不删除其他安装内容。同步中途出现异常时，先报告错误和备份位置，不删除备份、不强行重试；恢复必须根据备份目录逐项核对后执行。
 
@@ -92,7 +96,7 @@ CC Switch 可能自动或手动升级。升级可能改变 cc-switch.db 的表�
 1. 使用固定 Windows PowerShell、固定 Python 3.12 和 Git 做只读预检。
 2. 自建 skill 先在源仓库审查、测试、提交和推送，再用 sync-custom-skills.ps1 dry-run。
 3. dry-run 通过后运行真实同步，读取输出的备份位置和数量。
-4. 用 skill-repos.py show、源/安装副本比较和 git status 做回读核验。
+4. 用 skill-repos.py show、源/安装/Codex 三方比较和 git status 做回读核验，并用新 Codex 任务验证自动发现。
 5. 只有用户明确要求排查 CC Switch 桌面应用时，才检查 C:\Users\12070\AppData\Local\Programs\CC Switch\cc-switch.exe 的文件或进程状态；不因常规同步主动打开、点击或刷新应用。
 
 ## 脚本用法
