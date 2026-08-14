@@ -233,7 +233,7 @@ function Copy-GitTrackedSkill {
     $skillName = $SkillDirectory.Name
     $prefix = "$skillName/"
     $trackedPaths = @(
-        Invoke-Git @('ls-files', '--', $skillName) |
+        Invoke-Git @('-c', 'core.quotePath=false', 'ls-files', '--', $skillName) |
             ForEach-Object { $_.ToString().Trim() } |
             Where-Object { $_ }
     )
