@@ -1,0 +1,4 @@
+interface:
+  display_name: "个人记忆按需管理"
+  short_description: "按需查询、盘点和归档录入本机个人记忆系统，不启动 MCP"
+  default_prompt: "使用 $personal-memory-on-demand 查询、盘点或扫描我的本机个人记忆系统。"
