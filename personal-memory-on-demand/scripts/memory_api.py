@@ -15,7 +15,6 @@ from urllib.request import Request, urlopen
 
 API_ROOT = "http://127.0.0.1:8788/api"
 DEFAULT_TIMEOUT_SECONDS = 15
-QUERY_TYPES = ("symbol", "callers", "callees", "impact", "architecture")
 
 
 class MemoryApiError(RuntimeError):
@@ -107,8 +106,6 @@ def build_request(args: argparse.Namespace) -> RequestSpec:
     if operation == "code-graph-search":
         project_entity_id = _required(args.project_entity_id, "项目实体 ID")
         query_type = _required(args.query_type, "图谱检索类型")
-        if query_type not in QUERY_TYPES:
-            raise ValueError(f"图谱检索类型必须是：{', '.join(QUERY_TYPES)}。")
         return RequestSpec(
             operation,
             "GET",
@@ -262,7 +259,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--status", default="active", help="实体状态筛选")
     parser.add_argument("--entity-id", help="实体或项目实体 ID")
     parser.add_argument("--project-entity-id", help="代码图谱所属项目实体 ID")
-    parser.add_argument("--query-type", help=f"代码图谱检索类型：{', '.join(QUERY_TYPES)}")
+    parser.add_argument("--query-type", help="代码图谱检索类型，例如符号、调用者、被调用者、影响范围或架构")
     parser.add_argument("--all", action="store_true", help="仅归档扫描：扫描全部已归档会话")
     parser.add_argument("--no-embeddings", action="store_true", help="写入时不刷新嵌入")
     parser.add_argument("--no-graph", action="store_true", help="写入时不同步图投影")

@@ -29,7 +29,7 @@ description: 按需查询本机个人事实资产记忆系统的记忆、项目�
 | 查看最近盘点记录 | python scripts/memory_api.py inventory-status |
 | 查看归档扫描状态 | python scripts/memory_api.py archive-status |
 | 查询代码图谱状态 | python scripts/memory_api.py code-graph-status |
-| 检索代码图谱 | python scripts/memory_api.py code-graph-search --project-entity-id "项目实体 ID" --query-type architecture |
+| 检索代码图谱 | python scripts/memory_api.py code-graph-search --project-entity-id "项目实体 ID" --query-type "架构" |
 
 代码图谱尚未建立索引时，必须明确返回“尚未建图”；不得调用模型猜测代码结构。codebase-memory 的独立状态不因本 Skill 而改变。
 
