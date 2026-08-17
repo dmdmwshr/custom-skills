@@ -1,4 +1,4 @@
-"""不连接真实服务的个人记忆 API 适配器测试。"""
+"""不连接真实服务的个人事实记忆 API 适配器测试。"""
 
 from __future__ import annotations
 
@@ -45,70 +45,40 @@ class MemoryApiMappingTests(unittest.TestCase):
         spec = memory_api.build_request(memory_api.parse_args(argv))
         self.assertEqual(spec.method, method)
         self.assertEqual(spec.path, path)
-        self.assertEqual(
-            {key: [str(item) for item in value] for key, value in (query or {}).items()},
-            {
-                key: [str(item) for item in value]
-                for key, value in parse_qs(
-                    urlparse(
-                        f"http://invalid{spec.path}?{memory_api.urlencode(spec.query or {}, doseq=True)}"
-                    ).query,
-                    keep_blank_values=True,
-                ).items()
-            },
+        actual_query = parse_qs(
+            urlparse(f"http://invalid{spec.path}?{memory_api.urlencode(spec.query or {}, doseq=True)}").query,
+            keep_blank_values=True,
         )
+        self.assertEqual(query or {}, actual_query)
         self.assertEqual(spec.body, body)
 
-    def test_all_read_mappings(self) -> None:
+    def test_read_mappings_and_history_filters(self) -> None:
         cases = [
-            (["readiness"], "GET", "/readiness", {}, None),
-            (["health"], "GET", "/health", {}, None),
             (["overview"], "GET", "/overview", {}, None),
-            (["search", "--query", "消防"], "GET", "/memory/search", {"query": ["消防"], "limit": ["20"]}, None),
-            (["list-entities"], "GET", "/entities", {"status": ["active"], "limit": ["200"], "offset": ["0"]}, None),
-            (["entity-context", "--entity-id", "entity/1"], "GET", "/entities/entity%2F1", {}, None),
-            (["list-projects"], "GET", "/projects", {}, None),
-            (["project-context", "--entity-id", "project/1"], "GET", "/projects/project%2F1/context", {}, None),
-            (["inventory-status"], "GET", "/inventory/runs", {"limit": ["30"]}, None),
-            (["archive-status"], "GET", "/chat-archives/status", {}, None),
-            (["code-graph-status"], "GET", "/code-graph/status", {}, None),
             (
-                [
-                    "code-graph-search",
-                    "--project-entity-id",
-                    "project-1",
-                    "--query-type",
-                    "架构",
-                ],
+                ["search", "--query", "消防", "--namespace", "work", "--at", "2026-08-01T00:00:00Z"],
                 "GET",
-                "/code-graph/search",
-                {
-                    "project_entity_id": ["project-1"],
-                    "query_type": ["架构"],
-                    "query": [""],
-                    "limit": ["10"],
-                },
+                "/memory/search",
+                {"query": ["消防"], "limit": ["20"], "namespace": ["work"], "at": ["2026-08-01T00:00:00Z"]},
                 None,
             ),
+            (["entity-context", "--entity-id", "entity/1"], "GET", "/memory/entities/entity%2F1", {}, None),
+            (["project-context", "--entity-id", "project/1"], "GET", "/memory/projects/project%2F1/context", {}, None),
+            (["automation-status"], "GET", "/automation/status", {}, None),
+            (["model-settings"], "GET", "/settings/models", {}, None),
         ]
         for argv, method, path, query, body in cases:
             with self.subTest(argv=argv):
                 self.assert_mapping(argv, method, path, query, body)
 
     def test_two_explicit_write_mappings(self) -> None:
+        self.assert_mapping(["inventory-scan"], "POST", "/inventory/scan")
         self.assert_mapping(
-            ["inventory-scan", "--no-embeddings"],
-            "POST",
-            "/inventory/scan",
-            {},
-            {"refresh_embeddings": False, "sync_graph": True},
-        )
-        self.assert_mapping(
-            ["archive-scan", "--all", "--no-graph"],
+            ["archive-scan", "--all"],
             "POST",
             "/chat-archives/scan",
             {},
-            {"limit": None, "refresh_embeddings": True, "sync_graph": False},
+            {"limit": None},
         )
 
     def test_request_uses_fixed_loopback_api(self) -> None:
@@ -121,15 +91,19 @@ class MemoryApiMappingTests(unittest.TestCase):
         self.assertTrue(request.full_url.startswith(memory_api.API_ROOT))
         self.assertEqual(request.method, "GET")
 
-    def test_preflight_reports_embedding_gap_without_repair(self) -> None:
+    def test_preflight_reports_actual_degradation_without_repair(self) -> None:
         opener = FakeOpener(
             [
-                {"status": "ready", "version": "2.0.0"},
-                {"status": "healthy", "ollama": {"embedding_model_ready": False}},
+                {"status": "ready", "version": "3.0.0"},
+                {
+                    "status": "degraded",
+                    "graphiti": {"reachable": False},
+                    "models": {"embedding_available": False, "primary_available": False},
+                },
             ]
         )
         result = memory_api.preflight(opener=opener)
-        self.assertIn("本地向量模型未就绪", result["notice"])
+        self.assertEqual(len(result["notices"]), 3)
         self.assertEqual(len(opener.requests), 2)
 
 
