@@ -123,6 +123,16 @@ def mark_openpyxl_pending(cell):
     cell.font = openpyxl_pending_font()
 
 
+def clear_openpyxl_pending(cell):
+    fill = cell.fill
+    if fill.fill_type == "solid" and getattr(fill.fgColor, "rgb", None) == PENDING_FILL_RGB:
+        cell.fill = PatternFill(fill_type=None)
+
+
+def product_timeliness_needs_attention(value):
+    return str(value or "").strip() not in {"", "\\"}
+
+
 def excel_mark_pending(cell):
     cell.Interior.Color = 255
     cell.Font.Color = 0
@@ -679,9 +689,19 @@ def mark_pending_office(path, timeliness_by_brigade=None, product_records=None, 
             cell = sheet.cell(target_row, col)
             if timeliness_by_brigade is not None:
                 cell.value = timeliness_by_brigade.get(brigade, "\\")
-            mark_openpyxl_pending(cell)
+            if product_timeliness_needs_attention(cell.value):
+                mark_openpyxl_pending(cell)
+            else:
+                clear_openpyxl_pending(cell)
             cell.alignment = Alignment(wrap_text=True, vertical="top")
-            changed.append({"sheet": sheet.title, "cell": cell.coordinate, "value": cell.value})
+            changed.append(
+                {
+                    "sheet": sheet.title,
+                    "cell": cell.coordinate,
+                    "value": cell.value,
+                    "pending": product_timeliness_needs_attention(cell.value),
+                }
+            )
     workbook.save(path)
     return changed
 

@@ -179,7 +179,7 @@ class MonthlyBulletinRootTests(unittest.TestCase):
         required, actual = root.timeliness_count_from_stats(stats, "经开大队", {"经开大队": 6})
         self.assertEqual((required, actual), (6, None))
 
-    def test_mark_pending_office_marks_product_timeliness_row_red(self):
+    def test_mark_pending_office_marks_only_unfinished_product_timeliness_red(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "office.xlsx"
             wb = Workbook()
@@ -188,6 +188,7 @@ class MonthlyBulletinRootTests(unittest.TestCase):
             ws.cell(2, 4).value = "梁溪大队"
             ws.cell(2, 11).value = "经开大队"
             ws.cell(15, 3).value = "产品工作实效"
+            ws.cell(15, 11).fill = root.openpyxl_pending_fill()
             wb.save(path)
 
             changed = root.mark_pending_office(
@@ -204,6 +205,7 @@ class MonthlyBulletinRootTests(unittest.TestCase):
             self.assertEqual(ws2.cell(15, 11).value, "\\")
             self.assertEqual(ws2.cell(15, 4).fill.fgColor.rgb, "FFFF0000")
             self.assertEqual(ws2.cell(15, 4).font.color.rgb, "FF000000")
+            self.assertNotEqual(ws2.cell(15, 11).fill.fgColor.rgb, "FFFF0000")
             self.assertEqual(len(changed), 2)
 
 

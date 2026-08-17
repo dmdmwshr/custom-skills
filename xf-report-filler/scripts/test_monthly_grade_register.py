@@ -421,6 +421,7 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
             self.assertEqual(ws.cell(3, 2).number_format, mgr.PRODUCT_SCORE_NUMBER_FORMAT)
 
     def test_write_personal_stats_formats_product_and_monitor_scores(self):
+        self.assertEqual(mgr.MONITOR_SCORE_NUMBER_FORMAT, "0.0")
         with tempfile.TemporaryDirectory() as tmp:
             template = Path(tmp) / "个人执法统计表模板.xlsx"
             output = Path(tmp) / "2026年5月个人执法统计表.xlsx"
@@ -465,6 +466,8 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
             self.assertEqual(ws.cell(6, 28).number_format, mgr.MONITOR_SCORE_NUMBER_FORMAT)
 
     def test_write_case_scores_formats_product_and_monitor_scores(self):
+        self.assertEqual(mgr.CASE_SCORE_MONITOR_NUMBER_FORMAT, "0.00")
+
         class FakeCell:
             def __init__(self, value=None):
                 self.Value = value
