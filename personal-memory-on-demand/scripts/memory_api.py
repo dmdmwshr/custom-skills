@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 
 API_ROOT = "http://127.0.0.1:8788/api"
 DEFAULT_TIMEOUT_SECONDS = 20
+ARCHIVE_REBUILD_TIMEOUT_SECONDS = 120
 
 
 class MemoryApiError(RuntimeError):
@@ -200,7 +201,15 @@ def run(args: argparse.Namespace, *, opener: Callable[..., Any] = urlopen) -> di
     return {
         "operation": args.operation,
         "preflight": preflight(opener=opener),
-        "result": request_json(spec, opener=opener),
+        "result": request_json(
+            spec,
+            opener=opener,
+            timeout=(
+                ARCHIVE_REBUILD_TIMEOUT_SECONDS
+                if args.operation == "archive-rebuild"
+                else DEFAULT_TIMEOUT_SECONDS
+            ),
+        ),
     }
 
 

@@ -28,9 +28,11 @@ class FakeOpener:
     def __init__(self, payloads: list[object]) -> None:
         self.payloads = list(payloads)
         self.requests: list[object] = []
+        self.timeouts: list[int] = []
 
     def __call__(self, request: object, *, timeout: int) -> FakeResponse:
         self.requests.append(request)
+        self.timeouts.append(timeout)
         return FakeResponse(self.payloads.pop(0))
 
 
@@ -92,6 +94,25 @@ class MemoryApiMappingTests(unittest.TestCase):
             {},
             {"confirm": "REBUILD_ARCHIVE_FACTS", "primary_only": True},
         )
+
+    def test_archive_rebuild_uses_maintenance_timeout(self) -> None:
+        opener = FakeOpener(
+            [
+                {"status": "ready"},
+                {
+                    "status": "healthy",
+                    "graphiti": {"reachable": True},
+                    "models": {"embedding_available": True, "primary_available": True},
+                },
+                {"status": "queued"},
+            ]
+        )
+        result = memory_api.run(
+            memory_api.parse_args(["archive-rebuild", "--confirm-rebuild"]),
+            opener=opener,
+        )
+        self.assertEqual(result["result"], {"status": "queued"})
+        self.assertEqual(opener.timeouts[-1], memory_api.ARCHIVE_REBUILD_TIMEOUT_SECONDS)
 
     def test_utf8_console_configuration(self) -> None:
         stdout = Mock()
