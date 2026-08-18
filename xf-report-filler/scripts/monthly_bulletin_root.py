@@ -200,6 +200,38 @@ def parse_numbered_tasks(text):
     return tasks
 
 
+def red_text_by_line(text, red_ranges):
+    if not text or not red_ranges:
+        return ""
+    mask = [False] * len(text)
+    for start, end in red_ranges:
+        for index in range(max(0, start), min(len(text), end)):
+            mask[index] = True
+
+    lines = []
+    current = []
+    has_red = False
+    for index, char in enumerate(text):
+        if char in "\r\n":
+            if has_red:
+                line = "".join(current).strip()
+                if line:
+                    lines.append(line)
+            current = []
+            has_red = False
+            continue
+        if mask[index]:
+            current.append(char)
+            has_red = True
+        elif has_red and char.isspace():
+            current.append(char)
+    if has_red:
+        line = "".join(current).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def extract_red_text_map_xlrd(book, sheet, candidates):
     result = {}
     run_map = getattr(sheet, "rich_text_runlist_map", {}) or {}
@@ -212,7 +244,13 @@ def extract_red_text_map_xlrd(book, sheet, candidates):
         red_parts = []
         runs = run_map.get((row, col), [])
         if runs:
-            spans = list(runs) + [(len(text), None)]
+            cell_font_index = book.xf_list[sheet.cell_xf_index(row, col)].font_index
+            spans = []
+            if runs[0][0] > 0:
+                spans.append((0, cell_font_index))
+            spans.extend(runs)
+            spans.append((len(text), None))
+            red_ranges = []
             for index in range(len(spans) - 1):
                 start, font_index = spans[index]
                 end = spans[index + 1][0]
@@ -220,13 +258,14 @@ def extract_red_text_map_xlrd(book, sheet, candidates):
                     continue
                 font = book.font_list[font_index]
                 if _is_red(_xlrd_rgb(book, font.colour_index)):
-                    red_parts.append(text[start:end])
+                    red_ranges.append((start, end))
+            red_text = red_text_by_line(text, red_ranges)
         else:
             xf = book.xf_list[sheet.cell_xf_index(row, col)]
             font = book.font_list[xf.font_index]
             if _is_red(_xlrd_rgb(book, font.colour_index)):
                 red_parts.append(text)
-        red_text = "".join(red_parts).strip()
+            red_text = "".join(red_parts).strip()
         if red_text:
             result[item["cell"]] = red_text
     return result

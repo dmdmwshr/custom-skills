@@ -56,7 +56,11 @@ class MonthlyBulletinRootTests(unittest.TestCase):
         class FakeSheet:
             nrows = 3
             ncols = 5
-            rich_text_runlist_map = {(1, 2): [(0, 1)]}
+            rich_red_prefix = "1、前段红字任务\n2、第二条红字任务"
+            rich_text_runlist_map = {
+                (1, 2): [(0, 1)],
+                (1, 3): [(len(rich_red_prefix), 0)],
+            }
 
             def __init__(self):
                 self.values = {
@@ -67,7 +71,7 @@ class MonthlyBulletinRootTests(unittest.TestCase):
                     (1, 0): "梁溪大队8人",
                     (1, 1): "1、黑字已完成",
                     (1, 2): "1、红字未完成",
-                    (1, 3): "1、普通格不登记",
+                    (1, 3): f"{self.rich_red_prefix}\n3、黑字已完成",
                     (2, 0): "经开大队6人",
                     (2, 1): "1、黄色无红字",
                 }
@@ -76,7 +80,11 @@ class MonthlyBulletinRootTests(unittest.TestCase):
                 return self.values.get((row, col), "")
 
             def cell_xf_index(self, row, col):
-                return 1 if (row, col) in {(1, 1), (1, 2), (2, 1)} else 0
+                if (row, col) in {(1, 1), (1, 2), (2, 1)}:
+                    return 1
+                if (row, col) == (1, 3):
+                    return 2
+                return 0
 
             def sheet_by_name(self, name):
                 return self
@@ -86,6 +94,7 @@ class MonthlyBulletinRootTests(unittest.TestCase):
             xf_list=[
                 SimpleNamespace(background=SimpleNamespace(pattern_colour_index=0), font_index=0),
                 SimpleNamespace(background=SimpleNamespace(pattern_colour_index=1), font_index=0),
+                SimpleNamespace(background=SimpleNamespace(pattern_colour_index=1), font_index=1),
             ],
             font_list=[
                 SimpleNamespace(colour_index=0),
@@ -98,7 +107,7 @@ class MonthlyBulletinRootTests(unittest.TestCase):
             tasks = root.read_work_plan_month_tasks(Path("fake.xls"), 3, blockers)
 
         self.assertEqual(blockers, [])
-        self.assertEqual(tasks["梁溪大队"], ["红字未完成"])
+        self.assertEqual(tasks["梁溪大队"], ["红字未完成", "前段红字任务", "第二条红字任务"])
         self.assertEqual(tasks["经开大队"], [])
 
     def test_read_case_counts_excludes_review_and_counts_unqualified_projects(self):
