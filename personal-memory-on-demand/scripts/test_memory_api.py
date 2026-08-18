@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 import memory_api
@@ -80,6 +81,27 @@ class MemoryApiMappingTests(unittest.TestCase):
             {},
             {"limit": None},
         )
+
+    def test_archive_rebuild_requires_confirmation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "--confirm-rebuild"):
+            memory_api.build_request(memory_api.parse_args(["archive-rebuild"]))
+        self.assert_mapping(
+            ["archive-rebuild", "--confirm-rebuild"],
+            "POST",
+            "/chat-archives/rebuild",
+            {},
+            {"confirm": "REBUILD_ARCHIVE_FACTS", "primary_only": True},
+        )
+
+    def test_utf8_console_configuration(self) -> None:
+        stdout = Mock()
+        stderr = Mock()
+        with patch.object(memory_api.sys, "stdout", stdout), patch.object(
+            memory_api.sys, "stderr", stderr
+        ):
+            memory_api._configure_utf8_stdio()
+        stdout.reconfigure.assert_called_once_with(encoding="utf-8", errors="replace")
+        stderr.reconfigure.assert_called_once_with(encoding="utf-8", errors="replace")
 
     def test_request_uses_fixed_loopback_api(self) -> None:
         opener = FakeOpener([{"status": "ready"}])

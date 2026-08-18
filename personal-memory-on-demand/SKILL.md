@@ -11,7 +11,7 @@ description: 按需查询本机 Graphiti 个人事实记忆系统中的电脑配
 
 - 固定访问 `127.0.0.1:8788`，不连接远程地址，不读取或输出凭据。
 - 每次实际查询前先检查 API 就绪与健康状态。若服务、Graphiti/Neo4j 或固定向量模型不可用，如实报告，不擅自重启服务、切换模型或伪造结果。
-- 普通查询绝不触发写入。只有用户在当前消息明确要求“盘点”或“扫描已归档 Codex 会话并录入”时，才可手动执行对应操作。
+- 普通查询绝不触发写入。只有用户在当前消息明确要求“盘点”“扫描已归档 Codex 会话并录入”或“只重建归档事实”时，才可手动执行对应操作。
 - Windows 计划任务可按既定授权范围自动盘点和扫描；该自动授权不能扩展为交互式手动写入授权。
 - 不提供无来源的直接写入入口，不读取活跃会话，不把助手回答、系统提示、工具结果或终端输出当成用户事实。
 
@@ -45,8 +45,11 @@ description: 按需查询本机 Graphiti 个人事实记忆系统中的电脑配
 | 对当前电脑环境与登记资产执行确定性盘点 | `python scripts/memory_api.py inventory-scan` |
 | 扫描一批已归档用户消息 | `python scripts/memory_api.py archive-scan --limit 10` |
 | 扫描全部已归档用户消息 | `python scripts/memory_api.py archive-scan --all` |
+| 清除并用 Luna 最高思考重建归档用户消息事实 | `python scripts/memory_api.py archive-rebuild --confirm-rebuild` |
 
 盘点不调用生成模型。归档扫描只处理新原子消息哈希；每个事实必须能回到用户原文，并通过类型、关系方向、时间和敏感信息校验。失败任务由系统按退避策略处理，脚本本身不绕过队列补写。
+
+归档重建只在用户当前明确授权后执行。它保留确定性环境、软件、模型、Skill、项目、资产和工作线事实，只清理 `codex_archive` 来源及其归档水位；重建批次强制使用 Luna 最高思考，失败进入重试，不降级到本地模型。命令必须携带 `--confirm-rebuild`，缺少确认时脚本拒绝请求。
 
 ## 验证与维护
 
@@ -56,5 +59,5 @@ description: 按需查询本机 Graphiti 个人事实记忆系统中的电脑配
 
 ## 资源
 
-- `scripts/memory_api.py`：固定回环 API 的只读查询与两类受限手动写入适配器。
+- `scripts/memory_api.py`：固定回环 API 的只读查询、两类增量扫描与受确认保护的归档事实重建适配器。
 - `scripts/test_memory_api.py`：接口映射与授权边界的离线测试。

@@ -21,6 +21,15 @@ class MemoryApiError(RuntimeError):
     """本机记忆 API 无法安全完成请求。"""
 
 
+def _configure_utf8_stdio() -> None:
+    """让 Windows 控制台与 Codex 调用链稳定输出 UTF-8 中文。"""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 @dataclass(frozen=True)
 class RequestSpec:
     operation: str
@@ -111,6 +120,15 @@ def build_request(args: argparse.Namespace) -> RequestSpec:
             "POST",
             "/chat-archives/scan",
             body={"limit": None if args.all else _limit(args.limit, 10, 5000)},
+        )
+    if operation == "archive-rebuild":
+        if not args.confirm_rebuild:
+            raise ValueError("归档事实重建必须显式提供 --confirm-rebuild。")
+        return RequestSpec(
+            operation,
+            "POST",
+            "/chat-archives/rebuild",
+            body={"confirm": "REBUILD_ARCHIVE_FACTS", "primary_only": True},
         )
     raise ValueError(f"不支持的操作：{operation}")
 
@@ -207,6 +225,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "model-settings",
             "inventory-scan",
             "archive-scan",
+            "archive-rebuild",
         ),
     )
     parser.add_argument("--query", help="检索关键词")
@@ -220,15 +239,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--kind", choices=("entity", "relation"), help="本体类别")
     parser.add_argument("--entity-id", help="实体或项目实体 ID")
     parser.add_argument("--all", action="store_true", help="扫描全部已归档用户消息")
+    parser.add_argument(
+        "--confirm-rebuild",
+        action="store_true",
+        help="确认只清除并重建归档用户消息产生的事实",
+    )
     args = parser.parse_args(argv)
     if args.offset < 0:
         parser.error("--offset 不能小于 0。")
     if args.all and args.operation != "archive-scan":
         parser.error("--all 仅可用于 archive-scan。")
+    if args.confirm_rebuild and args.operation != "archive-rebuild":
+        parser.error("--confirm-rebuild 仅可用于 archive-rebuild。")
     return args
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_stdio()
     try:
         output = run(parse_args(argv))
     except (MemoryApiError, ValueError) as exc:
