@@ -11,9 +11,14 @@
 | `work_dir` | 中枢项目内的控制目录 | 业务仓的私有运行目录 |
 | `target_repository` | 业务规则的事实归属 | 私有数据目录 |
 | `session_policy` | 独立持久流或明确的一次性流 | 共享所有业务上下文 |
+| `session_hook` | 该路由固定会话可执行的最小提示入口和动作约束 | 任意消息正文、私有会话键、跨路由 hook |
 | `mobile_channel` | 脱敏的既有通道别名，或 `null` | App ID、令牌、用户标识、会话键 |
 
-一个路由对应一个“业务项目 + 职责”组合。业务代码不复制到控制目录；控制目录只放职责边界、协调说明和可公开的验收材料。
+一个路由对应一个“业务项目 + 职责”组合。业务代码不复制到控制目录；控制目录只放职责边界、固定 prompt hook、协调说明和可公开的验收材料。默认通知 hook 使用 Luna low，通过 `/timer/add` 注入不透明任务并只输出最终通知；授权助手 hook 只处理非交易授权协作，不承担通知发布。
+
+新增绑定的最小控制目录必须包含：`AGENTS.md`（职责和边界）、`SESSION_INITIALIZATION.md`（首次激活说明）以及一个与职责匹配的独立 hook。通知发布使用 `SESSION_NOTIFICATION_HOOK.md`，开发/非交易授权协作使用 `SESSION_DEVELOPMENT_CONTROL_HOOK.md`；不得把两类提示词互换或共用。已有目录或文件必须复用并逐项核对，不得重复添加。
+
+推荐由中枢 `scripts/scaffold_control_route.py` 生成待审查目录和 `ROUTE_MANIFEST.pending.json`。合并公开登记、完成私有绑定后，把新控制目录加入 Codex 桌面 `cc-connect-operations` 项目的源目录：优先使用产品公开项目编辑能力；没有 API 时可在用户已授权本次接入后使用可见桌面交互完成并回读。任何情况下都不得直接编辑 Codex SQLite、索引或会话文件。
 
 即使多个控制子目录被用户添加为同一个 Codex 桌面项目的源目录，每条活动路由的实际 `work_dir` 也必须精确等于自己的控制目录。控制目录是路由身份；`CC_PROJECT` 只用于核对公开项目别名是否一致，不能据此选择路由、覆盖 `work_dir` 或把根目录旧会话认作活动路由。
 
