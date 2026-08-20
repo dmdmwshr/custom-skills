@@ -1,4 +1,4 @@
 interface:
   display_name: "CC-Connect 协作"
-  short_description: "管理跨项目投递、固定会话换代与移动协作"
-  default_prompt: "使用 $cc-connect-collaboration 为业务项目接入受控移动通知，或换代并验证固定会话。"
+  short_description: "管理 cc-connect 固定会话、移动路由换代与跨项目投递"
+  default_prompt: "使用 $cc-connect-collaboration 管理 cc-connect 固定会话或移动路由；普通开发任务接力不使用此 Skill。"

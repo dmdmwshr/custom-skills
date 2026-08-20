@@ -8,6 +8,8 @@
 - 中枢只负责路由、会话提示、绑定代次、投递账本和脱敏回执；不补全事实、不持久化正文。
 - 固定会话只做轻量格式化、引用读取和最终回复，不做交易、账户、授权、下单、撤单或事实升级；会话不得调用 `/send`。
 - 每条路由必须使用自己的控制目录和 prompt hook；不得跨路由复用会话、hook 或幂等键。
+- 每条路由必须在自己的 `work_dir/.codex/hooks.json` 中定义受审 Hook，仅使用 SessionStart 的 `startup`、`resume`、`clear`、`compact` 事件和 `additionalContext`；自动链只允许 `session_agent`，固定会话不得调用 `/send`。
+- 启用前必须通过项目身份和 `.codex/hooks.json` exact hash 两层信任校验，并在设置→Hooks或 CLI `/hooks` 审核；Hook 修改后必须重新审核，禁止 bypass。
 
 ## 最小提示
 
@@ -20,6 +22,8 @@
 3. 立即向中枢原子 claim `publish_nonce`；领取失败时空输出并停止；
 4. 领取成功后只输出已生成的最终通知，由同一 ReplyCtx 自动回发原飞书会话；
 5. 不附加解释、工具过程、第二次发送或凭据。
+
+`connectivity_probe` 只能验证路由、Hook、Timer 和 ReplyCtx 的连通性，不得伪造、推断或发布宏观事实。探针若需要实际飞书外发，必须有当轮用户明确授权；飞书端最终可见性必须由用户确认。
 
 ## 状态与幂等
 
