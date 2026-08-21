@@ -1,12 +1,14 @@
 [project]
 name = "xf-product-case-registry"
-version = "1.3.0"
-description = "消防产品案卷 PDF/截图清点、来源分析、拆分、manifest 生成与接口导入工具"
+version = "1.4.0"
+description = "消防产品案卷浏览器采集、本地整理、PDF 清点与 V2 接口导入工具"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "httpx>=0.28,<0.29",
   "jsonschema>=4.25,<5",
+  "openpyxl>=3.1,<4",
   "pypdf>=6,<7",
+  "tzdata>=2025.2,<2027",
 ]
 
 [dependency-groups]

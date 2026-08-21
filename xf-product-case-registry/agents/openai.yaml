@@ -1,4 +1,4 @@
 interface:
-  display_name: "消防产品案卷 V2 导入"
-  short_description: "按现有 V2 认证契约完成本地案卷整理、核验与四步接口导入"
-  default_prompt: "使用 $xf-product-case-registry 按 V2 契约在 E:\\文件夹\\1、工作\\2、产品科技联网\\1、产品监督\\案卷汇总 的原始案卷和工作区内核对这个消防产品案卷包；不得在系统代码仓库产生案卷工作文件。写入前读取 LOCALAPPDATA 稳定目录中的认证配置并复核账号范围，只在我直接授权后执行四步导入。"
+  display_name: "消防产品案卷采集与 V2 导入"
+  short_description: "从已登录网页采集案卷，在独立工作目录整理、维护水位并完成 V2 导入"
+  default_prompt: "使用 $xf-product-case-registry 提示我手工登录来源系统，按当前配置的工作根增量采集并整理消防产品案卷；先维护 JSON 和 Excel 水位，得到明确生产写入授权后再执行 V2 导入，只有飞牛核验为 VERIFIED 才归档。"

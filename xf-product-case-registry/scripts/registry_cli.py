@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import mimetypes
 import os
@@ -12,7 +13,6 @@ import subprocess
 import sys
 import time
 import tomllib
-import zipfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -22,7 +22,7 @@ import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -323,25 +323,18 @@ def directory_hash(files: list[dict[str, Any]]) -> str:
 def safe_extract_zip(archive: Path, destination: Path) -> None:
     if destination.exists() and any(destination.iterdir()):
         raise RegistryError("ZIP 解压目标非空")
-    destination.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive) as source:
-        for info in source.infolist():
-            relative = safe_relative(info.filename)
-            if stat.S_ISLNK(info.external_attr >> 16):
-                raise RegistryError("ZIP 不允许符号链接")
-            target = (destination / Path(*PurePosixPath(relative).parts)).resolve()
-            if not inside(target, destination):
-                raise RegistryError("ZIP 路径越界")
-            if info.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with source.open(info) as incoming, target.open("xb") as outgoing:
-                shutil.copyfileobj(incoming, outgoing)
+    if destination.exists():
+        destination.rmdir()
+    intake = source_intake_api()
+    try:
+        intake.safe_extract_package(archive, destination)
+    except intake.SourceIntakeError as error:
+        raise RegistryError(str(error)) from error
 
 
 def inventory_command(args: argparse.Namespace) -> None:
     source, work = Path(args.input).resolve(), Path(args.work_dir).resolve()
+    enforce_local_workspace_preflight(args, work, source_path=source)
     if source.is_file() and source.suffix.lower() == ".zip":
         root = work / "source"
         safe_extract_zip(source, root)
@@ -379,10 +372,17 @@ def inventory_command(args: argparse.Namespace) -> None:
             "files": files,
         },
     )
+    update_local_case_waterline(
+        args,
+        work,
+        state="PENDING_ORGANIZATION",
+        local_status="INVENTORIED",
+    )
 
 
 def split_command(args: argparse.Namespace) -> None:
     work, plan = Path(args.work_dir).resolve(), read_json(Path(args.plan).resolve())
+    enforce_local_workspace_preflight(args, work)
     inventory = read_json(work / "inventory.json")
     by_rel = {
         item["relativePath"]: item for item in inventory.get("files", []) if isinstance(item, dict)
@@ -448,6 +448,12 @@ def split_command(args: argparse.Namespace) -> None:
         work / "split-index.json",
         {"splitIndexVersion": 4, "generatedAt": utc_now(), "items": result},
     )
+    update_local_case_waterline(
+        args,
+        work,
+        state="ORGANIZING",
+        local_status="ORGANIZING",
+    )
 
 
 def ocr_command(args: argparse.Namespace) -> None:
@@ -455,6 +461,7 @@ def ocr_command(args: argparse.Namespace) -> None:
         Path(args.work_dir).resolve(),
         read_json(Path(args.work_dir).resolve() / "inventory.json"),
     )
+    enforce_local_workspace_preflight(args, work)
     output = Path(args.output_dir).resolve()
     if not inside(output, work):
         raise RegistryError("OCR 输出必须位于 work-dir 内")
@@ -520,6 +527,12 @@ def ocr_command(args: argparse.Namespace) -> None:
     write_json(
         work / "ocr-result.json",
         {"engine": "MinerU-Docker", "completedAt": utc_now(), "mappings": mappings},
+    )
+    update_local_case_waterline(
+        args,
+        work,
+        state="ORGANIZING",
+        local_status="ORGANIZING",
     )
 
 
@@ -934,6 +947,10 @@ def compose_command(args: argparse.Namespace) -> None:
         read_json(Path(args.case_data).resolve()),
         read_json(Path(args.work_dir).resolve() / "inventory.json"),
     )
+    project_no = (
+        data.get("case", {}).get("projectNo") if isinstance(data.get("case"), dict) else None
+    )
+    enforce_local_workspace_preflight(args, work, project_no)
     inventory_hash = inventory.get("packageSha256")
     if not isinstance(inventory_hash, str) or not SHA256.fullmatch(inventory_hash):
         raise RegistryError("inventory.packageSha256 不合法")
@@ -1008,6 +1025,13 @@ def compose_command(args: argparse.Namespace) -> None:
         raise RegistryError("compose 校验失败：\n- " + "\n- ".join(errors))
     write_json(work / "manifest.json", manifest)
     write_json(work / "upload-map.json", {"files": upload})
+    update_local_case_waterline(
+        args,
+        work,
+        state="PENDING_UPLOAD",
+        local_status="READY_FOR_UPLOAD",
+        project_no=manifest["case"]["projectNo"],
+    )
 
 
 def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
@@ -1971,30 +1995,425 @@ def load_inputs(manifest_path: str, map_path: str) -> tuple[Path, dict[str, Any]
     return path, manifest, upload
 
 
+def complete_verified_upload_state(
+    state_path: Path,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    upload: dict[str, Any],
+    origin: str,
+    identity: dict[str, str | None],
+    verification: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Close a clean finalized V6 state after a standalone successful verify."""
+
+    if not state_path.exists():
+        return None
+    state = read_json(state_path)
+    # Old states remain eligible for read-only remote verification, but they are
+    # never upgraded or archived implicitly.
+    if state.get("stateVersion") != 6:
+        return state
+    validate_upload_state(state)
+    if state["status"] not in {"FINALIZED_UNVERIFIED", "VERIFIED"}:
+        return state
+    projection = files_projection(manifest, upload)
+    binding_digest = immutable_manifest_binding(manifest, projection)
+    if (
+        state.get("origin") != origin
+        or state.get("manifestSha256") != file_sha256(manifest_path)
+        or state.get("packageSha256") != manifest.get("packageSha256")
+        or state.get("projectNo") != manifest.get("case", {}).get("projectNo")
+        or state.get("brigadeCode") != manifest.get("case", {}).get("brigadeCode")
+        or state.get("filesProjection") != projection
+        or state.get("immutableBindingDigest") != binding_digest
+    ):
+        raise RegistryError("verify 成功，但 upload-state V6 与当前清单或目标不一致，未收口")
+    require_same_state_identity(state, identity)
+    if state["status"] == "FINALIZED_UNVERIFIED":
+        state.update(
+            {
+                "status": "VERIFIED",
+                "verification": verification,
+                "verifiedAt": utc_now(),
+            }
+        )
+        validate_upload_state(state)
+        write_json(state_path, state)
+    return state
+
+
+def archive_verified_state(
+    args: argparse.Namespace,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    state: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not state or state.get("status") != "VERIFIED" or getattr(args, "no_archive", False):
+        return None
+    resolved = resolve_manifest_workspace(args, manifest_path, manifest)
+    if resolved is None:
+        return None
+    workspace, layout = resolved
+    try:
+        return workspace.archive_verified_case(
+            layout,
+            manifest["case"]["projectNo"],
+            upload_status="VERIFIED",
+            verification={**state["verification"], "status": "VERIFIED"},
+            manifest_sha256=file_sha256(manifest_path),
+            package_sha256=manifest["packageSha256"],
+            verified_at=state.get("verifiedAt"),
+        )
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(f"服务端核验已完成，但本地归档失败：{error}") from error
+
+
+def resolve_manifest_workspace(
+    args: argparse.Namespace,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    *,
+    require_membership: bool = False,
+) -> tuple[Any, Any] | None:
+    workspace = workspace_api()
+    work_root = getattr(args, "work_root", None)
+    config_path = getattr(args, "workspace_config", None)
+    default_config = workspace.default_workspace_config_path()
+    if work_root is None and config_path is None and not default_config.exists():
+        if require_membership:
+            raise RegistryError("正式上传前必须先配置 workspace.toml 或显式指定 --work-root")
+        return None
+    try:
+        _config, layout = workspace.resolve_workspace(
+            work_root=work_root,
+            config_path=config_path,
+            create_layout=False,
+        )
+        active_case_dir = layout.work_case_dir(manifest["case"]["projectNo"])
+        if not inside(manifest_path, active_case_dir):
+            if require_membership or work_root is not None or config_path is not None:
+                raise RegistryError("当前 manifest 不在选定工作根的项目工作区，拒绝更新水位或归档")
+            return None
+        return workspace, layout
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(f"无法安全解析当前案卷的工作根：{error}") from error
+
+
+def enforce_upload_workspace_preflight(
+    args: argparse.Namespace,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+) -> None:
+    """Reject out-of-workspace production uploads before authentication."""
+
+    if not getattr(args, "workspace_required", False):
+        # Keep the pre-1.4 in-process function contract for callers that invoke
+        # upload_command directly. Every real 1.4 CLI upload sets this marker.
+        return
+    resolve_manifest_workspace(args, manifest_path, manifest, require_membership=True)
+
+
+def update_case_waterline(
+    args: argparse.Namespace,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    *,
+    state: str,
+    upload: dict[str, Any],
+    nas_verification: dict[str, Any] | None = None,
+    error_summary: str | None = None,
+) -> dict[str, Any] | None:
+    resolved = resolve_manifest_workspace(args, manifest_path, manifest)
+    if resolved is None:
+        return None
+    workspace, layout = resolved
+    try:
+        return workspace.upsert_case(
+            layout,
+            manifest["case"]["projectNo"],
+            state=state,
+            upload=upload,
+            **({"nasVerification": nas_verification} if nas_verification is not None else {}),
+            errorSummary=error_summary,
+        )
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(f"业务操作状态已变更，但案卷水位更新失败：{error}") from error
+
+
+def mark_uploading(
+    args: argparse.Namespace,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+) -> None:
+    update_case_waterline(
+        args,
+        manifest_path,
+        manifest,
+        state="UPLOADING",
+        upload={"status": "UPLOADING", "startedAt": utc_now()},
+        nas_verification={"status": "NOT_STARTED"},
+        error_summary=None,
+    )
+
+
+def mark_verified_pending_archive(
+    args: argparse.Namespace,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    state: dict[str, Any],
+) -> None:
+    verification = state.get("verification")
+    if state.get("status") != "VERIFIED" or not isinstance(verification, dict):
+        return
+    update_case_waterline(
+        args,
+        manifest_path,
+        manifest,
+        state="VERIFIED_PENDING_ARCHIVE",
+        upload={"status": "VERIFIED", "finalizedAt": state.get("finalizedAt")},
+        nas_verification={**verification, "status": "VERIFIED"},
+        error_summary=None,
+    )
+
+
+def archive_result_fields(result: dict[str, Any] | None) -> dict[str, Any]:
+    if result is None:
+        return {}
+    fields: dict[str, Any] = {"archive": result}
+    excel_error = result.get("waterlineXlsxError")
+    if isinstance(excel_error, str) and excel_error:
+        fields["warning"] = f"案卷已完成归档，但 Excel 水位表导出失败：{excel_error}"
+    return fields
+
+
+def mark_awaiting_nas(
+    args: argparse.Namespace,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    state: dict[str, Any],
+    error_summary: str,
+) -> None:
+    update_case_waterline(
+        args,
+        manifest_path,
+        manifest,
+        state="UPLOADED_AWAITING_NAS",
+        upload={
+            "status": "FINALIZED_UNVERIFIED",
+            "finalizedAt": state.get("finalizedAt"),
+        },
+        nas_verification={"status": "PENDING"},
+        error_summary=error_summary,
+    )
+
+
+def mark_verification_failure(
+    args: argparse.Namespace,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    state: dict[str, Any],
+    error_summary: str,
+) -> None:
+    update_case_waterline(
+        args,
+        manifest_path,
+        manifest,
+        state="NEEDS_MANUAL_REVIEW",
+        upload={
+            "status": "FINALIZED_UNVERIFIED",
+            "finalizedAt": state.get("finalizedAt"),
+        },
+        nas_verification={"status": "FAILED"},
+        error_summary=error_summary,
+    )
+
+
+def verification_error_is_waiting(error: RegistryError | str) -> bool:
+    message = str(error)
+    if message.startswith(("飞牛落盘核验中：", "飞牛正式库不可用：", "飞牛正式库暂不可用：")):
+        return True
+    if message.startswith("文件取回未完成："):
+        return message.rsplit("：", 1)[-1] in {"PENDING", "PROCESSING", "OFFLINE"}
+    return message.startswith(
+        (
+            "发起文件取回时网络异常",
+            "读取文件取回进度时网络异常",
+            "文件取回等待超时",
+            "文件需要先从飞牛取回",
+            "文件取回后仍无法下载",
+            "下载文件时网络异常",
+        )
+    )
+
+
+def mark_verification_error(
+    args: argparse.Namespace,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    state: dict[str, Any],
+    error: RegistryError,
+) -> None:
+    if verification_error_is_waiting(error):
+        mark_awaiting_nas(args, manifest_path, manifest, state, str(error))
+    else:
+        mark_verification_failure(args, manifest_path, manifest, state, str(error))
+
+
+def mark_upload_conflict(
+    args: argparse.Namespace,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    state: dict[str, Any],
+) -> None:
+    summary = state.get("finalizeSummary") if isinstance(state.get("finalizeSummary"), dict) else {}
+    update_case_waterline(
+        args,
+        manifest_path,
+        manifest,
+        state="NEEDS_MANUAL_REVIEW",
+        upload={
+            "status": "FINALIZED_WITH_CONFLICTS",
+            "finalizedAt": state.get("finalizedAt"),
+            "created": summary.get("created"),
+            "conflictCount": summary.get("conflictCount"),
+            "skippedCount": summary.get("skippedCount"),
+        },
+        nas_verification={"status": "NOT_STARTED"},
+        error_summary="终结结果包含冲突、跳过项或未新建案卷，需人工处理",
+    )
+
+
+def resolve_local_case_workspace(
+    args: argparse.Namespace,
+    work_dir: Path,
+    project_no: str | None = None,
+) -> tuple[Any, Any, str] | None:
+    workspace = workspace_api()
+    work_root = getattr(args, "work_root", None)
+    config_path = getattr(args, "workspace_config", None)
+    if (
+        work_root is None
+        and config_path is None
+        and not workspace.default_workspace_config_path().exists()
+    ):
+        return None
+    try:
+        _config, layout = workspace.resolve_workspace(
+            work_root=work_root,
+            config_path=config_path,
+            create_layout=False,
+        )
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(f"无法安全解析本地整理工作根：{error}") from error
+    candidate = project_no or work_dir.name
+    if not isinstance(candidate, str) or not PROJECT_NO.fullmatch(candidate):
+        return None
+    expected = layout.work_case_dir(candidate)
+    if work_dir.resolve() != expected.resolve():
+        return None
+    return workspace, layout, candidate
+
+
+def update_local_case_waterline(
+    args: argparse.Namespace,
+    work_dir: Path,
+    *,
+    state: str,
+    local_status: str,
+    project_no: str | None = None,
+) -> None:
+    resolved = resolve_local_case_workspace(args, work_dir, project_no)
+    if resolved is None:
+        return
+    workspace, layout, project = resolved
+    try:
+        workspace.upsert_case(
+            layout,
+            project,
+            state=state,
+            local={"status": local_status},
+            errorSummary=None,
+        )
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(f"本地处理已完成，但案卷水位更新失败：{error}") from error
+
+
+def enforce_local_workspace_preflight(
+    args: argparse.Namespace,
+    work_dir: Path,
+    project_no: str | None = None,
+    source_path: Path | None = None,
+) -> None:
+    """Require real CLI organization writes to stay in the configured case workspace."""
+
+    if not getattr(args, "workspace_required", False):
+        return
+    resolved = resolve_local_case_workspace(args, work_dir, project_no)
+    if resolved is None:
+        raise RegistryError(
+            "本地处理前必须先配置工作根，且 --work-dir 必须精确指向当前工作根的工作区/<项目编号>"
+        )
+    _workspace, layout, project = resolved
+    if source_path is not None and not inside(source_path, layout.pending_case_dir(project)):
+        raise RegistryError("inventory 原始输入必须位于当前工作根的原始案卷/待处理案卷/<项目编号>")
+
+
 def verify_command(args: argparse.Namespace) -> None:
-    _path, manifest, _upload = load_inputs(args.manifest, args.upload_map)
+    path, manifest, upload = load_inputs(args.manifest, args.upload_map)
     api_base, origin = origin_of(args.api_base)
+    state_path = path.parent / "upload-state.json"
+    existing_state = read_json(state_path) if state_path.exists() else {}
     with httpx.Client(
         timeout=httpx.Timeout(args.timeout, read=max(args.timeout, 300.0)), follow_redirects=False
     ) as client:
-        _identity, write_headers = authenticate_client(
+        identity, write_headers = authenticate_client(
             client,
             api_base,
             origin,
             manifest,
             secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
         )
-        verification = verify_with_poll(
-            client,
-            api_base,
-            manifest,
-            write_headers,
-            getattr(args, "deep_content_verify", False),
-            min(max(float(args.timeout), 1.0), 60.0),
-        )
+        try:
+            verification = verify_with_poll(
+                client,
+                api_base,
+                manifest,
+                write_headers,
+                getattr(args, "deep_content_verify", False),
+                min(max(float(args.timeout), 1.0), 60.0),
+            )
+        except RegistryError as error:
+            if existing_state.get("status") == "FINALIZED_UNVERIFIED":
+                mark_verification_error(args, path, manifest, existing_state, error)
+            raise
         if verification is None:
+            if existing_state.get("status") == "FINALIZED_UNVERIFIED":
+                mark_awaiting_nas(
+                    args,
+                    path,
+                    manifest,
+                    existing_state,
+                    "飞牛落盘核验仍在进行，本次等待超时",
+                )
             raise RegistryError("飞牛落盘核验仍在进行，请稍后重新运行 verify")
-        print(json.dumps(verification, ensure_ascii=False))
+        state = complete_verified_upload_state(
+            state_path,
+            path,
+            manifest,
+            upload,
+            origin,
+            identity,
+            verification,
+        )
+        if state and state.get("status") == "VERIFIED":
+            mark_verified_pending_archive(args, path, manifest, state)
+        archive_result = archive_verified_state(args, path, manifest, state)
+        print(
+            json.dumps(
+                {**verification, **archive_result_fields(archive_result)},
+                ensure_ascii=False,
+            )
+        )
 
 
 def verify_with_poll(
@@ -2036,6 +2455,7 @@ def upload_command(args: argparse.Namespace) -> None:
         return
     if not args.finalize:
         raise RegistryError("正式写入必须显式指定 --finalize")
+    enforce_upload_workspace_preflight(args, path, manifest)
     api_base, origin = origin_of(args.api_base)
     manifest_sha, package_sha = file_sha256(path), manifest["packageSha256"]
     brigade_code = manifest["case"]["brigadeCode"]
@@ -2110,8 +2530,9 @@ def upload_command(args: argparse.Namespace) -> None:
                     }
                 )
                 validate_upload_state(state)
+                write_json(state_path, state)
                 if conflict_status == "FINALIZED_WITH_CONFLICTS":
-                    write_json(state_path, state)
+                    mark_upload_conflict(args, path, manifest, state)
                     print(
                         json.dumps(
                             {
@@ -2125,14 +2546,25 @@ def upload_command(args: argparse.Namespace) -> None:
                         )
                     )
                     return
-                verification = verify_with_poll(
-                    client,
-                    api_base,
+                mark_awaiting_nas(
+                    args,
+                    path,
                     manifest,
-                    write_headers,
-                    getattr(args, "deep_content_verify", False),
-                    min(max(float(args.timeout), 1.0), 60.0),
+                    state,
+                    "服务端已终结，等待飞牛落盘核验",
                 )
+                try:
+                    verification = verify_with_poll(
+                        client,
+                        api_base,
+                        manifest,
+                        write_headers,
+                        getattr(args, "deep_content_verify", False),
+                        min(max(float(args.timeout), 1.0), 60.0),
+                    )
+                except RegistryError as error:
+                    mark_verification_error(args, path, manifest, state, error)
+                    raise
                 if verification is not None:
                     state.update(
                         {
@@ -2141,7 +2573,19 @@ def upload_command(args: argparse.Namespace) -> None:
                             "verifiedAt": utc_now(),
                         }
                     )
-                write_json(state_path, state)
+                    validate_upload_state(state)
+                    write_json(state_path, state)
+                else:
+                    mark_awaiting_nas(
+                        args,
+                        path,
+                        manifest,
+                        state,
+                        "飞牛落盘核验仍在进行，本次等待超时",
+                    )
+                if state.get("status") == "VERIFIED":
+                    mark_verified_pending_archive(args, path, manifest, state)
+                archive_result = archive_verified_state(args, path, manifest, state)
                 print(
                     json.dumps(
                         {
@@ -2149,6 +2593,7 @@ def upload_command(args: argparse.Namespace) -> None:
                             "caseId": state["caseId"],
                             "finalize": state.get("finalizeSummary"),
                             "verification": state.get("verification"),
+                            **archive_result_fields(archive_result),
                         },
                         ensure_ascii=False,
                     )
@@ -2198,6 +2643,7 @@ def upload_command(args: argparse.Namespace) -> None:
             }
         validate_upload_state(state)
         write_json(state_path, state)
+        mark_uploading(args, path, manifest)
         projection_by_ref = {item["clientRef"]: item for item in projection}
         for item in manifest["files"]:
             projection_item = projection_by_ref[item["clientRef"]]
@@ -2259,6 +2705,7 @@ def upload_command(args: argparse.Namespace) -> None:
         validate_upload_state(state)
         write_json(state_path, state)
         if conflict_status == "FINALIZED_WITH_CONFLICTS":
+            mark_upload_conflict(args, path, manifest, state)
             print(
                 json.dumps(
                     {
@@ -2272,14 +2719,25 @@ def upload_command(args: argparse.Namespace) -> None:
                 )
             )
             return
-        verification = verify_with_poll(
-            client,
-            api_base,
+        mark_awaiting_nas(
+            args,
+            path,
             manifest,
-            write_headers,
-            getattr(args, "deep_content_verify", False),
-            min(max(float(args.timeout), 1.0), 60.0),
+            state,
+            "服务端已终结，等待飞牛落盘核验",
         )
+        try:
+            verification = verify_with_poll(
+                client,
+                api_base,
+                manifest,
+                write_headers,
+                getattr(args, "deep_content_verify", False),
+                min(max(float(args.timeout), 1.0), 60.0),
+            )
+        except RegistryError as error:
+            mark_verification_error(args, path, manifest, state, error)
+            raise
         if verification is not None:
             state.update(
                 {"status": "VERIFIED", "verification": verification, "verifiedAt": utc_now()}
@@ -2289,6 +2747,16 @@ def upload_command(args: argparse.Namespace) -> None:
             status = "VERIFIED"
         else:
             status = "FINALIZED_UNVERIFIED"
+            mark_awaiting_nas(
+                args,
+                path,
+                manifest,
+                state,
+                "飞牛落盘核验仍在进行，本次等待超时",
+            )
+    if state.get("status") == "VERIFIED":
+        mark_verified_pending_archive(args, path, manifest, state)
+    archive_result = archive_verified_state(args, path, manifest, state)
     print(
         json.dumps(
             {
@@ -2296,6 +2764,7 @@ def upload_command(args: argparse.Namespace) -> None:
                 "caseId": state["caseId"],
                 "finalize": state.get("finalizeSummary"),
                 "verification": state.get("verification"),
+                **archive_result_fields(archive_result),
             },
             ensure_ascii=False,
         )
@@ -2315,6 +2784,214 @@ def validate_command(args: argparse.Namespace) -> None:
     print(json.dumps({"status": "valid"}, ensure_ascii=False))
 
 
+def workspace_api() -> Any:
+    module_name = f"{__package__}.workspace_state" if __package__ else "workspace_state"
+    return importlib.import_module(module_name)
+
+
+def source_intake_api() -> Any:
+    module_name = f"{__package__}.source_intake" if __package__ else "source_intake"
+    return importlib.import_module(module_name)
+
+
+def workspace_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "work_root": getattr(args, "work_root", None),
+        "config_path": getattr(args, "workspace_config", None),
+    }
+
+
+def workspace_configure_command(args: argparse.Namespace) -> None:
+    workspace = workspace_api()
+    try:
+        config = workspace.configure_workspace(
+            work_root=args.work_root,
+            download_dir=getattr(args, "download_dir", None),
+            config_path=getattr(args, "workspace_config", None),
+        )
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    print(
+        json.dumps(
+            {
+                "status": "configured",
+                "workRoot": str(config.work_root),
+                "downloadDir": str(config.download_dir) if config.download_dir else None,
+                "configPath": str(
+                    Path(args.workspace_config).resolve()
+                    if getattr(args, "workspace_config", None)
+                    else workspace.default_workspace_config_path()
+                ),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def workspace_doctor_command(args: argparse.Namespace) -> None:
+    workspace = workspace_api()
+    try:
+        result = workspace.doctor_workspace(**workspace_kwargs(args))
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def ledger_export_command(args: argparse.Namespace) -> None:
+    workspace = workspace_api()
+    try:
+        _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        output = workspace.export_waterline_xlsx(layout)
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps({"status": "exported", "path": str(output)}, ensure_ascii=False))
+
+
+def source_result_summary(result: dict[str, Any]) -> dict[str, Any]:
+    keys = {
+        "schemaVersion",
+        "batchId",
+        "status",
+        "currentRound",
+        "stableRounds",
+        "listResult",
+        "progress",
+        "conflicts",
+        "scope",
+        "listContract",
+        "updatesGlobalWaterline",
+    }
+    return {key: result[key] for key in keys if key in result}
+
+
+def resolve_source_layout(args: argparse.Namespace) -> Any:
+    workspace = workspace_api()
+    try:
+        _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        return layout
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+
+
+def run_source_action(args: argparse.Namespace, action: str, **kwargs: Any) -> None:
+    source = source_intake_api()
+    workspace = workspace_api()
+    try:
+        result = getattr(source, action)(resolve_source_layout(args), **kwargs)
+    except (source.SourceIntakeError, workspace.WorkspaceStateError) as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(source_result_summary(result), ensure_ascii=False))
+
+
+def source_begin_command(args: argparse.Namespace) -> None:
+    source = source_intake_api()
+    workspace = workspace_api()
+    try:
+        _, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        result = source.begin_capture(
+            layout,
+            filter_json=Path(args.filter_json) if getattr(args, "filter_json", None) else None,
+            batch_id=getattr(args, "batch_id", None),
+            origin=args.origin,
+            scope="acceptance" if getattr(args, "acceptance_sample", False) else "all",
+        )
+    except (source.SourceIntakeError, workspace.WorkspaceStateError) as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(source_result_summary(result), ensure_ascii=False))
+
+
+def source_add_page_command(args: argparse.Namespace) -> None:
+    run_source_action(
+        args,
+        "add_page",
+        batch_id=args.batch_id,
+        page=Path(args.page_json),
+        screenshot=Path(args.screenshot) if getattr(args, "screenshot", None) else None,
+        round_no=getattr(args, "round_no", None),
+    )
+
+
+def source_add_detail_command(args: argparse.Namespace) -> None:
+    if not str(args.source_url).strip():
+        raise RegistryError("详情来源地址不能为空")
+    run_source_action(
+        args,
+        "add_detail",
+        batch_id=args.batch_id,
+        rwid=args.rwid,
+        detail=Path(args.detail_json),
+        source_url=getattr(args, "source_url", None),
+        screenshot=Path(args.screenshot) if getattr(args, "screenshot", None) else None,
+    )
+
+
+def source_snapshot_downloads_command(args: argparse.Namespace) -> None:
+    source = source_intake_api()
+    workspace = workspace_api()
+    try:
+        config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        result = source.record_download_baseline(
+            layout,
+            args.batch_id,
+            args.rwid,
+            config.download_dir,
+        )
+    except (source.SourceIntakeError, workspace.WorkspaceStateError) as error:
+        raise RegistryError(str(error)) from error
+    relative = result.get("relativePath")
+    output = (layout.root / relative).resolve() if isinstance(relative, str) else None
+    print(
+        json.dumps(
+            {
+                "status": "captured",
+                "path": str(output) if output is not None else None,
+                "fileCount": len(result.get("files", [])),
+                "fingerprint": result.get("fingerprint"),
+                "rwid": result.get("rwid"),
+                "projectNo": result.get("projectNo"),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def source_attach_package_command(args: argparse.Namespace) -> None:
+    source = source_intake_api()
+    workspace = workspace_api()
+    try:
+        config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        result = source.attach_package(
+            layout,
+            batch_id=args.batch_id,
+            rwid=args.rwid,
+            download_path=Path(args.download),
+            original_name=getattr(args, "original_name", None),
+            project_no=getattr(args, "project_no", None),
+            download_baseline=Path(args.download_baseline),
+            allowed_download_dir=config.download_dir,
+        )
+    except (source.SourceIntakeError, workspace.WorkspaceStateError) as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(source_result_summary(result), ensure_ascii=False))
+
+
+def source_finalize_command(args: argparse.Namespace) -> None:
+    run_source_action(args, "finalize_capture", batch_id=args.batch_id)
+
+
+def add_workspace_resolution_options(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--work-root",
+        help="本次使用的业务工作根；优先于本地 workspace.toml 配置",
+    )
+    command.add_argument(
+        "--workspace-config",
+        help=(
+            "workspace.toml 路径；默认使用 %%LOCALAPPDATA%%/xf-product-case-registry/workspace.toml"
+        ),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="消防产品案卷 CaseImportManifestV2 工具")
     parser.add_argument("--version", action="version", version=VERSION)
@@ -2322,21 +2999,25 @@ def build_parser() -> argparse.ArgumentParser:
     inventory = sub.add_parser("inventory")
     inventory.add_argument("input")
     inventory.add_argument("--work-dir", required=True)
-    inventory.set_defaults(func=inventory_command)
+    add_workspace_resolution_options(inventory)
+    inventory.set_defaults(func=inventory_command, workspace_required=True)
     ocr = sub.add_parser("ocr")
     ocr.add_argument("--work-dir", required=True)
     ocr.add_argument("--output-dir", required=True)
     ocr.add_argument("--relative-path", action="append")
     ocr.add_argument("--timeout", type=int, default=3600)
-    ocr.set_defaults(func=ocr_command)
+    add_workspace_resolution_options(ocr)
+    ocr.set_defaults(func=ocr_command, workspace_required=True)
     split = sub.add_parser("split")
     split.add_argument("--work-dir", required=True)
     split.add_argument("--plan", required=True)
-    split.set_defaults(func=split_command)
+    add_workspace_resolution_options(split)
+    split.set_defaults(func=split_command, workspace_required=True)
     compose = sub.add_parser("compose")
     compose.add_argument("--work-dir", required=True)
     compose.add_argument("--case-data", required=True)
-    compose.set_defaults(func=compose_command)
+    add_workspace_resolution_options(compose)
+    compose.set_defaults(func=compose_command, workspace_required=True)
     validate = sub.add_parser("validate")
     validate.add_argument("--manifest", required=True)
     validate.add_argument("--upload-map")
@@ -2354,6 +3035,87 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     init_auth.set_defaults(func=init_auth_config_command)
+
+    workspace = sub.add_parser("workspace", help="配置或检查业务工作根")
+    workspace_sub = workspace.add_subparsers(dest="workspace_command", required=True)
+    workspace_configure = workspace_sub.add_parser("configure", help="写入稳定的本地工作根配置")
+    workspace_configure.add_argument("--work-root", required=True)
+    workspace_configure.add_argument("--download-dir")
+    workspace_configure.add_argument("--workspace-config")
+    workspace_configure.set_defaults(func=workspace_configure_command)
+    workspace_doctor = workspace_sub.add_parser("doctor", help="只读检查工作根与布局")
+    add_workspace_resolution_options(workspace_doctor)
+    workspace_doctor.set_defaults(func=workspace_doctor_command)
+
+    source = sub.add_parser("source", help="接收已登录浏览器生成的本地采集物")
+    source_sub = source.add_subparsers(dest="source_command", required=True)
+
+    source_begin = source_sub.add_parser("begin", help="创建 BrowserCaptureV1 采集批次")
+    add_workspace_resolution_options(source_begin)
+    source_begin.add_argument(
+        "--filter-json",
+        help="可选的筛选条件 JSON；缺省时生成上海时间本年、全部大队默认筛选",
+    )
+    source_begin.add_argument("--origin", required=True)
+    source_begin.add_argument("--batch-id")
+    source_begin.add_argument(
+        "--acceptance-sample",
+        action="store_true",
+        help="仅做真实单案下载验收；证据留在批次目录，不进入正式水位或待处理案卷",
+    )
+    source_begin.set_defaults(func=source_begin_command)
+
+    source_page = source_sub.add_parser("add-page", help="接收一页列表清单")
+    add_workspace_resolution_options(source_page)
+    source_page.add_argument("--batch-id", required=True)
+    source_page.add_argument("--page-json", required=True)
+    source_page.add_argument("--screenshot", required=True)
+    source_page.add_argument("--round", dest="round_no", type=int, choices=(1, 2, 3))
+    source_page.set_defaults(func=source_add_page_command)
+
+    source_detail = source_sub.add_parser("add-detail", help="接收案卷详情与本地核查截图")
+    add_workspace_resolution_options(source_detail)
+    source_detail.add_argument("--batch-id", required=True)
+    source_detail.add_argument("--rwid", "--record-key", dest="rwid", required=True)
+    source_detail.add_argument("--detail-json", required=True)
+    source_detail.add_argument("--source-url", required=True)
+    source_detail.add_argument("--screenshot", required=True)
+    source_detail.set_defaults(func=source_add_detail_command)
+
+    source_snapshot = source_sub.add_parser(
+        "snapshot-downloads",
+        help="在每个案卷点击打包前保存本次下载基线",
+    )
+    add_workspace_resolution_options(source_snapshot)
+    source_snapshot.add_argument("--batch-id", required=True)
+    source_snapshot.add_argument("--rwid", "--record-key", dest="rwid", required=True)
+    source_snapshot.set_defaults(func=source_snapshot_downloads_command)
+
+    source_package = source_sub.add_parser("attach-package", help="校验、规范命名并绑定已下载 ZIP")
+    add_workspace_resolution_options(source_package)
+    source_package.add_argument("--batch-id", required=True)
+    source_package.add_argument("--rwid", "--record-key", dest="rwid", required=True)
+    source_package.add_argument("--download", required=True)
+    source_package.add_argument("--original-name")
+    source_package.add_argument("--project-no")
+    source_package.add_argument(
+        "--download-baseline",
+        required=True,
+        help="本案点击打包前由 source snapshot-downloads 生成的下载基线 JSON",
+    )
+    source_package.set_defaults(func=source_attach_package_command)
+
+    source_finalize = source_sub.add_parser("finalize", help="收口当前清单扫描轮次或批次进度")
+    add_workspace_resolution_options(source_finalize)
+    source_finalize.add_argument("--batch-id", required=True)
+    source_finalize.set_defaults(func=source_finalize_command)
+
+    ledger = sub.add_parser("ledger", help="管理全局案卷水位表")
+    ledger_sub = ledger.add_subparsers(dest="ledger_command", required=True)
+    ledger_export = ledger_sub.add_parser("export", help="从 JSON 事实源重建 Excel 水位表")
+    add_workspace_resolution_options(ledger_export)
+    ledger_export.set_defaults(func=ledger_export_command)
+
     for name, func in (("upload", upload_command), ("verify", verify_command)):
         command = sub.add_parser(name)
         command.add_argument("--manifest", required=True)
@@ -2373,10 +3135,17 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="显式取回飞牛正文并下载校验内容 SHA-256（默认只核对目录和飞牛落盘证据）",
         )
+        add_workspace_resolution_options(command)
+        command.add_argument(
+            "--no-archive",
+            action="store_true",
+            help="核验成功后不自动收口本地工作目录",
+        )
         command.set_defaults(func=func)
         if name == "upload":
             command.add_argument("--dry-run", action="store_true")
             command.add_argument("--finalize", action="store_true")
+            command.set_defaults(workspace_required=True)
     return parser
 
 

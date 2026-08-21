@@ -11,6 +11,8 @@ import pytest
 from pypdf import PdfWriter
 
 import scripts.registry_cli as cli
+import scripts.source_intake as source
+import scripts.workspace_state as workspace
 from scripts.registry_cli import (
     RegistryError,
     compose_command,
@@ -1215,6 +1217,359 @@ def test_parser_defaults_to_stable_local_auth_config() -> None:
         ]
     )
     assert Path(args.auth_config) == cli.DEFAULT_AUTH_CONFIG
+
+
+def test_real_upload_cli_requires_configured_case_workspace_before_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    manifest_path = tmp_path / "manifest.json"
+    map_path = tmp_path / "upload-map.json"
+    manifest_path.write_text(json.dumps(data), encoding="utf-8")
+    map_path.write_text(json.dumps({"files": {"file:one": str(source)}}), encoding="utf-8")
+    args = cli.build_parser().parse_args(
+        [
+            "upload",
+            "--manifest",
+            str(manifest_path),
+            "--upload-map",
+            str(map_path),
+            "--api-base",
+            "https://registry.example",
+            "--workspace-config",
+            str(tmp_path / "missing-workspace.toml"),
+            "--finalize",
+        ]
+    )
+
+    def unexpected_client(**_kwargs: object) -> None:
+        raise AssertionError("工作根门禁必须早于网络客户端")
+
+    monkeypatch.setattr(cli.httpx, "Client", unexpected_client)
+    with pytest.raises(RegistryError, match="未配置工作根"):
+        upload_command(args)
+
+
+def test_real_upload_cli_rejects_manifest_outside_selected_case_workspace_before_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "business"
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    config_path = tmp_path / "workspace.toml"
+    workspace.configure_workspace(
+        work_root=root,
+        download_dir=downloads,
+        config_path=config_path,
+    )
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    manifest_path = tmp_path / "legacy" / "manifest.json"
+    manifest_path.parent.mkdir()
+    map_path = manifest_path.parent / "upload-map.json"
+    manifest_path.write_text(json.dumps(data), encoding="utf-8")
+    map_path.write_text(json.dumps({"files": {"file:one": str(source)}}), encoding="utf-8")
+    args = cli.build_parser().parse_args(
+        [
+            "upload",
+            "--manifest",
+            str(manifest_path),
+            "--upload-map",
+            str(map_path),
+            "--api-base",
+            "https://registry.example",
+            "--workspace-config",
+            str(config_path),
+            "--finalize",
+        ]
+    )
+
+    def unexpected_client(**_kwargs: object) -> None:
+        raise AssertionError("越界清单必须在网络前被拒绝")
+
+    monkeypatch.setattr(cli.httpx, "Client", unexpected_client)
+    with pytest.raises(RegistryError, match="manifest 不在选定工作根"):
+        upload_command(args)
+
+
+def test_real_compose_cli_updates_case_waterline_to_pending_upload(tmp_path: Path) -> None:
+    root = tmp_path / "business"
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    config_path = tmp_path / "workspace.toml"
+    config = workspace.configure_workspace(
+        work_root=root,
+        download_dir=downloads,
+        config_path=config_path,
+    )
+    layout = workspace.BusinessLayout.from_root(config.work_root)
+    pending = layout.pending_case_dir(PROJECT)
+    pending.mkdir(parents=True)
+    source = pending / "one.pdf"
+    pdf(source)
+    work = layout.work_case_dir(PROJECT)
+    inventory_args = cli.build_parser().parse_args(
+        [
+            "inventory",
+            str(pending),
+            "--work-dir",
+            str(work),
+            "--workspace-config",
+            str(config_path),
+        ]
+    )
+    inventory_command(inventory_args)
+    record = workspace.load_waterline(layout)["cases"][PROJECT]
+    assert record["state"] == "PENDING_ORGANIZATION"
+    assert record["local"]["status"] == "INVENTORIED"
+
+    data = manifest(source)
+    data.pop("packageSha256")
+    data["files"][0].update({"sourceRelativePath": "one.pdf", "relativePath": "normalized/one.pdf"})
+    case_data = work / "case-data.json"
+    case_data.write_text(json.dumps(data), encoding="utf-8")
+    compose_args = cli.build_parser().parse_args(
+        [
+            "compose",
+            "--work-dir",
+            str(work),
+            "--case-data",
+            str(case_data),
+            "--workspace-config",
+            str(config_path),
+        ]
+    )
+    compose_command(compose_args)
+    record = workspace.load_waterline(layout)["cases"][PROJECT]
+    assert record["state"] == "PENDING_UPLOAD"
+    assert record["local"]["status"] == "READY_FOR_UPLOAD"
+
+
+def test_real_inventory_cli_rejects_originals_outside_pending_case(tmp_path: Path) -> None:
+    root = tmp_path / "business"
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    config_path = tmp_path / "workspace.toml"
+    config = workspace.configure_workspace(
+        work_root=root,
+        download_dir=downloads,
+        config_path=config_path,
+    )
+    layout = workspace.BusinessLayout.from_root(config.work_root)
+    source = tmp_path / "external-source"
+    source.mkdir()
+    pdf(source / "one.pdf")
+    work = layout.work_case_dir(PROJECT)
+    args = cli.build_parser().parse_args(
+        [
+            "inventory",
+            str(source),
+            "--work-dir",
+            str(work),
+            "--workspace-config",
+            str(config_path),
+        ]
+    )
+    with pytest.raises(RegistryError, match="原始案卷/待处理案卷"):
+        inventory_command(args)
+    assert not (work / "inventory.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("message", "waiting"),
+    [
+        ("飞牛落盘核验中：file:one", True),
+        ("飞牛正式库暂不可用：file:one", True),
+        ("文件取回等待超时；取回任务仍由服务端保留", True),
+        ("目录 SHA-256 不一致：file:one", False),
+        ("下载 SHA-256 不一致：file:one", False),
+    ],
+)
+def test_verification_error_classification_distinguishes_waiting_from_real_fault(
+    message: str, waiting: bool
+) -> None:
+    assert cli.verification_error_is_waiting(RegistryError(message)) is waiting
+
+
+def test_verified_waterline_stops_at_pending_archive_until_archive_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def capture_update(*_args: object, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(cli, "update_case_waterline", capture_update)
+    cli.mark_verified_pending_archive(
+        argparse.Namespace(),
+        tmp_path / "manifest.json",
+        {"case": {"projectNo": PROJECT}},
+        {
+            "status": "VERIFIED",
+            "finalizedAt": "2026-08-21T00:00:00Z",
+            "verification": {"caseId": "case-id", "filesVerified": 1},
+        },
+    )
+    assert captured["state"] == "VERIFIED_PENDING_ARCHIVE"
+    assert captured["upload"]["status"] == "VERIFIED"
+    assert captured["nas_verification"]["status"] == "VERIFIED"
+    fields = cli.archive_result_fields(
+        {"status": "COMPLETED", "waterlineXlsxError": "Excel 正在被占用"}
+    )
+    assert "waterlineXlsxError" in fields["archive"]
+    assert "Excel 水位表导出失败" in fields["warning"]
+
+
+def test_source_attach_package_parser_accepts_download_baseline_override() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "source",
+            "attach-package",
+            "--batch-id",
+            "batch-1",
+            "--rwid",
+            "fixture-rwid",
+            "--download",
+            "downloads",
+            "--download-baseline",
+            "baseline.json",
+        ]
+    )
+    assert args.download_baseline == "baseline.json"
+
+
+def test_source_begin_parser_supports_isolated_acceptance_sample() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "source",
+            "begin",
+            "--origin",
+            "https://source.example/cases",
+            "--acceptance-sample",
+        ]
+    )
+    assert args.acceptance_sample is True
+
+
+def test_source_attach_package_parser_requires_per_case_download_baseline() -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            [
+                "source",
+                "attach-package",
+                "--batch-id",
+                "batch-1",
+                "--rwid",
+                "fixture-rwid",
+                "--download",
+                "download.zip",
+            ]
+        )
+
+
+def test_source_cli_requires_page_screenshot_detail_url_and_snapshot_rwid() -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            [
+                "source",
+                "add-page",
+                "--batch-id",
+                "batch-1",
+                "--page-json",
+                "page.json",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            [
+                "source",
+                "add-detail",
+                "--batch-id",
+                "batch-1",
+                "--rwid",
+                "fixture-rwid",
+                "--detail-json",
+                "detail.json",
+                "--screenshot",
+                "detail.png",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["source", "snapshot-downloads", "--batch-id", "batch-1"])
+
+
+def test_source_snapshot_downloads_persists_per_case_baseline(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "business"
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    config_path = tmp_path / "workspace.toml"
+    workspace.configure_workspace(
+        work_root=root,
+        download_dir=downloads,
+        config_path=config_path,
+    )
+    begin_args = cli.build_parser().parse_args(
+        [
+            "source",
+            "begin",
+            "--batch-id",
+            "batch-1",
+            "--origin",
+            "http://registry-source.example/#/xfjd/list?runId=secret",
+            "--workspace-config",
+            str(config_path),
+        ]
+    )
+    cli.source_begin_command(begin_args)
+    capsys.readouterr()
+    layout = workspace.BusinessLayout.from_root(root)
+    record = {
+        "RWID": "fixture-rwid",
+        "项目编号": PROJECT,
+        "单位名称": "测试单位",
+    }
+    for round_no in (1, 2):
+        source.add_page(
+            layout,
+            "batch-1",
+            1,
+            [record],
+            1,
+            1,
+            round_no=round_no,
+        )
+        source.finalize_capture(layout, "batch-1")
+    (downloads / "existing.zip").write_bytes(b"baseline fixture")
+    snapshot_args = cli.build_parser().parse_args(
+        [
+            "source",
+            "snapshot-downloads",
+            "--batch-id",
+            "batch-1",
+            "--rwid",
+            "fixture-rwid",
+            "--workspace-config",
+            str(config_path),
+        ]
+    )
+    cli.source_snapshot_downloads_command(snapshot_args)
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "captured"
+    assert output["fileCount"] == 1
+    assert output["rwid"] == "fixture-rwid"
+    assert output["projectNo"] == PROJECT
+    assert Path(output["path"]).is_file()
+    persisted = json.loads(Path(output["path"]).read_text(encoding="utf-8"))
+    assert persisted["batchId"] == "batch-1"
+    assert persisted["rwid"] == "fixture-rwid"
+    assert persisted["projectNo"] == PROJECT
+    assert persisted["consumedAt"] is None
 
 
 def test_default_auth_config_uses_local_app_data(
