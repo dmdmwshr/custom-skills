@@ -29,7 +29,7 @@
 
 至少分别记录 `session_prompt_accepted`、`session_prompt_unverified`、nonce 是否 `claimed`、`session_publish_unverified` 和明确失败。`session_prompt_accepted` 只表示 Timer 被接受；Timer `fired` 但没有 claim 不得记为已发布。claim 表示会话已完成内容生成并开始最终输出，仍不等于飞书送达；没有可信平台回执时总体保持 `delivery_unverified`。
 
-同一 `(route_key, idempotency_key)` 只能产生一次会话提示和一次发布尝试。`/timer/add` POST 一旦开始，任何超时、非 200 或回执异常都视为可能已经创建，不得再次添加 Timer；重复执行只能有一个 nonce claim 成功。未知送达不得自动重发。
+同一 `(route_key, idempotency_key)` 只能产生一次会话提示和一次发布尝试。必须先区分业务投递意图登记与 Timer 创建：投递意图 POST 结果未知时只允许认证 GET 对账，`present/absent/unknown` 均不自动授权再次 POST；既有不确定项进入 `suppressed_unknown`。只有中枢已持久登记该意图并由 worker 开始 `/timer/add` 后，才进入会话提示阶段。`/timer/add` POST 一旦开始，任何超时、非 200 或回执异常都视为可能已经创建，不得再次添加 Timer；重复执行只能有一个 nonce claim 成功。未知送达不得自动重发。
 
 ## 人工回退
 
@@ -38,3 +38,5 @@
 ## 失败关闭
 
 固定会话、工作目录、prompt hook、绑定代次、Agent 模型/推理强度、业务引用或哈希校验失败时停止发布并保留业务待发送项。Luna/low 由固定 cc-connect 项目配置，Timer API 不携带或覆盖模型参数。任何交易、账户、授权、执行、撤单、仓位或真实外发扩权请求均失败关闭。
+
+中枢 `ledger_epoch` 缺失或变化时，业务消费者必须暂停登记与回读推进；不得清空本地状态或从 `absent` 推导重发。人工重登记只允许在当前用户明确指定精确幂等键、并有证据证明该意图和 Timer 均未产生外发后另行执行。

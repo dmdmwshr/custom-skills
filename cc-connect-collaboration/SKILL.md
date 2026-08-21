@@ -26,6 +26,9 @@ description: 统一管理本机 cc-connect 的多项目移动协作，包括独�
 - 每条路由必须有独立控制目录、固定 prompt hook 和明确职责；通知 hook 只允许读取已登记的不透明引用，授权助手 hook 不得被写成通知发布 hook。
 - 每条路由的 `work_dir` 必须独立维护自己的 `.codex/hooks.json`，仅允许受审的 `SessionStart` `startup`、`resume`、`clear`、`compact` 事件，并通过 `additionalContext` 注入固定职责说明；不得跨路由共享或绕过 hook。
 - 自动通知链只允许 `session_agent` 执行；固定会话不得调用 `/send`。启用前必须同时核对项目身份和 exact hook hash，并在设置→Hooks或 CLI `/hooks` 中审核；任何修改后都必须重新审核，审核失败立即停止自动链。
+- 业务项目的自动通知消费者应与 DuckDB、PyArrow、Parquet、WebSocket 等重型数据采集栈隔离为独立轻量进程或任务；数据任务只生成不可变信封，消费者只处理脱敏引用、登记状态和追加回执。两者不得同时消费同一待发送箱。
+- 中枢必须先完成鉴权和静态校验，再原子登记 `registered_held`，随后才异步检查 Hook、UDS、固定会话和 Timer 健康。业务消费者必须锚定中枢返回的 `ledger_epoch`；epoch 缺失或变化时失败关闭。
+- 必须区分“投递意图登记结果未知”和“Timer/会话发布结果未知”。前者只允许认证 GET 对账，既有不确定记录统一进入 `suppressed_unknown`；无论对账结果为 `present`、`absent` 还是 `unknown`，均不得自动再次 POST。后者从 Timer POST 开始即永久禁止自动重建 Timer。
 
 ## 先确认目标与现状
 
@@ -141,6 +144,8 @@ description: 统一管理本机 cc-connect 的多项目移动协作，包括独�
 - `session_prompt_accepted`：Timer 已被 cc-connect 接受，但不等于会话已执行或飞书已发送。
 - `session_prompt_unverified`：Timer POST 结果未知；同一幂等键不得再次创建 Timer。
 - `session_publish_unverified`：固定会话已解析内容并领取一次性发布权、即将输出最终文本；只说明发布尝试已生成，飞书送达和已读仍未知。
+- `registration_unknown`：投递意图 POST 可能已被中枢登记但业务侧未获得可信响应；只做认证对账，不再次 POST。
+- `suppressed_unknown`：历史或当前登记状态无法安全证明“从未登记”；不计入可重试待发送或送达未验证，同一幂等键永久抑制自动重发。
 - `bridge_incompatible`：Bridge 协议探测或兼容性检查失败；只停止依赖 Bridge 的会话换代或绑定变更，不改写会话或私有配置。它不代表已独立验证的原生 UDS 飞书主动文本出口不可用。
 - `consumer_unacknowledged`：中枢已存在候选绑定代次但业务项目尚未确认；保留待发送项，不向新代次投递。
 - `desktop_not_supported`：只表示不支持“不触发 Agent 的纯静默追加”；不得据此绕过默认的固定会话代发流程。

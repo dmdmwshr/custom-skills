@@ -20,9 +20,10 @@ cc-connect 只负责路由、会话、通道、投递账本和脱敏回执。业
 
 | 接口 | 行为 |
 | --- | --- |
-| `GET /v1/routes/{route_key}` | 从中枢运行账本返回脱敏路由状态、`role`、当前 `binding_generation`、`delivery_mode` 与健康结论。 |
-| `POST /v1/delivery-intents` | 接收路由别名、通知引用、事件类型、来源别名、幂等键、内容哈希与过期时间；拒绝消息正文、任意 URL 或未登记来源。 |
-| `GET /v1/deliveries/{idempotency_key}` | 返回该意图创建时的 `delivery_mode`、会话提示、会话发布、移动通道和总体状态。 |
+| `GET /v1/routes/{route_key}` | 从中枢运行账本返回脱敏路由状态、`role`、当前 `binding_generation`、`delivery_mode`、健康结论与不透明 `ledger_epoch`。 |
+| `POST /v1/delivery-intents` | 接收路由别名、通知引用、事件类型、来源别名、幂等键、内容哈希与过期时间；拒绝消息正文、任意 URL 或未登记来源。鉴权和静态校验通过后先原子写入 `registered_held`，重型健康检查只在异步 worker 中进行。 |
+| `GET /v1/deliveries/{idempotency_key}` | 返回该意图创建时的 `delivery_mode`、登记状态、`ledger_epoch`、会话提示、会话发布、移动通道和总体状态。 |
+| `GET /v1/reconciliations/{idempotency_key}` | 使用路由、来源和能力令牌做认证对账，只返回 `present/absent/unknown`、登记状态和 `ledger_epoch`；`resend_allowed` 恒为 `false`。 |
 | `POST /v1/routes/{route_key}/acknowledgements` | 接收业务项目对当前 `binding_generation` 的确认。 |
 
 ### `delivery_mode` 公开枚举
@@ -42,18 +43,18 @@ cc-connect 只负责路由、会话、通道、投递账本和脱敏回执。业
 `POST /v1/delivery-intents` 的 JSON 必须且只能包含下列七个字段：`route_key`、`source`、`event_type`、`notification_ref`、`idempotency_key`、`content_hash`、`expires_at`。`notification_ref` 必须是业务项目定义的受限不透明对象 ID，不能是 URL，也不能承载标题、摘要、正文、深链或其他业务文本；`content_hash` 为投递时临时解析出的完整业务内容的 SHA-256。
 
 - `Authorization: Bearer <本机私有能力令牌>` 证明来源能力。令牌只由同宿主受限运行边界直接提供，不能写入 Git、业务配置、日志、任务参数、环境变量、业务数据库或回复。
-- `GET /v1/deliveries/{idempotency_key}` 还必须带 `X-Route-Key` 和 `X-CC-Source`，两者与已登记路由/来源一致。
+- `GET /v1/deliveries/{idempotency_key}` 与 `GET /v1/reconciliations/{idempotency_key}` 都必须带 `X-Route-Key` 和 `X-CC-Source`，两者与已登记路由/来源一致。
 - 确认请求正文只能是 `{ "binding_generation": <整数> }`，并带 `X-CC-Source` 与同一能力令牌。既有活动路由只可完成一次初始业务确认；后继代次只能在中枢已记录桌面响应核验后确认。
-- 路由读模型至少返回 `state`、`role`、`delivery_mode`、`binding_generation`、`acknowledged_generation`、健康结论及脱敏队列计数；投递读模型分别返回创建时的 `delivery_mode`、`mobile_status`、`desktop_status`、总体状态和错误类别。
+- 路由读模型至少返回 `state`、`role`、`delivery_mode`、`binding_generation`、`acknowledged_generation`、`ledger_epoch`、健康结论及脱敏队列计数；投递读模型分别返回创建时的 `delivery_mode`、`registration_status`、`ledger_epoch`、`mobile_status`、`desktop_status`、总体状态和错误类别。业务侧首次读到 epoch 时建立本地锚点，缺失或变化都必须全局暂停，不能用新值覆盖后继续发送。
 
 对投递意图按 `(route_key, idempotency_key)` 去重。持久投递账本只能保留哈希、状态、时间、错误类别和不透明关联值；内容仅可在一次投递时从业务项目的受控只读来源暂时读取。未知送达状态不得自动重发。
 
 ## 接入与回读流程
 
 1. 业务项目先读取自身规则与唯一计划，确认事件事实、发送条件、去重和当前授权；中枢不代为判断。
-2. 业务项目查询目标路由，确认 `role` 对应的职责、允许事件类型、健康结论与已确认的绑定代次；运行状态不是 `active` 时，只保留业务待发送项。
-3. 业务项目提交不含正文的投递意图。默认由中枢通过 `/timer/add` 向目标固定会话注入不透明任务；该会话的独立 prompt hook 以 Luna low 读取受控引用，只输出最终通知，cc-connect 通过同一 ReplyCtx 自动回发原飞书会话。会话不得调用 `POST /send`；中枢直接 `POST /send` 仅在当前用户明确授权的人工回退中允许，正文只存在于受控读取过程的内存，不得双发同一幂等键。
-4. 业务项目通过投递查询接口回读结果，并只追加自己的送达回执，绝不改写原始待发送对象。
+2. 业务项目查询目标路由，确认 `role` 对应的职责、允许事件类型、健康结论、已确认的绑定代次与 `ledger_epoch`；运行状态不是 `active`、epoch 缺失或 epoch 漂移时，只保留业务待发送项。
+3. 业务项目提交不含正文的投递意图。中枢完成鉴权和静态校验后必须先原子登记 `registered_held`，再由异步 worker 检查 Hook、UDS、固定会话和 Timer 健康；因此健康检查失败不会造成“业务不知道是否已登记”的窗口。默认由中枢通过 `/timer/add` 向目标固定会话注入不透明任务；该会话的独立 prompt hook 以 Luna low 读取受控引用，只输出最终通知，cc-connect 通过同一 ReplyCtx 自动回发原飞书会话。会话不得调用 `POST /send`；中枢直接 `POST /send` 仅在当前用户明确授权的人工回退中允许，正文只存在于受控读取过程的内存，不得双发同一幂等键。
+4. 业务项目通过投递查询接口回读结果，并只追加自己的送达回执，绝不改写原始待发送对象。POST 响应不可信时只调用认证对账接口；`present/absent/unknown` 均不能自动授权重新 POST。历史上已经尝试但无法确定登记结果的项迁移为 `suppressed_unknown`，不计入可重试待发送或送达未验证。
 5. 路由代次变化后，业务项目必须读取新 `binding_generation` 并确认；确认前中枢不得将自动投递指向候选代次。
 
 ## OKXnew 首期示例
@@ -62,7 +63,8 @@ OKXnew 首期使用两个彼此隔离的显示角色：“OKXnew 授权助手（
 
 “OKXnew 消息推送”只登记“已确认宏观发布或修订”的高重要级事件。其不可变 `NotificationEnvelopeV1` 保持原状，并通过关联的投递意图、绑定确认和送达回执接入中枢。
 
-- 数据采集在形成合格宏观信封后异步提交投递意图；桥接不可用不得阻断宏观采集、策略或模拟执行。
+- DATA-01 只负责在形成合格宏观信封后写入不可变待发送箱，不直接调用 cc-connect。独立 AUTO-01 轻量消费者异步提交投递意图并追加回执；它不得导入 DuckDB、PyArrow、Parquet 或 WebSocket 数据栈，使用单实例租约和周期内心跳防止双消费者。桥接不可用不得阻断宏观采集、策略或模拟执行。
+- 轻量消费者复用本机持久 HTTP 客户端，关闭系统代理继承，并为连接、连接池、读写分别设置有界超时。只有连接尚未建立的失败可按同一幂等键有限重试；读超时、协议错误、5xx 或畸形响应都进入 `registration_unknown`，只做 GET 对账。
 - 中枢通过 `/timer/add` 向“OKXnew 消息推送”固定会话注入不透明任务；该会话使用 Luna low 读取登记信封引用，只输出最终通知，由同一 ReplyCtx 自动回发原飞书会话。会话不得调用 `POST /send`；原生直发仅是显式人工回退。
 - 中枢账本分别记录 `session_prompt_accepted`、`session_prompt_unverified`、`session_publish_unverified`、明确失败和总体未知送达；同一任务不得创建第二个 Timer 或备用直发。
 - `session_prompt_accepted` 只表示 Timer 已接受；只有固定会话解析内容并原子领取一次性发布权后，才能进入 `session_publish_unverified`。该状态仍不等于飞书已送达或已读；未知结果不得自动重发。
@@ -73,3 +75,4 @@ OKXnew 首期使用两个彼此隔离的显示角色：“OKXnew 授权助手（
 - 路由、来源、事件类型、幂等键、内容哈希、过期时间或业务确认缺失时，拒绝投递意图并保留业务待发送项。
 - Bridge 协议探测或兼容性检查失败时，只停止依赖 Bridge 的换代与绑定变更。自动通知另行要求回环网关、UDS Timer、私有目标映射、路由工作目录、职责 hook 和固定 Agent 配置全部通过脱敏验证；任何一项失败都停止对应投递，不得改写会话文件、私有配置或业务事实。
 - 任何桥接恢复、路由重绑、实际发送或定时任务创建均需符合当前用户授权和业务仓授权边界；健康查询本身不授权这些变更。
+- 中枢账本重建、缺失或 epoch 变化时，业务消费者必须全局暂停并保留事实与信封；不得把 `absent` 当成自动补发许可。只有当前用户对精确幂等键作出新的人工重登记授权，且已证明所有相关边界都未外发时，才可另行制定恢复动作。
