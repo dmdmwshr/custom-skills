@@ -211,7 +211,12 @@ def detail_for(data: dict[str, object]) -> dict[str, object]:
 
 
 def directory_file(source: Path) -> dict[str, object]:
-    return {"id": "file-id", "sha256": file_sha256(source)}
+    return {
+        "id": "file-id",
+        "sha256": file_sha256(source),
+        "remoteState": "AVAILABLE",
+        "nasVerifiedAt": "2026-08-10T00:00:00.000Z",
+    }
 
 
 def test_explicit_51_slot_map_is_correct() -> None:
@@ -480,7 +485,7 @@ def test_verify_requires_exact_unit_and_brigade(
         "rows": [
             {
                 "slotKey": "OTHER_ATTACHMENT",
-                "children": [{"title": "附件", "files": [{"id": "file-id"}]}],
+                "children": [{"title": "附件", "files": [directory_file(source)]}],
             }
         ]
     }
@@ -580,7 +585,7 @@ def test_verify_uses_long_read_timeout(tmp_path: Path, monkeypatch: pytest.Monke
         "rows": [
             {
                 "slotKey": "OTHER_ATTACHMENT",
-                "children": [{"title": "附件", "files": [{"id": "file-id"}]}],
+                "children": [{"title": "附件", "files": [directory_file(source)]}],
             }
         ]
     }
@@ -678,11 +683,23 @@ def test_finalized_unverified_retries_read_only_and_origin_is_bound(
                 json={"data": [{"id": case_id, "projectNo": PROJECT}] if remote["case"] else []},
             )
         if request.url.path == "/api/v2/import-jobs":
-            return httpx.Response(200, json={"id": "job"})
+            return httpx.Response(
+                200,
+                json={"id": "job", "packageHash": data["packageSha256"], "status": "CREATED"},
+            )
         if request.url.path.endswith("/files"):
-            return httpx.Response(201, json={})
+            return httpx.Response(
+                201,
+                json={
+                    "jobId": "job",
+                    "relativePath": "files/one.pdf",
+                    "sha256": data["files"][0]["sha256"],
+                    "mimeType": "application/pdf",
+                    "sizeBytes": str(source.stat().st_size),
+                },
+            )
         if request.url.path.endswith("/manifest"):
-            return httpx.Response(200, json={})
+            return httpx.Response(200, json={"id": "job", "status": "MANIFEST_RECEIVED"})
         if request.url.path.endswith("/finalize"):
             remote["case"] = True
             return httpx.Response(
@@ -695,6 +712,26 @@ def test_finalized_unverified_retries_read_only_and_origin_is_bound(
                     "conflicts": [],
                     "skipped": [],
                     "serverInternalField": "must-not-persist",
+                },
+            )
+        if request.url.path == "/api/v2/import-jobs/job":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "job",
+                    "packageHash": data["packageSha256"],
+                    "packageName": PROJECT,
+                    "status": "FINALIZED",
+                    "finalizedAt": "2026-08-10T00:00:00Z",
+                    "case": {"projectNo": PROJECT, "brigade": {"routePath": "xishan"}},
+                    "resultSummary": {
+                        "caseId": case_id,
+                        "created": True,
+                        "added": {"products": 0, "slots": 0, "attachments": 1},
+                        "replaced": {"slots": 0},
+                        "conflicts": [],
+                        "skipped": [],
+                    },
                 },
             )
         if request.url.path == f"/api/v2/cases/{case_id}":
@@ -724,7 +761,7 @@ def test_finalized_unverified_retries_read_only_and_origin_is_bound(
                     "rows": [
                         {
                             "slotKey": "OTHER_ATTACHMENT",
-                            "children": [{"title": "附件", "files": [{"id": "file-id"}]}],
+                            "children": [{"title": "附件", "files": [directory_file(source)]}],
                         }
                     ]
                 },
@@ -766,6 +803,9 @@ def test_finalized_unverified_retries_read_only_and_origin_is_bound(
     upload_command(args)
     verified_state = read_json(tmp_path / "upload-state.json")
     assert len(posts) == count and verified_state["status"] == "VERIFIED"
+    upload_command(args)
+    rerun_state = read_json(tmp_path / "upload-state.json")
+    assert len(posts) == count and rerun_state["status"] == "VERIFIED"
     assert set(verified_state["authIdentity"]) == {"digest", "role", "brigadeCode"}
     output = capsys.readouterr().out
     assert "manifestSha256" not in output and "serverInternalField" not in output
@@ -852,7 +892,7 @@ def test_uploading_state_with_existing_case_recovers_without_second_post(
                     "rows": [
                         {
                             "slotKey": "OTHER_ATTACHMENT",
-                            "children": [{"title": "附件", "files": [{"id": "file-id"}]}],
+                            "children": [{"title": "附件", "files": [directory_file(source)]}],
                         }
                     ]
                 },
@@ -872,18 +912,140 @@ def test_uploading_state_with_existing_case_recovers_without_second_post(
             follow_redirects=False,
         ),
     )
+    with pytest.raises(RegistryError, match="旧 V5"):
+        upload_command(
+            argparse.Namespace(
+                manifest=str(manifest_path),
+                upload_map=str(map_path),
+                api_base=origin,
+                auth_config=str(auth_config(tmp_path)),
+                timeout=10.0,
+                dry_run=False,
+                finalize=True,
+            )
+        )
+    assert posts == []
+    assert read_json(tmp_path / "upload-state.json")["status"] == "UPLOADING"
+
+
+@pytest.mark.parametrize("job_status", ["CREATED", "UPLOADING", "MANIFEST_RECEIVED"])
+def test_upload_resumes_all_active_states_with_case_null(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, job_status: str
+) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    manifest_path = tmp_path / "manifest.json"
+    map_path = tmp_path / "map.json"
+    manifest_path.write_text(json.dumps(data), encoding="utf-8")
+    map_path.write_text(json.dumps({"files": {"file:one": str(source)}}), encoding="utf-8")
+    projection = cli.files_projection(data, {"file:one": str(source)})
+    state = {
+        "stateVersion": 6,
+        "status": "UPLOADING",
+        "origin": "https://registry.example",
+        "manifestSha256": cli.file_sha256(manifest_path),
+        "packageSha256": data["packageSha256"],
+        "projectNo": PROJECT,
+        "brigadeCode": "XISHAN",
+        "jobId": "job",
+        "authIdentity": admin_state_identity(),
+        "filesProjection": projection,
+        "immutableBindingDigest": cli.immutable_manifest_binding(data, projection),
+        "uploadedFileRefs": [],
+    }
+    cli.write_json(tmp_path / "upload-state.json", state)
+    final_job = {
+        "id": "job",
+        "packageHash": data["packageSha256"],
+        "packageName": PROJECT,
+        "status": "FINALIZED",
+        "finalizedAt": "2026-08-10T00:00:00Z",
+        "case": {"projectNo": PROJECT, "brigade": {"routePath": "xishan"}},
+        "resultSummary": {
+            "caseId": "11111111-1111-4111-8111-111111111111",
+            "created": True,
+            "added": {"products": 0, "slots": 0, "attachments": 1},
+            "replaced": {"slots": 0},
+            "conflicts": [],
+            "skipped": [],
+        },
+    }
+    jobs = iter(
+        [
+            {
+                "id": "job",
+                "packageHash": data["packageSha256"],
+                "status": job_status,
+                **({"packageName": PROJECT} if job_status == "MANIFEST_RECEIVED" else {}),
+                "case": None,
+            },
+            final_job,
+        ]
+    )
+    monkeypatch.setattr(cli, "get_import_job", lambda *_args, **_kwargs: next(jobs))
+    monkeypatch.setattr(
+        cli,
+        "verify_with_poll",
+        lambda *_args, **_kwargs: {
+            "caseId": "11111111-1111-4111-8111-111111111111",
+            "inspections": 1,
+            "products": 0,
+            "filesVerified": 1,
+        },
+    )
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        auth_response = auth_route(request)
+        if auth_response is not None:
+            return auth_response
+        requests.append(request.url.path)
+        if request.url.path == "/api/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.method == "POST" and request.url.path.endswith("/files"):
+            return httpx.Response(
+                201,
+                json={
+                    "jobId": "job",
+                    "relativePath": "files/one.pdf",
+                    "sha256": data["files"][0]["sha256"],
+                    "mimeType": "application/pdf",
+                    "sizeBytes": str(source.stat().st_size),
+                },
+            )
+        if request.method == "PUT" and request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json={"id": "job", "status": "MANIFEST_RECEIVED"})
+        if request.method == "POST" and request.url.path.endswith("/finalize"):
+            return httpx.Response(200, json=final_job["resultSummary"])
+        raise AssertionError(request.url)
+
+    real = httpx.Client
+    monkeypatch.setattr(
+        cli.httpx,
+        "Client",
+        lambda **kwargs: real(
+            transport=httpx.MockTransport(handler),
+            timeout=kwargs.get("timeout"),
+            headers=kwargs.get("headers"),
+            follow_redirects=False,
+        ),
+    )
     upload_command(
         argparse.Namespace(
             manifest=str(manifest_path),
             upload_map=str(map_path),
-            api_base=origin,
+            api_base="https://registry.example",
             auth_config=str(auth_config(tmp_path)),
             timeout=10.0,
             dry_run=False,
             finalize=True,
         )
     )
-    assert posts == []
+    assert "/api/v2/import-jobs" not in requests
+    assert requests.count("/api/v2/import-jobs/job/files") == 1
+    assert requests.count("/api/v2/import-jobs/job/manifest") == 1
+    assert requests.count("/api/v2/import-jobs/job/finalize") == 1
     assert read_json(tmp_path / "upload-state.json")["status"] == "VERIFIED"
 
 
@@ -1007,6 +1169,37 @@ def test_http_error_does_not_echo_response_body() -> None:
     with pytest.raises(RegistryError) as raised:
         cli.response_json(response, "认证")
     assert str(raised.value) == "认证 失败：HTTP 403"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"message": "manifest 的 repairSiteId 必须为 UUID 或 null"},
+        {"errors": ["文件哈希不一致", "槽位引用缺失"]},
+    ],
+)
+def test_http_error_allows_short_json_validation_hint(payload: dict[str, object]) -> None:
+    response = httpx.Response(400, json=payload)
+    with pytest.raises(RegistryError) as raised:
+        cli.response_json(response, "提交清单")
+    assert "HTTP 400" in str(raised.value)
+    assert "repairSiteId" in str(raised.value) or "槽位引用缺失" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"message": "x" * 241},
+        {"message": {"nested": "not allowed"}},
+        {"message": "C:\\private\\secret.txt"},
+        {"stack": "trace must not leak", "message": "bad"},
+    ],
+)
+def test_http_error_rejects_unsafe_json_error_details(payload: dict[str, object]) -> None:
+    response = httpx.Response(400, json=payload)
+    with pytest.raises(RegistryError) as raised:
+        cli.response_json(response, "提交清单")
+    assert str(raised.value) == "提交清单 失败：HTTP 400"
 
 
 def test_parser_defaults_to_stable_local_auth_config() -> None:
@@ -1262,15 +1455,590 @@ def test_state_v5_is_closed_and_stores_only_identity_digest() -> None:
         "authIdentity": admin_state_identity(),
         "uploadedFileRefs": [],
     }
-    cli.validate_upload_state(state)
     serialized = json.dumps(state)
     assert (
         TEST_USER_ID not in serialized
         and "brigadeId" not in serialized
         and "userId" not in serialized
     )
-    with pytest.raises(RegistryError, match="额外字段"):
-        cli.validate_upload_state({**state, "csrfToken": TEST_CSRF})
+    with pytest.raises(RegistryError, match="旧 V5"):
+        cli.validate_upload_state(state)
+
+
+def test_state_v6_requires_file_projection_and_target_binding() -> None:
+    state = {
+        "stateVersion": 6,
+        "status": "UPLOADING",
+        "origin": "https://registry.example",
+        "manifestSha256": "sha256:" + "1" * 64,
+        "packageSha256": "sha256:" + "2" * 64,
+        "projectNo": PROJECT,
+        "brigadeCode": "XISHAN",
+        "jobId": "job",
+        "authIdentity": {"digest": "sha256:" + "3" * 64, "role": "ADMIN", "brigadeCode": None},
+        "immutableBindingDigest": "sha256:" + "5" * 64,
+        "filesProjection": [
+            {
+                "clientRef": "file:one",
+                "relativePath": "files/one.pdf",
+                "sha256": "sha256:" + "4" * 64,
+                "mimeType": "application/pdf",
+                "pageCount": 1,
+                "sizeBytes": 1,
+            }
+        ],
+        "uploadedFileRefs": [],
+    }
+    cli.validate_upload_state(state)
+    with pytest.raises(RegistryError, match="文件投影"):
+        cli.validate_upload_state({**state, "filesProjection": []})
+
+    with pytest.raises(RegistryError, match="文件投影"):
+        cli.validate_upload_state(
+            {
+                **state,
+                "filesProjection": [
+                    {
+                        **state["filesProjection"][0],
+                        "relativePath": "folder/../one.pdf",
+                    }
+                ],
+            }
+        )
+
+
+def test_files_projection_fills_optional_page_count_and_size(tmp_path: Path) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source, pages=2)
+    data = manifest(source)
+    data["files"][0].pop("pageCount")
+    projection = cli.files_projection(data, {"file:one": str(source)})
+    assert projection == [
+        {
+            "clientRef": "file:one",
+            "relativePath": "files/one.pdf",
+            "sha256": file_sha256(source),
+            "mimeType": "application/pdf",
+            "pageCount": 2,
+            "sizeBytes": source.stat().st_size,
+        }
+    ]
+
+
+def test_immutable_binding_supports_electronic_and_scanned_versions(tmp_path: Path) -> None:
+    first = tmp_path / "one.pdf"
+    second = tmp_path / "two.pdf"
+    pdf(first)
+    pdf(second, pages=2)
+    data = manifest(first)
+    data["files"].append(
+        {
+            "clientRef": "file:two",
+            "relativePath": "files/two.pdf",
+            "sha256": file_sha256(second),
+            "mimeType": "application/pdf",
+        }
+    )
+    data["otherAttachments"] = []
+    data["documentSlots"] = [
+        {
+            "clientRef": "slot:authorization",
+            "slotCode": "AUTHORIZATION_LETTER",
+            "versions": [
+                {"kind": "ELECTRONIC", "fileRef": "file:one"},
+                {"kind": "SCANNED", "fileRef": "file:two"},
+            ],
+        }
+    ]
+    upload = {"file:one": str(first), "file:two": str(second)}
+    assert validate_manifest(data, upload) == []
+    projection = cli.files_projection(data, upload)
+    digest = cli.immutable_manifest_binding(data, projection)
+    assert cli.SHA256.fullmatch(digest)
+
+
+@pytest.mark.parametrize("status", ["CREATED", "UPLOADING", "MANIFEST_RECEIVED"])
+def test_get_import_job_allows_active_production_case_null(status: str) -> None:
+    package_sha = "sha256:" + "a" * 64
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "job",
+                "packageHash": package_sha,
+                "status": status,
+                **({"packageName": PROJECT} if status == "MANIFEST_RECEIVED" else {}),
+                "case": None,
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result = cli.get_import_job(
+            client, "https://registry.example", "job", package_sha, PROJECT, "XISHAN"
+        )
+    assert result["status"] == status
+
+
+@pytest.mark.parametrize(
+    "response, expected",
+    [
+        (
+            httpx.Response(
+                200, json={"id": "job", "packageHash": "sha256:" + "a" * 64, "status": "FAILED"}
+            ),
+            "FAILED",
+        ),
+        (httpx.Response(404, text="not found"), "不存在"),
+    ],
+)
+def test_get_import_job_failed_or_missing_stops_without_guessing(
+    response: httpx.Response, expected: str
+) -> None:
+    package_sha = "sha256:" + "a" * 64
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return response
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(RegistryError, match=expected),
+    ):
+        cli.get_import_job(
+            client, "https://registry.example", "job", package_sha, PROJECT, "XISHAN"
+        )
+
+
+def test_response_error_code_reads_bounded_unread_stream() -> None:
+    class ErrorStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b'{"code":"RECALL_REQUIRED","message":"do not echo"}'
+
+    response = httpx.Response(
+        409,
+        headers={"content-type": "application/json"},
+        stream=ErrorStream(),
+    )
+    assert cli.response_error_code(response) == "RECALL_REQUIRED"
+    response.close()
+
+    class HugeStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"{" + b"x" * (cli.MAX_ERROR_RESPONSE_BYTES + 1)
+
+    huge = httpx.Response(
+        409,
+        headers={"content-type": "application/json"},
+        stream=HugeStream(),
+    )
+    assert cli.response_error_code(huge) is None
+    huge.close()
+
+
+def test_repair_site_id_contract_is_preserved_and_enforced(tmp_path: Path) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    valid = manifest(source)
+    valid["initialInspection"]["products"] = [
+        {
+            "clientRef": "product:one",
+            "name": "产品",
+            "maintenance": "YES",
+            "repairSiteId": "11111111-1111-4111-8111-111111111111",
+        }
+    ]
+    assert validate_manifest(valid, {"file:one": str(source)}) == []
+
+    invalid_uuid = json.loads(json.dumps(valid))
+    invalid_uuid["initialInspection"]["products"][0]["repairSiteId"] = "not-a-uuid"
+    assert any("repairSiteId" in error for error in validate_manifest(invalid_uuid))
+
+    invalid_maintenance = json.loads(json.dumps(valid))
+    invalid_maintenance["initialInspection"]["products"][0]["maintenance"] = "NO"
+    assert any("maintenance" in error for error in validate_manifest(invalid_maintenance))
+
+    no_repair_site = json.loads(json.dumps(valid))
+    no_repair_site["initialInspection"]["products"][0]["repairSiteId"] = None
+    no_repair_site["initialInspection"]["products"][0]["maintenance"] = "UNKNOWN"
+    assert validate_manifest(no_repair_site, {"file:one": str(source)}) == []
+
+    uppercase_uuid = json.loads(json.dumps(valid))
+    uppercase_uuid["initialInspection"]["products"][0]["repairSiteId"] = (
+        "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+    )
+    assert any("repairSiteId" in error for error in validate_manifest(uppercase_uuid))
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("name", " 产品"),
+        ("modelSpec", " "),
+        ("nominalProducer", "生产企业 "),
+        ("location", "位置" + "x" * 300),
+        ("problemDescription", "问题" + "x" * 2000),
+    ],
+)
+def test_product_text_fields_are_trimmed_nonempty_and_bounded(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    product = {"clientRef": "product:one", "name": "产品"}
+    data["initialInspection"]["products"] = [product]
+    product[field] = value
+    errors = validate_manifest(data)
+    assert any(field in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "created, conflict_count, skipped_count",
+    [(True, 1, 0), (True, 0, 1), (False, 0, 0)],
+)
+def test_finalize_conflicts_are_closed_non_verified_state(
+    created: bool, conflict_count: int, skipped_count: int
+) -> None:
+    state = {
+        "stateVersion": 6,
+        "status": "FINALIZED_WITH_CONFLICTS",
+        "origin": "https://registry.example",
+        "manifestSha256": "sha256:" + "1" * 64,
+        "packageSha256": "sha256:" + "2" * 64,
+        "projectNo": PROJECT,
+        "brigadeCode": "XISHAN",
+        "jobId": "job",
+        "authIdentity": admin_state_identity(),
+        "immutableBindingDigest": "sha256:" + "5" * 64,
+        "filesProjection": [
+            {
+                "clientRef": "file:one",
+                "relativePath": "files/one.pdf",
+                "sha256": "sha256:" + "4" * 64,
+                "mimeType": "application/pdf",
+                "pageCount": 1,
+                "sizeBytes": 1,
+            }
+        ],
+        "uploadedFileRefs": [],
+        "caseId": "11111111-1111-4111-8111-111111111111",
+        "finalizedAt": "2026-08-10T00:00:00Z",
+        "finalizeSummary": {
+            "caseId": "11111111-1111-4111-8111-111111111111",
+            "created": created,
+            "addedProducts": 0,
+            "addedSlots": 0,
+            "addedAttachments": 0,
+            "replacedSlots": 0,
+            "conflictCount": conflict_count,
+            "skippedCount": skipped_count,
+        },
+    }
+    cli.validate_upload_state(state)
+    with pytest.raises(RegistryError, match="不得进入 VERIFIED"):
+        cli.validate_upload_state(
+            {**state, "status": "VERIFIED", "verification": {}, "verifiedAt": "now"}
+        )
+
+
+def test_one_untitled_attachment_is_allowed_but_multiple_are_not(tmp_path: Path) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    data["otherAttachments"][0].pop("title")
+    assert validate_manifest(data, {"file:one": str(source)}) == []
+    second = json.loads(json.dumps(data["otherAttachments"][0]))
+    second["clientRef"] = "attachment:two"
+    data["otherAttachments"].append(second)
+    assert any("多个无 title" in error for error in validate_manifest(data))
+    titled = manifest(source)
+    titled["otherAttachments"][0]["title"] = " 附件"
+    assert any("title" in error for error in validate_manifest(titled))
+    titled["otherAttachments"][0]["title"] = "x" * 301
+    assert any("title" in error for error in validate_manifest(titled))
+
+
+def test_verify_recalls_remote_only_file_before_hash_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    detail = detail_for(data)
+    directory = {
+        "rows": [
+            {
+                "slotKey": "OTHER_ATTACHMENT",
+                "children": [{"title": "附件", "files": [directory_file(source)]}],
+            }
+        ]
+    }
+    statuses = iter(["PENDING", "PROCESSING", "READY"])
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        auth_response = auth_route(request)
+        if auth_response is not None:
+            return auth_response
+        seen.append(request)
+        if request.url.path == "/api/v2/cases":
+            return httpx.Response(200, json={"data": [{"id": detail["id"], "projectNo": PROJECT}]})
+        if request.url.path == f"/api/v2/cases/{detail['id']}":
+            return httpx.Response(200, json=detail)
+        if request.url.path == f"/api/v2/cases/{detail['id']}/directory":
+            return httpx.Response(200, json=directory)
+        if request.url.path == "/api/v2/files/file-id":
+            if sum(1 for item in seen if item.url.path == request.url.path) == 1:
+                return httpx.Response(409, json={"code": "RECALL_REQUIRED", "message": "secret"})
+            return httpx.Response(200, content=source.read_bytes())
+        if request.url.path == "/api/v2/files/file-id/recall":
+            assert request.method == "POST"
+            assert request.headers["origin"] == "https://registry.example"
+            assert request.headers["x-product-case-client"] == "web-v2"
+            assert request.headers["x-csrf-token"] == TEST_CSRF
+            return httpx.Response(
+                200, json={"recallId": "recall-1", "fileId": "file-id", "status": "PENDING"}
+            )
+        if request.url.path == "/api/v2/file-recalls/recall-1":
+            assert request.method == "GET"
+            assert "x-csrf-token" not in request.headers
+            return httpx.Response(
+                200, json={"recallId": "recall-1", "fileId": "file-id", "status": next(statuses)}
+            )
+        raise AssertionError(request.url)
+
+    monkeypatch.setattr(cli, "RECALL_POLL_INTERVAL_SECONDS", 0.0)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result = cli.verify_with_client(
+            client,
+            "https://registry.example",
+            data,
+            {
+                "Origin": "https://registry.example",
+                "X-Product-Case-Client": "web-v2",
+                "X-CSRF-Token": TEST_CSRF,
+            },
+            True,
+        )
+    assert result["filesVerified"] == 1
+
+
+def test_default_verify_stops_on_missing_flynn_landed_evidence(tmp_path: Path) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    directory = {
+        "rows": [
+            {
+                "slotKey": "OTHER_ATTACHMENT",
+                "children": [
+                    {
+                        "title": "附件",
+                        "files": [
+                            {
+                                "id": "file-id",
+                                "sha256": file_sha256(source),
+                                "remoteState": "PENDING",
+                                "nasVerifiedAt": None,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    with (
+        verify_client(source, detail_for(data), directory) as client,
+        pytest.raises(RegistryError, match="飞牛落盘核验中"),
+    ):
+        cli.verify_with_client(client, "https://registry.example", data)
+
+
+def test_verify_allows_server_derived_empty_recheck_for_initial_failure(tmp_path: Path) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    data["initialInspection"]["products"] = [
+        {
+            "clientRef": "product:one",
+            "name": "产品",
+            "method": "ONSITE",
+            "result": "UNQUALIFIED",
+            "problemDescription": "问题",
+        }
+    ]
+    assert validate_manifest(data, {"file:one": str(source)}) == []
+    detail = detail_for(data)
+    detail["inspections"].append({"id": "derived-recheck", "stage": "RECHECK", "products": []})
+    detail["inspections"][0]["products"][0].update(
+        {"method": "ONSITE", "result": "UNQUALIFIED", "problemDescription": "问题"}
+    )
+    directory = {
+        "rows": [
+            {
+                "slotKey": "OTHER_ATTACHMENT",
+                "children": [{"title": "附件", "files": [directory_file(source)]}],
+            }
+        ]
+    }
+    with verify_client(source, detail, directory) as client:
+        result = cli.verify_with_client(client, "https://registry.example", data)
+    assert result["inspections"] == 2
+
+
+def test_verify_uses_effective_reinspection_result_for_derived_recheck(tmp_path: Path) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    data["initialInspection"]["products"] = [
+        {
+            "clientRef": "product:one",
+            "name": "产品",
+            "method": "SAMPLING",
+            "result": "QUALIFIED",
+            "reinspectionApplied": "YES",
+            "reinspectionResult": "UNQUALIFIED",
+        }
+    ]
+    detail = detail_for(data)
+    detail["inspections"].append({"id": "derived-recheck", "stage": "RECHECK", "products": []})
+    detail["inspections"][0]["products"][0].update(
+        {
+            "method": "SAMPLING",
+            "result": "QUALIFIED",
+            "reinspectionApplied": "YES",
+            "reinspectionResult": "UNQUALIFIED",
+        }
+    )
+    directory = {
+        "rows": [
+            {
+                "slotKey": "OTHER_ATTACHMENT",
+                "children": [{"title": "附件", "files": [directory_file(source)]}],
+            }
+        ]
+    }
+    with verify_client(source, detail, directory) as client:
+        result = cli.verify_with_client(client, "https://registry.example", data)
+    assert result["inspections"] == 2
+
+    negative = json.loads(json.dumps(data))
+    negative["initialInspection"]["products"][0].update(
+        {"result": "UNQUALIFIED", "reinspectionResult": "QUALIFIED"}
+    )
+    negative_detail = detail_for(negative)
+    negative_detail["inspections"].append(
+        {"id": "derived-recheck", "stage": "RECHECK", "products": []}
+    )
+    negative_detail["inspections"][0]["products"][0].update(
+        {"method": "SAMPLING", "result": "UNQUALIFIED", "reinspectionResult": "QUALIFIED"}
+    )
+    with (
+        verify_client(source, negative_detail, directory) as client,
+        pytest.raises(RegistryError, match="实际检查数量"),
+    ):
+        cli.verify_with_client(client, "https://registry.example", negative)
+
+
+def test_deep_download_streams_and_enforces_size_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "MAX_DEEP_VERIFY_BYTES", 4)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"12345",
+            headers={"Content-Length": "5"},
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(RegistryError, match="大小限制"),
+    ):
+        cli.download_verified_file(
+            client,
+            "https://registry.example",
+            "file-id",
+            "sha256:" + "0" * 64,
+            {"Origin": "https://registry.example", "X-CSRF-Token": TEST_CSRF},
+            "file:one",
+        )
+
+
+def test_deep_download_non_recall_conflict_is_not_hash_mismatch() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"code": "OTHER_CONFLICT", "message": "busy"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(RegistryError, match="HTTP 409"),
+    ):
+        cli.download_verified_file(
+            client,
+            "https://registry.example",
+            "file-id",
+            "sha256:" + "0" * 64,
+            {"Origin": "https://registry.example", "X-CSRF-Token": TEST_CSRF},
+            "file:one",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("sha256", "sha256:" + "0" * 64, "目录 SHA-256"),
+        ("remoteState", None, "飞牛正式库"),
+        ("nasVerifiedAt", None, "飞牛落盘核验中"),
+    ],
+)
+def test_default_verify_requires_complete_attachment_evidence(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    evidence = directory_file(source)
+    evidence[field] = value
+    directory = {
+        "rows": [
+            {
+                "slotKey": "OTHER_ATTACHMENT",
+                "children": [{"title": "附件", "files": [evidence]}],
+            }
+        ]
+    }
+    with (
+        verify_client(source, detail_for(data), directory) as client,
+        pytest.raises(RegistryError, match=message),
+    ):
+        cli.verify_with_client(client, "https://registry.example", data)
+
+
+@pytest.mark.parametrize("status", ["OFFLINE", "FAILED"])
+def test_recall_terminal_status_does_not_become_hash_mismatch(
+    status: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/recall"):
+            return httpx.Response(
+                200, json={"recallId": "recall-1", "fileId": "file-id", "status": status}
+            )
+        raise AssertionError(request.url)
+
+    monkeypatch.setattr(cli, "RECALL_POLL_INTERVAL_SECONDS", 0.0)
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(RegistryError, match=f"{status}"),
+    ):
+        cli.recall_until_ready(
+            client,
+            "https://registry.example",
+            "file-id",
+            {
+                "Origin": "https://registry.example",
+                "X-Product-Case-Client": "web-v2",
+                "X-CSRF-Token": TEST_CSRF,
+            },
+        )
 
 
 def test_finalize_summary_whitelists_only_boolean_and_counts() -> None:

@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import tomllib
 import zipfile
 from datetime import UTC, datetime
@@ -21,7 +22,7 @@ import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -47,6 +48,9 @@ SYSTEM_POWERSHELL = Path(shutil.which("pwsh.exe") or "__missing_pwsh__")
 MINERU_SCRIPT = Path(r"D:\Program_Files\MinerU-Docker\run-mineru-docker.ps1")
 SCHEMA_PATH = SKILL_ROOT / "references" / "CaseImportManifestV2.schema.json"
 PROJECT_NO = re.compile(r"^\d{8}[A-Z]\d{9}$")
+UUID = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
 SHA256 = re.compile(r"^sha256:[a-f0-9]{64}$")
 CLIENT_REF = re.compile(r"^[a-z][a-z0-9:_-]{0,159}$")
 BRIGADES = {"JIANGYIN", "YIXING", "LIANGXI", "XISHAN", "HUISHAN", "BINHU", "XINWU", "JINGKAI"}
@@ -58,6 +62,11 @@ METHODS, RESULTS, TRI = (
 )
 ACCESS = {"CCC", "TECHNICAL_APPRAISAL", "NOT_APPLICABLE", "UNKNOWN"}
 VERSIONS = {"ELECTRONIC", "SCANNED"}
+RECALL_STATUSES = {"READY", "PENDING", "PROCESSING", "OFFLINE", "FAILED"}
+RECALL_POLL_INTERVAL_SECONDS = 2.0
+RECALL_MAX_POLLS = 30
+MAX_DEEP_VERIFY_BYTES = 100 * 1024 * 1024
+MAX_ERROR_RESPONSE_BYTES = 16 * 1024
 
 # Explicit production fixed-slot map: code -> (multiplicity, stage).
 SLOT_META: dict[str, tuple[str, str | None]] = {
@@ -260,6 +269,7 @@ def safe_relative(value: str) -> str:
         not normalized
         or normalized.startswith("/")
         or re.match(r"^[A-Za-z]:/", normalized)
+        or "." in parts
         or ".." in parts
         or "\0" in normalized
     ):
@@ -626,6 +636,7 @@ def validate_manifest(
         errors.append("case.criminalCaseOverride 必须为布尔值")
     inspections: dict[str, str] = {}
     products: dict[str, tuple[str, dict[str, Any]]] = {}
+    product_identities: set[tuple[str, str, str]] = set()
 
     def inspect(value: Any, stage: str, label: str) -> None:
         item = only_keys(value, {"clientRef", "stage", "inspectionDate", "products"}, label, errors)
@@ -654,6 +665,7 @@ def validate_manifest(
                     "result",
                     "onlineSale",
                     "maintenance",
+                    "repairSiteId",
                     "marketAccessMode",
                     "problemDescription",
                     "reinspectionApplied",
@@ -667,10 +679,31 @@ def validate_manifest(
                 errors.append("产品 clientRef 重复或不合法")
             else:
                 products[product_ref] = (stage, product)
-            for key in ("name", "modelSpec", "nominalProducer", "location", "problemDescription"):
-                if key in product and not text(product[key]):
-                    errors.append(f"产品 {key} 必须为文本")
-            if not text(product.get("name")) or not product["name"].strip():
+            product_identity = (
+                stage,
+                str(product.get("name", "")).strip(),
+                str(product.get("modelSpec", "")).strip(),
+            )
+            if product_identity in product_identities:
+                errors.append("同一检查中产品名称和型号重复，远端核验会产生歧义")
+            else:
+                product_identities.add(product_identity)
+            field_limits = {
+                "name": 300,
+                "modelSpec": 300,
+                "nominalProducer": 300,
+                "location": 300,
+                "problemDescription": 2000,
+            }
+            for key, limit in field_limits.items():
+                if key not in product:
+                    continue
+                value = product[key]
+                if not isinstance(value, str) or value != value.strip() or not value:
+                    errors.append(f"产品 {key} 必须是已 trim 且非空的文本")
+                elif len(value) > limit:
+                    errors.append(f"产品 {key} 长度不得超过 {limit} 个字符")
+            if not isinstance(product.get("name"), str) or not product["name"].strip():
                 errors.append("产品名称不能为空")
             if "method" in product and product["method"] not in METHODS:
                 errors.append("产品 method 不合法")
@@ -683,6 +716,16 @@ def validate_manifest(
                     errors.append(f"产品 {key} 不合法")
             if "marketAccessMode" in product and product["marketAccessMode"] not in ACCESS:
                 errors.append("产品 marketAccessMode 不合法")
+            if "repairSiteId" in product:
+                repair_site_id = product["repairSiteId"]
+                if repair_site_id is not None and (
+                    not isinstance(repair_site_id, str)
+                    or not UUID.fullmatch(repair_site_id)
+                    or repair_site_id != repair_site_id.lower()
+                ):
+                    errors.append("产品 repairSiteId 必须为规范小写 UUID 或 null")
+                if repair_site_id is not None and product.get("maintenance") != "YES":
+                    errors.append("填写 repairSiteId 时 maintenance 必须为 YES")
             if (
                 product.get("result") == "UNQUALIFIED"
                 and not str(product.get("problemDescription", "")).strip()
@@ -719,10 +762,12 @@ def validate_manifest(
         else:
             refs.add(file_ref)
         try:
+            if text(path) and ("\\" in path or "//" in path):
+                raise RegistryError("路径包含不允许的分隔符")
             path = safe_relative(path) if text(path) else ""
         except RegistryError:
             path = ""
-        if not path or not path.endswith(".pdf") or path in paths:
+        if not path or not path.lower().endswith(".pdf") or path in paths:
             errors.append("文件 relativePath 必须唯一安全 PDF")
         else:
             paths.add(path)
@@ -842,21 +887,43 @@ def validate_manifest(
     )
     if not isinstance(root.get("otherAttachments", []), list):
         errors.append("otherAttachments 必须是数组")
+    attachment_refs: set[str] = set()
+    attachment_titles: set[str] = set()
+    missing_attachment_titles = 0
     for attachment in attachments:
         attachment = only_keys(
             attachment, {"clientRef", "slotCode", "title", "fileRef"}, "otherAttachment", errors
         )
         file_ref = attachment.get("fileRef")
-        if not ref(attachment.get("clientRef")) or attachment.get("slotCode") != "OTHER_ATTACHMENT":
+        attachment_ref = attachment.get("clientRef")
+        if (
+            not ref(attachment_ref)
+            or attachment_ref in attachment_refs
+            or attachment.get("slotCode") != "OTHER_ATTACHMENT"
+        ):
             errors.append("其他附件不合法")
-        if "title" in attachment and not text(attachment["title"]):
-            errors.append("其他附件 title 必须为文本")
+        else:
+            attachment_refs.add(attachment_ref)
+        title = attachment.get("title")
+        normalized_title = title.strip() if isinstance(title, str) else None
+        if "title" in attachment and (
+            not isinstance(title, str) or title != normalized_title or not 1 <= len(title) <= 300
+        ):
+            errors.append("其他附件 title 必须是已 trim 且长度为 1 至 300 的文本")
+        if not normalized_title:
+            missing_attachment_titles += 1
+        elif normalized_title in attachment_titles:
+            errors.append("其他附件 title 不能重复，避免核验歧义")
+        else:
+            attachment_titles.add(normalized_title)
         if file_ref not in refs:
             errors.append("其他附件引用未知文件")
         elif file_ref in used:
             errors.append("同一 fileRef 不得复用")
         else:
             used.add(file_ref)
+    if missing_attachment_titles > 1:
+        errors.append("多个无 title 的其他附件会导致核验歧义")
     errors.extend(f"文件 {item} 未被引用" for item in refs - used)
     return errors
 
@@ -947,7 +1014,10 @@ def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
     if not 200 <= response.status_code < 300:
         # Never echo a response body here. Authentication and validation responses
         # may contain data that must not be copied into terminals, logs, or task output.
-        raise RegistryError(f"{label} 失败：HTTP {response.status_code}")
+        message = safe_error_message(response)
+        auth_error = label.startswith("登录") or label.startswith("读取登录会话")
+        suffix = f"：{message}" if message and not auth_error else ""
+        raise RegistryError(f"{label} 失败：HTTP {response.status_code}{suffix}")
     try:
         value = response.json()
     except ValueError as error:
@@ -957,10 +1027,66 @@ def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
     return value
 
 
+def safe_error_message(response: httpx.Response) -> str | None:
+    """Allow only short, non-sensitive validation hints from JSON errors."""
+    value = limited_json_value(response)
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {
+        "statusCode",
+        "message",
+        "error",
+        "code",
+        "errors",
+    }:
+        return None
+    raw: Any = value.get("message", value.get("errors"))
+    parts = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+    if not parts or len(parts) > 8 or any(not isinstance(item, str) for item in parts):
+        return None
+    cleaned: list[str] = []
+    sensitive = re.compile(
+        r"(?:password|passwd|cookie|csrf|token|secret|stack|trace|internal|session|bearer|[A-Za-z]:\\|\\\\|/(?:[^\s；，。]+)|https?://|\b(?:select|insert|update|delete|drop|alter|from|where)\b|\b(?:id|jobid|userid|fileid|caseid)\s*[:=]|[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
+        re.IGNORECASE,
+    )
+    for item in parts:
+        if (
+            not 1 <= len(item) <= 240
+            or any(ord(char) < 32 for char in item)
+            or sensitive.search(item)
+        ):
+            return None
+        cleaned.append(item)
+    return "；".join(cleaned)
+
+
+def limited_json_value(response: httpx.Response) -> Any | None:
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        return None
+    body = bytearray()
+    try:
+        for chunk in response.iter_bytes(4096):
+            body.extend(chunk)
+            if len(body) > MAX_ERROR_RESPONSE_BYTES:
+                return None
+        return json.loads(bytes(body))
+    except (ValueError, UnicodeError, httpx.HTTPError, httpx.ResponseNotRead):
+        return None
+
+
 def origin_of(api_base: str) -> tuple[str, str]:
     parsed = urlsplit(api_base)
-    if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
-        raise RegistryError("api-base 必须是无查询串的 HTTPS 地址")
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RegistryError("api-base 必须是无用户信息、路径、查询串的 HTTPS 地址")
     return api_base.rstrip("/"), f"{parsed.scheme}://{parsed.netloc}"
 
 
@@ -1086,6 +1212,94 @@ def require_same_state_identity(state: dict[str, Any], identity: dict[str, str |
         raise RegistryError("当前登录身份与 upload-state 绑定身份不一致；禁止切换身份续传")
 
 
+def files_projection(manifest: dict[str, Any], upload: dict[str, Any]) -> list[dict[str, Any]]:
+    projection: list[dict[str, Any]] = []
+    for item in sorted(manifest["files"], key=lambda value: value["clientRef"]):
+        source = upload.get(item["clientRef"])
+        if not isinstance(source, str):
+            raise RegistryError(f"文件投影缺少本地来源：{item['clientRef']}")
+        source_path = Path(source)
+        actual_sha256, actual_page_count = pdf_info(source_path)
+        if actual_sha256 != item["sha256"] or (
+            "pageCount" in item and actual_page_count != item["pageCount"]
+        ):
+            raise RegistryError(f"文件投影与本地 PDF 不一致：{item['clientRef']}")
+        projection.append(
+            {
+                key: item[key]
+                for key in ("clientRef", "relativePath", "sha256", "mimeType", "pageCount")
+                if key in item
+            }
+            | {"pageCount": actual_page_count, "sizeBytes": source_path.stat().st_size}
+        )
+    return projection
+
+
+def immutable_manifest_binding(manifest: dict[str, Any], projection: list[dict[str, Any]]) -> str:
+    inspections = []
+    for key in ("initialInspection", "recheckInspection"):
+        inspection = manifest.get(key)
+        if isinstance(inspection, dict):
+            inspections.append(
+                {
+                    "clientRef": inspection.get("clientRef"),
+                    "stage": inspection.get("stage"),
+                    "products": sorted(
+                        product.get("clientRef")
+                        for product in inspection.get("products", [])
+                        if isinstance(product, dict)
+                    ),
+                }
+            )
+    slots = [
+        {
+            "clientRef": slot.get("clientRef"),
+            "slotCode": slot.get("slotCode"),
+            "owner": {
+                "inspectionRef": slot.get("inspectionRef"),
+                "productRef": slot.get("productRef"),
+                "notificationTarget": slot.get("notificationTarget"),
+            },
+            "versions": sorted(
+                (
+                    {
+                        "kind": version.get("kind"),
+                        "fileRef": version.get("fileRef"),
+                    }
+                    for version in slot.get("versions", [])
+                    if isinstance(version, dict)
+                ),
+                key=lambda item: (item["kind"], item["fileRef"]),
+            ),
+        }
+        for slot in manifest.get("documentSlots", [])
+        if isinstance(slot, dict)
+    ]
+    attachments = [
+        {
+            "clientRef": attachment.get("clientRef"),
+            "slotCode": attachment.get("slotCode"),
+            "fileRef": attachment.get("fileRef"),
+        }
+        for attachment in manifest.get("otherAttachments", [])
+        if isinstance(attachment, dict)
+    ]
+    binding = {
+        "schemaVersion": manifest.get("schemaVersion"),
+        "packageSha256": manifest.get("packageSha256"),
+        "case": {
+            "projectNo": manifest.get("case", {}).get("projectNo"),
+            "brigadeCode": manifest.get("case", {}).get("brigadeCode"),
+        },
+        "inspections": sorted(inspections, key=lambda item: (item["stage"], item["clientRef"])),
+        "documentSlots": sorted(slots, key=lambda item: item["clientRef"]),
+        "otherAttachments": sorted(attachments, key=lambda item: item["clientRef"]),
+        "filesProjection": projection,
+    }
+    canonical = json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 STATE_BASE_KEYS = {
     "stateVersion",
     "status",
@@ -1093,8 +1307,11 @@ STATE_BASE_KEYS = {
     "manifestSha256",
     "packageSha256",
     "projectNo",
+    "brigadeCode",
     "jobId",
     "authIdentity",
+    "filesProjection",
+    "immutableBindingDigest",
     "uploadedFileRefs",
 }
 STATE_OPTIONAL_KEYS = {"caseId", "finalizedAt", "finalizeSummary", "verification", "verifiedAt"}
@@ -1103,26 +1320,72 @@ STATE_OPTIONAL_KEYS = {"caseId", "finalizedAt", "finalizeSummary", "verification
 def validate_upload_state(state: dict[str, Any]) -> None:
     if not state:
         return
+    if state.get("stateVersion") == 5:
+        raise RegistryError("现有 upload-state 是旧 V5；不得自动续传，请改用 verify 只读核验")
     extra = set(state) - STATE_BASE_KEYS - STATE_OPTIONAL_KEYS
     missing = STATE_BASE_KEYS - set(state)
-    if extra or missing or state.get("stateVersion") != 5:
-        raise RegistryError("upload-state V5 字段不完整、包含额外字段或版本不受支持")
+    if extra or missing or state.get("stateVersion") != 6:
+        raise RegistryError("upload-state V6 字段不完整、包含额外字段或版本不受支持")
     status = state.get("status")
-    if status not in {"UPLOADING", "FINALIZED_UNVERIFIED", "VERIFIED"}:
-        raise RegistryError("upload-state V5 状态无效")
+    if status not in {
+        "UPLOADING",
+        "FINALIZED_UNVERIFIED",
+        "FINALIZED_WITH_CONFLICTS",
+        "VERIFIED",
+    }:
+        raise RegistryError("upload-state V6 状态无效")
     if (
         not isinstance(state.get("origin"), str)
         or not SHA256.fullmatch(str(state.get("manifestSha256")))
         or not SHA256.fullmatch(str(state.get("packageSha256")))
         or not isinstance(state.get("projectNo"), str)
         or not PROJECT_NO.fullmatch(state["projectNo"])
+        or state.get("brigadeCode") not in BRIGADES
         or not isinstance(state.get("jobId"), str)
         or not state.get("jobId")
+        or not isinstance(state.get("filesProjection"), list)
+        or not SHA256.fullmatch(str(state.get("immutableBindingDigest")))
         or not isinstance(state.get("uploadedFileRefs"), list)
         or any(not isinstance(item, str) for item in state["uploadedFileRefs"])
         or len(set(state["uploadedFileRefs"])) != len(state["uploadedFileRefs"])
     ):
-        raise RegistryError("upload-state V5 基础字段无效")
+        raise RegistryError("upload-state V6 基础字段无效")
+    if not state["filesProjection"]:
+        raise RegistryError("upload-state V6 文件投影无效")
+    projection_refs: set[str] = set()
+    for item in state["filesProjection"]:
+        if not isinstance(item, dict) or set(item) != {
+            "clientRef",
+            "relativePath",
+            "sha256",
+            "mimeType",
+            "pageCount",
+            "sizeBytes",
+        }:
+            raise RegistryError("upload-state V6 文件投影无效")
+        if (
+            not ref(item.get("clientRef"))
+            or item["clientRef"] in projection_refs
+            or not isinstance(item.get("relativePath"), str)
+            or not SHA256.fullmatch(str(item.get("sha256")))
+            or item.get("mimeType") != "application/pdf"
+            or not isinstance(item.get("pageCount"), int)
+            or isinstance(item.get("pageCount"), bool)
+            or item["pageCount"] < 1
+            or not isinstance(item.get("sizeBytes"), int)
+            or isinstance(item.get("sizeBytes"), bool)
+            or item["sizeBytes"] < 1
+        ):
+            raise RegistryError("upload-state V6 文件投影无效")
+        try:
+            normalized_path = safe_relative(item["relativePath"])
+        except RegistryError as exc:
+            raise RegistryError("upload-state V6 文件投影无效") from exc
+        if normalized_path != item["relativePath"] or not normalized_path.lower().endswith(".pdf"):
+            raise RegistryError("upload-state V6 文件投影无效")
+        projection_refs.add(item["clientRef"])
+    if set(state["uploadedFileRefs"]) - projection_refs:
+        raise RegistryError("upload-state V6 已上传引用超出文件投影")
     identity = state.get("authIdentity")
     if (
         not isinstance(identity, dict)
@@ -1136,10 +1399,12 @@ def validate_upload_state(state: dict[str, Any]) -> None:
         or (identity.get("role") == "ADMIN" and identity.get("brigadeCode") is not None)
         or (identity.get("role") == "BRIGADE" and not identity.get("brigadeCode"))
     ):
-        raise RegistryError("upload-state V5 身份摘要无效")
+        raise RegistryError("upload-state V6 身份摘要无效")
+    if identity.get("role") == "BRIGADE" and identity.get("brigadeCode") != state["brigadeCode"]:
+        raise RegistryError("upload-state V6 大队与身份摘要不一致")
     if status == "UPLOADING" and set(state) != STATE_BASE_KEYS:
         raise RegistryError("UPLOADING 状态包含不允许的完成字段")
-    if status in {"FINALIZED_UNVERIFIED", "VERIFIED"}:
+    if status in {"FINALIZED_UNVERIFIED", "FINALIZED_WITH_CONFLICTS", "VERIFIED"}:
         if not isinstance(state.get("caseId"), str) or not isinstance(
             state.get("finalizedAt"), str
         ):
@@ -1148,7 +1413,7 @@ def validate_upload_state(state: dict[str, Any]) -> None:
         if status == "VERIFIED" and summary is None:
             summary = None
         elif not isinstance(summary, dict):
-            raise RegistryError("upload-state V5 的 finalizeSummary 无效")
+            raise RegistryError("upload-state V6 的 finalizeSummary 无效")
         if summary is not None:
             if set(summary) != {
                 "caseId",
@@ -1160,21 +1425,29 @@ def validate_upload_state(state: dict[str, Any]) -> None:
                 "conflictCount",
                 "skippedCount",
             }:
-                raise RegistryError("upload-state V5 的 finalizeSummary 无效")
+                raise RegistryError("upload-state V6 的 finalizeSummary 无效")
             if summary.get("caseId") != state["caseId"] or not isinstance(
                 summary.get("created"), bool
             ):
-                raise RegistryError("upload-state V5 的 finalizeSummary 身份无效")
+                raise RegistryError("upload-state V6 的 finalizeSummary 身份无效")
             for key in set(summary) - {"caseId", "created"}:
                 value = summary[key]
                 if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                    raise RegistryError("upload-state V5 的 finalizeSummary 计数无效")
-    if status == "FINALIZED_UNVERIFIED" and set(state) != STATE_BASE_KEYS | {
+                    raise RegistryError("upload-state V6 的 finalizeSummary 计数无效")
+            if status == "VERIFIED" and (
+                not summary["created"]
+                or summary["conflictCount"] > 0
+                or summary["skippedCount"] > 0
+            ):
+                raise RegistryError("存在冲突或跳过项时不得进入 VERIFIED")
+    if status in {"FINALIZED_UNVERIFIED", "FINALIZED_WITH_CONFLICTS"} and set(
+        state
+    ) != STATE_BASE_KEYS | {
         "caseId",
         "finalizedAt",
         "finalizeSummary",
     }:
-        raise RegistryError("FINALIZED_UNVERIFIED 状态字段不封闭")
+        raise RegistryError("终结待处理状态字段不封闭")
     if status == "VERIFIED":
         complete_keys = STATE_BASE_KEYS | {
             "caseId",
@@ -1247,6 +1520,80 @@ def exact_case(client: httpx.Client, api_base: str, project_no: str) -> dict[str
     return matches[0] if matches else None
 
 
+def get_import_job(
+    client: httpx.Client,
+    api_base: str,
+    job_id: str,
+    package_sha: str,
+    project_no: str,
+    brigade_code: str,
+) -> dict[str, Any]:
+    try:
+        job = response_json(client.get(f"{api_base}/api/v2/import-jobs/{job_id}"), "读取导入任务")
+    except RegistryError as error:
+        if "HTTP 404" in str(error):
+            raise RegistryError("服务端导入任务不存在；不得猜测或重建任务") from error
+        raise
+    if job.get("id") != job_id:
+        raise RegistryError("服务端导入任务 id 对账失败")
+    if job.get("packageHash") != package_sha:
+        raise RegistryError("服务端导入任务包哈希对账失败")
+    status = job.get("status")
+    if status == "FAILED":
+        raise RegistryError("服务端导入任务已 FAILED，停止续传")
+    if status not in {"CREATED", "UPLOADING", "MANIFEST_RECEIVED", "FINALIZED"}:
+        raise RegistryError("服务端导入任务状态不受支持，停止续传")
+    case = job.get("case")
+    if status == "FINALIZED":
+        brigade = case.get("brigade") if isinstance(case, dict) else None
+        route_path = brigade.get("routePath") if isinstance(brigade, dict) else None
+        if (
+            not isinstance(case, dict)
+            or case.get("projectNo") != project_no
+            or not isinstance(route_path, str)
+            or route_path.strip("/").upper() != brigade_code
+        ):
+            raise RegistryError("服务端已终结任务项目或大队归属对账失败")
+        if job.get("packageName") != project_no or case.get("projectNo") != project_no:
+            raise RegistryError("服务端已终结任务项目编号对账失败")
+        if not isinstance(job.get("finalizedAt"), str) or not isinstance(
+            job.get("resultSummary"), dict
+        ):
+            raise RegistryError("服务端已终结任务缺少 finalizedAt 或结果摘要")
+    elif status == "MANIFEST_RECEIVED" and job.get("packageName") != project_no:
+        raise RegistryError("服务端已接收清单任务项目编号对账失败")
+    return job
+
+
+def check_uploaded_file_response(value: dict[str, Any], item: dict[str, Any], job_id: str) -> None:
+    size_bytes = value.get("sizeBytes")
+    if (
+        value.get("jobId") != job_id
+        or value.get("relativePath") != item["relativePath"]
+        or value.get("sha256") != item["sha256"]
+        or value.get("mimeType") != item["mimeType"]
+        or not isinstance(size_bytes, str)
+        or not re.fullmatch(r"(?:0|[1-9][0-9]*)", size_bytes)
+        or int(size_bytes) != item["sizeBytes"]
+    ):
+        raise RegistryError("上传 PDF 响应与文件投影、大小或任务归属不一致")
+
+
+def check_manifest_response(value: dict[str, Any], job_id: str) -> None:
+    if value.get("id") != job_id or value.get("status") != "MANIFEST_RECEIVED":
+        raise RegistryError("提交清单响应与任务状态不一致")
+
+
+def finalized_summary_from_job(job: dict[str, Any]) -> dict[str, Any]:
+    if job.get("status") != "FINALIZED":
+        raise RegistryError("服务端导入任务尚未终结")
+    if not isinstance(job.get("finalizedAt"), str) or not isinstance(
+        job.get("resultSummary"), dict
+    ):
+        raise RegistryError("服务端终结任务缺少 finalizedAt 或结果摘要")
+    return finalize_summary(job["resultSummary"])
+
+
 def expected_products(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {
         product["clientRef"]: {**product, "_stage": inspection["stage"]}
@@ -1256,8 +1603,133 @@ def expected_products(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+def response_error_code(response: httpx.Response) -> str | None:
+    """Read only a non-sensitive discriminator from an error response."""
+    value = limited_json_value(response)
+    if value is None:
+        return None
+    return (
+        value.get("code")
+        if isinstance(value, dict) and isinstance(value.get("code"), str)
+        else None
+    )
+
+
+def recall_projection(response: httpx.Response, label: str) -> dict[str, Any]:
+    projection = response_json(response, label)
+    status = projection.get("status")
+    recall_id = projection.get("recallId")
+    if status not in RECALL_STATUSES or not isinstance(recall_id, str) or not recall_id:
+        raise RegistryError(f"{label} 返回的取回状态无效")
+    return projection
+
+
+def recall_until_ready(
+    client: httpx.Client,
+    api_base: str,
+    file_id: str,
+    write_headers: dict[str, str],
+) -> None:
+    """Recall a remote-only file, reusing the server's idempotent recall job."""
+    started = time.monotonic()
+    deadline = started + RECALL_POLL_INTERVAL_SECONDS * RECALL_MAX_POLLS + 30.0
+
+    def request_recall() -> dict[str, Any]:
+        try:
+            response = client.post(
+                f"{api_base}/api/v2/files/{file_id}/recall", headers=write_headers
+            )
+        except httpx.HTTPError as error:
+            raise RegistryError("发起文件取回时网络异常") from error
+        return recall_projection(response, "发起文件取回")
+
+    projection = request_recall()
+    if projection["status"] == "READY":
+        return
+    if projection["status"] in {"OFFLINE", "FAILED"}:
+        raise RegistryError(f"文件取回未完成：{projection['status']}")
+
+    for _ in range(RECALL_MAX_POLLS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(RECALL_POLL_INTERVAL_SECONDS, remaining))
+        try:
+            response = client.get(f"{api_base}/api/v2/file-recalls/{projection['recallId']}")
+        except httpx.HTTPError as error:
+            raise RegistryError("读取文件取回进度时网络异常") from error
+        if response.status_code == 409 and response_error_code(response) == "RECALL_REQUIRED":
+            # The relay may have expired while polling. The server reuses an
+            # existing task, so issuing recall again is safe and idempotent.
+            projection = request_recall()
+        else:
+            projection = recall_projection(response, "读取文件取回进度")
+        if projection["status"] == "READY":
+            return
+        if projection["status"] in {"OFFLINE", "FAILED"}:
+            raise RegistryError(f"文件取回未完成：{projection['status']}")
+    raise RegistryError("文件取回等待超时；取回任务仍由服务端保留")
+
+
+def download_verified_file(
+    client: httpx.Client,
+    api_base: str,
+    remote_id: str,
+    expected_sha256: str,
+    write_headers: dict[str, str] | None,
+    file_ref: str,
+) -> None:
+    for _ in range(2):
+        try:
+            with client.stream("GET", f"{api_base}/api/v2/files/{remote_id}") as response:
+                if (
+                    response.status_code == 409
+                    and response_error_code(response) == "RECALL_REQUIRED"
+                ):
+                    needs_recall = True
+                else:
+                    needs_recall = False
+                    if response.status_code != 200:
+                        raise RegistryError(
+                            f"下载文件失败：HTTP {response.status_code}：{file_ref}"
+                        )
+                    content_length = response.headers.get("content-length")
+                    if content_length is not None:
+                        try:
+                            declared_bytes = int(content_length)
+                        except ValueError as error:
+                            raise RegistryError(f"下载文件长度无效：{file_ref}") from error
+                        if declared_bytes < 0 or declared_bytes > MAX_DEEP_VERIFY_BYTES:
+                            raise RegistryError(f"下载文件超过深度核验大小限制：{file_ref}")
+                    digest = hashlib.sha256()
+                    total_bytes = 0
+                    for chunk in response.iter_bytes(1024 * 1024):
+                        total_bytes += len(chunk)
+                        if total_bytes > MAX_DEEP_VERIFY_BYTES:
+                            raise RegistryError(f"下载文件超过深度核验大小限制：{file_ref}")
+                        digest.update(chunk)
+                    if content_length is not None and total_bytes != declared_bytes:
+                        raise RegistryError(f"下载文件长度不一致：{file_ref}")
+                    actual_sha256 = "sha256:" + digest.hexdigest()
+                    if actual_sha256 != expected_sha256:
+                        raise RegistryError(f"下载 SHA-256 不一致：{file_ref}")
+                    return
+        except httpx.HTTPError as error:
+            raise RegistryError(f"下载文件时网络异常：{file_ref}") from error
+        if needs_recall:
+            if write_headers is None:
+                raise RegistryError(f"文件需要先从飞牛取回，无法安全核验：{file_ref}")
+            recall_until_ready(client, api_base, remote_id, write_headers)
+            continue
+    raise RegistryError(f"文件取回后仍无法下载：{file_ref}")
+
+
 def verify_with_client(
-    client: httpx.Client, api_base: str, manifest: dict[str, Any]
+    client: httpx.Client,
+    api_base: str,
+    manifest: dict[str, Any],
+    write_headers: dict[str, str] | None = None,
+    deep_content_verify: bool = False,
 ) -> dict[str, Any]:
     listed = exact_case(client, api_base, manifest["case"]["projectNo"])
     if not listed:
@@ -1294,6 +1766,32 @@ def verify_with_client(
     )
     actual_rows = [item for item in detail.get("inspections", []) if isinstance(item, dict)]
     actual_inspections = {item.get("stage"): item for item in actual_rows}
+    reported_inspection_count = len(actual_inspections)
+    initial_products = manifest["initialInspection"].get("products", [])
+
+    def effective_result(product: dict[str, Any]) -> Any:
+        result = product.get("result")
+        if (
+            product.get("method") == "SAMPLING"
+            and product.get("reinspectionApplied") == "YES"
+            and product.get("reinspectionResult") in RESULTS
+        ):
+            return product["reinspectionResult"]
+        return result
+
+    allows_derived_empty_recheck = "recheckInspection" not in manifest and any(
+        isinstance(product, dict) and effective_result(product) == "UNQUALIFIED"
+        for product in initial_products
+    )
+    derived_recheck = actual_inspections.get("RECHECK")
+    if (
+        allows_derived_empty_recheck
+        and isinstance(derived_recheck, dict)
+        and derived_recheck.get("products") == []
+        and sum(item.get("stage") == "RECHECK" for item in actual_rows) == 1
+    ):
+        actual_rows = [item for item in actual_rows if item is not derived_recheck]
+        actual_inspections = {item.get("stage"): item for item in actual_rows}
     if (
         len(actual_rows) != len(expected_inspections)
         or len(actual_inspections) != len(actual_rows)
@@ -1334,28 +1832,49 @@ def verify_with_client(
                 "maintenance",
                 "marketAccessMode",
                 "problemDescription",
+                "repairSiteId",
                 "reinspectionApplied",
                 "reinspectionResult",
             ):
-                if field in product and remote.get(field) != product[field]:
+                if field == "repairSiteId":
+                    local_repair_site_id = product.get(field)
+                    remote_repair_site_id = remote.get(field)
+                    if isinstance(local_repair_site_id, str):
+                        local_repair_site_id = local_repair_site_id.lower()
+                    if isinstance(remote_repair_site_id, str):
+                        remote_repair_site_id = remote_repair_site_id.lower()
+                    if remote_repair_site_id != local_repair_site_id:
+                        raise RegistryError(f"产品字段不一致：{field}")
+                elif field in product and remote.get(field) != product[field]:
                     raise RegistryError(f"产品字段不一致：{field}")
             remote_product_by_ref[product["clientRef"]] = remote
     source_files = {item["clientRef"]: item for item in manifest["files"]}
     rows = directory.get("rows", [])
 
-    def check_file(file_ref: str, remote: dict[str, Any], require_directory_sha: bool) -> None:
+    def check_file(file_ref: str, remote: dict[str, Any]) -> None:
         expected = source_files[file_ref]
-        if require_directory_sha and remote.get("sha256") != expected["sha256"]:
+        if remote.get("sha256") != expected["sha256"]:
             raise RegistryError(f"目录 SHA-256 不一致：{file_ref}")
+        remote_state = remote.get("remoteState")
+        if remote_state != "AVAILABLE":
+            if remote_state == "PENDING":
+                raise RegistryError(f"飞牛落盘核验中：{file_ref}")
+            raise RegistryError(f"飞牛正式库不可用：{file_ref}")
+        nas_verified_at = remote.get("nasVerifiedAt")
+        if not isinstance(nas_verified_at, str) or not nas_verified_at.strip():
+            raise RegistryError(f"飞牛落盘核验中：{file_ref}")
         remote_id = remote.get("id")
         if not isinstance(remote_id, str):
             raise RegistryError(f"目录缺少文件标识：{file_ref}")
-        response = client.get(f"{api_base}/api/v2/files/{remote_id}")
-        if (
-            response.status_code != 200
-            or "sha256:" + hashlib.sha256(response.content).hexdigest() != expected["sha256"]
-        ):
-            raise RegistryError(f"下载 SHA-256 不一致：{file_ref}")
+        if deep_content_verify:
+            download_verified_file(
+                client,
+                api_base,
+                remote_id,
+                expected["sha256"],
+                write_headers,
+                file_ref,
+            )
 
     for slot in manifest.get("documentSlots", []):
         code, (multiplicity, stage) = slot["slotCode"], SLOT_META[slot["slotCode"]]
@@ -1409,7 +1928,7 @@ def verify_with_client(
             remote = owner["versions"].get(version["kind"])
             if not isinstance(remote, dict):
                 raise RegistryError(f"目录版本缺失：{code}/{version['kind']}")
-            check_file(version["fileRef"], remote, True)
+            check_file(version["fileRef"], remote)
     for attachment in manifest.get("otherAttachments", []):
         rows_match = [
             row
@@ -1429,10 +1948,10 @@ def verify_with_client(
             or len(children[0]["files"]) != 1
         ):
             raise RegistryError("其他附件匹配不唯一或缺失")
-        check_file(attachment["fileRef"], children[0]["files"][0], False)
+        check_file(attachment["fileRef"], children[0]["files"][0])
     return {
         "caseId": case_id,
-        "inspections": len(actual_inspections),
+        "inspections": reported_inspection_count,
         "products": len(remote_product_by_ref),
         "filesVerified": len(source_files),
     }
@@ -1458,14 +1977,47 @@ def verify_command(args: argparse.Namespace) -> None:
     with httpx.Client(
         timeout=httpx.Timeout(args.timeout, read=max(args.timeout, 300.0)), follow_redirects=False
     ) as client:
-        authenticate_client(
+        _identity, write_headers = authenticate_client(
             client,
             api_base,
             origin,
             manifest,
             secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
         )
-        print(json.dumps(verify_with_client(client, api_base, manifest), ensure_ascii=False))
+        verification = verify_with_poll(
+            client,
+            api_base,
+            manifest,
+            write_headers,
+            getattr(args, "deep_content_verify", False),
+            min(max(float(args.timeout), 1.0), 60.0),
+        )
+        if verification is None:
+            raise RegistryError("飞牛落盘核验仍在进行，请稍后重新运行 verify")
+        print(json.dumps(verification, ensure_ascii=False))
+
+
+def verify_with_poll(
+    client: httpx.Client,
+    api_base: str,
+    manifest: dict[str, Any],
+    write_headers: dict[str, str],
+    deep_content_verify: bool,
+    max_seconds: float,
+) -> dict[str, Any] | None:
+    deadline = time.monotonic() + max_seconds
+    while True:
+        try:
+            return verify_with_client(
+                client, api_base, manifest, write_headers, deep_content_verify
+            )
+        except RegistryError as error:
+            if not str(error).startswith("飞牛落盘核验中："):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            time.sleep(min(RECALL_POLL_INTERVAL_SECONDS, remaining))
 
 
 def upload_command(args: argparse.Namespace) -> None:
@@ -1486,17 +2038,32 @@ def upload_command(args: argparse.Namespace) -> None:
         raise RegistryError("正式写入必须显式指定 --finalize")
     api_base, origin = origin_of(args.api_base)
     manifest_sha, package_sha = file_sha256(path), manifest["packageSha256"]
+    brigade_code = manifest["case"]["brigadeCode"]
+    projection = files_projection(manifest, upload)
+    binding_digest = immutable_manifest_binding(manifest, projection)
     state_path = path.parent / "upload-state.json"
     state = read_json(state_path) if state_path.exists() else {}
     validate_upload_state(state)
-    if state and not set(state["uploadedFileRefs"]).issubset(upload):
-        raise RegistryError("upload-state 包含当前 manifest 中不存在的 fileRef")
     if state and (
-        state.get("manifestSha256") != manifest_sha
-        or state.get("packageSha256") != package_sha
+        state.get("packageSha256") != package_sha
         or state.get("origin") != origin
+        or state.get("projectNo") != manifest["case"]["projectNo"]
+        or state.get("brigadeCode") != brigade_code
+        or state.get("filesProjection") != projection
+        or state.get("immutableBindingDigest") != binding_digest
     ):
-        raise RegistryError("upload-state 与当前清单或 origin 不匹配")
+        raise RegistryError("upload-state V6 与当前清单、文件投影、origin 或目标不匹配")
+    if (
+        state
+        and state["status"]
+        in {
+            "FINALIZED_UNVERIFIED",
+            "FINALIZED_WITH_CONFLICTS",
+            "VERIFIED",
+        }
+        and state.get("manifestSha256") != manifest_sha
+    ):
+        raise RegistryError("已终结 upload-state 要求 manifestSha256 精确不变")
     with httpx.Client(
         timeout=httpx.Timeout(args.timeout, read=max(args.timeout, 300.0)),
         follow_redirects=False,
@@ -1509,85 +2076,133 @@ def upload_command(args: argparse.Namespace) -> None:
             secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
         )
         require_same_state_identity(state, identity)
-        if state.get("status") in {"FINALIZED_UNVERIFIED", "VERIFIED"}:
-            verification = verify_with_client(client, api_base, manifest)
-            state.update(
-                {
-                    "status": "VERIFIED",
-                    "caseId": verification["caseId"],
-                    "verification": verification,
-                    "verifiedAt": utc_now(),
-                }
-            )
-            validate_upload_state(state)
-            write_json(state_path, state)
-            print(
-                json.dumps(
-                    {"idempotentReplay": True, "verification": verification}, ensure_ascii=False
-                )
-            )
-            return
         if response_json(client.get(f"{api_base}/api/ready"), "服务就绪").get("status") != "ready":
             raise RegistryError("服务未就绪")
-        existing = exact_case(client, api_base, manifest["case"]["projectNo"])
-        if existing and state.get("status") == "UPLOADING" and isinstance(state.get("jobId"), str):
-            # A committed finalize response may be lost.  Verification is the
-            # only safe recovery: never retry a write in this ambiguous state.
-            verification = verify_with_client(client, api_base, manifest)
-            state.update(
-                {
-                    "status": "VERIFIED",
-                    "caseId": verification["caseId"],
-                    "finalizedAt": utc_now(),
-                    "verification": verification,
-                    "verifiedAt": utc_now(),
-                }
+        job_id: str
+        if state:
+            job = get_import_job(
+                client,
+                api_base,
+                state["jobId"],
+                package_sha,
+                manifest["case"]["projectNo"],
+                brigade_code,
             )
-            validate_upload_state(state)
-            write_json(state_path, state)
-            print(
-                json.dumps(
-                    {"recoveredAfterLostFinalizeResponse": True, "verification": verification},
-                    ensure_ascii=False,
+            if job["status"] == "FINALIZED":
+                summary = finalized_summary_from_job(job)
+                conflict_status = (
+                    "FINALIZED_WITH_CONFLICTS"
+                    if (
+                        not summary["created"]
+                        or summary["conflictCount"] > 0
+                        or summary["skippedCount"] > 0
+                    )
+                    else "FINALIZED_UNVERIFIED"
                 )
+                state.pop("verification", None)
+                state.pop("verifiedAt", None)
+                state.update(
+                    {
+                        "status": conflict_status,
+                        "caseId": summary["caseId"],
+                        "finalizedAt": job["finalizedAt"],
+                        "finalizeSummary": summary,
+                    }
+                )
+                validate_upload_state(state)
+                if conflict_status == "FINALIZED_WITH_CONFLICTS":
+                    write_json(state_path, state)
+                    print(
+                        json.dumps(
+                            {
+                                "status": state["status"],
+                                "caseId": state["caseId"],
+                                "finalize": state.get("finalizeSummary"),
+                                "verification": None,
+                                "manualReviewRequired": True,
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                    return
+                verification = verify_with_poll(
+                    client,
+                    api_base,
+                    manifest,
+                    write_headers,
+                    getattr(args, "deep_content_verify", False),
+                    min(max(float(args.timeout), 1.0), 60.0),
+                )
+                if verification is not None:
+                    state.update(
+                        {
+                            "status": "VERIFIED",
+                            "verification": verification,
+                            "verifiedAt": utc_now(),
+                        }
+                    )
+                write_json(state_path, state)
+                print(
+                    json.dumps(
+                        {
+                            "status": state["status"],
+                            "caseId": state["caseId"],
+                            "finalize": state.get("finalizeSummary"),
+                            "verification": state.get("verification"),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                return
+            elif job["status"] == "FAILED":
+                raise RegistryError("服务端导入任务已 FAILED，停止续传；请修正后新建任务")
+            elif job["status"] not in {"CREATED", "UPLOADING", "MANIFEST_RECEIVED"}:
+                raise RegistryError("服务端任务状态或项目编号无法安全对账")
+            job_id = state["jobId"]
+            state["manifestSha256"] = manifest_sha
+        else:
+            existing = exact_case(client, api_base, manifest["case"]["projectNo"])
+            if existing:
+                raise RegistryError("目标项目编号已存在；为防覆盖人工数据已停止")
+            job = response_json(
+                client.post(
+                    f"{api_base}/api/v2/import-jobs",
+                    headers={
+                        **write_headers,
+                        "Idempotency-Key": f"xfpcr-v2-{package_sha[7:]}",
+                    },
+                    json={"packageSha256": package_sha},
+                ),
+                "创建导入任务",
             )
-            return
-        if existing:
-            raise RegistryError("目标项目编号已存在；为防覆盖人工数据已停止")
-        previous_job = state.get("jobId")
-        job = response_json(
-            client.post(
-                f"{api_base}/api/v2/import-jobs",
-                headers={
-                    **write_headers,
-                    "Idempotency-Key": f"xfpcr-v2-{package_sha[7:]}",
-                },
-                json={"packageSha256": package_sha},
-            ),
-            "创建导入任务",
-        )
-        job_id = job.get("id")
-        if not isinstance(job_id, str):
-            raise RegistryError("导入任务响应缺少 id")
-        uploaded = set(state.get("uploadedFileRefs", [])) if previous_job == job_id else set()
-        state = {
-            "stateVersion": 5,
-            "status": "UPLOADING",
-            "origin": origin,
-            "manifestSha256": manifest_sha,
-            "packageSha256": package_sha,
-            "projectNo": manifest["case"]["projectNo"],
-            "jobId": job_id,
-            "authIdentity": identity,
-            "uploadedFileRefs": sorted(uploaded),
-        }
+            job_id = job.get("id") if isinstance(job.get("id"), str) else ""
+            if (
+                not job_id
+                or job.get("packageHash") != package_sha
+                or job.get("status") not in {"CREATED", "UPLOADING"}
+            ):
+                raise RegistryError("创建导入任务响应无法安全对账")
+            state = {
+                "stateVersion": 6,
+                "status": "UPLOADING",
+                "origin": origin,
+                "manifestSha256": manifest_sha,
+                "packageSha256": package_sha,
+                "projectNo": manifest["case"]["projectNo"],
+                "brigadeCode": brigade_code,
+                "jobId": job_id,
+                "authIdentity": identity,
+                "filesProjection": projection,
+                "immutableBindingDigest": binding_digest,
+                "uploadedFileRefs": [],
+            }
         validate_upload_state(state)
         write_json(state_path, state)
+        projection_by_ref = {item["clientRef"]: item for item in projection}
         for item in manifest["files"]:
-            if item["clientRef"] in uploaded:
-                continue
+            projection_item = projection_by_ref[item["clientRef"]]
             with Path(upload[item["clientRef"]]).open("rb") as stream:
-                response_json(
+                uploaded_response = response_json(
                     client.post(
                         f"{api_base}/api/v2/import-jobs/{job_id}/files",
                         headers=write_headers,
@@ -1596,10 +2211,10 @@ def upload_command(args: argparse.Namespace) -> None:
                     ),
                     "上传 PDF",
                 )
-            uploaded.add(item["clientRef"])
-            state["uploadedFileRefs"] = sorted(uploaded)
+            check_uploaded_file_response(uploaded_response, projection_item, job_id)
+            state["uploadedFileRefs"] = sorted({*state["uploadedFileRefs"], item["clientRef"]})
             write_json(state_path, state)
-        response_json(
+        manifest_response = response_json(
             client.put(
                 f"{api_base}/api/v2/import-jobs/{job_id}/manifest",
                 headers=write_headers,
@@ -1607,36 +2222,80 @@ def upload_command(args: argparse.Namespace) -> None:
             ),
             "提交清单",
         )
-        summary = finalize_summary(
-            response_json(
-                client.post(
-                    f"{api_base}/api/v2/import-jobs/{job_id}/finalize",
-                    headers=write_headers,
-                ),
-                "完成导入",
+        check_manifest_response(manifest_response, job_id)
+        response_json(
+            client.post(
+                f"{api_base}/api/v2/import-jobs/{job_id}/finalize",
+                headers=write_headers,
+            ),
+            "完成导入",
+        )
+        finalized_job = get_import_job(
+            client,
+            api_base,
+            job_id,
+            package_sha,
+            manifest["case"]["projectNo"],
+            brigade_code,
+        )
+        summary = finalized_summary_from_job(finalized_job)
+        conflict_status = (
+            "FINALIZED_WITH_CONFLICTS"
+            if (
+                not summary["created"]
+                or summary["conflictCount"] > 0
+                or summary["skippedCount"] > 0
             )
+            else "FINALIZED_UNVERIFIED"
         )
         state.update(
             {
-                "status": "FINALIZED_UNVERIFIED",
-                "finalizedAt": utc_now(),
+                "status": conflict_status,
+                "finalizedAt": finalized_job["finalizedAt"],
                 "finalizeSummary": summary,
                 "caseId": summary["caseId"],
             }
         )
         validate_upload_state(state)
         write_json(state_path, state)
-        verification = verify_with_client(client, api_base, manifest)
-        state.update({"status": "VERIFIED", "verification": verification, "verifiedAt": utc_now()})
-        validate_upload_state(state)
-        write_json(state_path, state)
+        if conflict_status == "FINALIZED_WITH_CONFLICTS":
+            print(
+                json.dumps(
+                    {
+                        "status": state["status"],
+                        "caseId": state["caseId"],
+                        "finalize": state.get("finalizeSummary"),
+                        "verification": None,
+                        "manualReviewRequired": True,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
+        verification = verify_with_poll(
+            client,
+            api_base,
+            manifest,
+            write_headers,
+            getattr(args, "deep_content_verify", False),
+            min(max(float(args.timeout), 1.0), 60.0),
+        )
+        if verification is not None:
+            state.update(
+                {"status": "VERIFIED", "verification": verification, "verifiedAt": utc_now()}
+            )
+            validate_upload_state(state)
+            write_json(state_path, state)
+            status = "VERIFIED"
+        else:
+            status = "FINALIZED_UNVERIFIED"
     print(
         json.dumps(
             {
-                "status": "VERIFIED",
+                "status": status,
                 "caseId": state["caseId"],
                 "finalize": state.get("finalizeSummary"),
-                "verification": state["verification"],
+                "verification": state.get("verification"),
             },
             ensure_ascii=False,
         )
@@ -1709,6 +2368,11 @@ def build_parser() -> argparse.ArgumentParser:
             ),
         )
         command.add_argument("--timeout", type=float, default=60.0)
+        command.add_argument(
+            "--deep-content-verify",
+            action="store_true",
+            help="显式取回飞牛正文并下载校验内容 SHA-256（默认只核对目录和飞牛落盘证据）",
+        )
         command.set_defaults(func=func)
         if name == "upload":
             command.add_argument("--dry-run", action="store_true")

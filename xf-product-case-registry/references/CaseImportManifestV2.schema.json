@@ -41,7 +41,11 @@
   },
   "$defs": {
     "clientRef": { "type": "string", "pattern": "^[a-z][a-z0-9:_-]{0,159}$" },
-    "sha256": { "type": "string", "pattern": "^(sha256:)?[a-fA-F0-9]{64}$" },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
     "date": { "type": "string", "format": "date" },
     "case": {
       "type": "object",
@@ -92,6 +96,9 @@
         },
         "onlineSale": { "enum": ["YES", "NO", "UNKNOWN"] },
         "maintenance": { "enum": ["YES", "NO", "UNKNOWN"] },
+        "repairSiteId": {
+          "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
+        },
         "marketAccessMode": {
           "enum": ["CCC", "TECHNICAL_APPRAISAL", "NOT_APPLICABLE", "UNKNOWN"]
         },
@@ -102,6 +109,16 @@
         }
       },
       "allOf": [
+        {
+          "if": {
+            "properties": { "repairSiteId": { "type": "string" } },
+            "required": ["repairSiteId"]
+          },
+          "then": {
+            "required": ["maintenance"],
+            "properties": { "maintenance": { "const": "YES" } }
+          }
+        },
         {
           "if": {
             "properties": { "result": { "const": "UNQUALIFIED" } },
@@ -180,7 +197,7 @@
         "relativePath": {
           "type": "string",
           "minLength": 1,
-          "pattern": "^(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+          "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.(?:/|$))(?!.*(?:^|/)\\.\\.(?:/|$)).+\\.[Pp][Dd][Ff]$"
         },
         "sha256": { "$ref": "#/$defs/sha256" },
         "mimeType": { "const": "application/pdf" },
@@ -280,6 +297,110 @@
           "if": {
             "properties": {
               "slotCode": {
+                "enum": ["AUTHORIZATION_LETTER", "BUSINESS_LICENSE"]
+              }
+            },
+            "required": ["slotCode"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["inspectionRef"] },
+                { "required": ["productRef"] },
+                { "required": ["notificationTarget"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "slotCode": {
+                "enum": [
+                  "INITIAL_INSPECTION_RECORD",
+                  "INITIAL_ONSITE_PHOTO",
+                  "INITIAL_QUALITY_RESULT_APPROVAL",
+                  "INITIAL_QUALITY_RESULT_NOTICE",
+                  "INITIAL_QUALITY_RESULT_RECEIPT",
+                  "INITIAL_REINSPECTION_QUALITY_RESULT_APPROVAL",
+                  "INITIAL_REINSPECTION_QUALITY_RESULT_NOTICE",
+                  "INITIAL_REINSPECTION_QUALITY_RESULT_RECEIPT",
+                  "ONSITE_UNQUALIFIED_APPROVAL",
+                  "ONSITE_UNQUALIFIED_NOTICE",
+                  "ONSITE_UNQUALIFIED_RECEIPT",
+                  "RECTIFICATION_APPROVAL",
+                  "RECTIFICATION_ORDER",
+                  "RECTIFICATION_RECEIPT",
+                  "EVIDENCE_PRESERVATION_APPROVAL",
+                  "EVIDENCE_PRESERVATION_DECISION",
+                  "EVIDENCE_PRESERVATION_INVENTORY",
+                  "RECHECK_INSPECTION_RECORD",
+                  "RECHECK_ONSITE_PHOTO",
+                  "RECHECK_QUALITY_RESULT_APPROVAL",
+                  "RECHECK_QUALITY_RESULT_NOTICE",
+                  "RECHECK_QUALITY_RESULT_RECEIPT",
+                  "RECHECK_REINSPECTION_QUALITY_RESULT_APPROVAL",
+                  "RECHECK_REINSPECTION_QUALITY_RESULT_NOTICE",
+                  "RECHECK_REINSPECTION_QUALITY_RESULT_RECEIPT"
+                ]
+              }
+            },
+            "required": ["slotCode"]
+          },
+          "then": {
+            "required": ["inspectionRef"],
+            "not": {
+              "anyOf": [
+                { "required": ["productRef"] },
+                { "required": ["notificationTarget"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "slotCode": {
+                "enum": [
+                  "INITIAL_CCC_CERTIFICATE",
+                  "INITIAL_TECHNICAL_APPRAISAL_CERTIFICATE",
+                  "INITIAL_TYPE_TEST_REPORT",
+                  "INITIAL_PURCHASE_RECORD_INVOICE",
+                  "INITIAL_MAINTENANCE_RECORD",
+                  "INITIAL_SAMPLING_FORM",
+                  "INITIAL_SAMPLING_TEST_REPORT",
+                  "INITIAL_REINSPECTION_APPLICATION",
+                  "INITIAL_REINSPECTION_ACCEPTANCE",
+                  "INITIAL_REINSPECTION_REPORT",
+                  "RECHECK_CCC_CERTIFICATE",
+                  "RECHECK_TECHNICAL_APPRAISAL_CERTIFICATE",
+                  "RECHECK_TYPE_TEST_REPORT",
+                  "RECHECK_PURCHASE_RECORD_INVOICE",
+                  "RECHECK_MAINTENANCE_RECORD",
+                  "RECHECK_SAMPLING_FORM",
+                  "RECHECK_SAMPLING_TEST_REPORT",
+                  "RECHECK_REINSPECTION_APPLICATION",
+                  "RECHECK_REINSPECTION_ACCEPTANCE",
+                  "RECHECK_REINSPECTION_REPORT"
+                ]
+              }
+            },
+            "required": ["slotCode"]
+          },
+          "then": {
+            "required": ["productRef"],
+            "not": {
+              "anyOf": [
+                { "required": ["inspectionRef"] },
+                { "required": ["notificationTarget"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "slotCode": {
                 "enum": [
                   "ILLEGAL_PRODUCT_NOTIFICATION_APPROVAL",
                   "ILLEGAL_PRODUCT_NOTIFICATION_LETTER",
@@ -289,7 +410,15 @@
             },
             "required": ["slotCode"]
           },
-          "then": { "required": ["notificationTarget"] }
+          "then": {
+            "required": ["notificationTarget"],
+            "not": {
+              "anyOf": [
+                { "required": ["inspectionRef"] },
+                { "required": ["productRef"] }
+              ]
+            }
+          }
         }
       ]
     },

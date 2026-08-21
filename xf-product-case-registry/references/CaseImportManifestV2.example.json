@@ -29,6 +29,7 @@
         "result": "UNQUALIFIED",
         "onlineSale": "UNKNOWN",
         "maintenance": "UNKNOWN",
+        "repairSiteId": null,
         "marketAccessMode": "CCC",
         "problemDescription": "一层走道部位使用的直流水枪跌落试验后出现破裂。"
       }
