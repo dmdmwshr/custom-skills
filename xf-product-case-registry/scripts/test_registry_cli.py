@@ -45,6 +45,11 @@ def test_browser_runbook_covers_marked_controls_latency_and_download_gate() -> N
         "source snapshot-downloads",
         "evaluateAll",
         "约 20 秒",
+        "法律文书查询",
+        "键盘确认键",
+        "tab.playwright.waitForEvent",
+        "下载交付不可用",
+        "不得第三次点击",
     ):
         assert required in runbook
 
