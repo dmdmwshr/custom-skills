@@ -32,6 +32,23 @@ TEST_CSRF = "csrf-token-value-at-least-32-characters"
 TEST_USER_ID = "22222222-2222-4222-8222-222222222222"
 
 
+def test_browser_runbook_covers_marked_controls_latency_and_download_gate() -> None:
+    runbook = (ROOT / "references" / "browser-acquisition.md").read_text(encoding="utf-8")
+
+    for required in (
+        "#tab-306",
+        "查询统计",
+        "消防产品监督检查记录",
+        "SINGLE_CASE_DOWNLOAD_PROOF",
+        "打\\s*包",
+        "叶子",
+        "source snapshot-downloads",
+        "evaluateAll",
+        "约 20 秒",
+    ):
+        assert required in runbook
+
+
 def auth_config(tmp_path: Path) -> Path:
     path = tmp_path / "auth.toml"
     path.write_text(

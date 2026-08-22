@@ -28,7 +28,7 @@ description: 通过用户已登录的消防监督管理网页采集消防产品�
 ## 默认流程
 
 1. 运行 `workspace doctor` 解析并核验工作根。首次使用或切换目录时运行 `workspace configure`；配置只保存工作根和下载目录，不保存认证信息。
-2. 提示用户在受控浏览器中手工登录来源系统。按 `browser-acquisition.md` 使用可见文字、角色和标签操作，不依赖坐标；默认筛选上海时间本年、全部管辖单位、全部 8 个大队和“消防产品监督检查记录”。
+2. 提示用户在受控浏览器中手工登录来源系统。先读取 `browser-acquisition.md` 的“已标注页面的低延迟执行规程”，按可见文字、角色和限定容器操作，不依赖坐标；默认筛选上海时间本年、全部管辖单位、全部 8 个大队和“消防产品监督检查记录”。同名控件必须先缩小到业务容器；来源网页回传较慢时，单次动作只做一个控件和一个最小状态核对，不能用全页快照或串行逐项查询代替。
 3. 先完整扫描结果页，记录实时总数与分页；连续两轮来源记录集合一致才完成清单，最多重扫三轮。以 RWID 识别来源记录，以项目编号识别最终案卷；重复一致则合并，冲突转人工处理。
 4. 对新增或变化案卷直接读取详情字段，保存完整详情截图；正式 `source add-page` 必须带列表截图，`source add-detail` 必须带去除 `runId` 后的详情来源地址。每个案卷点击下载前先运行 `source snapshot-downloads --batch-id <批次> --rwid <RWID>`；再执行“打包 → 全选 → 核对叶子文书 → 开始打包”，并把本案基线传给 `source attach-package --download-baseline`。只接收相对该基线唯一新增、完成且大小稳定的 ZIP，按项目编号和 SHA-256 重命名后交给本地流程。
 5. 用 `source begin/add-page/add-detail/snapshot-downloads/attach-package/finalize` 持久化 `BrowserCaptureV1`、`SourceEvidenceV1` 和 `CaseWaterlineV1`。JSON 是机器事实源，`ledger export` 只把它投影为 `案卷水位记录表.xlsx`。
