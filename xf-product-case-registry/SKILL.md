@@ -28,9 +28,9 @@ description: 通过用户已登录的消防监督管理网页采集消防产品�
 ## 默认流程
 
 1. 运行 `workspace doctor` 解析并核验工作根。首次使用或切换目录时运行 `workspace configure`；配置只保存工作根和下载目录，不保存认证信息。
-2. 提示用户在受控浏览器中手工登录来源系统。先读取 `browser-acquisition.md` 的“执行模块与固定顺序”，按可见文字、角色和限定容器操作，不依赖坐标；当前右侧浏览器在批次内固定为 1200×1050。默认筛选上海时间本年、全部管辖单位、全部 8 个大队和“消防产品监督检查记录”。同名控件必须先缩小到业务容器；来源网页回传较慢时，单次动作只做一个控件和一个最小状态核对，不能用全页快照或串行逐项查询代替。
+2. 提示用户在受控浏览器中手工登录来源系统。先读取 `browser-acquisition.md` 的“执行模块与固定顺序”，按可见文字、角色和限定容器操作，不依赖坐标；当前右侧浏览器在批次内固定为 1600×1400。默认筛选上海时间本年、全部管辖单位、全部 8 个大队和“消防产品监督检查记录”。同名控件必须先缩小到业务容器；来源网页回传较慢时，单次动作只做一个控件和一个最小状态核对，不能用全页快照或串行逐项查询代替。
 3. 先读取页面实时总数、每页条数和总页数，并用 `source tail-cursor` 以“最后一页最后一条”为首个游标。每次翻页后都回读当前页、可见行数和首末记录；页码只用于导航，RWID 和项目编号才是身份。完整年度批次仍须连续两轮来源记录集合一致，最多重扫三轮；单案演示仅使用 `--acceptance-sample`，不得冒充全局水位。
-4. 列表中只能点击“关联项目／案卷名称”进入详情；法律文书名称是文书或打印入口，不能当作案卷入口。详情页同时出现项目编号和文书目录后保存完整截图；正式 `source add-page` 必须带列表截图，`source add-detail` 必须带去除 `runId` 后的详情来源地址。每个案卷点击下载前先运行 `source snapshot-downloads --batch-id <批次> --rwid <RWID>`；再执行“打包 → 全选 → 核对叶子文书 → 开始打包”。点击后使用 `source await-download --download-baseline <基线> --attach` 等待来源系统异步生成；`.crdownload`、变化中的文件或多候选均不得绑定。若内置浏览器已完成来源响应却将 Blob 下载标记为 0 字节取消，按 `browser-acquisition.md` 的“Blob 本地恢复”使用 `scripts/browser_blob_receiver.mjs` 原子接收后再走同一校验；只有相对本案基线唯一新增、完成且大小稳定的 ZIP 才会按项目编号和 SHA-256 规范命名并交给本地流程。
+4. 列表中只能点击“关联项目／案卷名称”进入详情；法律文书名称是文书或打印入口，不能当作案卷入口。详情页同时出现项目编号和文书目录后保存完整截图；正式 `source add-page` 必须带列表截图，`source add-detail` 必须带去除 `runId` 后的详情来源地址。每个案卷点击下载前先运行 `source snapshot-downloads --batch-id <批次> --rwid <RWID>`；再执行“打包 → 全选 → 核对叶子文书 → 开始打包”。点击后使用 `source await-download --download-baseline <基线> --attach` 等待来源系统异步生成；`.crdownload`、变化中的文件或多候选均不得绑定。若内置浏览器已完成来源响应却将 Blob 下载标记为 0 字节取消，按 `browser-acquisition.md` 的“Blob 本地恢复”使用 `scripts/browser_blob_receiver.mjs` 原子接收后再走同一校验；只有相对本案基线唯一新增、完成且大小稳定的 ZIP 才会按项目编号和 SHA-256 规范命名、移入工作根，且仅在哈希一致后删除下载目录中的该临时副本。
 5. 用 `source begin/add-page/add-detail/snapshot-downloads/await-download/attach-package/finalize` 持久化 `BrowserCaptureV1`、`SourceEvidenceV1` 和 `CaseWaterlineV1`。JSON 是机器事实源，`ledger export` 只把它投影为 `案卷水位记录表.xlsx`。
 6. 对待处理案卷依次运行 `inventory → ocr/split → compose → validate → upload --dry-run`。只把可确认字段写入 `case-data.json`，只把已分类的规范 PDF 放入 51 个槽位或 `OTHER_ATTACHMENT`；证据不足时保留待确认，不猜测。
 7. 当前请求已经明确授权具体案卷和生产写入时，运行 `upload --finalize`，随后 `verify`；否则停在本地清单并一次性说明对象、影响和验证方式。
@@ -40,7 +40,7 @@ description: 通过用户已登录的消防监督管理网页采集消防产品�
 
 ## 本地安全门禁
 
-- 工作目录使用 `references/case-data-format.md` 规定的 `原始案卷/案卷目录截图`、`待处理案卷`、`已处理案卷`、`工作区/采集批次`、项目工作区、`核验记录` 和 `历史工作区`。原始 ZIP 不覆盖、不删除；规范化结果只写项目工作区。
+- 工作目录使用 `references/case-data-format.md` 规定的 `原始案卷/案卷目录截图`、`待处理案卷`、`已处理案卷`、`工作区/采集批次`、项目工作区、`核验记录` 和 `历史工作区`。每个原始 ZIP 只在工作根保留一份，不覆盖、不改内容；确认工作根副本哈希一致后删除下载目录中的同一临时副本。规范化结果只写项目工作区。
 - ZIP 解压必须拒绝路径穿越、加密条目、重复路径、大小写或 Unicode 重名、异常压缩比、压缩炸弹和超出资源上限的包；不得递归自动解压内层 ZIP。异常只标记当前案卷“需人工处理”。
 - 下载基线必须逐案刷新并绑定当前批次、RWID 和项目编号；成功绑定 ZIP 后写入不可覆盖的消费回执。基线不能跨案卷或跨批次复用，相同案卷和相同 ZIP 只允许幂等恢复。
 - `attach-package` 只接受工作配置中浏览器下载目录本身，或该目录的直接子文件；其他目录、嵌套路径、同名外部文件均拒绝。

@@ -1094,7 +1094,8 @@ def test_await_download_records_stall_and_auto_attaches_a_complete_zip(
         downloads,
         observed_at="2099-08-21T10:30:00+08:00",
     )
-    _write_zip(downloads / "completed.zip", {"document.txt": b"completed"})
+    completed = downloads / "completed.zip"
+    _write_zip(completed, {"document.txt": b"completed"})
     attached = source.await_download(
         layout,
         "fixture-batch",
@@ -1115,6 +1116,7 @@ def test_await_download_records_stall_and_auto_attaches_a_complete_zip(
     assert captured_attached["records"]["fixture-rwid-await"]["package"]["storedName"].startswith(
         f"{PROJECT_A}_案卷包_"
     )
+    assert not completed.exists()
     assert captured_attached["status"] == "READY_FOR_ORGANIZATION"
 
 
@@ -1135,6 +1137,8 @@ def test_attach_package_renames_mojibake_zip_and_is_idempotent(
         download_baseline=baseline,
         allowed_download_dir=tmp_path,
     )
+    assert not downloaded.exists()
+    _write_zip(downloaded, {"文书/fixture.txt": b"fixture package"})
     second = source.attach_package(
         layout,
         "fixture-batch",
@@ -1149,7 +1153,8 @@ def test_attach_package_renames_mojibake_zip_and_is_idempotent(
     assert package["storedName"].startswith(f"{PROJECT_A}_案卷包_")
     assert package["storedName"].endswith(".zip")
     assert package["originalSuggestedName"] == "æ¡ˆå·ä¸‹è½½.zip"
-    assert downloaded.is_file()
+    assert package["downloadDisposition"]["status"] == "MOVED_TO_WORKSPACE"
+    assert not downloaded.exists()
     assert len(list(layout.pending_case_dir(PROJECT_A).glob("*_案卷包_*.zip"))) == 1
     assert package["zipInspection"] == {
         "entryCount": 1,
@@ -1484,6 +1489,7 @@ def test_attach_package_rejects_partial_and_non_zip_downloads(
             download_baseline=baseline,
             allowed_download_dir=tmp_path,
         )
+    assert candidate.is_file()
     assert not list(layout.pending_case_dir(PROJECT_A).glob("*_案卷包_*.zip"))
 
 

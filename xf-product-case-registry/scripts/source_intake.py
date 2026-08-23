@@ -1584,6 +1584,35 @@ def _copy_immutable(source: Path, destination: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _remove_confirmed_download_copy(
+    source: Path, stored: Path, package_sha256: str
+) -> dict[str, str]:
+    """清理已安全转入工作目录的下载副本，绝不按文件名猜测或删除其他候选。"""
+
+    if source.resolve() == stored.resolve():
+        raise SourceIntakeError("下载副本与工作目录归档不能是同一文件")
+    if not stored.is_file() or _sha256(stored) != package_sha256:
+        raise SourceIntakeError("工作目录归档副本无法通过哈希复核，拒绝清理下载副本")
+    checked_at = _timestamp()
+    if not source.is_file():
+        return {"status": "SOURCE_ALREADY_ABSENT", "checkedAt": checked_at}
+    if _sha256(source) != package_sha256:
+        return {
+            "status": "SOURCE_RETAINED_HASH_MISMATCH",
+            "checkedAt": checked_at,
+            "reason": "下载副本与工作目录归档哈希不一致",
+        }
+    try:
+        source.unlink()
+    except OSError as error:
+        return {
+            "status": "SOURCE_RETAINED_CLEANUP_FAILED",
+            "checkedAt": checked_at,
+            "reason": f"删除下载副本失败：{error}",
+        }
+    return {"status": "MOVED_TO_WORKSPACE", "removedAt": _timestamp()}
+
+
 def _case_evidence_dir(layout: Any, state: dict[str, Any], project_no: str, batch_id: str) -> Path:
     if _is_acceptance_sample(state):
         return layout.batch_dir(batch_id) / "验收样本" / project_no
@@ -2191,12 +2220,36 @@ def _sync_attached_package(
                 "packageSha256": package["sha256"],
                 "packageRelativePath": package["relativePath"],
                 "downloadSelection": package["downloadSelection"],
+                "downloadDisposition": package.get("downloadDisposition"),
             },
             local={
                 "status": "PENDING_ORGANIZATION",
             },
         )
     return state
+
+
+def _sync_and_cleanup_download_copy(
+    layout: Any,
+    capture_path: Path,
+    state: dict[str, Any],
+    batch_id: str,
+    record_key: str,
+    project_no: str,
+    package: dict[str, Any],
+    source: Path,
+    stored: Path,
+) -> dict[str, Any]:
+    """先持久化工作目录归档，再按哈希清理唯一对应的下载副本。"""
+
+    package["downloadDisposition"] = {"status": "PENDING_SOURCE_REMOVAL"}
+    _sync_attached_package(layout, capture_path, state, batch_id, record_key, project_no, package)
+    package["downloadDisposition"] = _remove_confirmed_download_copy(
+        source, stored, package["sha256"]
+    )
+    return _sync_attached_package(
+        layout, capture_path, state, batch_id, record_key, project_no, package
+    )
 
 
 def attach_package(
@@ -2297,7 +2350,7 @@ def attach_package(
                 "consumedAt": consumption["consumedAt"],
             },
         )
-        return _sync_attached_package(
+        return _sync_and_cleanup_download_copy(
             layout,
             capture_path,
             state,
@@ -2305,6 +2358,8 @@ def attach_package(
             record_key,
             selected_project,
             existing,
+            source,
+            stored_existing,
         )
     consumption = _consume_download_baseline(baseline, baseline_path, sha)
     short = sha.removeprefix("sha256:")[:12]
@@ -2338,7 +2393,7 @@ def attach_package(
             "consumedAt": consumption["consumedAt"],
         },
     }
-    return _sync_attached_package(
+    return _sync_and_cleanup_download_copy(
         layout,
         capture_path,
         state,
@@ -2346,6 +2401,8 @@ def attach_package(
         record_key,
         selected_project,
         package,
+        source,
+        stored,
     )
 
 

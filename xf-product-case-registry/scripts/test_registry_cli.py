@@ -58,6 +58,8 @@ def test_browser_runbook_covers_marked_controls_latency_and_download_gate() -> N
         "tab.playwright.waitForEvent",
         "下载交付不可用",
         "不得第三次点击",
+        "只保留工作根中的原始 ZIP",
+        "下载清理结果",
     ):
         assert required in runbook
 
