@@ -120,6 +120,7 @@ _CASE_NAME_KEYS = {
     "案卷名称",
 }
 _SOURCE_APPEARANCE_KEYS = {
+    "casename",
     "createdat",
     "createtime",
     "creator",
@@ -128,6 +129,7 @@ _SOURCE_APPEARANCE_KEYS = {
     "documentnumber",
     "documentstatus",
     "documenttitle",
+    "projectname",
     "sourceorder",
     "sourcepage",
     "sourcerow",
@@ -137,6 +139,9 @@ _SOURCE_APPEARANCE_KEYS = {
     "创建时间",
     "制作人",
     "制作时间",
+    "关联项目",
+    "关联项目案卷名称",
+    "案卷名称",
     "文书名称",
     "文书文号",
     "文书状态",
@@ -1111,11 +1116,21 @@ def _annotate_inspection_stages(
     grouped: dict[str, list[tuple[int, str, dict[str, Any] | None]]] = {}
     labels: dict[str, str] = {}
     for rwid, record in records.items():
-        case_name = _find_first(record.get("fields") or {}, _CASE_NAME_KEYS)
-        label = str(case_name).strip() if case_name not in (None, "") else rwid
-        group_key = _normalized_identity_value(label) or rwid
-        labels.setdefault(group_key, label)
         appearances = list(record.get("sourceAppearances") or [])
+        case_names = [
+            value
+            for value in (
+                *(_find_first(item, _CASE_NAME_KEYS) for item in appearances),
+                _find_first(record.get("fields") or {}, _CASE_NAME_KEYS),
+            )
+            if value not in (None, "")
+        ]
+        normalized_names = {
+            value for item in case_names if (value := _normalized_case_name(item)) is not None
+        }
+        label = str(case_names[0]).strip() if case_names else rwid
+        group_key = next(iter(normalized_names)) if len(normalized_names) == 1 else rwid
+        labels.setdefault(group_key, label)
         if appearances:
             for appearance in appearances:
                 grouped.setdefault(group_key, []).append(
@@ -1651,6 +1666,13 @@ def _normalized_identity_value(value: Any) -> str | None:
     if value in (None, ""):
         return None
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value))).casefold()
+
+
+def _normalized_case_name(value: Any) -> str | None:
+    normalized = _normalized_identity_value(value)
+    if normalized is None:
+        return None
+    return re.sub(r"\((?:个体工商户|个体户)\)$", "", normalized)
 
 
 def _detail_identity_fields(value: dict[str, Any]) -> dict[str, str]:

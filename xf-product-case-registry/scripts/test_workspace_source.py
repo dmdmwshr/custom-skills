@@ -401,6 +401,7 @@ def test_capture_preserves_document_waterline_and_marks_initial_recheck(
     items = [
         _record(
             "fixture-rwid-repeat",
+            caseName="测试经营部",
             documentName="消防产品监督检查记录（初查）",
             createdAt="2099-01-01",
             sourcePage=2,
@@ -409,6 +410,7 @@ def test_capture_preserves_document_waterline_and_marks_initial_recheck(
         ),
         _record(
             "fixture-rwid-repeat",
+            caseName="测试经营部（个体工商户）",
             documentName="消防产品监督检查记录（复查）",
             createdAt="2099-02-01",
             sourcePage=1,
@@ -428,6 +430,10 @@ def test_capture_preserves_document_waterline_and_marks_initial_recheck(
         "RECHECK",
     ]
     assert record["sourceAppearances"][0]["documentName"].endswith("（初查）")
+    assert {item["caseName"] for item in record["sourceAppearances"]} == {
+        "测试经营部",
+        "测试经营部（个体工商户）",
+    }
 
 
 def test_third_inspection_record_is_nonblocking_anomaly(
