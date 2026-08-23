@@ -1489,6 +1489,21 @@ def test_source_begin_parser_supports_isolated_acceptance_sample() -> None:
     assert args.acceptance_sample is True
 
 
+def test_ledger_status_parser_supports_formal_batch_selection() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "ledger",
+            "status",
+            "--work-root",
+            "C:/fixture-work-root",
+            "--batch-id",
+            "formal-batch",
+        ]
+    )
+    assert args.batch_id == "formal-batch"
+    assert args.func is cli.ledger_status_command
+
+
 def test_source_tail_cursor_and_await_download_parsers() -> None:
     tail = cli.build_parser().parse_args(
         [

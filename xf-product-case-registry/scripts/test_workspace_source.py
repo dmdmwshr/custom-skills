@@ -281,6 +281,180 @@ def test_legacy_scan_and_json_excel_readback(layout: workspace.BusinessLayout) -
     assert workspace.load_waterline(layout) == json_value
 
 
+def test_workspace_progress_uses_current_formal_project_milestones(
+    layout: workspace.BusinessLayout,
+) -> None:
+    batch_id = "formal-progress"
+    project_c = "99999999T209900003"
+    batch = layout.batch_dir(batch_id)
+    staging = batch / "staging"
+    staging.mkdir(parents=True)
+    (batch / "browser-capture.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": "BrowserCaptureV1",
+                "scope": "all",
+                "batchId": batch_id,
+                "status": "COLLECTING_DETAILS",
+                "createdAt": "2099-08-21T10:00:00+08:00",
+                "updatedAt": "2099-08-21T11:00:00+08:00",
+                "sourceDocumentCount": 4,
+                "uniqueRwidCount": 3,
+                "currentRound": 2,
+                "stableRounds": 2,
+                "anomalies": [{"blocking": False}],
+                "conflicts": [],
+                "rounds": {
+                    "2": {
+                        "totalPages": 2,
+                        "pages": {
+                            "1": {"rawItemCount": 2},
+                            "2": {"rawItemCount": 2},
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    acceptance = layout.batch_dir("newer-acceptance")
+    acceptance.mkdir(parents=True)
+    (acceptance / "browser-capture.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": "BrowserCaptureV1",
+                "scope": "acceptance",
+                "updatedAt": "2099-08-22T11:00:00+08:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    list_screenshots = layout.capture_screenshots / batch_id
+    list_screenshots.mkdir(parents=True)
+    for index in (1, 2):
+        (list_screenshots / f"列表_轮{index}_页001_fixture.png").write_bytes(b"list")
+
+    for index, project_no in enumerate((PROJECT_A, PROJECT_B, project_c), start=1):
+        (staging / f"详情_rwid-{index}.json").write_text(
+            json.dumps({"项目编号": project_no}), encoding="utf-8"
+        )
+        (staging / f"详情_rwid-{index}.png").write_bytes(b"staging screenshot")
+        source_dir = (
+            layout.completed_case_dir(project_no) / "20990821T030000Z-0123456789ab"
+            if project_no == project_c
+            else layout.pending_case_dir(project_no)
+        )
+        source_dir.mkdir(parents=True)
+        (source_dir / "source-evidence.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "SourceEvidenceV1",
+                    "projectNo": project_no,
+                    "batchIds": [batch_id],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (source_dir / f"案卷详情_{index:012d}.png").write_bytes(b"formal screenshot")
+        if project_no != PROJECT_B:
+            (source_dir / f"{project_no}_案卷包_{index:012d}.zip").write_bytes(b"zip")
+
+    workspace.upsert_case(
+        layout,
+        PROJECT_A,
+        state="NEEDS_MANUAL_REVIEW",
+        source={"status": "PACKAGE_READY", "batchId": batch_id},
+        local={"status": "READY_FOR_UPLOAD"},
+        upload={"status": "FAILED"},
+        nasVerification={"status": "NOT_STARTED"},
+    )
+    workspace.upsert_case(
+        layout,
+        PROJECT_B,
+        state="PENDING_UPLOAD",
+        source={"status": "DETAIL_CAPTURED", "batchId": batch_id},
+        local={"status": "READY_FOR_UPLOAD"},
+        upload={"status": "NOT_STARTED"},
+        nasVerification={"status": "NOT_STARTED"},
+    )
+    workspace.upsert_case(
+        layout,
+        project_c,
+        state="COMPLETED",
+        source={"status": "PACKAGE_READY", "batchId": batch_id},
+        local={"status": "ARCHIVED"},
+        upload={"status": "VERIFIED"},
+        nasVerification={"status": "VERIFIED"},
+    )
+
+    first_workspace = layout.work_case_dir(PROJECT_A)
+    first_workspace.mkdir(parents=True)
+    (first_workspace / "upload-state.json").write_text(
+        json.dumps(
+            {
+                "stateVersion": 6,
+                "projectNo": PROJECT_A,
+                "status": "UPLOADING",
+                "jobId": "redacted-job-a",
+                "filesProjection": [{"clientRef": "a"}, {"clientRef": "b"}],
+                "uploadedFileRefs": ["a", "b"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    third_workspace = layout.work_case_dir(project_c)
+    third_workspace.mkdir(parents=True)
+    (third_workspace / "upload-state.json").write_text(
+        json.dumps(
+            {
+                "stateVersion": 6,
+                "projectNo": project_c,
+                "status": "VERIFIED",
+                "jobId": "redacted-job-c",
+                "filesProjection": [{"clientRef": "c"}],
+                "uploadedFileRefs": ["c"],
+                "finalizeSummary": {
+                    "created": True,
+                    "conflictCount": 0,
+                    "skippedCount": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    history = layout.history_workspaces / "99999999T209900099-fixture"
+    history.mkdir(parents=True)
+    (history / "upload-state.json").write_text(
+        json.dumps(
+            {
+                "stateVersion": 6,
+                "projectNo": "99999999T209900099",
+                "status": "VERIFIED",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = workspace.workspace_progress(layout)
+    assert result["batch"]["batchId"] == batch_id
+    assert result["batch"]["sourceDocumentRecords"] == 4
+    assert result["batch"]["pageSize"] == 2
+    assert result["storage"]["listScreenshotFiles"] == 2
+    assert result["storage"]["formalDetailProjects"] == 3
+    assert result["storage"]["packageProjects"] == 2
+    assert result["storage"]["packageWaitingProjects"] == 1
+    assert result["storage"]["stagingDetailProjects"] == 3
+    assert result["waterline"]["caseCount"] == 3
+    assert result["upload"]["v6JobCreatedCases"] == 2
+    assert result["upload"]["allFilesTransferredCases"] == 2
+    assert result["upload"]["finalizedCases"] == 1
+    assert result["upload"]["successfulSystemCases"] == 1
+    assert result["upload"]["nasVerifiedCases"] == 1
+    assert result["upload"]["failedCases"] == 1
+    assert result["upload"]["readyForUploadCases"] == 1
+
+
 def test_excel_export_forces_source_text_to_strings_without_mutating_json(
     layout: workspace.BusinessLayout,
 ) -> None:

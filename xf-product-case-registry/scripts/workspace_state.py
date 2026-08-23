@@ -7,6 +7,7 @@ import stat
 import tomllib
 import unicodedata
 import uuid
+from collections import Counter
 from collections.abc import Mapping
 from contextlib import contextmanager, suppress
 from copy import deepcopy
@@ -754,6 +755,372 @@ def export_waterline_xlsx(layout: BusinessLayout) -> Path:
     return target
 
 
+def _read_progress_json(path: Path, boundary: Path, label: str) -> dict[str, Any]:
+    _validated_workspace_path(path, boundary, label, must_exist=True)
+    if _is_reparse(path) or not path.is_file():
+        raise WorkspaceStateError(f"{label}必须是非重解析点普通文件")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise WorkspaceStateError(f"{label}无法读取或格式错误") from error
+    if not isinstance(value, dict):
+        raise WorkspaceStateError(f"{label}顶层必须是对象")
+    return value
+
+
+def _formal_capture_batch(
+    layout: BusinessLayout, batch_id: str | None
+) -> tuple[str, Path, dict[str, Any]]:
+    if not layout.capture_batches.is_dir():
+        raise WorkspaceStateError("采集批次目录不存在")
+
+    if batch_id is not None:
+        selected_id = _safe_component(batch_id, "批次编号")
+        selected_dir = layout.batch_dir(selected_id)
+        capture_path = selected_dir / "browser-capture.json"
+        state = _read_progress_json(capture_path, layout.root, "浏览器采集状态")
+        if state.get("schemaVersion") != "BrowserCaptureV1":
+            raise WorkspaceStateError("浏览器采集状态不是 BrowserCaptureV1")
+        if state.get("scope") != "all":
+            raise WorkspaceStateError("进度查询只接受 scope=all 的正式批次")
+        return selected_id, selected_dir, state
+
+    candidates: list[tuple[str, int, str, Path, dict[str, Any]]] = []
+    for child in layout.capture_batches.iterdir():
+        if _is_reparse(child):
+            raise WorkspaceStateError(f"采集批次不允许重解析点：{child}")
+        if not child.is_dir():
+            continue
+        capture_path = child / "browser-capture.json"
+        if not capture_path.is_file():
+            continue
+        state = _read_progress_json(capture_path, layout.root, "浏览器采集状态")
+        if state.get("schemaVersion") != "BrowserCaptureV1" or state.get("scope") != "all":
+            continue
+        updated_at = state.get("updatedAt") or state.get("createdAt") or ""
+        candidates.append(
+            (
+                str(updated_at) if isinstance(updated_at, str) else "",
+                capture_path.stat().st_mtime_ns,
+                child.name,
+                child,
+                state,
+            )
+        )
+    if not candidates:
+        raise WorkspaceStateError("没有可查询的 scope=all 正式采集批次")
+    _updated_at, _mtime, selected_id, selected_dir, state = max(candidates)
+    return selected_id, selected_dir, state
+
+
+def _status_counts(records: list[Mapping[str, Any]], section: str | None = None) -> dict[str, int]:
+    values: Counter[str] = Counter()
+    for record in records:
+        value = _status(record, section) if section is not None else str(record.get("state") or "")
+        values[value or "UNKNOWN"] += 1
+    return dict(sorted(values.items()))
+
+
+def _capture_page_size(state: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    rounds = state.get("rounds")
+    current_round = state.get("currentRound")
+    if not isinstance(rounds, Mapping):
+        return None, None
+    round_state = rounds.get(str(current_round)) or rounds.get(current_round)
+    if not isinstance(round_state, Mapping):
+        return None, None
+    total_pages = round_state.get("totalPages")
+    pages = round_state.get("pages")
+    sizes: list[int] = []
+    if isinstance(pages, Mapping):
+        for page in pages.values():
+            if not isinstance(page, Mapping):
+                continue
+            size = page.get("rawItemCount")
+            if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+                sizes.append(size)
+    return (max(sizes) if sizes else None), (
+        total_pages if isinstance(total_pages, int) and not isinstance(total_pages, bool) else None
+    )
+
+
+def workspace_progress(layout: BusinessLayout, *, batch_id: str | None = None) -> dict[str, Any]:
+    """Return a read-only, project-number-based progress snapshot for the current formal batch."""
+
+    selected_id, batch_dir, capture = _formal_capture_batch(layout, batch_id)
+    issues: list[dict[str, str]] = []
+    page_size, total_pages = _capture_page_size(capture)
+
+    list_screenshot_dir = layout.capture_screenshots / selected_id
+    list_screenshots = 0
+    if list_screenshot_dir.exists():
+        _assert_safe_tree(list_screenshot_dir, layout.root, "列表截图目录")
+        list_screenshots = sum(
+            1
+            for path in list_screenshot_dir.iterdir()
+            if path.is_file() and path.suffix.casefold() in {".png", ".jpg", ".jpeg"}
+        )
+
+    staging = batch_dir / "staging"
+    staging_detail_json = 0
+    staging_detail_screenshots = 0
+    staging_projects: set[str] = set()
+    if staging.exists():
+        _assert_safe_tree(staging, layout.root, "批次 staging")
+        for detail_path in staging.glob("详情_*.json"):
+            staging_detail_json += 1
+            detail = _read_progress_json(detail_path, layout.root, "临时详情 JSON")
+            raw_project = detail.get("项目编号") or detail.get("projectNo")
+            if isinstance(raw_project, str) and PROJECT_NO.fullmatch(raw_project.strip().upper()):
+                staging_projects.add(raw_project.strip().upper())
+            else:
+                issues.append(
+                    {"code": "STAGING_DETAIL_PROJECT_NO_INVALID", "item": detail_path.name}
+                )
+        staging_detail_screenshots = sum(
+            1
+            for path in staging.iterdir()
+            if path.is_file()
+            and path.stem.startswith("详情_")
+            and path.suffix.casefold() in {".png", ".jpg", ".jpeg"}
+        )
+
+    evidence_projects: set[str] = set()
+    package_projects: set[str] = set()
+    formal_detail_projects: set[str] = set()
+    package_files = 0
+    formal_detail_screenshot_files = 0
+    source_evidence_files = 0
+    evidence_locations: list[tuple[str, Path]] = []
+    if layout.pending_cases.is_dir():
+        for child in layout.pending_cases.iterdir():
+            if _is_reparse(child):
+                raise WorkspaceStateError(f"待处理案卷不允许重解析点：{child}")
+            if not child.is_dir() or not PROJECT_NO.fullmatch(child.name):
+                continue
+            evidence_locations.append((child.name, child))
+    if layout.completed_cases.is_dir():
+        for project_dir in layout.completed_cases.iterdir():
+            if _is_reparse(project_dir):
+                raise WorkspaceStateError(f"已处理案卷不允许重解析点：{project_dir}")
+            if not project_dir.is_dir() or not PROJECT_NO.fullmatch(project_dir.name):
+                continue
+            for generation_dir in project_dir.iterdir():
+                if _is_reparse(generation_dir):
+                    raise WorkspaceStateError(f"已处理案卷代际不允许重解析点：{generation_dir}")
+                if generation_dir.is_dir():
+                    evidence_locations.append((project_dir.name, generation_dir))
+
+    for project_no, evidence_dir in evidence_locations:
+        evidence_path = evidence_dir / "source-evidence.json"
+        if not evidence_path.is_file():
+            continue
+        evidence = _read_progress_json(evidence_path, layout.root, "来源证据")
+        batch_ids = evidence.get("batchIds")
+        if not isinstance(batch_ids, list) or selected_id not in batch_ids:
+            continue
+        source_evidence_files += 1
+        evidence_project = evidence.get("projectNo")
+        if evidence.get("schemaVersion") != "SourceEvidenceV1" or evidence_project != project_no:
+            issues.append({"code": "SOURCE_EVIDENCE_IDENTITY_MISMATCH", "projectNo": project_no})
+            continue
+        evidence_projects.add(project_no)
+        screenshots = [
+            path
+            for path in evidence_dir.iterdir()
+            if path.is_file()
+            and path.name.startswith("案卷详情_")
+            and path.suffix.casefold() in {".png", ".jpg", ".jpeg"}
+        ]
+        formal_detail_screenshot_files += len(screenshots)
+        if screenshots:
+            formal_detail_projects.add(project_no)
+        packages = [
+            path
+            for path in evidence_dir.iterdir()
+            if path.is_file()
+            and path.name.startswith(f"{project_no}_案卷包_")
+            and path.suffix.casefold() == ".zip"
+        ]
+        package_files += len(packages)
+        if packages:
+            package_projects.add(project_no)
+        if len(packages) > 1:
+            issues.append({"code": "MULTIPLE_FORMAL_PACKAGES", "projectNo": project_no})
+
+    waterline = load_waterline(layout)
+    current_records: list[Mapping[str, Any]] = []
+    record_by_project: dict[str, Mapping[str, Any]] = {}
+    for project_no, record in waterline["cases"].items():
+        if not isinstance(record, Mapping):
+            continue
+        source = record.get("source")
+        if not isinstance(source, Mapping):
+            continue
+        source_batches = source.get("batchIds")
+        belongs = source.get("batchId") == selected_id or (
+            isinstance(source_batches, list) and selected_id in source_batches
+        )
+        if belongs:
+            current_records.append(record)
+            record_by_project[project_no] = record
+
+    upload_state_counts: Counter[str] = Counter()
+    job_created = 0
+    projected_files = 0
+    transferred_files = 0
+    all_files_transferred = 0
+    finalized_projects: set[str] = set()
+    finalized_with_conflicts = 0
+    successful_system_projects: set[str] = set()
+    state_verified_projects: set[str] = set()
+    for project_no in sorted(record_by_project):
+        state_path = layout.work_case_dir(project_no) / "upload-state.json"
+        if not state_path.is_file():
+            continue
+        upload_state = _read_progress_json(state_path, layout.root, "上传状态")
+        if upload_state.get("stateVersion") != 6 or upload_state.get("projectNo") != project_no:
+            issues.append({"code": "UPLOAD_STATE_EXCLUDED", "projectNo": project_no})
+            continue
+        state_status = str(upload_state.get("status") or "UNKNOWN")
+        upload_state_counts[state_status] += 1
+        if isinstance(upload_state.get("jobId"), str) and upload_state["jobId"]:
+            job_created += 1
+        projection = upload_state.get("filesProjection")
+        uploaded = upload_state.get("uploadedFileRefs")
+        projection_refs = (
+            {
+                item.get("clientRef")
+                for item in projection
+                if isinstance(item, Mapping) and isinstance(item.get("clientRef"), str)
+            }
+            if isinstance(projection, list)
+            else set()
+        )
+        uploaded_refs = (
+            {item for item in uploaded if isinstance(item, str)}
+            if isinstance(uploaded, list)
+            else set()
+        )
+        projected_files += len(projection_refs)
+        transferred_files += len(uploaded_refs & projection_refs)
+        if projection_refs and projection_refs == uploaded_refs:
+            all_files_transferred += 1
+        if state_status in {"FINALIZED_UNVERIFIED", "FINALIZED_WITH_CONFLICTS", "VERIFIED"}:
+            finalized_projects.add(project_no)
+        if state_status == "FINALIZED_WITH_CONFLICTS":
+            finalized_with_conflicts += 1
+        summary = upload_state.get("finalizeSummary")
+        if (
+            state_status in {"FINALIZED_UNVERIFIED", "VERIFIED"}
+            and isinstance(summary, Mapping)
+            and summary.get("created") is True
+            and summary.get("conflictCount") == 0
+            and summary.get("skippedCount") == 0
+        ):
+            successful_system_projects.add(project_no)
+        if state_status == "VERIFIED":
+            state_verified_projects.add(project_no)
+
+    upload_waterline_counts = _status_counts(current_records, "upload")
+    nas_waterline_counts = _status_counts(current_records, "nasVerification")
+    ready_for_upload = sum(
+        1
+        for record in current_records
+        if _status(record, "local") == "READY_FOR_UPLOAD"
+        and _status(record, "upload") == "NOT_STARTED"
+    )
+    failed_cases = upload_waterline_counts.get("FAILED", 0)
+    not_started_cases = upload_waterline_counts.get("NOT_STARTED", 0)
+    waterline_verified_projects = {
+        project_no
+        for project_no, record in record_by_project.items()
+        if _status(record, "upload") == "VERIFIED"
+    }
+    finalized_projects.update(waterline_verified_projects)
+    successful_system_projects.update(waterline_verified_projects)
+    nas_verified_cases = len(
+        state_verified_projects
+        | {
+            project_no
+            for project_no, record in record_by_project.items()
+            if _status(record, "nasVerification") == "VERIFIED"
+        }
+    )
+    in_progress_cases = sum(
+        1
+        for record in current_records
+        if _status(record, "upload") not in {"NOT_STARTED", "FAILED", "VERIFIED"}
+    )
+
+    return {
+        "schemaVersion": "CaseProgressV1",
+        "status": "OK",
+        "scope": "CURRENT_ACTIVITY",
+        "generatedAt": _utc_now(),
+        "identityKey": "projectNo",
+        "batch": {
+            "batchId": selected_id,
+            "captureStatus": capture.get("status"),
+            "updatedAt": capture.get("updatedAt"),
+            "stableRounds": capture.get("stableRounds"),
+            "currentRound": capture.get("currentRound"),
+            "sourceDocumentRecords": capture.get("sourceDocumentCount"),
+            "uniqueRwids": capture.get("uniqueRwidCount"),
+            "pageSize": page_size,
+            "totalPages": total_pages,
+            "anomalies": len(capture.get("anomalies", []))
+            if isinstance(capture.get("anomalies"), list)
+            else 0,
+            "conflicts": len(capture.get("conflicts", []))
+            if isinstance(capture.get("conflicts"), list)
+            else 0,
+        },
+        "storage": {
+            "listScreenshotFiles": list_screenshots,
+            "formalDetailProjects": len(formal_detail_projects),
+            "formalDetailScreenshotFiles": formal_detail_screenshot_files,
+            "sourceEvidenceProjects": len(evidence_projects),
+            "sourceEvidenceFiles": source_evidence_files,
+            "packageProjects": len(package_projects),
+            "packageZipFiles": package_files,
+            "packageWaitingProjects": len(evidence_projects - package_projects),
+            "stagingDetailProjects": len(staging_projects),
+            "stagingDetailJsonFiles": staging_detail_json,
+            "stagingDetailScreenshotFiles": staging_detail_screenshots,
+        },
+        "waterline": {
+            "caseCount": len(current_records),
+            "overall": _status_counts(current_records),
+            "source": _status_counts(current_records, "source"),
+            "local": _status_counts(current_records, "local"),
+            "upload": upload_waterline_counts,
+            "nasVerification": nas_waterline_counts,
+        },
+        "upload": {
+            "readyForUploadCases": ready_for_upload,
+            "notStartedCases": not_started_cases,
+            "inProgressCases": max(in_progress_cases, 0),
+            "failedCases": failed_cases,
+            "v6JobCreatedCases": job_created,
+            "projectedFiles": projected_files,
+            "transferredFiles": transferred_files,
+            "allFilesTransferredCases": all_files_transferred,
+            "finalizedCases": len(finalized_projects),
+            "finalizedWithConflictsCases": finalized_with_conflicts,
+            "successfulSystemCases": len(successful_system_projects),
+            "nasVerifiedCases": nas_verified_cases,
+            "uploadState": dict(sorted(upload_state_counts.items())),
+        },
+        "exclusions": {
+            "acceptanceSamples": True,
+            "historyWorkspaces": True,
+            "legacyCasesOutsideBatch": True,
+        },
+        "issues": issues,
+    }
+
+
 def _validated_workspace_path(
     path: Path,
     boundary: Path,
@@ -1064,4 +1431,5 @@ __all__ = [
     "secure_download_dir",
     "secure_workspace_root",
     "upsert_case",
+    "workspace_progress",
 ]

@@ -22,7 +22,7 @@ import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "1.4.10"
+VERSION = "1.4.11"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -2847,6 +2847,16 @@ def ledger_export_command(args: argparse.Namespace) -> None:
     print(json.dumps({"status": "exported", "path": str(output)}, ensure_ascii=False))
 
 
+def ledger_status_command(args: argparse.Namespace) -> None:
+    workspace = workspace_api()
+    try:
+        _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        result = workspace.workspace_progress(layout, batch_id=args.batch_id)
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def source_result_summary(result: dict[str, Any]) -> dict[str, Any]:
     keys = {
         "schemaVersion",
@@ -3220,6 +3230,16 @@ def build_parser() -> argparse.ArgumentParser:
     ledger_export = ledger_sub.add_parser("export", help="从 JSON 事实源重建 Excel 水位表")
     add_workspace_resolution_options(ledger_export)
     ledger_export.set_defaults(func=ledger_export_command)
+    ledger_status = ledger_sub.add_parser(
+        "status",
+        help="只读汇总当前正式批次的查询、存储、整理、上传与飞牛核验进度",
+    )
+    add_workspace_resolution_options(ledger_status)
+    ledger_status.add_argument(
+        "--batch-id",
+        help="指定 scope=all 的正式批次；省略时选择更新时间最新的正式批次",
+    )
+    ledger_status.set_defaults(func=ledger_status_command)
 
     for name, func in (("upload", upload_command), ("verify", verify_command)):
         command = sub.add_parser(name)
