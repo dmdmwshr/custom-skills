@@ -54,6 +54,25 @@
 3. 点击后运行 `source await-download --batch-id <批次> --rwid <RWID> --download-baseline <基线> --attach`。它在已配置下载目录中轮询最多 30 分钟：只接受相对基线唯一新增的 `.zip`，连续 3 次大小稳定且 ZIP 可打开后才自动规范命名和绑定。
 4. `.crdownload`、`.part`、`.tmp` 等临时文件代表仍在下载，绝不确认；持续 5 分钟无大小或更新时间变化标记为 `STALLED`，超时标记为 `WAITING`，多个候选标记为 `AMBIGUOUS`。这些状态都保持“案卷包待接收”，不进入整理或上传。
 
+### 内置浏览器 Blob 本地恢复
+
+仅当同一轮下载同时满足以下证据时，才使用本恢复路径：
+
+1. `Network.loadingFinished` 表明同一点击的来源响应已完成，且其数据长度与下载事件的 `totalBytes` 一致；
+2. `Page.downloadWillBegin` 给出同轮的 Blob URL、建议 ZIP 文件名和下载 GUID；
+3. 随后的 `Page.downloadProgress` 为 `state=canceled`、`receivedBytes=0`，而下载目录没有新增 ZIP。
+
+这表示来源系统已完成打包，**内置浏览器的 Blob 写盘交付被取消**。它不是 ZIP 转换失败，也不是等待更久能解决的 `.crdownload`。不得读取或保存 Cookie、令牌或其他会话数据；不得从任意历史响应、未知请求或其他页面取包。
+
+恢复步骤如下：
+
+1. 在点击前照常建立本案下载基线；保留本轮 `downloadWillBegin` 的建议文件名、`downloadProgress.totalBytes` 和对应的已完成网络请求 ID，仅用于当前会话，不写入上传 manifest。
+2. 仅对该已完成请求调用 `Network.getResponseBody`。返回值必须是 Base64，且解码大小等于 `totalBytes`，文件头为 ZIP；否则保持“案卷包待接收”。
+3. 在同一受控浏览器会话中加载 `scripts/browser_blob_receiver.mjs` 的 `receiveBrowserBlobZip`，以已配置下载目录、建议 ZIP 文件名、Base64 包体和预期字节数调用。该程序只允许直接子文件、拒绝覆盖，以临时文件加硬链接原子落盘，并返回 SHA-256。
+4. 然后运行 `source await-download --batch-id <批次> --rwid <RWID> --download-baseline <本轮基线> --attach`。它仍负责唯一候选、ZIP 安全检查、哈希命名、基线消费回执和状态更新。
+
+若 CDP 不开放 `Network.getResponseBody`、包体不完整、原子落盘失败或 ZIP 校验失败，记录 `IAB_BLOB_DELIVERY_UNAVAILABLE` 并停在“详情已采集、案卷包待接收”；不得反复点击。此时只能由用户在支持原生下载的外部浏览器手工登录来源系统后继续，不能导出或迁移内置浏览器会话。
+
 ### 模块 E：下一案卷与断点恢复
 
 1. 当前页从底部向上处理：同页下一个为 `row - 1`；当前行是第 1 行时，下一个为上一页的“最后一个可见行”，翻页后必须重新读取行数，不能假定等于 `S`。
