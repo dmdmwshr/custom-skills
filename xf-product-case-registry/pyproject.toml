@@ -1,6 +1,6 @@
 [project]
 name = "xf-product-case-registry"
-version = "1.4.5"
+version = "1.4.6"
 description = "消防产品案卷浏览器采集、本地整理、PDF 清点与 V2 接口导入工具"
 requires-python = ">=3.12,<3.13"
 dependencies = [

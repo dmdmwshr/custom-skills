@@ -1127,6 +1127,7 @@ def test_attach_package_renames_mojibake_zip_and_is_idempotent(
     baseline = _bound_download_baseline(layout, "fixture-batch", "fixture-rwid-package", tmp_path)
     downloaded = tmp_path / "downloaded.zip"
     _write_zip(downloaded, {"文书/fixture.txt": b"fixture package"})
+    downloaded_bytes = downloaded.read_bytes()
 
     first = source.attach_package(
         layout,
@@ -1138,7 +1139,7 @@ def test_attach_package_renames_mojibake_zip_and_is_idempotent(
         allowed_download_dir=tmp_path,
     )
     assert not downloaded.exists()
-    _write_zip(downloaded, {"文书/fixture.txt": b"fixture package"})
+    downloaded.write_bytes(downloaded_bytes)
     second = source.attach_package(
         layout,
         "fixture-batch",
