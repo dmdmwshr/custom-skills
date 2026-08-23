@@ -67,11 +67,11 @@
 恢复步骤如下：
 
 1. 在点击前照常建立本案下载基线；保留本轮 `downloadWillBegin` 的建议文件名、`downloadProgress.totalBytes` 和对应的已完成网络请求 ID，仅用于当前会话，不写入上传 manifest。
-2. 仅对该已完成请求调用 `Network.getResponseBody`。返回值必须是 Base64，且解码大小等于 `totalBytes`，文件头为 ZIP；否则保持“案卷包待接收”。
+2. 仅对该已完成请求调用 `Network.getResponseBody`。返回值必须是 Base64，且解码大小等于 `totalBytes`，文件头为 ZIP；否则保持“案卷包待接收”。Base64 会把传输体积扩大约三分之一，`browser_blob_receiver.mjs` 的文件大小上限不等于受控 CDP/Node 消息通道的帧上限；不得根据 ZIP 原始字节数猜测通道一定可交付。
 3. 在同一受控浏览器会话中加载 `scripts/browser_blob_receiver.mjs` 的 `receiveBrowserBlobZip`，以已配置下载目录、建议 ZIP 文件名、Base64 包体和预期字节数调用。该程序只允许直接子文件、拒绝覆盖，以临时文件加硬链接原子落盘，并返回 SHA-256。
 4. 然后运行 `source await-download --batch-id <批次> --rwid <RWID> --download-baseline <本轮基线> --attach`。它仍负责唯一候选、ZIP 安全检查、哈希命名、基线消费回执、移入工作根和状态更新；仅在工作根副本复核一致后删除下载目录中的恢复 ZIP。
 
-若 CDP 不开放 `Network.getResponseBody`、包体不完整、原子落盘失败或 ZIP 校验失败，记录 `IAB_BLOB_DELIVERY_UNAVAILABLE` 并停在“详情已采集、案卷包待接收”；不得反复点击。此时只能由用户在支持原生下载的外部浏览器手工登录来源系统后继续，不能导出或迁移内置浏览器会话。
+若 CDP 不开放 `Network.getResponseBody`、返回 `native pipe message exceeds frame limit` 等原生消息帧超限、包体不完整、原子落盘失败或 ZIP 校验失败，记录 `IAB_BLOB_DELIVERY_UNAVAILABLE` 并停在“详情已采集、案卷包待接收”；保存项目编号、RWID、`totalBytes`、来源打包已完成和非阻塞批次标记，但不把请求 ID、下载 GUID、Blob URL 或建议文件名写入上传 manifest。消息帧超限后控制通道可能短暂积压，下一次浏览器动作前先回读当前地址与加载状态；调用超时不能当作动作成功，也不能盲目补点。不得改用页面脚本读取 Blob、分块拼包、读取会话或迁移浏览器配置，也不得反复点击打包。此时只能由用户在支持原生下载的外部浏览器手工登录来源系统后继续，不能导出或迁移内置浏览器会话。
 
 ### 模块 E：下一案卷与断点恢复
 

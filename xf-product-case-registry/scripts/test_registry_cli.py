@@ -46,6 +46,8 @@ def test_browser_runbook_covers_marked_controls_latency_and_download_gate() -> N
         "source await-download",
         "内置浏览器 Blob 本地恢复",
         "Network.getResponseBody",
+        "native pipe message exceeds frame limit",
+        "消息帧超限后控制通道可能短暂积压",
         "browser_blob_receiver.mjs",
         "执行模块与固定顺序",
         "关联项目／案卷名称",
