@@ -54,6 +54,8 @@ except (ImportError, ModuleNotFoundError):  # pragma: no cover - 由独立加载
 BROWSER_CAPTURE_VERSION = "BrowserCaptureV1"
 SOURCE_EVIDENCE_VERSION = "SourceEvidenceV1"
 DOWNLOAD_BASELINE_VERSION = "DownloadBaselineV1"
+TAIL_CURSOR_VERSION = "TailCursorV1"
+DOWNLOAD_WAIT_VERSION = "DownloadWaitV1"
 CAPTURE_FILE_NAME = "browser-capture.json"
 EVIDENCE_FILE_NAME = "source-evidence.json"
 try:
@@ -70,6 +72,9 @@ MAX_ZIP_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_ZIP_RATIO = 200.0
 MAX_CAPTURE_PAGES = 10_000
 MAX_CAPTURE_RECORDS = 1_000_000
+DEFAULT_DOWNLOAD_WAIT_SECONDS = 30 * 60
+DEFAULT_DOWNLOAD_POLL_SECONDS = 5.0
+DEFAULT_DOWNLOAD_STALL_SECONDS = 5 * 60
 WINDOWS_DEVICE_NAMES = {
     "CON",
     "PRN",
@@ -206,6 +211,77 @@ def _default_filters(value: datetime | str | None, explicit: dict[str, Any]) -> 
         if defaults.get(key) != expected:
             raise SourceIntakeError(f"采集筛选 {key} 必须固定为 {expected}")
     return defaults
+
+
+def plan_tail_first_cursor(
+    total_count: int,
+    page_size: int,
+    page_number: int,
+    visible_row_count: int,
+    row_number: int | None = None,
+) -> dict[str, Any]:
+    """按页面已回读的行数计算尾页优先采集游标，绝不只相信历史页码。"""
+
+    values = {
+        "列表总数": total_count,
+        "每页条数": page_size,
+        "当前页码": page_number,
+        "当前页可见行数": visible_row_count,
+    }
+    for label, value in values.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise SourceIntakeError(f"{label}必须是正整数")
+    total_pages = (total_count + page_size - 1) // page_size
+    if page_number > total_pages:
+        raise SourceIntakeError("当前页码超出页面报告的总页数")
+    if visible_row_count > page_size:
+        raise SourceIntakeError("当前页可见行数超过每页条数")
+    expected_rows = total_count - (page_number - 1) * page_size
+    expected_rows = min(page_size, expected_rows)
+    if visible_row_count != expected_rows:
+        raise SourceIntakeError(
+            f"当前页可见行数与页面水位不一致：{visible_row_count}/{expected_rows}"
+        )
+    selected_row = visible_row_count if row_number is None else row_number
+    if (
+        not isinstance(selected_row, int)
+        or isinstance(selected_row, bool)
+        or not 1 <= selected_row <= visible_row_count
+    ):
+        raise SourceIntakeError("选中行号必须位于当前页可见行范围内")
+    source_index = (page_number - 1) * page_size + selected_row
+    tail_ordinal = total_count - source_index + 1
+    if selected_row > 1:
+        next_cursor: dict[str, Any] | None = {
+            "pageNumber": page_number,
+            "rowNumber": selected_row - 1,
+            "rowStrategy": "EXACT_ROW",
+            "requiresVisibleRowReadback": False,
+        }
+    elif page_number > 1:
+        next_cursor = {
+            "pageNumber": page_number - 1,
+            "rowNumber": None,
+            "rowStrategy": "LAST_VISIBLE_ROW_AFTER_REFRESH",
+            "requiresVisibleRowReadback": True,
+        }
+    else:
+        next_cursor = None
+    return {
+        "schemaVersion": TAIL_CURSOR_VERSION,
+        "order": "TAIL_FIRST",
+        "totalCount": total_count,
+        "pageSize": page_size,
+        "totalPages": total_pages,
+        "current": {
+            "pageNumber": page_number,
+            "visibleRowCount": visible_row_count,
+            "rowNumber": selected_row,
+            "sourceIndex": source_index,
+            "tailOrdinal": tail_ordinal,
+        },
+        "next": next_cursor,
+    }
 
 
 def _require_safe_component(value: str, label: str) -> str:
@@ -457,6 +533,215 @@ def record_download_baseline(
     value["relativePath"] = target.resolve().relative_to(Path(layout.root).resolve()).as_posix()
     _write_json_exclusive(target, value)
     return value
+
+
+def _has_changed_since_download_baseline(
+    item: Path,
+    baseline_by_name: dict[str, dict[str, Any]],
+) -> bool:
+    """仅用本案基线判断文件是否属于当前点击，不按文件名猜测归属。"""
+
+    prior = baseline_by_name.get(item.name.casefold())
+    if prior is None:
+        return True
+    stat_value = item.stat()
+    unchanged = (prior["sizeBytes"], prior["mtimeNs"]) == (
+        stat_value.st_size,
+        stat_value.st_mtime_ns,
+    )
+    if not unchanged and prior.get("sha256"):
+        unchanged = prior["sha256"] == _sha256(item)
+    return not unchanged
+
+
+def _download_artifacts_since_baseline(
+    download_dir: Path,
+    baseline: dict[str, Any],
+) -> tuple[list[Path], list[Path]]:
+    baseline_by_name = {item["name"].casefold(): item for item in baseline["files"]}
+    zip_candidates: list[Path] = []
+    partial_candidates: list[Path] = []
+    for item in sorted(download_dir.iterdir(), key=lambda path: path.name.casefold()):
+        if not item.is_file():
+            continue
+        lower_name = item.name.casefold()
+        is_zip = item.suffix.casefold() == ".zip"
+        is_partial = lower_name.endswith(PARTIAL_SUFFIXES)
+        if not (is_zip or is_partial) or not _has_changed_since_download_baseline(
+            item, baseline_by_name
+        ):
+            continue
+        if is_zip:
+            zip_candidates.append(item)
+        else:
+            partial_candidates.append(item)
+    return zip_candidates, partial_candidates
+
+
+def _download_artifact_snapshot(item: Path) -> dict[str, Any]:
+    stat_value = item.stat()
+    return {
+        "name": item.name,
+        "sizeBytes": stat_value.st_size,
+        "mtimeNs": stat_value.st_mtime_ns,
+    }
+
+
+def wait_for_download_candidate(
+    download_dir: str | Path,
+    *,
+    download_baseline: dict[str, Any] | list[dict[str, Any]] | str | Path,
+    timeout_seconds: float = DEFAULT_DOWNLOAD_WAIT_SECONDS,
+    poll_seconds: float = DEFAULT_DOWNLOAD_POLL_SECONDS,
+    stalled_after_seconds: float = DEFAULT_DOWNLOAD_STALL_SECONDS,
+    stability_checks: int = 3,
+    stability_interval: float = 1.0,
+    sleep_fn: Any = time.sleep,
+    monotonic_fn: Any = time.monotonic,
+) -> dict[str, Any]:
+    """等待异步打包下载真正完成；临时扩展名和变化中的文件不会被当作案卷包。"""
+
+    directory = Path(download_dir).expanduser()
+    if not directory.is_absolute() or not directory.is_dir():
+        raise SourceIntakeError("下载目录不存在")
+    baseline = _normalize_download_baseline(download_baseline)
+    if baseline is None:
+        raise SourceIntakeError("等待下载必须提供本案下载前基线")
+    for label, value in {
+        "下载等待时长": timeout_seconds,
+        "下载轮询间隔": poll_seconds,
+        "下载停滞阈值": stalled_after_seconds,
+        "下载稳定间隔": stability_interval,
+    }.items():
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+            raise SourceIntakeError(f"{label}必须是非负数")
+    if stability_checks < 3:
+        raise SourceIntakeError("下载稳定性至少需要 3 次检查")
+
+    started_at = monotonic_fn()
+    last_partial_signature: tuple[tuple[str, int, int], ...] | None = None
+    last_progress_at = started_at
+    while True:
+        zip_candidates, partial_candidates = _download_artifacts_since_baseline(directory, baseline)
+        now = monotonic_fn()
+        partial_snapshot = [_download_artifact_snapshot(item) for item in partial_candidates]
+        zip_snapshot = [_download_artifact_snapshot(item) for item in zip_candidates]
+        common = {
+            "schemaVersion": DOWNLOAD_WAIT_VERSION,
+            "observedAt": _timestamp(),
+            "elapsedSeconds": round(max(0.0, now - started_at), 3),
+            "partialCandidates": partial_snapshot,
+            "zipCandidates": zip_snapshot,
+        }
+        if (
+            len(zip_candidates) > 1
+            or len(partial_candidates) > 1
+            or (zip_candidates and partial_candidates)
+        ):
+            return {
+                **common,
+                "status": "AMBIGUOUS",
+                "reason": "下载目录相对本案基线出现多个候选或同时存在未完成下载",
+            }
+        if len(zip_candidates) == 1:
+            candidate = zip_candidates[0]
+            try:
+                source, selection, inspection = _resolve_zip(
+                    candidate,
+                    baseline,
+                    stability_checks=stability_checks,
+                    stability_interval=stability_interval,
+                    sleep_fn=sleep_fn,
+                )
+            except SourceIntakeError as error:
+                return {**common, "status": "INVALID", "reason": str(error)}
+            return {
+                **common,
+                "status": "READY",
+                "downloadPath": str(source),
+                "originalSuggestedName": source.name,
+                "downloadSelection": selection,
+                "zipInspection": {
+                    "entryCount": inspection["entryCount"],
+                    "fileCount": inspection["fileCount"],
+                    "totalSizeBytes": inspection["totalSizeBytes"],
+                },
+            }
+        partial_signature = tuple(
+            (item["name"], item["sizeBytes"], item["mtimeNs"]) for item in partial_snapshot
+        )
+        if partial_signature != last_partial_signature:
+            last_partial_signature = partial_signature
+            last_progress_at = now
+        if partial_candidates and now - last_progress_at >= stalled_after_seconds:
+            return {
+                **common,
+                "status": "STALLED",
+                "reason": "临时下载文件在停滞阈值内未继续变化",
+            }
+        if now - started_at >= timeout_seconds:
+            return {
+                **common,
+                "status": "WAITING",
+                "reason": "尚未出现相对本案基线唯一、完整且稳定的 ZIP",
+            }
+        sleep_fn(poll_seconds)
+
+
+def _record_download_delivery(
+    layout: Any,
+    capture_path: Path,
+    state: dict[str, Any],
+    record_key: str,
+    project_no: str,
+    result: dict[str, Any],
+) -> None:
+    """把异步交付观察写入当前案卷断点，不把绝对下载路径写入业务证据。"""
+
+    observed_at = str(result.get("observedAt") or _timestamp())
+    delivery = {
+        "schemaVersion": DOWNLOAD_WAIT_VERSION,
+        "status": str(result["status"]),
+        "observedAt": observed_at,
+        "elapsedSeconds": result.get("elapsedSeconds"),
+        "reason": result.get("reason"),
+        "partialCandidates": list(result.get("partialCandidates") or []),
+        "zipCandidates": list(result.get("zipCandidates") or []),
+    }
+    record = state["records"][record_key]
+    record["downloadDelivery"] = delivery
+    state["updatedAt"] = observed_at
+    _write_json(capture_path, state)
+
+    if _is_acceptance_sample(state):
+        return
+    source_status = {
+        "READY": "PACKAGE_READY_TO_ATTACH",
+        "WAITING": "PACKAGE_WAITING",
+        "STALLED": "PACKAGE_STALLED",
+        "AMBIGUOUS": "PACKAGE_AMBIGUOUS",
+        "INVALID": "PACKAGE_INVALID",
+    }.get(delivery["status"])
+    if source_status is None:
+        return
+    error_summary = (
+        str(delivery["reason"])
+        if delivery["status"] in {"STALLED", "AMBIGUOUS", "INVALID"}
+        else None
+    )
+    waterline_state = "DETAIL_CAPTURED" if record.get("detail") else "DISCOVERED"
+    _maybe_waterline(
+        layout,
+        project_no,
+        state=waterline_state,
+        source={
+            "status": source_status,
+            "batchId": state["batchId"],
+            "rwid": record_key,
+            "downloadDelivery": delivery,
+        },
+        errorSummary=error_summary,
+    )
 
 
 def _validate_bound_download_baseline(
@@ -2064,6 +2349,88 @@ def attach_package(
     )
 
 
+def await_download(
+    workspace: Any,
+    batch_id: str,
+    rwid: str,
+    *,
+    download_baseline: dict[str, Any] | list[dict[str, Any]] | str | Path,
+    download_dir: str | Path,
+    allowed_download_dir: str | Path | None,
+    timeout_seconds: float = DEFAULT_DOWNLOAD_WAIT_SECONDS,
+    poll_seconds: float = DEFAULT_DOWNLOAD_POLL_SECONDS,
+    stalled_after_seconds: float = DEFAULT_DOWNLOAD_STALL_SECONDS,
+    attach: bool = False,
+    stability_checks: int = 3,
+    stability_interval: float = 1.0,
+    sleep_fn: Any = time.sleep,
+    monotonic_fn: Any = time.monotonic,
+) -> dict[str, Any]:
+    """等待来源系统异步生成包；可在唯一 ZIP 稳定后自动交给既有绑定门禁。"""
+
+    layout = _layout(workspace)
+    capture_path, state = _load_capture(layout, batch_id)
+    record_key = _require_rwid(rwid)
+    record = (state.get("records") or {}).get(record_key)
+    if record is None:
+        raise SourceIntakeError("等待下载的 RWID 不在已稳定清单中")
+    if record.get("aliasOf"):
+        raise SourceIntakeError(f"该 RWID 已合并，请使用主记录 {record['aliasOf']}")
+    expected_project = record.get("projectNo") or (record.get("detail") or {}).get("projectNo")
+    project_no = _require_project_no(str(expected_project or "").strip().upper())
+    baseline, _ = _validate_bound_download_baseline(
+        layout,
+        batch_id,
+        record_key,
+        project_no,
+        download_baseline,
+    )
+    selected_download_dir = _validate_configured_download_path(download_dir, allowed_download_dir)
+    if not selected_download_dir.is_dir():
+        raise SourceIntakeError("等待下载必须传入已配置的浏览器下载目录")
+    result = wait_for_download_candidate(
+        selected_download_dir,
+        download_baseline=baseline,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        stalled_after_seconds=stalled_after_seconds,
+        stability_checks=stability_checks,
+        stability_interval=stability_interval,
+        sleep_fn=sleep_fn,
+        monotonic_fn=monotonic_fn,
+    )
+    envelope = {
+        "batchId": batch_id,
+        "rwid": record_key,
+        "projectNo": project_no,
+        **result,
+    }
+    _record_download_delivery(
+        layout,
+        capture_path,
+        state,
+        record_key,
+        project_no,
+        result,
+    )
+    if result["status"] != "READY" or not attach:
+        return envelope
+    capture = attach_package(
+        layout,
+        batch_id,
+        record_key,
+        Path(str(result["downloadPath"])),
+        original_name=str(result["originalSuggestedName"]),
+        project_no=project_no,
+        download_baseline=baseline,
+        allowed_download_dir=selected_download_dir,
+        stability_checks=stability_checks,
+        stability_interval=stability_interval,
+        sleep_fn=sleep_fn,
+    )
+    return {**envelope, "status": "ATTACHED", "capture": capture}
+
+
 # CLI/测试可使用方案中的短名称；公开实现仍保留语义更明确的函数名。
 begin = begin_capture
 finalize = finalize_capture
@@ -2071,19 +2438,24 @@ finalize = finalize_capture
 
 __all__ = [
     "BROWSER_CAPTURE_VERSION",
+    "DOWNLOAD_WAIT_VERSION",
     "DOWNLOAD_BASELINE_VERSION",
     "SOURCE_EVIDENCE_VERSION",
+    "TAIL_CURSOR_VERSION",
     "SourceIntakeError",
     "add_detail",
     "add_page",
     "attach_package",
+    "await_download",
     "begin",
     "begin_capture",
     "capture_download_baseline",
     "finalize",
     "finalize_capture",
     "inspect_zip_package",
+    "plan_tail_first_cursor",
     "record_download_baseline",
     "safe_extract_package",
     "sanitize_source_url",
+    "wait_for_download_candidate",
 ]

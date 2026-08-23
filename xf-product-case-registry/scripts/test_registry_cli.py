@@ -43,6 +43,11 @@ def test_browser_runbook_covers_marked_controls_latency_and_download_gate() -> N
         "打\\s*包",
         "叶子",
         "source snapshot-downloads",
+        "source await-download",
+        "执行模块与固定顺序",
+        "关联项目／案卷名称",
+        ".crdownload",
+        "尾页优先",
         "evaluateAll",
         "约 20 秒",
         "法律文书查询",
@@ -1475,6 +1480,44 @@ def test_source_begin_parser_supports_isolated_acceptance_sample() -> None:
         ]
     )
     assert args.acceptance_sample is True
+
+
+def test_source_tail_cursor_and_await_download_parsers() -> None:
+    tail = cli.build_parser().parse_args(
+        [
+            "source",
+            "tail-cursor",
+            "--total-count",
+            "521",
+            "--page-size",
+            "20",
+            "--page-number",
+            "27",
+            "--visible-row-count",
+            "1",
+        ]
+    )
+    assert tail.total_count == 521
+    assert tail.row_number is None
+
+    waiting = cli.build_parser().parse_args(
+        [
+            "source",
+            "await-download",
+            "--batch-id",
+            "batch-1",
+            "--rwid",
+            "fixture-rwid",
+            "--download-baseline",
+            "baseline.json",
+            "--timeout-seconds",
+            "1800",
+            "--attach",
+        ]
+    )
+    assert waiting.download_baseline == "baseline.json"
+    assert waiting.timeout_seconds == 1800
+    assert waiting.attach is True
 
 
 def test_source_attach_package_parser_requires_per_case_download_baseline() -> None:

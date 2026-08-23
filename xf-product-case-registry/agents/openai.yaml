@@ -1,4 +1,4 @@
 interface:
   display_name: "消防产品案卷采集与 V2 导入"
   short_description: "从已登录网页采集案卷，在独立工作目录整理、维护水位并完成 V2 导入"
-  default_prompt: "使用 $xf-product-case-registry 提示我手工登录来源系统，按当前配置的工作根增量采集并整理消防产品案卷；先维护 JSON 和 Excel 水位，得到明确生产写入授权后再执行 V2 导入，只有飞牛核验为 VERIFIED 才归档。"
+  default_prompt: "使用 $xf-product-case-registry 提示我手工登录来源系统，按当前配置的工作根从尾页末条开始增量采集消防产品案卷；正确进入关联项目，自动等待完整 ZIP、维护 JSON 和 Excel 水位，得到明确生产写入授权后再执行 V2 导入，只有飞牛核验为 VERIFIED 才归档。"

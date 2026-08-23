@@ -947,6 +947,177 @@ def test_new_detail_requires_local_screenshot_evidence(layout: workspace.Busines
     assert not (layout.pending_case_dir(PROJECT_A) / "source-evidence.json").exists()
 
 
+def test_tail_first_cursor_uses_visible_rows_and_crosses_page_boundaries() -> None:
+    tail = source.plan_tail_first_cursor(521, 20, 27, 1)
+    assert tail["totalPages"] == 27
+    assert tail["current"] == {
+        "pageNumber": 27,
+        "visibleRowCount": 1,
+        "rowNumber": 1,
+        "sourceIndex": 521,
+        "tailOrdinal": 1,
+    }
+    assert tail["next"] == {
+        "pageNumber": 26,
+        "rowNumber": None,
+        "rowStrategy": "LAST_VISIBLE_ROW_AFTER_REFRESH",
+        "requiresVisibleRowReadback": True,
+    }
+
+    previous_page = source.plan_tail_first_cursor(521, 20, 26, 20, row_number=20)
+    assert previous_page["current"]["sourceIndex"] == 520
+    assert previous_page["current"]["tailOrdinal"] == 2
+    assert previous_page["next"] == {
+        "pageNumber": 26,
+        "rowNumber": 19,
+        "rowStrategy": "EXACT_ROW",
+        "requiresVisibleRowReadback": False,
+    }
+
+    with pytest.raises(source.SourceIntakeError, match="页面水位不一致"):
+        source.plan_tail_first_cursor(521, 20, 27, 20)
+
+
+def test_wait_for_download_candidate_distinguishes_ready_stalled_and_ambiguous(
+    tmp_path: Path,
+) -> None:
+    ready_dir = tmp_path / "ready-downloads"
+    ready_dir.mkdir()
+    ready_baseline = source.capture_download_baseline(ready_dir, observed_at=FIXED_NOW)
+    _write_zip(ready_dir / "source-package.zip", {"document.txt": b"ready"})
+    ready = source.wait_for_download_candidate(
+        ready_dir,
+        download_baseline=ready_baseline,
+        timeout_seconds=0,
+        poll_seconds=0,
+        stalled_after_seconds=30,
+        stability_interval=0,
+        sleep_fn=lambda _seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+    assert ready["status"] == "READY"
+    assert ready["originalSuggestedName"] == "source-package.zip"
+    assert ready["zipInspection"]["fileCount"] == 1
+
+    stalled_dir = tmp_path / "stalled-downloads"
+    stalled_dir.mkdir()
+    stalled_baseline = source.capture_download_baseline(stalled_dir, observed_at=FIXED_NOW)
+    (stalled_dir / "source-package.crdownload").write_bytes(b"partial")
+    moments = iter((0.0, 0.0, 4.0))
+    stalled = source.wait_for_download_candidate(
+        stalled_dir,
+        download_baseline=stalled_baseline,
+        timeout_seconds=10,
+        poll_seconds=0,
+        stalled_after_seconds=3,
+        stability_interval=0,
+        sleep_fn=lambda _seconds: None,
+        monotonic_fn=lambda: next(moments),
+    )
+    assert stalled["status"] == "STALLED"
+    assert stalled["partialCandidates"] == [
+        {
+            "name": "source-package.crdownload",
+            "sizeBytes": len(b"partial"),
+            "mtimeNs": (stalled_dir / "source-package.crdownload").stat().st_mtime_ns,
+        }
+    ]
+
+    ambiguous_dir = tmp_path / "ambiguous-downloads"
+    ambiguous_dir.mkdir()
+    ambiguous_baseline = source.capture_download_baseline(ambiguous_dir, observed_at=FIXED_NOW)
+    _write_zip(ambiguous_dir / "first.zip", {"first.txt": b"first"})
+    _write_zip(ambiguous_dir / "second.zip", {"second.txt": b"second"})
+    ambiguous = source.wait_for_download_candidate(
+        ambiguous_dir,
+        download_baseline=ambiguous_baseline,
+        timeout_seconds=0,
+        poll_seconds=0,
+        stalled_after_seconds=30,
+        stability_interval=0,
+        sleep_fn=lambda _seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+    assert ambiguous["status"] == "AMBIGUOUS"
+    assert {item["name"] for item in ambiguous["zipCandidates"]} == {"first.zip", "second.zip"}
+
+
+def test_await_download_records_stall_and_auto_attaches_a_complete_zip(
+    layout: workspace.BusinessLayout, tmp_path: Path
+) -> None:
+    _begin_and_stabilize(layout, [_record("fixture-rwid-await")])
+    screenshot = tmp_path / "await-detail.png"
+    screenshot.write_bytes(b"detail screenshot")
+    source.add_detail(
+        layout,
+        "fixture-batch",
+        "fixture-rwid-await",
+        {"项目编号": PROJECT_A, "单位名称": "测试单位", "检查结果": "合格"},
+        "https://source.example/#/detail?RWID=fixture-rwid-await",
+        screenshot,
+        captured_at=FIXED_NOW,
+    )
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    baseline = _bound_download_baseline(layout, "fixture-batch", "fixture-rwid-await", downloads)
+    (downloads / "pending.crdownload").write_bytes(b"partial")
+    moments = iter((0.0, 0.0, 5.0))
+    stalled = source.await_download(
+        layout,
+        "fixture-batch",
+        "fixture-rwid-await",
+        download_baseline=baseline,
+        download_dir=downloads,
+        allowed_download_dir=downloads,
+        timeout_seconds=10,
+        poll_seconds=0,
+        stalled_after_seconds=3,
+        stability_interval=0,
+        sleep_fn=lambda _seconds: None,
+        monotonic_fn=lambda: next(moments),
+        attach=True,
+    )
+    assert stalled["status"] == "STALLED"
+    captured_stall = _read_json(layout.batch_dir("fixture-batch") / "browser-capture.json")
+    delivery = captured_stall["records"]["fixture-rwid-await"]["downloadDelivery"]
+    assert delivery["status"] == "STALLED"
+    assert "package" not in captured_stall["records"]["fixture-rwid-await"]
+    waterline_case = workspace.load_waterline(layout)["cases"][PROJECT_A]
+    assert waterline_case["state"] == "DETAIL_CAPTURED"
+    assert waterline_case["source"]["status"] == "PACKAGE_STALLED"
+
+    (downloads / "pending.crdownload").unlink()
+    recovery_baseline = _bound_download_baseline(
+        layout,
+        "fixture-batch",
+        "fixture-rwid-await",
+        downloads,
+        observed_at="2099-08-21T10:30:00+08:00",
+    )
+    _write_zip(downloads / "completed.zip", {"document.txt": b"completed"})
+    attached = source.await_download(
+        layout,
+        "fixture-batch",
+        "fixture-rwid-await",
+        download_baseline=recovery_baseline,
+        download_dir=downloads,
+        allowed_download_dir=downloads,
+        timeout_seconds=0,
+        poll_seconds=0,
+        stalled_after_seconds=30,
+        stability_interval=0,
+        sleep_fn=lambda _seconds: None,
+        monotonic_fn=lambda: 0.0,
+        attach=True,
+    )
+    assert attached["status"] == "ATTACHED"
+    captured_attached = attached["capture"]
+    assert captured_attached["records"]["fixture-rwid-await"]["package"]["storedName"].startswith(
+        f"{PROJECT_A}_案卷包_"
+    )
+    assert captured_attached["status"] == "READY_FOR_ORGANIZATION"
+
+
 def test_attach_package_renames_mojibake_zip_and_is_idempotent(
     layout: workspace.BusinessLayout, tmp_path: Path
 ) -> None:

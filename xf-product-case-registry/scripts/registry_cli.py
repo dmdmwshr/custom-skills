@@ -22,7 +22,7 @@ import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -2955,6 +2955,59 @@ def source_snapshot_downloads_command(args: argparse.Namespace) -> None:
     )
 
 
+def source_tail_cursor_command(args: argparse.Namespace) -> None:
+    source = source_intake_api()
+    try:
+        result = source.plan_tail_first_cursor(
+            args.total_count,
+            args.page_size,
+            args.page_number,
+            args.visible_row_count,
+            args.row_number,
+        )
+    except source.SourceIntakeError as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def source_await_download_command(args: argparse.Namespace) -> None:
+    source = source_intake_api()
+    workspace = workspace_api()
+    try:
+        config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        result = source.await_download(
+            layout,
+            batch_id=args.batch_id,
+            rwid=args.rwid,
+            download_baseline=Path(args.download_baseline),
+            download_dir=config.download_dir,
+            allowed_download_dir=config.download_dir,
+            timeout_seconds=args.timeout_seconds,
+            poll_seconds=args.poll_seconds,
+            stalled_after_seconds=args.stalled_after_seconds,
+            attach=args.attach,
+        )
+    except (source.SourceIntakeError, workspace.WorkspaceStateError) as error:
+        raise RegistryError(str(error)) from error
+    keys = {
+        "schemaVersion",
+        "status",
+        "batchId",
+        "rwid",
+        "projectNo",
+        "reason",
+        "elapsedSeconds",
+        "partialCandidates",
+        "zipCandidates",
+        "originalSuggestedName",
+        "zipInspection",
+    }
+    summary = {key: result[key] for key in keys if key in result}
+    if isinstance(result.get("capture"), dict):
+        summary["capture"] = source_result_summary(result["capture"])
+    print(json.dumps(summary, ensure_ascii=False))
+
+
 def source_attach_package_command(args: argparse.Namespace) -> None:
     source = source_intake_api()
     workspace = workspace_api()
@@ -3065,6 +3118,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     source_begin.set_defaults(func=source_begin_command)
 
+    source_tail_cursor = source_sub.add_parser(
+        "tail-cursor",
+        help="按页面实时总数和可见行数计算尾页优先的当前与下一案卷位置",
+    )
+    source_tail_cursor.add_argument("--total-count", type=int, required=True)
+    source_tail_cursor.add_argument("--page-size", type=int, required=True)
+    source_tail_cursor.add_argument("--page-number", type=int, required=True)
+    source_tail_cursor.add_argument("--visible-row-count", type=int, required=True)
+    source_tail_cursor.add_argument(
+        "--row-number",
+        type=int,
+        help="当前处理的行；省略时取当前页最后一个可见行",
+    )
+    source_tail_cursor.set_defaults(func=source_tail_cursor_command)
+
     source_page = source_sub.add_parser("add-page", help="接收一页列表清单")
     add_workspace_resolution_options(source_page)
     source_page.add_argument("--batch-id", required=True)
@@ -3090,6 +3158,43 @@ def build_parser() -> argparse.ArgumentParser:
     source_snapshot.add_argument("--batch-id", required=True)
     source_snapshot.add_argument("--rwid", "--record-key", dest="rwid", required=True)
     source_snapshot.set_defaults(func=source_snapshot_downloads_command)
+
+    source_await = source_sub.add_parser(
+        "await-download",
+        help="等待来源系统异步生成 ZIP；完成后可自动校验、规范命名并绑定",
+    )
+    add_workspace_resolution_options(source_await)
+    source_await.add_argument("--batch-id", required=True)
+    source_await.add_argument("--rwid", "--record-key", dest="rwid", required=True)
+    source_await.add_argument(
+        "--download-baseline",
+        required=True,
+        help="本案点击打包前由 source snapshot-downloads 生成的下载基线 JSON",
+    )
+    source_await.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=30 * 60,
+        help="最长等待秒数，默认 1800 秒",
+    )
+    source_await.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=5.0,
+        help="下载目录轮询间隔秒数，默认 5 秒",
+    )
+    source_await.add_argument(
+        "--stalled-after-seconds",
+        type=float,
+        default=5 * 60,
+        help="临时下载文件持续无变化后判定停滞的秒数，默认 300 秒",
+    )
+    source_await.add_argument(
+        "--attach",
+        action="store_true",
+        help="唯一完整 ZIP 稳定并通过检查后自动绑定到当前案卷",
+    )
+    source_await.set_defaults(func=source_await_download_command)
 
     source_package = source_sub.add_parser("attach-package", help="校验、规范命名并绑定已下载 ZIP")
     add_workspace_resolution_options(source_package)
