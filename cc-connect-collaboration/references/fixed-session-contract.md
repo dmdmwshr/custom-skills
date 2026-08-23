@@ -16,9 +16,9 @@
 | `hook_hash` | `.codex/hooks.json` 的 exact 内容哈希 | 模糊版本、未核验副本 |
 | `mobile_channel` | 脱敏的既有通道别名，或 `null` | App ID、令牌、用户标识、会话键 |
 
-一个路由对应一个“业务项目 + 职责”组合。业务代码不复制到控制目录；控制目录只放职责边界、固定 prompt hook、协调说明和可公开的验收材料。默认通知 hook 使用 Luna low，通过 `/timer/add` 注入不透明任务并只输出最终通知；授权助手 hook 只处理非交易授权协作，不承担通知发布。
+一个路由对应一个“业务项目 + 职责”组合。业务代码不复制到控制目录；控制目录只放职责边界、固定 prompt hook、协调说明和可公开的验收材料。默认通知 hook 使用 Luna low，通过 `/timer/add` 注入不透明任务并只输出最终通知；交易授权 hook 只处理当前用户逐条明确发起、业务仓允许的授权协作，不承担通知发布，也不得触发执行。
 
-新增绑定的最小控制目录必须包含：`AGENTS.md`（职责和边界）、`SESSION_INITIALIZATION.md`（首次激活说明）、一个与职责匹配的独立 hook 和 `.codex/hooks.json`。Hook 只允许 SessionStart 的 `startup`、`resume`、`clear`、`compact` 事件，并用 `additionalContext` 注入职责说明。通知发布使用 `SESSION_NOTIFICATION_HOOK.md`，开发/非交易授权协作使用 `SESSION_DEVELOPMENT_CONTROL_HOOK.md`；不得把两类提示词互换或共用。已有目录或文件必须复用并逐项核对，不得重复添加。
+新增绑定的最小控制目录必须包含：`AGENTS.md`（职责和边界）、`SESSION_INITIALIZATION.md`（首次激活说明）、一个与职责匹配的独立 hook 和 `.codex/hooks.json`。Hook 只允许 SessionStart 的 `startup`、`resume`、`clear`、`compact` 事件，并用 `additionalContext` 注入职责说明。通知发布使用 `SESSION_NOTIFICATION_HOOK.md`，开发或交易授权协作使用独立的 `SESSION_DEVELOPMENT_CONTROL_HOOK.md`；不得把两类提示词互换或共用。交易授权 Hook 必须明确允许的模式与授权动作，并明确禁止计划修改、模式切换、执行接口、凭据和 `live`。已有目录或文件必须复用并逐项核对，不得重复添加。
 
 启用前必须同时满足：项目身份与目标路由一致、`.codex/hooks.json` exact hash 与登记一致，并已在 Codex 设置→Hooks或 CLI `/hooks` 审核通过。任何 Hook 修改后必须重新审核；不得通过环境变量、替代配置或其他方式 bypass 审核。
 
