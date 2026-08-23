@@ -521,7 +521,7 @@ def test_acceptance_sample_is_isolated_from_formal_queue_and_waterline(
         layout,
         batch_id,
         rwid,
-        {"项目编号": PROJECT_A, "单位名称": "验收样本单位", "检查结果": "合格"},
+        {"项目编号": PROJECT_A, "单位名称": "测试单位", "检查结果": "合格"},
         "https://source.example/#/detail?runId=discard&RWID=fixture-acceptance-rwid",
         screenshot,
         captured_at=FIXED_NOW,
@@ -925,12 +925,111 @@ def test_detail_stage_merges_consistent_rwids_that_lacked_list_project_number(
     assert merged["conflicts"] == []
 
 
+@pytest.mark.parametrize(
+    "detail_url, detail_unit, reason",
+    [
+        (
+            "https://source.example/#/detail?RWID=identity-b",
+            "甲公司",
+            "详情 URL 的 RWID",
+        ),
+        (
+            "https://source.example/#/detail?RWID=identity-a",
+            "丙公司",
+            "详情单位名称",
+        ),
+    ],
+)
+def test_detail_identity_chain_mismatch_blocks_only_current_case(
+    layout: workspace.BusinessLayout,
+    tmp_path: Path,
+    detail_url: str,
+    detail_unit: str,
+    reason: str,
+) -> None:
+    items = [
+        {
+            "RWID": "identity-a",
+            "caseName": "甲公司",
+            "documentName": "消防产品监督检查记录(编号：〔2099〕第0001号)",
+            "createdAt": "2099-08-21 09:00:00",
+        },
+        {
+            "RWID": "identity-b",
+            "caseName": "乙公司",
+            "documentName": "消防产品监督检查记录(编号：〔2099〕第0002号)",
+            "createdAt": "2099-08-21 08:00:00",
+        },
+    ]
+    _begin_and_stabilize(layout, items, batch_id="identity-chain")
+    screenshot = tmp_path / "identity.png"
+    screenshot.write_bytes(b"identity screenshot")
+
+    with pytest.raises(source.SourceIntakeError, match="CASE_IDENTITY_CHAIN_MISMATCH"):
+        source.add_detail(
+            layout,
+            "identity-chain",
+            "identity-a",
+            {"项目编号": PROJECT_A, "单位名称": detail_unit},
+            detail_url,
+            screenshot,
+            captured_at=FIXED_NOW,
+        )
+
+    persisted = _read_json(layout.batch_dir("identity-chain") / "browser-capture.json")
+    assert persisted["status"] == "COLLECTING_DETAILS"
+    assert persisted["records"]["identity-a"]["caseIdentityStatus"] == "MISMATCH"
+    assert "caseIdentityStatus" not in persisted["records"]["identity-b"]
+    conflict = persisted["records"]["identity-a"]["identityMismatch"]
+    assert conflict["type"] == "CASE_IDENTITY_CHAIN_MISMATCH"
+    assert conflict["blockingScope"] == "CURRENT_CASE"
+    assert reason in conflict["reasons"][0]
+    assert not layout.pending_case_dir(PROJECT_A).exists()
+
+    continued = source.add_detail(
+        layout,
+        "identity-chain",
+        "identity-b",
+        {"项目编号": PROJECT_B, "单位名称": "乙公司"},
+        "https://source.example/#/detail?RWID=identity-b",
+        screenshot,
+        captured_at=FIXED_NOW,
+    )
+    assert continued["records"]["identity-b"]["projectNo"] == PROJECT_B
+    assert layout.pending_case_dir(PROJECT_B).is_dir()
+
+
+def test_detail_identity_chain_accepts_individual_business_suffix_normalization(
+    layout: workspace.BusinessLayout, tmp_path: Path
+) -> None:
+    _begin_and_stabilize(
+        layout,
+        [{"RWID": "identity-suffix", "caseName": "甲公司（个体工商户）"}],
+        batch_id="identity-suffix",
+    )
+    screenshot = tmp_path / "identity-suffix.png"
+    screenshot.write_bytes(b"identity suffix screenshot")
+
+    result = source.add_detail(
+        layout,
+        "identity-suffix",
+        "identity-suffix",
+        {"项目编号": PROJECT_A, "单位名称": "甲公司"},
+        "https://source.example/#/detail?RWID=identity-suffix",
+        screenshot,
+        captured_at=FIXED_NOW,
+    )
+
+    assert result["records"]["identity-suffix"]["projectNo"] == PROJECT_A
+    assert result["conflicts"] == []
+
+
 def test_detail_stage_blocks_conflicting_rwids_for_same_project(
     layout: workspace.BusinessLayout, tmp_path: Path
 ) -> None:
     items = [
         {"RWID": "detail-conflict-a", "单位名称": "测试单位"},
-        {"RWID": "detail-conflict-b", "单位名称": "测试单位"},
+        {"RWID": "detail-conflict-b", "单位名称": "另一测试单位"},
     ]
     _begin_and_stabilize(layout, items, batch_id="detail-conflict")
     screenshot = tmp_path / "canonical.png"

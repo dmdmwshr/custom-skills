@@ -30,7 +30,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -118,6 +118,13 @@ _CASE_NAME_KEYS = {
     "关联项目",
     "关联项目案卷名称",
     "案卷名称",
+}
+_UNIT_NAME_KEYS = {
+    "unitname",
+    "checkedunit",
+    "companyname",
+    "单位名称",
+    "被检查单位",
 }
 _SOURCE_APPEARANCE_KEYS = {
     "casename",
@@ -922,6 +929,28 @@ def sanitize_source_url(value: str | None) -> str | None:
     )
 
 
+def _source_url_rwid(value: str | None) -> str | None:
+    """从已脱敏详情地址读取 RWID；不读取浏览器会话状态。"""
+
+    if not value:
+        return None
+    parts = urlsplit(value)
+    queries = [parts.query]
+    if parts.fragment:
+        _route, separator, fragment_query = parts.fragment.partition("?")
+        if separator:
+            queries.append(fragment_query)
+    values = {
+        str(item).strip()
+        for query in queries
+        for key, item in parse_qsl(query, keep_blank_values=True)
+        if _normalized_key(key) == "rwid" and str(item).strip()
+    }
+    if len(values) > 1:
+        raise SourceIntakeError("来源详情 URL 含多个不同 RWID")
+    return next(iter(values), None)
+
+
 def _clean_evidence(value: Any, *, key_hint: str = "") -> Any:
     """建立证据白名单边界：认证字段丢弃，URL 去会话参数。"""
 
@@ -1678,10 +1707,7 @@ def _normalized_case_name(value: Any) -> str | None:
 def _detail_identity_fields(value: dict[str, Any]) -> dict[str, str]:
     candidates = {
         "projectNo": _find_first(value, _PROJECT_KEYS),
-        "unitName": _find_first(
-            value,
-            {"unitname", "checkedunit", "companyname", "单位名称", "被检查单位"},
-        ),
+        "unitName": _find_first(value, _UNIT_NAME_KEYS),
         "brigadeCode": _find_first(
             value,
             {"brigadecode", "brigadenumber", "大队代码", "大队编号"},
@@ -1700,6 +1726,43 @@ def _detail_identity_mismatches(left: dict[str, Any], right: dict[str, Any]) -> 
     return sorted(
         key for key in set(left_fields) & set(right_fields) if left_fields[key] != right_fields[key]
     )
+
+
+def _list_case_names(record: dict[str, Any]) -> list[str]:
+    values = [
+        _find_first(item, _CASE_NAME_KEYS)
+        for item in list(record.get("sourceAppearances") or [])
+        if isinstance(item, dict)
+    ]
+    values.append(_find_first(record.get("fields") or {}, _CASE_NAME_KEYS | _UNIT_NAME_KEYS))
+    return list(dict.fromkeys(str(item).strip() for item in values if item not in (None, "")))
+
+
+def _raise_case_identity_mismatch(
+    capture_path: Path,
+    state: dict[str, Any],
+    record_key: str,
+    project_no: str | None,
+    reasons: list[str],
+) -> NoReturn:
+    """记录只阻塞当前案卷的身份链错误，并保留批次后续处理能力。"""
+
+    record = state["records"][record_key]
+    conflict = {
+        "type": "CASE_IDENTITY_CHAIN_MISMATCH",
+        "rwid": record_key,
+        "projectNo": project_no,
+        "reasons": reasons,
+        "blocking": True,
+        "blockingScope": "CURRENT_CASE",
+    }
+    if conflict not in state.setdefault("conflicts", []):
+        state["conflicts"].append(conflict)
+    record["caseIdentityStatus"] = "MISMATCH"
+    record["identityMismatch"] = conflict
+    state["updatedAt"] = _timestamp()
+    _write_json(capture_path, state)
+    raise SourceIntakeError("CASE_IDENTITY_CHAIN_MISMATCH：" + "；".join(reasons))
 
 
 def _verified_completed_waterline(layout: Any, project_no: str) -> dict[str, Any] | None:
@@ -1823,8 +1886,44 @@ def add_detail(
     if record.get("skippedAsUnchanged"):
         raise SourceIntakeError("详情项目编号已在水位中完成并通过飞牛核验")
     clean_detail = _clean_evidence(_json_input(detail, "案卷详情"))
-    project_raw = _find_first(clean_detail, _PROJECT_KEYS) or record.get("projectNo")
-    project_no = _require_project_no(str(project_raw or "").strip().upper())
+    project_raw = _find_first(clean_detail, _PROJECT_KEYS)
+    if project_raw in (None, ""):
+        _raise_case_identity_mismatch(
+            capture_path,
+            state,
+            record_key,
+            None,
+            ["详情未显式提供项目编号"],
+        )
+    project_no = _require_project_no(str(project_raw).strip().upper())
+    safe_url = sanitize_source_url(source_url) if source_url else None
+    url_rwid = _source_url_rwid(safe_url)
+    if source_url and url_rwid != record_key:
+        _raise_case_identity_mismatch(
+            capture_path,
+            state,
+            record_key,
+            project_no,
+            [f"详情 URL 的 RWID {url_rwid or '缺失'} 与清单 RWID 不一致"],
+        )
+    expected_case_names = _list_case_names(record)
+    detail_unit_name = _find_first(clean_detail, _UNIT_NAME_KEYS)
+    normalized_expected = {
+        item for value in expected_case_names if (item := _normalized_case_name(value)) is not None
+    }
+    normalized_actual = _normalized_case_name(detail_unit_name)
+    if normalized_expected and normalized_actual not in normalized_expected:
+        _raise_case_identity_mismatch(
+            capture_path,
+            state,
+            record_key,
+            project_no,
+            [
+                "详情单位名称与本次清单案卷名称不一致"
+                if normalized_actual is not None
+                else "详情未提供单位名称，无法对账本次清单案卷名称"
+            ],
+        )
     if record.get("projectNo") and record["projectNo"] != project_no:
         conflict = {"type": "DETAIL_PROJECT_CONFLICT", "rwid": record_key, "projectNo": project_no}
         state.setdefault("conflicts", []).append(conflict)
@@ -1833,7 +1932,6 @@ def add_detail(
         raise SourceIntakeError("详情项目编号与清单不一致，已转人工处理")
     captured = _timestamp(captured_at)
     tags = _derive_tags(clean_detail)
-    safe_url = sanitize_source_url(source_url) if source_url else None
     fingerprint = _fingerprint(clean_detail)
     business_fingerprint = _business_detail_fingerprint(clean_detail)
     alias_of: str | None = None
@@ -2004,10 +2102,7 @@ def add_detail(
         "tags": tags,
         "source": source_fields,
     }
-    unit_name = _find_first(
-        clean_detail,
-        {"unitname", "checkedunit", "companyname", "单位名称", "被检查单位"},
-    )
+    unit_name = _find_first(clean_detail, _UNIT_NAME_KEYS)
     brigade_name = _find_first(
         clean_detail,
         {
