@@ -99,6 +99,21 @@ def _bound_download_baseline(
     *,
     observed_at: str = FIXED_NOW,
 ) -> dict[str, object]:
+    capture = _read_json(layout.batch_dir(batch_id) / "browser-capture.json")
+    record = capture["records"][rwid]  # type: ignore[index]
+    if not record.get("detail"):  # type: ignore[union-attr]
+        detail_screenshot = layout.batch_dir(batch_id) / "fixture-detail.png"
+        detail_screenshot.write_bytes(b"fixture detail screenshot")
+        project_no = record.get("projectNo") or PROJECT_A  # type: ignore[union-attr]
+        source.add_detail(
+            layout,
+            batch_id,
+            rwid,
+            {"项目编号": project_no, "单位名称": "测试单位", "大队代码": "FIXTURE"},
+            f"https://source.example/#/detail?RWID={rwid}",
+            detail_screenshot,
+            captured_at=observed_at,
+        )
     return source.record_download_baseline(
         layout,
         batch_id,
@@ -378,6 +393,82 @@ def test_capture_requires_two_stable_rounds_and_deduplicates_rwid(
     persisted = _read_json(layout.batch_dir("fixture-batch") / "browser-capture.json")
     assert persisted["sourceOrigin"] == "https://source.example/cases?name=fixture"
     assert "runId" not in json.dumps(persisted, ensure_ascii=False)
+
+
+def test_capture_preserves_document_waterline_and_marks_initial_recheck(
+    layout: workspace.BusinessLayout,
+) -> None:
+    items = [
+        _record(
+            "fixture-rwid-repeat",
+            documentName="消防产品监督检查记录（初查）",
+            createdAt="2099-01-01",
+            sourcePage=2,
+            sourceRow=20,
+            sourceOrder=40,
+        ),
+        _record(
+            "fixture-rwid-repeat",
+            documentName="消防产品监督检查记录（复查）",
+            createdAt="2099-02-01",
+            sourcePage=1,
+            sourceRow=1,
+            sourceOrder=1,
+        ),
+    ]
+
+    state = _begin_and_stabilize(layout, items, batch_id="document-waterline")
+
+    assert state["sourceDocumentCount"] == 2
+    assert state["uniqueRwidCount"] == 1
+    record = state["records"]["fixture-rwid-repeat"]
+    assert record["inspectionStages"] == ["INITIAL", "RECHECK"]
+    assert [item["inspectionStage"] for item in record["sourceAppearances"]] == [
+        "INITIAL",
+        "RECHECK",
+    ]
+    assert record["sourceAppearances"][0]["documentName"].endswith("（初查）")
+
+
+def test_third_inspection_record_is_nonblocking_anomaly(
+    layout: workspace.BusinessLayout,
+) -> None:
+    items = [
+        _record(
+            f"fixture-repeat-{index}",
+            caseName="同一案卷名称",
+            documentName=f"消防产品监督检查记录-{index}",
+            sourceOrder=4 - index,
+        )
+        for index in (1, 2, 3)
+    ]
+
+    state = _begin_and_stabilize(layout, items, batch_id="three-inspections")
+
+    assert state["listResult"] == "STABLE"
+    assert state["status"] == "COLLECTING_DETAILS"
+    assert state["conflicts"] == []
+    assert state["sourceDocumentCount"] == 3
+    assert state["actionRwids"] == [
+        "fixture-repeat-1",
+        "fixture-repeat-2",
+        "fixture-repeat-3",
+    ]
+    assert [state["records"][rwid]["inspectionStages"][0] for rwid in state["actionRwids"]] == [
+        "INITIAL",
+        "RECHECK",
+        "ANOMALY",
+    ]
+    assert state["anomalies"] == [
+        {
+            "type": "INSPECTION_RECORD_COUNT_EXCEEDED",
+            "caseName": "同一案卷名称",
+            "recordCount": 3,
+            "expectedMaximum": 2,
+            "rwids": ["fixture-repeat-1", "fixture-repeat-2", "fixture-repeat-3"],
+            "blocking": False,
+        }
+    ]
 
 
 def test_acceptance_sample_is_isolated_from_formal_queue_and_waterline(
@@ -665,12 +756,9 @@ def test_capture_checkpoint_rejects_cross_root_resume(tmp_path: Path) -> None:
         )
 
 
-def test_completed_unchanged_case_is_skipped_but_changed_case_is_queued(
-    layout: workspace.BusinessLayout,
+def test_completed_case_is_queued_until_detail_project_number_is_verified(
+    layout: workspace.BusinessLayout, tmp_path: Path
 ) -> None:
-    original = _record("fixture-incremental", status="初次")
-    first = _begin_and_stabilize(layout, [original], batch_id="incremental-first")
-    fingerprint = first["records"]["fixture-incremental"]["sourceRecordFingerprint"]
     workspace.upsert_case(
         layout,
         PROJECT_A,
@@ -678,8 +766,6 @@ def test_completed_unchanged_case_is_skipped_but_changed_case_is_queued(
         completedAt="2099-08-20T00:00:00+08:00",
         source={
             "status": "COMPLETED",
-            "listFingerprint": fingerprint,
-            "sourceRecordFingerprint": fingerprint,
         },
         local={"status": "ARCHIVED", "workspacePath": "fixture-history"},
         upload={"status": "VERIFIED", "caseId": "fixture-case"},
@@ -688,38 +774,44 @@ def test_completed_unchanged_case_is_skipped_but_changed_case_is_queued(
         history={"previousCompletion": {"completedAt": "2099-01-01T00:00:00+08:00"}},
     )
 
-    unchanged = _begin_and_stabilize(layout, [original], batch_id="incremental-unchanged")
-    assert unchanged["status"] == "COMPLETED"
-    assert unchanged["actionRwids"] == []
-    assert unchanged["records"]["fixture-incremental"]["skippedAsUnchanged"] is True
-    unchanged_waterline = workspace.load_waterline(layout)["cases"][PROJECT_A]
-    assert unchanged_waterline["state"] == "COMPLETED"
-    assert unchanged_waterline["source"]["batchId"] == "incremental-unchanged"
-
-    changed = _begin_and_stabilize(
+    listed = _begin_and_stabilize(
         layout,
-        [_record("fixture-incremental", status="内容已变化")],
-        batch_id="incremental-changed",
+        [_record("fixture-incremental", status="复查文书")],
+        batch_id="incremental-detail-gated",
     )
-    assert changed["status"] == "COLLECTING_DETAILS"
-    assert changed["actionRwids"] == ["fixture-incremental"]
-    changed_waterline = workspace.load_waterline(layout)["cases"][PROJECT_A]
-    assert changed_waterline["state"] == "DISCOVERED"
-    assert changed_waterline["completedAt"] is None
-    assert changed_waterline["source"]["changedSinceCompleted"] is True
-    assert changed_waterline["local"] == {"status": "NOT_STARTED"}
-    assert changed_waterline["upload"] == {"status": "NOT_STARTED"}
-    assert changed_waterline["nasVerification"] == {"status": "NOT_STARTED"}
-    assert changed_waterline["archive"] is None
-    previous = changed_waterline["history"]["previousCompletion"]
-    assert previous["completedAt"] == "2099-08-20T00:00:00+08:00"
-    assert previous["local"]["status"] == "ARCHIVED"
-    assert previous["upload"]["status"] == "VERIFIED"
-    assert previous["nasVerification"]["status"] == "VERIFIED"
-    assert previous["archive"] == {"verificationRecord": "fixture-record"}
-    assert changed_waterline["history"]["olderCompletions"] == [
-        {"completedAt": "2099-01-01T00:00:00+08:00"}
-    ]
+    assert listed["status"] == "COLLECTING_DETAILS"
+    assert listed["actionRwids"] == ["fixture-incremental"]
+    assert workspace.load_waterline(layout)["cases"][PROJECT_A]["state"] == "COMPLETED"
+
+    screenshot = tmp_path / "completed-detail.png"
+    screenshot.write_bytes(b"completed detail screenshot")
+    resolved = source.add_detail(
+        layout,
+        "incremental-detail-gated",
+        "fixture-incremental",
+        {
+            "项目编号": PROJECT_A,
+            "单位名称": "测试单位",
+            "大队代码": "FIXTURE",
+            "文书目录": ["初查", "复查"],
+        },
+        "https://source.example/#/detail?RWID=fixture-incremental",
+        screenshot,
+        captured_at=FIXED_NOW,
+    )
+
+    assert resolved["status"] == "COMPLETED"
+    assert resolved["actionRwids"] == []
+    resolved_record = resolved["records"]["fixture-incremental"]
+    assert resolved_record["skippedAsCompletedProject"] is True
+    waterline = workspace.load_waterline(layout)["cases"][PROJECT_A]
+    assert waterline["state"] == "COMPLETED"
+    assert waterline["completedAt"] == "2099-08-20T00:00:00+08:00"
+    assert waterline["local"]["status"] == "ARCHIVED"
+    assert waterline["upload"]["status"] == "VERIFIED"
+    assert waterline["nasVerification"]["status"] == "VERIFIED"
+    assert waterline["source"]["batchId"] == "incremental-detail-gated"
+    assert waterline["source"]["projectIdentitySource"] == "DETAIL"
 
 
 def test_capture_marks_continuously_changing_list_without_false_completion(
@@ -804,16 +896,25 @@ def test_detail_stage_merges_consistent_rwids_that_lacked_list_project_number(
         screenshot,
         captured_at=FIXED_NOW,
     )
+    alias_screenshot = tmp_path / "alias.png"
+    alias_screenshot.write_bytes(b"alias screenshot")
     merged = source.add_detail(
         layout,
         "detail-alias",
         "detail-alias-b",
-        detail,
+        {
+            **detail,
+            "文书目录": ["消防产品监督检查记录（复查）"],
+            "检查结论": "复查合格",
+        },
         "https://source.example/#/detail?RWID=detail-alias-b",
+        alias_screenshot,
         captured_at=FIXED_NOW,
     )
     assert merged["records"]["detail-alias-b"]["aliasOf"] == "detail-alias-a"
     assert merged["records"]["detail-alias-b"]["projectNo"] == PROJECT_A
+    assert merged["records"]["detail-alias-b"]["detail"]["projectInspectionStages"] == ["RECHECK"]
+    assert "复查" in merged["records"]["detail-alias-b"]["detail"]["tags"]
     assert merged["actionRwids"] == ["detail-alias-a"]
     assert merged["conflicts"] == []
 
@@ -842,14 +943,14 @@ def test_detail_stage_blocks_conflicting_rwids_for_same_project(
         screenshot,
         captured_at=FIXED_NOW,
     )
-    with pytest.raises(source.SourceIntakeError, match="多个 RWID"):
+    with pytest.raises(source.SourceIntakeError, match="身份字段冲突"):
         source.add_detail(
             layout,
             "detail-conflict",
             "detail-conflict-b",
             {
                 "项目编号": PROJECT_A,
-                "单位名称": "测试单位",
+                "单位名称": "另一测试单位",
                 "单位地址": "另一测试地址",
                 "检查结论": "合格",
             },
@@ -890,7 +991,7 @@ def test_detail_evidence_strips_session_data_and_derives_tags(
     )
 
     record = state["records"]["fixture-rwid-detail"]["detail"]
-    assert set(record["tags"]) == {"现场检查", "抽样送检", "不合格", "复查"}
+    assert set(record["tags"]) == {"现场检查", "抽样送检", "不合格", "复查", "初查"}
     assert record["sourceUrl"] == "https://source.example/#/detail?RWID=fixture-rwid-detail"
     evidence = _read_json(layout.pending_case_dir(PROJECT_A) / "source-evidence.json")
     serialized = json.dumps(evidence, ensure_ascii=False)
@@ -905,7 +1006,13 @@ def test_detail_evidence_strips_session_data_and_derives_tags(
     assert waterline_case["unitName"] == "测试单位"
     assert waterline_case["brigadeName"] == "测试大队"
     assert waterline_case["brigadeCode"] == "FIXTURE"
-    assert set(waterline_case["tags"]) == {"现场检查", "抽样送检", "不合格", "复查"}
+    assert set(waterline_case["tags"]) == {
+        "现场检查",
+        "抽样送检",
+        "不合格",
+        "复查",
+        "初查",
+    }
     assert waterline_case["source"]["address"] == "测试地址1号"
 
 
@@ -1150,7 +1257,22 @@ def test_attach_package_renames_mojibake_zip_and_is_idempotent(
         allowed_download_dir=tmp_path,
     )
     package = second["records"]["fixture-rwid-package"]["package"]
-    assert package == first["records"]["fixture-rwid-package"]["package"]
+    first_package = first["records"]["fixture-rwid-package"]["package"]
+    assert {
+        **package,
+        "downloadDisposition": {
+            key: value
+            for key, value in package["downloadDisposition"].items()
+            if key != "removedAt"
+        },
+    } == {
+        **first_package,
+        "downloadDisposition": {
+            key: value
+            for key, value in first_package["downloadDisposition"].items()
+            if key != "removedAt"
+        },
+    }
     assert package["storedName"].startswith(f"{PROJECT_A}_案卷包_")
     assert package["storedName"].endswith(".zip")
     assert package["originalSuggestedName"] == "æ¡ˆå·ä¸‹è½½.zip"
@@ -1163,7 +1285,7 @@ def test_attach_package_renames_mojibake_zip_and_is_idempotent(
         "totalSizeBytes": len(b"fixture package"),
     }
     assert "extractedRelativePath" not in package
-    assert second["status"] == "PACKAGES_READY"
+    assert second["status"] == "READY_FOR_ORGANIZATION"
     waterline_case = workspace.load_waterline(layout)["cases"][PROJECT_A]
     assert waterline_case["state"] == "PENDING_ORGANIZATION"
     assert waterline_case["source"]["status"] == "PACKAGE_READY"
@@ -1421,7 +1543,7 @@ def test_rejected_package_can_recover_to_ready_with_audit_trail(
     )
 
 
-def test_attach_before_detail_preserves_package_evidence(
+def test_download_requires_detail_then_preserves_package_evidence(
     layout: workspace.BusinessLayout, tmp_path: Path
 ) -> None:
     _begin_and_stabilize(
@@ -1429,8 +1551,31 @@ def test_attach_before_detail_preserves_package_evidence(
         [_record("fixture-rwid-package-first")],
         batch_id="package-first",
     )
-    baseline = _bound_download_baseline(
-        layout, "package-first", "fixture-rwid-package-first", tmp_path
+    with pytest.raises(source.SourceIntakeError, match="必须先进入详情"):
+        source.record_download_baseline(
+            layout,
+            "package-first",
+            "fixture-rwid-package-first",
+            tmp_path,
+            observed_at=FIXED_NOW,
+        )
+    screenshot = tmp_path / "package-first.png"
+    screenshot.write_bytes(b"fixture screenshot")
+    source.add_detail(
+        layout,
+        "package-first",
+        "fixture-rwid-package-first",
+        {"项目编号": PROJECT_A, "单位名称": "测试单位", "检查结果": "合格"},
+        "https://source.example/#/detail?RWID=fixture-rwid-package-first",
+        screenshot,
+        captured_at=FIXED_NOW,
+    )
+    baseline = source.record_download_baseline(
+        layout,
+        "package-first",
+        "fixture-rwid-package-first",
+        tmp_path,
+        observed_at=FIXED_NOW,
     )
     downloaded = tmp_path / "package-first.zip"
     _write_zip(downloaded, {"document.txt": b"fixture"})
@@ -1445,17 +1590,6 @@ def test_attach_before_detail_preserves_package_evidence(
         sleep_fn=lambda _seconds: None,
     )
     package_before = attached["records"]["fixture-rwid-package-first"]["package"]
-    screenshot = tmp_path / "package-first.png"
-    screenshot.write_bytes(b"fixture screenshot")
-    source.add_detail(
-        layout,
-        "package-first",
-        "fixture-rwid-package-first",
-        {"项目编号": PROJECT_A, "单位名称": "测试单位", "检查结果": "合格"},
-        "https://source.example/#/detail?RWID=fixture-rwid-package-first",
-        screenshot,
-        captured_at=FIXED_NOW,
-    )
     evidence = _read_json(layout.pending_case_dir(PROJECT_A) / "source-evidence.json")
     evidence_record = evidence["records"]["fixture-rwid-package-first"]
     assert evidence_record["package"] == package_before

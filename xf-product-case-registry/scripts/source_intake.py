@@ -35,19 +35,17 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:  # 包导入与直接加载脚本两种方式都要可用。
-    from .workspace_state import BusinessLayout, load_waterline, save_waterline, upsert_case
+    from .workspace_state import BusinessLayout, load_waterline, upsert_case
 except (ImportError, ModuleNotFoundError):  # pragma: no cover - 由独立加载测试覆盖行为
     try:
         from workspace_state import (  # type: ignore[no-redef]
             BusinessLayout,
             load_waterline,
-            save_waterline,
             upsert_case,
         )
     except (ImportError, ModuleNotFoundError):  # pragma: no cover
         BusinessLayout = None  # type: ignore[assignment,misc]
         load_waterline = None  # type: ignore[assignment]
-        save_waterline = None  # type: ignore[assignment]
         upsert_case = None  # type: ignore[assignment]
 
 
@@ -114,6 +112,38 @@ _SENSITIVE_KEYS = {
 }
 _PROJECT_KEYS = {"projectno", "projectnumber", "projectcode", "项目编号"}
 _RWID_KEYS = {"rwid", "recordkey", "recordid", "任务id", "任务编号"}
+_CASE_NAME_KEYS = {
+    "casename",
+    "projectname",
+    "关联项目",
+    "关联项目案卷名称",
+    "案卷名称",
+}
+_SOURCE_APPEARANCE_KEYS = {
+    "createdat",
+    "createtime",
+    "creator",
+    "documentname",
+    "documentno",
+    "documentnumber",
+    "documentstatus",
+    "documenttitle",
+    "sourceorder",
+    "sourcepage",
+    "sourcerow",
+    "sourcerowid",
+    "status",
+    "创建人",
+    "创建时间",
+    "制作人",
+    "制作时间",
+    "文书名称",
+    "文书文号",
+    "文书状态",
+    "文书编号",
+    "文书标题",
+    "生成时间",
+}
 
 
 class SourceIntakeError(RuntimeError):
@@ -512,7 +542,9 @@ def record_download_baseline(
     if record.get("aliasOf"):
         raise SourceIntakeError(f"该 RWID 已合并，请使用主记录 {record['aliasOf']}")
     if record.get("skippedAsUnchanged"):
-        raise SourceIntakeError("已完成且列表特征未变化，无需下载案卷包")
+        raise SourceIntakeError("详情项目编号已在水位中完成并通过飞牛核验，无需下载案卷包")
+    if not record.get("detail"):
+        raise SourceIntakeError("必须先进入详情读取项目编号并保存完整截图，才能建立下载基线")
     project_no = _require_project_no(
         str(record.get("projectNo") or (record.get("detail") or {}).get("projectNo") or "")
         .strip()
@@ -963,23 +995,171 @@ def _find_first(value: Any, wanted: set[str]) -> Any:
     return None
 
 
+def _normalized_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).casefold())
+
+
+def _is_source_appearance_key(value: Any) -> bool:
+    raw = str(value).strip()
+    return _normalized_key(raw) in _SOURCE_APPEARANCE_KEYS or raw in _SOURCE_APPEARANCE_KEYS
+
+
+def _sorted_unique_appearances(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique = {_canonical(value): value for value in values if value}
+    return [unique[key] for key in sorted(unique)]
+
+
 def _normalize_record(item: dict[str, Any]) -> dict[str, Any]:
     clean = _clean_evidence(item)
     rwid = _require_rwid(_find_first(clean, _RWID_KEYS))
     project = _find_first(clean, _PROJECT_KEYS)
-    normalized = {"rwid": rwid, "fields": clean}
+    fields: dict[str, Any] = {}
+    appearance: dict[str, Any] = {}
+    for key, value in clean.items():
+        target = appearance if _is_source_appearance_key(key) else fields
+        target[key] = value
+    normalized: dict[str, Any] = {"rwid": rwid, "fields": fields}
+    if appearance:
+        normalized["sourceAppearances"] = [appearance]
     if project not in (None, ""):
         normalized["projectNo"] = _require_project_no(str(project).strip().upper())
     return normalized
 
 
-def _record_equivalence(record: dict[str, Any]) -> str:
+def _record_core(record: dict[str, Any]) -> dict[str, Any]:
     fields = dict(record.get("fields") or {})
     for key in list(fields):
-        normalized = re.sub(r"[^a-z0-9]", "", str(key).casefold())
-        if normalized in _RWID_KEYS or "url" in normalized:
+        normalized = _normalized_key(key)
+        raw = str(key).strip()
+        if (
+            normalized in _RWID_KEYS
+            or raw in _RWID_KEYS
+            or normalized in _PROJECT_KEYS
+            or raw in _PROJECT_KEYS
+            or "url" in normalized
+        ):
             fields.pop(key, None)
-    return _fingerprint({"projectNo": record.get("projectNo"), "fields": fields})
+    return {"projectNo": record.get("projectNo"), "fields": fields}
+
+
+def _merge_rwid_records(
+    existing: dict[str, Any], incoming: dict[str, Any]
+) -> dict[str, Any] | None:
+    if existing.get("rwid") != incoming.get("rwid"):
+        return None
+    existing_project = existing.get("projectNo")
+    incoming_project = incoming.get("projectNo")
+    if existing_project and incoming_project and existing_project != incoming_project:
+        return None
+    existing_core = _record_core(existing)
+    incoming_core = _record_core(incoming)
+    existing_core["projectNo"] = existing_project or incoming_project
+    incoming_core["projectNo"] = existing_project or incoming_project
+    if existing_core != incoming_core:
+        return None
+    merged: dict[str, Any] = {
+        "rwid": existing["rwid"],
+        "fields": dict(existing.get("fields") or incoming.get("fields") or {}),
+    }
+    project_no = existing_project or incoming_project
+    if project_no:
+        merged["projectNo"] = project_no
+    appearances = _sorted_unique_appearances(
+        list(existing.get("sourceAppearances") or [])
+        + list(incoming.get("sourceAppearances") or [])
+    )
+    if appearances:
+        merged["sourceAppearances"] = appearances
+    return merged
+
+
+def _record_core_equivalence(record: dict[str, Any]) -> str:
+    return _fingerprint(_record_core(record))
+
+
+def _record_equivalence(record: dict[str, Any]) -> str:
+    return _fingerprint(
+        {
+            **_record_core(record),
+            "sourceAppearances": _sorted_unique_appearances(
+                list(record.get("sourceAppearances") or [])
+            ),
+        }
+    )
+
+
+def _positive_int(value: Any) -> int | None:
+    if type(value) is int and value > 0:
+        return value
+    if isinstance(value, str) and value.isdecimal() and int(value) > 0:
+        return int(value)
+    return None
+
+
+def _appearance_tail_position(value: dict[str, Any]) -> int:
+    source_order = _positive_int(_find_first(value, {"sourceorder"}))
+    if source_order is not None:
+        return source_order
+    page = _positive_int(_find_first(value, {"sourcepage"})) or 0
+    row = _positive_int(_find_first(value, {"sourcerow"})) or 0
+    return page * (MAX_CAPTURE_RECORDS + 1) + row
+
+
+def _annotate_inspection_stages(
+    records: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[tuple[int, str, dict[str, Any] | None]]] = {}
+    labels: dict[str, str] = {}
+    for rwid, record in records.items():
+        case_name = _find_first(record.get("fields") or {}, _CASE_NAME_KEYS)
+        label = str(case_name).strip() if case_name not in (None, "") else rwid
+        group_key = _normalized_identity_value(label) or rwid
+        labels.setdefault(group_key, label)
+        appearances = list(record.get("sourceAppearances") or [])
+        if appearances:
+            for appearance in appearances:
+                grouped.setdefault(group_key, []).append(
+                    (_appearance_tail_position(appearance), rwid, appearance)
+                )
+        else:
+            grouped.setdefault(group_key, []).append((0, rwid, None))
+
+    stages_by_rwid: dict[str, list[str]] = {rwid: [] for rwid in records}
+    appearances_by_rwid: dict[str, list[dict[str, Any]]] = {rwid: [] for rwid in records}
+    anomalies: list[dict[str, Any]] = []
+    for group_key, entries in grouped.items():
+        ordered = sorted(entries, key=lambda item: (-item[0], item[1], _canonical(item[2])))
+        for index, (_position, rwid, appearance) in enumerate(ordered):
+            stage = "INITIAL" if index == 0 else "RECHECK" if index == 1 else "ANOMALY"
+            stages_by_rwid[rwid].append(stage)
+            if appearance is not None:
+                appearances_by_rwid[rwid].append({**appearance, "inspectionStage": stage})
+        if len(ordered) > 2:
+            anomaly = {
+                "type": "INSPECTION_RECORD_COUNT_EXCEEDED",
+                "caseName": labels[group_key],
+                "recordCount": len(ordered),
+                "expectedMaximum": 2,
+                "rwids": sorted({rwid for _position, rwid, _appearance in ordered}),
+                "blocking": False,
+            }
+            anomalies.append(anomaly)
+            for _position, rwid, _appearance in ordered:
+                records[rwid].setdefault("anomalies", []).append(anomaly)
+
+    for rwid, record in records.items():
+        if appearances_by_rwid[rwid]:
+            record["sourceAppearances"] = appearances_by_rwid[rwid]
+        record["inspectionStages"] = list(dict.fromkeys(stages_by_rwid[rwid] or ["INITIAL"]))
+    return sorted(anomalies, key=_canonical)
+
+
+def _tail_ordered_rwids(records: dict[str, dict[str, Any]]) -> list[str]:
+    def position(rwid: str) -> int:
+        appearances = records[rwid].get("sourceAppearances") or []
+        return max((_appearance_tail_position(item) for item in appearances), default=0)
+
+    return sorted(records, key=lambda rwid: (-position(rwid), rwid))
 
 
 def _load_capture(layout: Any, batch_id: str) -> tuple[Path, dict[str, Any]]:
@@ -1006,61 +1186,6 @@ def _maybe_waterline(layout: Any, project_no: str, **fields: Any) -> None:
         upsert_case(layout, project_no, **fields)
     except TypeError as error:  # 接口漂移必须显式暴露，不能静默丢水位。
         raise SourceIntakeError(f"案卷水位接口不兼容：{error}") from error
-
-
-def _reopen_completed_case(
-    layout: Any,
-    project_no: str,
-    existing: dict[str, Any],
-    source_change: dict[str, Any],
-    seen_at: str,
-) -> None:
-    if load_waterline is None or save_waterline is None:
-        _maybe_waterline(
-            layout,
-            project_no,
-            state="DISCOVERED",
-            completedAt=None,
-            archive=None,
-            local={"status": "NOT_STARTED"},
-            upload={"status": "NOT_STARTED"},
-            nasVerification={"status": "NOT_STARTED"},
-            source=source_change,
-        )
-        return
-    data = load_waterline(layout)
-    record = data["cases"].get(project_no)
-    if not isinstance(record, dict) or record.get("state") != "COMPLETED":
-        raise SourceIntakeError("已完成案卷的水位在重开时发生变化，请重试")
-    snapshot = {
-        "completedAt": record.get("completedAt"),
-        "local": record.get("local"),
-        "upload": record.get("upload"),
-        "nasVerification": record.get("nasVerification"),
-        "archive": record.get("archive"),
-        "sourceRecordFingerprint": (record.get("source") or {}).get("sourceRecordFingerprint"),
-        "listFingerprint": (record.get("source") or {}).get("listFingerprint"),
-        "reopenedAt": seen_at,
-    }
-    history = record.setdefault("history", {})
-    prior = history.get("previousCompletion")
-    if prior:
-        history.setdefault("olderCompletions", []).append(prior)
-    history["previousCompletion"] = snapshot
-    record.update(
-        {
-            "state": "DISCOVERED",
-            "completedAt": None,
-            "archive": None,
-            "local": {"status": "NOT_STARTED"},
-            "upload": {"status": "NOT_STARTED"},
-            "nasVerification": {"status": "NOT_STARTED"},
-            "errorSummary": None,
-            "lastSeenAt": seen_at,
-        }
-    )
-    record["source"] = {**dict(record.get("source") or {}), **source_change}
-    save_waterline(layout, data)
 
 
 def begin_capture(
@@ -1118,6 +1243,7 @@ def begin_capture(
         "rounds": {},
         "records": {},
         "conflicts": [],
+        "anomalies": [],
         "createdAt": created_at,
         "updatedAt": created_at,
     }
@@ -1202,10 +1328,16 @@ def add_page(
     conflicts: list[dict[str, Any]] = []
     for record in normalized:
         existing = by_rwid.get(record["rwid"])
-        if existing is not None and existing != record:
-            conflicts.append({"type": "RWID_CONFLICT", "rwid": record["rwid"], "page": page_no})
-        else:
+        if existing is None:
             by_rwid[record["rwid"]] = record
+            continue
+        merged = _merge_rwid_records(existing, record)
+        if merged is None:
+            conflict = {"type": "RWID_CONFLICT", "rwid": record["rwid"], "page": page_no}
+            if conflict not in conflicts:
+                conflicts.append(conflict)
+        else:
+            by_rwid[record["rwid"]] = merged
     page_value: dict[str, Any] = {
         "pageNumber": page_no,
         "totalCount": total,
@@ -1265,12 +1397,18 @@ def _round_records(round_value: dict[str, Any]) -> tuple[dict[str, dict[str, Any
     for page_value in sorted(values, key=lambda item: item["pageNumber"]):
         for record in page_value["records"]:
             existing = records.get(record["rwid"])
-            if existing is not None and existing != record:
-                round_value.setdefault("conflicts", []).append(
-                    {"type": "RWID_CONFLICT", "rwid": record["rwid"]}
-                )
-            else:
+            if existing is None:
                 records[record["rwid"]] = record
+                continue
+            merged = _merge_rwid_records(existing, record)
+            if merged is None:
+                conflict = {"type": "RWID_CONFLICT", "rwid": record["rwid"]}
+                conflicts = round_value.setdefault("conflicts", [])
+                if conflict not in conflicts:
+                    conflicts.append(conflict)
+            else:
+                records[record["rwid"]] = merged
+    round_value["anomalies"] = _annotate_inspection_stages(records)
     return records, total, total_pages
 
 
@@ -1282,7 +1420,7 @@ def _project_conflicts(records: dict[str, dict[str, Any]]) -> list[dict[str, Any
             grouped.setdefault(project_no, []).append(record)
     result = []
     for project_no, items in grouped.items():
-        signatures = {_record_equivalence(item) for item in items}
+        signatures = {_record_core_equivalence(item) for item in items}
         if len(items) > 1 and len(signatures) > 1:
             result.append(
                 {
@@ -1325,21 +1463,14 @@ def _refresh_progress(state: dict[str, Any]) -> None:
 
 
 def _prepare_acceptance_queue(state: dict[str, Any], records: dict[str, dict[str, Any]]) -> None:
-    """验收样本只做本批次去重，不读取或更新正式案卷水位。"""
+    """验收样本只按 RWID 建详情队列，不读取或更新正式案卷水位。"""
 
-    canonical_by_project: dict[str, str] = {}
     actions: list[str] = []
-    for rwid in sorted(records):
+    for rwid in _tail_ordered_rwids(records):
         record = records[rwid]
         record["sourceRecordFingerprint"] = _record_equivalence(record)
-        project_no = record.get("projectNo")
-        if project_no:
-            canonical = canonical_by_project.get(project_no)
-            if canonical is not None:
-                record["aliasOf"] = canonical
-                continue
-            canonical_by_project[project_no] = rwid
         actions.append(rwid)
+    state["detailRwids"] = list(actions)
     state["actionRwids"] = actions
 
 
@@ -1349,67 +1480,15 @@ def _prepare_incremental_queue(
     records: dict[str, dict[str, Any]],
     observed_at: datetime | str | None,
 ) -> None:
-    """按项目合并重复来源，并用 CaseWaterlineV1 决定本轮实际处理队列。"""
+    """列表阶段只建立 RWID 详情队列，项目水位必须在详情读到项目编号后判断。"""
 
-    waterline_cases: dict[str, Any] = {}
-    if load_waterline is not None:
-        waterline = load_waterline(layout)
-        waterline_cases = dict(waterline.get("cases") or {})
-    canonical_by_project: dict[str, str] = {}
     actions: list[str] = []
-    seen_at = _timestamp(observed_at)
-    for rwid in sorted(records):
+    for rwid in _tail_ordered_rwids(records):
         record = records[rwid]
-        fingerprint = _record_equivalence(record)
-        record["sourceRecordFingerprint"] = fingerprint
-        project_no = record.get("projectNo")
-        if not project_no:
-            actions.append(rwid)
-            continue
-        canonical = canonical_by_project.get(project_no)
-        if canonical is not None:
-            record["aliasOf"] = canonical
-            continue
-        canonical_by_project[project_no] = rwid
-        existing = waterline_cases.get(project_no) or {}
-        previous_source = existing.get("source") or {}
-        previous_fingerprint = previous_source.get("listFingerprint") or previous_source.get(
-            "sourceRecordFingerprint"
-        )
-        unchanged_completed = (
-            existing.get("state") == "COMPLETED" and previous_fingerprint == fingerprint
-        )
-        if unchanged_completed:
-            record["skippedAsUnchanged"] = True
-            _maybe_waterline(
-                layout,
-                project_no,
-                source={
-                    "batchId": state["batchId"],
-                    "rwid": rwid,
-                    "lastSeenAt": seen_at,
-                    "listFingerprint": fingerprint,
-                    "sourceRecordFingerprint": fingerprint,
-                },
-            )
-            continue
+        record["sourceRecordFingerprint"] = _record_equivalence(record)
         actions.append(rwid)
-        source_change = {
-            "status": "DISCOVERED",
-            "batchId": state["batchId"],
-            "rwid": rwid,
-            "lastSeenAt": seen_at,
-            "listFingerprint": fingerprint,
-            "sourceRecordFingerprint": fingerprint,
-        }
-        if existing.get("state") == "COMPLETED":
-            source_change["changedSinceCompleted"] = True
-            source_change["previousCompletedAt"] = existing.get("completedAt")
-            _reopen_completed_case(layout, project_no, existing, source_change, seen_at)
-        elif existing:
-            _maybe_waterline(layout, project_no, source=source_change)
-        else:
-            _maybe_waterline(layout, project_no, state="DISCOVERED", source=source_change)
+    state["detailRwids"] = list(actions)
+    state["waterlineDecision"] = "AFTER_DETAIL_PROJECT_NO"
     state["actionRwids"] = actions
 
 
@@ -1473,7 +1552,9 @@ def finalize_capture(
     round_value.update(
         {
             "fingerprint": fingerprint,
+            "documentRecordCount": total,
             "uniqueRecordCount": len(records),
+            "uniqueRwidCount": len(records),
             "reportedTotal": total,
             "totalPages": total_pages,
             "completedAt": _timestamp(now),
@@ -1484,6 +1565,9 @@ def finalize_capture(
     state["stableRounds"] = 2 if stable else 1
     if stable:
         state["records"] = records
+        state["sourceDocumentCount"] = total
+        state["uniqueRwidCount"] = len(records)
+        state["anomalies"] = list(round_value.get("anomalies") or [])
         conflicts = list(round_value.get("conflicts") or []) + _project_conflicts(records)
         state["conflicts"] = conflicts
         state["listResult"] = "SAMPLE_STABLE" if _is_acceptance_sample(state) else "STABLE"
@@ -1561,6 +1645,53 @@ def _business_detail_fingerprint(value: Any) -> str:
         return item
 
     return _fingerprint(scrub(value))
+
+
+def _normalized_identity_value(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value))).casefold()
+
+
+def _detail_identity_fields(value: dict[str, Any]) -> dict[str, str]:
+    candidates = {
+        "projectNo": _find_first(value, _PROJECT_KEYS),
+        "unitName": _find_first(
+            value,
+            {"unitname", "checkedunit", "companyname", "单位名称", "被检查单位"},
+        ),
+        "brigadeCode": _find_first(
+            value,
+            {"brigadecode", "brigadenumber", "大队代码", "大队编号"},
+        ),
+    }
+    return {
+        key: normalized
+        for key, item in candidates.items()
+        if (normalized := _normalized_identity_value(item)) is not None
+    }
+
+
+def _detail_identity_mismatches(left: dict[str, Any], right: dict[str, Any]) -> list[str]:
+    left_fields = _detail_identity_fields(left)
+    right_fields = _detail_identity_fields(right)
+    return sorted(
+        key for key in set(left_fields) & set(right_fields) if left_fields[key] != right_fields[key]
+    )
+
+
+def _verified_completed_waterline(layout: Any, project_no: str) -> dict[str, Any] | None:
+    if load_waterline is None:
+        return None
+    value = load_waterline(layout)
+    record = (value.get("cases") or {}).get(project_no)
+    if not isinstance(record, dict) or record.get("state") != "COMPLETED":
+        return None
+    upload = record.get("upload") or {}
+    nas = record.get("nasVerification") or {}
+    if upload.get("status") != "VERIFIED" or nas.get("status") != "VERIFIED":
+        return None
+    return record
 
 
 def _copy_immutable(source: Path, destination: Path) -> None:
@@ -1668,7 +1799,7 @@ def add_detail(
     if record.get("aliasOf"):
         raise SourceIntakeError(f"该 RWID 已合并，请使用主记录 {record['aliasOf']}")
     if record.get("skippedAsUnchanged"):
-        raise SourceIntakeError("已完成且列表特征未变化，无需重新采集详情")
+        raise SourceIntakeError("详情项目编号已在水位中完成并通过飞牛核验")
     clean_detail = _clean_evidence(_json_input(detail, "案卷详情"))
     project_raw = _find_first(clean_detail, _PROJECT_KEYS) or record.get("projectNo")
     project_no = _require_project_no(str(project_raw or "").strip().upper())
@@ -1683,6 +1814,7 @@ def add_detail(
     safe_url = sanitize_source_url(source_url) if source_url else None
     fingerprint = _fingerprint(clean_detail)
     business_fingerprint = _business_detail_fingerprint(clean_detail)
+    alias_of: str | None = None
     for other_rwid, other_record in state["records"].items():
         if other_rwid == record_key:
             continue
@@ -1690,20 +1822,22 @@ def add_detail(
         other_project = other_record.get("projectNo") or other_detail.get("projectNo")
         if other_project != project_no or not other_detail:
             continue
-        other_business_fingerprint = other_detail.get("businessFingerprint") or (
-            _business_detail_fingerprint(other_detail.get("fields") or {})
+        mismatches = _detail_identity_mismatches(
+            clean_detail,
+            dict(other_detail.get("fields") or {}),
         )
-        if other_business_fingerprint != business_fingerprint:
+        if mismatches:
             state.setdefault("conflicts", []).append(
                 {
                     "type": "PROJECT_DETAIL_CONFLICT",
                     "projectNo": project_no,
                     "rwids": sorted([record_key, other_rwid]),
+                    "identityFields": mismatches,
                 }
             )
             state["status"] = "NEEDS_MANUAL_REVIEW"
             _write_json(capture_path, state)
-            raise SourceIntakeError("多个 RWID 在详情阶段指向同一项目但字段冲突")
+            raise SourceIntakeError("同一项目编号的详情身份字段冲突，已转人工处理")
         canonical = other_record.get("aliasOf") or other_rwid
         canonical_record = state["records"][canonical]
         alias_package = record.get("package")
@@ -1725,41 +1859,8 @@ def add_detail(
             raise SourceIntakeError("同一项目的多个 RWID 已绑定不同案卷包")
         if alias_package and not canonical_package:
             canonical_record["package"] = alias_package
-        alias_detail = {
-            "projectNo": project_no,
-            "capturedAt": captured,
-            "sourceUrl": safe_url,
-            "fingerprint": fingerprint,
-            "businessFingerprint": business_fingerprint,
-            "aliasOf": canonical,
-        }
-        record.update({"projectNo": project_no, "aliasOf": canonical, "detail": alias_detail})
-        state["actionRwids"] = [item for item in state.get("actionRwids", []) if item != record_key]
-        evidence_path, evidence = _load_evidence(layout, project_no, batch_id, state=state)
-        if batch_id not in evidence["batchIds"]:
-            evidence["batchIds"].append(batch_id)
-        evidence_alias = evidence["records"].setdefault(record_key, {})
-        evidence_alias.update(alias_detail)
-        if alias_package and not canonical_package:
-            evidence["records"].setdefault(canonical, {"projectNo": project_no})["package"] = (
-                alias_package
-            )
-        evidence["updatedAt"] = captured
-        _write_json(evidence_path, evidence)
-        _refresh_progress(state)
-        state["updatedAt"] = captured
-        _write_json(capture_path, state)
-        if not _is_acceptance_sample(state):
-            _maybe_waterline(
-                layout,
-                project_no,
-                source={
-                    "lastSeenAt": captured,
-                    "aliasRwid": record_key,
-                    "canonicalRwid": canonical,
-                },
-            )
-        return state
+        if alias_of is None:
+            alias_of = canonical
     existing = record.get("detail")
     if existing and existing.get("fingerprint") != fingerprint:
         state.setdefault("conflicts", []).append(
@@ -1814,17 +1915,32 @@ def add_detail(
         screenshot_record = existing["screenshot"]
     else:
         raise SourceIntakeError("每个新处理案卷必须提供一张完整详情截图")
+    source_stages = list(record.get("inspectionStages") or ["INITIAL"])
+    project_stages = (
+        ["ANOMALY" if "ANOMALY" in source_stages else "RECHECK"] if alias_of else source_stages
+    )
+    stage_label = {"INITIAL": "初查", "RECHECK": "复查", "ANOMALY": "检查记录次数异常"}
+    stage_tags = {stage_label[item] for item in project_stages}
+    tags = sorted(set(tags) | stage_tags)
     detail_record: dict[str, Any] = {
         "projectNo": project_no,
         "capturedAt": captured,
         "sourceUrl": safe_url,
         "fields": clean_detail,
         "tags": tags,
+        "sourceInspectionStages": source_stages,
+        "projectInspectionStages": project_stages,
         "fingerprint": fingerprint,
         "businessFingerprint": business_fingerprint,
     }
+    if record.get("anomalies"):
+        detail_record["anomalies"] = list(record["anomalies"])
     if screenshot_record:
         detail_record["screenshot"] = screenshot_record
+    if alias_of:
+        detail_record["aliasOf"] = alias_of
+        record["aliasOf"] = alias_of
+        state["actionRwids"] = [item for item in state.get("actionRwids", []) if item != record_key]
     record["projectNo"] = project_no
     record["detail"] = detail_record
     evidence_path, evidence = _load_evidence(layout, project_no, batch_id, state=state)
@@ -1835,23 +1951,34 @@ def add_detail(
     if prior_fingerprint and prior_fingerprint != detail_record["fingerprint"]:
         raise SourceIntakeError("本地来源证据已有不同详情，拒绝覆盖")
     evidence_record.update(detail_record)
+    if alias_of and record.get("package"):
+        evidence["records"].setdefault(alias_of, {"projectNo": project_no})["package"] = record[
+            "package"
+        ]
     evidence["tags"] = sorted(set(evidence.get("tags") or []) | set(tags))
     evidence["updatedAt"] = captured
     _write_json(evidence_path, evidence)
-    _refresh_progress(state)
-    state["updatedAt"] = captured
-    _write_json(capture_path, state)
     source_fields: dict[str, Any] = {
         "batchId": batch_id,
         "rwid": record_key,
         "tags": tags,
         "capturedAt": captured,
+        "projectIdentitySource": "DETAIL",
+        "sourceRecordFingerprint": record.get("sourceRecordFingerprint"),
+        "detailBusinessFingerprint": business_fingerprint,
+        "sourceInspectionStages": source_stages,
+        "projectInspectionStages": project_stages,
+        "sourceDocumentCount": len(record.get("sourceAppearances") or []) or 1,
     }
+    if record.get("anomalies"):
+        source_fields["anomalies"] = list(record["anomalies"])
+    if alias_of:
+        source_fields["aliasRwid"] = record_key
+        source_fields["canonicalRwid"] = alias_of
     address = _find_first(clean_detail, {"address", "unitaddress", "单位地址", "地址"})
     if address not in (None, ""):
         source_fields["address"] = str(address).strip()
     waterline_fields: dict[str, Any] = {
-        "state": "DETAIL_CAPTURED",
         "tags": tags,
         "source": source_fields,
     }
@@ -1882,7 +2009,40 @@ def add_detail(
     if brigade_code not in (None, ""):
         waterline_fields["brigadeCode"] = str(brigade_code).strip()
     if not _is_acceptance_sample(state):
-        _maybe_waterline(layout, project_no, **waterline_fields)
+        current_case = None
+        if load_waterline is not None:
+            current_case = (load_waterline(layout).get("cases") or {}).get(project_no)
+        prior_tags = set((current_case or {}).get("tags") or [])
+        waterline_fields["tags"] = sorted(prior_tags | set(tags))
+        verified_completed = _verified_completed_waterline(layout, project_no)
+        if verified_completed is not None:
+            canonical_record = state["records"][alias_of] if alias_of else record
+            canonical_record["skippedAsUnchanged"] = True
+            canonical_record["skippedAsCompletedProject"] = True
+            canonical_record["skipReason"] = "PROJECT_NO_ALREADY_VERIFIED"
+            record["skippedAsCompletedProject"] = True
+            state["actionRwids"] = [
+                item for item in state.get("actionRwids", []) if item not in {record_key, alias_of}
+            ]
+            _maybe_waterline(layout, project_no, **waterline_fields)
+        elif alias_of:
+            _maybe_waterline(layout, project_no, **waterline_fields)
+        else:
+            existing_state = (current_case or {}).get("state")
+            if existing_state in {
+                "PENDING_ORGANIZATION",
+                "READY_FOR_COMPOSE",
+                "READY_FOR_UPLOAD",
+                "UPLOADING",
+                "UPLOADED_PENDING_NAS_VERIFY",
+            }:
+                record["resumesExistingProject"] = True
+            else:
+                waterline_fields["state"] = "DETAIL_CAPTURED"
+            _maybe_waterline(layout, project_no, **waterline_fields)
+    _refresh_progress(state)
+    state["updatedAt"] = captured
+    _write_json(capture_path, state)
     return state
 
 
@@ -2277,7 +2437,7 @@ def attach_package(
     if record.get("aliasOf"):
         raise SourceIntakeError(f"该 RWID 已合并，请使用主记录 {record['aliasOf']}")
     if record.get("skippedAsUnchanged"):
-        raise SourceIntakeError("已完成且列表特征未变化，无需重新下载案卷包")
+        raise SourceIntakeError("详情项目编号已在水位中完成并通过飞牛核验，无需重新下载")
     expected_project = record.get("projectNo") or (record.get("detail") or {}).get("projectNo")
     selected_project = _require_project_no(str(project_no or expected_project or "").upper())
     if expected_project and expected_project != selected_project:

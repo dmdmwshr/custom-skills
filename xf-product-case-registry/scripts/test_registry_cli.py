@@ -1615,6 +1615,16 @@ def test_source_snapshot_downloads_persists_per_case_baseline(
             round_no=round_no,
         )
         source.finalize_capture(layout, "batch-1")
+    screenshot = tmp_path / "detail.png"
+    screenshot.write_bytes(b"detail screenshot")
+    source.add_detail(
+        layout,
+        "batch-1",
+        "fixture-rwid",
+        {"项目编号": PROJECT, "单位名称": "测试单位", "大队代码": "FIXTURE"},
+        "http://registry-source.example/#/xfjd/detail?RWID=fixture-rwid",
+        screenshot,
+    )
     (downloads / "existing.zip").write_bytes(b"baseline fixture")
     snapshot_args = cli.build_parser().parse_args(
         [
