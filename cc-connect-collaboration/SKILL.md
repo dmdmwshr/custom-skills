@@ -1,6 +1,6 @@
 ---
 name: cc-connect-collaboration
-description: 统一管理本机 cc-connect 的多项目移动协作，包括代码触发的业务自动通知、独立固定会话、业务项目消费者接入、交易授权固定会话、移动通道、飞书应用显示维护、投递意图、固定会话绑定代次、双向验证、消息推送、Windows 中文乱码、Codex 固定会话运行时与 SYSTEM 任务可见性排障、定时唤醒、跨项目衔接反馈和受控会话职责核验。仅在请求明确涉及 cc-connect、移动端协作、固定会话路由、飞书或微信、跨项目通知、代码触发直接投递、跨项目衔接反馈、控制目录、路由重绑、飞书应用改名发布、固定会话运行错误、任务 Missing 误报或固定会话换代时使用；普通 Codex 开发任务因上下文过长而新建同项目任务、初始化、重命名及归档旧任务时改用 `codex-project-task-handoff`。
+description: 统一管理本机 cc-connect 的多项目移动协作，包括代码触发的业务自动通知、宏观快速决策卡、独立固定会话、业务项目消费者接入、交易授权固定会话、移动通道、飞书应用显示维护、投递意图、固定会话绑定代次、双向验证、消息推送、Windows 中文乱码、Codex 固定会话运行时与 SYSTEM 任务可见性排障、定时唤醒、跨项目衔接反馈和受控会话职责核验。仅在请求明确涉及 cc-connect、移动端协作、固定会话路由、飞书或微信、跨项目通知、代码触发直接投递、宏观通知可读性或修订门禁、跨项目衔接反馈、控制目录、路由重绑、飞书应用改名发布、固定会话运行错误、任务 Missing 误报或固定会话换代时使用；普通 Codex 开发任务因上下文过长而新建同项目任务、初始化、重命名及归档旧任务时改用 `codex-project-task-handoff`。
 ---
 
 # CC-Connect 移动协作
@@ -26,6 +26,7 @@ description: 统一管理本机 cc-connect 的多项目移动协作，包括代�
 - 每条路由必须有独立控制目录、固定 prompt hook 和明确职责；通知 hook 只允许读取已登记的不透明引用，授权助手 hook 不得被写成通知发布 hook。
 - 每条路由的 `work_dir` 必须独立维护自己的 `.codex/hooks.json`，仅允许受审的 `SessionStart` `startup`、`resume`、`clear`、`compact` 事件，并通过 `additionalContext` 注入固定职责说明；不得跨路由共享或绕过 hook。
 - 业务自动通知只允许已登记路由使用 `direct_feishu`：中枢异步 worker 每轮原子领取最多一条意图，先核对来源、事件白名单、项目、职责、绑定代次和交易授权路由隔离，再从受控只读来源临时取正文并调用私有 `/send`。固定桌面会话不参与这条链。
+- 业务仓必须拥有消息可读性和修订门禁。以 OKXnew 宏观通知为例，新自然事件使用冻结 `mobile_text` 的 `NotificationEnvelopeV2`；纯来源元数据更新、非核心修订、历史补采或核心指标不完整只留审计/预览。中枢只验证 V2 哈希、结构、UTF-8、指标数与长度并原样透传，不得重新计算或改写业务结论。
 - `session_agent`、Timer 和外部 CLI 恢复线程只作为停用兼容能力或明确选择的会话实验，不得作为业务自动通知回退。其唯一写入者门禁仅约束会话注入；出现 active writer、模型缓存不兼容或空响应时，停止会话注入，但不得据此把健康的 `direct_feishu` 判为不可用。
 - 业务项目的自动通知消费者应与 DuckDB、PyArrow、Parquet、WebSocket 等重型数据采集栈隔离为独立轻量进程或任务；数据任务只生成不可变信封，消费者只处理脱敏引用、登记状态和追加回执。两者不得同时消费同一待发送箱。
 - 中枢必须先完成鉴权和静态校验，再原子登记 `registered_held`，随后由异步 worker 核对私有目标、绑定代次和直接飞书适配器健康。业务消费者必须锚定中枢返回的 `ledger_epoch`；epoch 缺失或变化时失败关闭。Hook、固定会话和 Timer 健康不属于直接自动通知门禁。
@@ -73,7 +74,7 @@ description: 统一管理本机 cc-connect 的多项目移动协作，包括代�
 
 需要路由字段、状态转换和验收口径时，读取 [固定会话路由契约](references/fixed-session-contract.md)。
 
-业务项目需要接入中枢投递、查询路由或确认绑定代次时，读取 [业务消费者接入契约](references/business-consumer-integration-contract.md)；代码触发自动通知或自动消息乱码排障还必须读取 [代码触发直接投递契约](references/code-triggered-direct-delivery-contract.md)。移动回复出现固定会话运行包、模型缓存、代理、空响应或原始内部错误时，同时读取 [固定会话路由契约](references/fixed-session-contract.md)。只有用户明确选择停用兼容的固定会话代发实验时，才读取 [会话代发契约](references/session-mediated-delivery-contract.md)。
+业务项目需要接入中枢投递、查询路由或确认绑定代次时，读取 [业务消费者接入契约](references/business-consumer-integration-contract.md)；代码触发自动通知或自动消息乱码排障还必须读取 [代码触发直接投递契约](references/code-triggered-direct-delivery-contract.md)。涉及 OKXnew 宏观消息可读性、V2 信封、核心修订门禁、PCE/核心 PCE 或无外发手机预览时，还必须读取 [宏观快速决策卡 V2](references/macro-quick-decision-card-v2.md)。移动回复出现固定会话运行包、模型缓存、代理、空响应或原始内部错误时，同时读取 [固定会话路由契约](references/fixed-session-contract.md)。只有用户明确选择停用兼容的固定会话代发实验时，才读取 [会话代发契约](references/session-mediated-delivery-contract.md)。
 
 自动消息乱码、移动回复报错、SYSTEM 任务显示 Missing 或修复后需要做完整双向验收时，必须读取 [Windows 双链路故障恢复与验收](references/windows-dual-path-recovery-and-acceptance.md)，按“分流诊断 → 本机无外发验证 → 精确部署 → 唯一真实投递 → 用户普通回复 → 台账收口”的顺序执行。
 
@@ -118,6 +119,7 @@ description: 统一管理本机 cc-connect 的多项目移动协作，包括代�
 - 不发送凭据、会话标识、原始消息正文、账户/持仓/成交明细或未经业务仓授权的外部内容。交易授权路由可回显完成授权判断所必需的计划范围、模式、有效期、当前状态和授权结果，但不得扩大为账户或执行信息。
 - 不发送“链路测试”或重复健康提醒。只有用户明确要求实际投递，或业务产出的待发送事项已达到其发送条件时才投递。
 - 宏观、行情等业务消息由业务仓完成来源判定、去重、持久化和发送条件判断；中枢只按已核验路由投递并回读投递结果。
+- 宏观移动消息不得直接罗列底层序列、内部版本、英文单位或相对文件路径。业务仓应冻结一屏中文成品；V2 预览与实际投递必须逐字一致，且预览接口不得提供发送、重放或修改动作。
 - 发送成功不等于业务处理成功；没有可验证回执时只报告 `delivery_unverified`，不得编造已送达。
 - 自动通知不会静默写入 Codex 桌面任务，这是正常设计。中枢只记录飞书传输状态；用户回复后的移动入站才进入固定会话。不得为了让桌面侧栏出现自动记录而新建 Timer、恢复外部 CLI、重绑或改写 Codex 会话数据。
 - 送达结果为未知时不得自动重发，避免平台其实已接收而产生重复消息。
