@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import tomllib
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -22,7 +23,7 @@ import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "1.4.11"
+VERSION = "1.5.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -1036,6 +1037,17 @@ def compose_command(args: argparse.Namespace) -> None:
 
 def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
     if not 200 <= response.status_code < 300:
+        if response.status_code == 429:
+            retry_after = response.headers.get("retry-after", "").strip()
+            wait_hint = (
+                f"，请等待 {retry_after} 秒后重试"
+                if re.fullmatch(r"[1-9][0-9]{0,5}", retry_after)
+                else "，请按服务端提示稍后重试"
+            )
+            raise RegistryError(
+                f"{label} 触发登记系统限流{wait_hint}；"
+                "多案上传必须使用 upload-batch 共用一次登录会话"
+            )
         # Never echo a response body here. Authentication and validation responses
         # may contain data that must not be copied into terminals, logs, or task output.
         message = safe_error_message(response)
@@ -1222,6 +1234,12 @@ def authenticate_client(
         WRITE_HEADER: WRITE_HEADER_VALUE,
         "X-CSRF-Token": csrf_token,
     }
+
+
+def require_identity_scope(identity: dict[str, str | None], manifest: dict[str, Any]) -> None:
+    brigade_code = manifest["case"]["brigadeCode"]
+    if identity.get("role") == "BRIGADE" and identity.get("brigadeCode") != brigade_code:
+        raise RegistryError("当前大队账户与 manifest 的 brigadeCode 不一致")
 
 
 def require_same_state_identity(state: dict[str, Any], identity: dict[str, str | None]) -> None:
@@ -1587,6 +1605,66 @@ def get_import_job(
     elif status == "MANIFEST_RECEIVED" and job.get("packageName") != project_no:
         raise RegistryError("服务端已接收清单任务项目编号对账失败")
     return job
+
+
+def reconcile_uploaded_file_refs(
+    state: dict[str, Any],
+    job: dict[str, Any],
+    projection: list[dict[str, Any]],
+) -> None:
+    """Reconcile resumable progress without re-sending an already accepted PDF."""
+
+    expected_by_path = {item["relativePath"]: item for item in projection}
+    expected_refs = {item["clientRef"] for item in projection}
+    server_field = None
+    for candidate in ("files", "uploadedFiles"):
+        if candidate in job:
+            if server_field is not None:
+                raise RegistryError("服务端导入任务同时返回多个文件投影字段，停止续传")
+            server_field = candidate
+    if server_field is None:
+        if job.get("status") == "MANIFEST_RECEIVED":
+            # The manifest endpoint accepts only a complete file graph. On an older
+            # server that does not expose its file projection, this terminal pre-
+            # finalize state is sufficient evidence that every expected PDF exists.
+            state["uploadedFileRefs"] = sorted(expected_refs)
+        return
+
+    server_files = job.get(server_field)
+    if not isinstance(server_files, list):
+        raise RegistryError("服务端导入任务文件投影不是数组，停止续传")
+    server_refs: set[str] = set()
+    seen_paths: set[str] = set()
+    for server_item in server_files:
+        if not isinstance(server_item, dict):
+            raise RegistryError("服务端导入任务文件投影包含无效条目，停止续传")
+        relative_path = server_item.get("relativePath")
+        if not isinstance(relative_path, str) or relative_path in seen_paths:
+            raise RegistryError("服务端导入任务文件路径无效或重复，停止续传")
+        seen_paths.add(relative_path)
+        expected = expected_by_path.get(relative_path)
+        raw_size = server_item.get("sizeBytes")
+        if isinstance(raw_size, str) and re.fullmatch(r"(?:0|[1-9][0-9]*)", raw_size):
+            size_bytes = int(raw_size)
+        elif isinstance(raw_size, int) and not isinstance(raw_size, bool):
+            size_bytes = raw_size
+        else:
+            raise RegistryError("服务端导入任务文件大小无效，停止续传")
+        if (
+            expected is None
+            or server_item.get("sha256") != expected["sha256"]
+            or server_item.get("mimeType") != expected["mimeType"]
+            or size_bytes != expected["sizeBytes"]
+        ):
+            raise RegistryError("服务端导入任务文件投影与本地规范 PDF 不一致，停止续传")
+        server_refs.add(expected["clientRef"])
+
+    local_refs = set(state["uploadedFileRefs"])
+    if local_refs - server_refs:
+        raise RegistryError("本地记录为已上传的 PDF 在服务端文件投影中缺失，停止续传")
+    if job.get("status") == "MANIFEST_RECEIVED" and server_refs != expected_refs:
+        raise RegistryError("服务端已接收清单但文件投影不完整，停止终结")
+    state["uploadedFileRefs"] = sorted(server_refs)
 
 
 def check_uploaded_file_response(value: dict[str, Any], item: dict[str, Any], job_id: str) -> None:
@@ -2484,21 +2562,44 @@ def upload_command(args: argparse.Namespace) -> None:
         and state.get("manifestSha256") != manifest_sha
     ):
         raise RegistryError("已终结 upload-state 要求 manifestSha256 精确不变")
-    with httpx.Client(
-        timeout=httpx.Timeout(args.timeout, read=max(args.timeout, 300.0)),
-        follow_redirects=False,
-    ) as client:
-        identity, write_headers = authenticate_client(
-            client,
-            api_base,
-            origin,
-            manifest,
-            secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
+    shared_session = getattr(args, "_shared_session", None)
+    if shared_session is None:
+        client_scope = httpx.Client(
+            timeout=httpx.Timeout(args.timeout, read=max(args.timeout, 300.0)),
+            follow_redirects=False,
         )
+    elif (
+        not isinstance(shared_session, dict)
+        or shared_session.get("apiBase") != api_base
+        or shared_session.get("origin") != origin
+        or not isinstance(shared_session.get("client"), httpx.Client)
+        or not isinstance(shared_session.get("identity"), dict)
+        or not isinstance(shared_session.get("writeHeaders"), dict)
+    ):
+        raise RegistryError("批量上传共享会话与当前目标不一致")
+    else:
+        client_scope = nullcontext(shared_session["client"])
+    with client_scope as client:
+        if shared_session is None:
+            identity, write_headers = authenticate_client(
+                client,
+                api_base,
+                origin,
+                manifest,
+                secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
+            )
+            if (
+                response_json(client.get(f"{api_base}/api/ready"), "服务就绪").get("status")
+                != "ready"
+            ):
+                raise RegistryError("服务未就绪")
+        else:
+            identity = shared_session["identity"]
+            write_headers = shared_session["writeHeaders"]
+            require_identity_scope(identity, manifest)
         require_same_state_identity(state, identity)
-        if response_json(client.get(f"{api_base}/api/ready"), "服务就绪").get("status") != "ready":
-            raise RegistryError("服务未就绪")
         job_id: str
+        job_status = "CREATED"
         if state:
             job = get_import_job(
                 client,
@@ -2604,6 +2705,8 @@ def upload_command(args: argparse.Namespace) -> None:
             elif job["status"] not in {"CREATED", "UPLOADING", "MANIFEST_RECEIVED"}:
                 raise RegistryError("服务端任务状态或项目编号无法安全对账")
             job_id = state["jobId"]
+            job_status = job["status"]
+            reconcile_uploaded_file_refs(state, job, projection)
             state["manifestSha256"] = manifest_sha
         else:
             existing = exact_case(client, api_base, manifest["case"]["projectNo"])
@@ -2641,11 +2744,14 @@ def upload_command(args: argparse.Namespace) -> None:
                 "immutableBindingDigest": binding_digest,
                 "uploadedFileRefs": [],
             }
+            job_status = job["status"]
         validate_upload_state(state)
         write_json(state_path, state)
         mark_uploading(args, path, manifest)
         projection_by_ref = {item["clientRef"]: item for item in projection}
         for item in manifest["files"]:
+            if item["clientRef"] in state["uploadedFileRefs"]:
+                continue
             projection_item = projection_by_ref[item["clientRef"]]
             with Path(upload[item["clientRef"]]).open("rb") as stream:
                 uploaded_response = response_json(
@@ -2660,15 +2766,19 @@ def upload_command(args: argparse.Namespace) -> None:
             check_uploaded_file_response(uploaded_response, projection_item, job_id)
             state["uploadedFileRefs"] = sorted({*state["uploadedFileRefs"], item["clientRef"]})
             write_json(state_path, state)
-        manifest_response = response_json(
-            client.put(
-                f"{api_base}/api/v2/import-jobs/{job_id}/manifest",
-                headers=write_headers,
-                json=manifest,
-            ),
-            "提交清单",
-        )
-        check_manifest_response(manifest_response, job_id)
+        expected_refs = {item["clientRef"] for item in projection}
+        if set(state["uploadedFileRefs"]) != expected_refs:
+            raise RegistryError("本地上传进度未覆盖全部规范 PDF，停止提交清单")
+        if job_status != "MANIFEST_RECEIVED":
+            manifest_response = response_json(
+                client.put(
+                    f"{api_base}/api/v2/import-jobs/{job_id}/manifest",
+                    headers=write_headers,
+                    json=manifest,
+                ),
+                "提交清单",
+            )
+            check_manifest_response(manifest_response, job_id)
         response_json(
             client.post(
                 f"{api_base}/api/v2/import-jobs/{job_id}/finalize",
@@ -2765,6 +2875,154 @@ def upload_command(args: argparse.Namespace) -> None:
                 "finalize": state.get("finalizeSummary"),
                 "verification": state.get("verification"),
                 **archive_result_fields(archive_result),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def upload_batch_command(args: argparse.Namespace) -> None:
+    projects = list(dict.fromkeys(args.project))
+    if len(projects) != len(args.project):
+        raise RegistryError("upload-batch 的 --project 不得重复")
+    workspace = workspace_api()
+    try:
+        _config, layout = workspace.resolve_workspace(
+            work_root=getattr(args, "work_root", None),
+            config_path=getattr(args, "workspace_config", None),
+            create_layout=False,
+        )
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(f"无法安全解析批量上传工作根：{error}") from error
+
+    prepared: list[tuple[str, Path, Path, dict[str, Any]]] = []
+    results: list[dict[str, Any]] = []
+    for project_no in projects:
+        if not PROJECT_NO.fullmatch(project_no):
+            results.append(
+                {"projectNo": project_no, "status": "PRECHECK_FAILED", "error": "项目编号无效"}
+            )
+            continue
+        manifest_path = layout.work_case_dir(project_no) / "manifest.json"
+        upload_map_path = layout.work_case_dir(project_no) / "upload-map.json"
+        try:
+            resolved_path, manifest, _upload = load_inputs(str(manifest_path), str(upload_map_path))
+            if manifest.get("case", {}).get("projectNo") != project_no:
+                raise RegistryError("manifest 项目编号与所选项目不一致")
+            enforce_upload_workspace_preflight(args, resolved_path, manifest)
+        except RegistryError as error:
+            results.append(
+                {"projectNo": project_no, "status": "PRECHECK_FAILED", "error": str(error)}
+            )
+            continue
+        prepared.append((project_no, resolved_path, upload_map_path, manifest))
+
+    if args.dry_run:
+        for project_no, _manifest_path, _map_path, _manifest in prepared:
+            results.append({"projectNo": project_no, "status": "DRY_RUN_OK"})
+        print(
+            json.dumps(
+                {
+                    "status": "batch-dry-run",
+                    "network": False,
+                    "selected": len(projects),
+                    "ready": len(prepared),
+                    "failed": len(results) - len(prepared),
+                    "cases": results,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
+    if not args.finalize:
+        raise RegistryError("批量正式写入必须显式指定 --finalize")
+    if not prepared:
+        print(
+            json.dumps(
+                {"status": "batch-not-started", "selected": len(projects), "cases": results},
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    api_base, origin = origin_of(args.api_base)
+    with httpx.Client(
+        timeout=httpx.Timeout(args.timeout, read=max(args.timeout, 300.0)),
+        follow_redirects=False,
+    ) as client:
+        identity, write_headers = authenticate_client(
+            client,
+            api_base,
+            origin,
+            prepared[0][3],
+            secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
+        )
+        brigades = {manifest["case"]["brigadeCode"] for *_paths, manifest in prepared}
+        if len(brigades) > 1 and identity.get("role") != "ADMIN":
+            raise RegistryError("跨大队批量上传必须使用 ADMIN 账户")
+        for *_paths, manifest in prepared:
+            require_identity_scope(identity, manifest)
+        if response_json(client.get(f"{api_base}/api/ready"), "服务就绪").get("status") != "ready":
+            raise RegistryError("服务未就绪")
+        shared_session = {
+            "client": client,
+            "apiBase": api_base,
+            "origin": origin,
+            "identity": identity,
+            "writeHeaders": write_headers,
+        }
+        for project_no, manifest_path, upload_map_path, _manifest in prepared:
+            print(
+                json.dumps({"projectNo": project_no, "batchPhase": "STARTED"}, ensure_ascii=False)
+            )
+            case_args = argparse.Namespace(**vars(args))
+            case_args.manifest = str(manifest_path)
+            case_args.upload_map = str(upload_map_path)
+            case_args.dry_run = False
+            case_args._shared_session = shared_session
+            try:
+                upload_command(case_args)
+                state_path = manifest_path.parent / "upload-state.json"
+                case_status = (
+                    read_json(state_path).get("status")
+                    if state_path.exists()
+                    else "VERIFIED_ARCHIVED"
+                )
+                results.append({"projectNo": project_no, "status": case_status})
+            except RegistryError as error:
+                results.append({"projectNo": project_no, "status": "FAILED", "error": str(error)})
+            except httpx.TransportError:
+                results.append(
+                    {
+                        "projectNo": project_no,
+                        "status": "FAILED",
+                        "error": "网络传输失败，请检查连接后从本案断点重试",
+                    }
+                )
+
+    excel_warning = None
+    try:
+        workspace.export_waterline_xlsx(layout)
+    except workspace.WorkspaceStateError as error:
+        excel_warning = f"JSON 水位已保留，但 Excel 水位表刷新失败：{error}"
+    failed = sum(1 for item in results if item["status"] in {"PRECHECK_FAILED", "FAILED"})
+    verified = sum(1 for item in results if item["status"] in {"VERIFIED", "VERIFIED_ARCHIVED"})
+    awaiting_nas = sum(1 for item in results if item["status"] == "FINALIZED_UNVERIFIED")
+    manual_review = sum(1 for item in results if item["status"] == "FINALIZED_WITH_CONFLICTS")
+    needs_attention = failed + awaiting_nas + manual_review
+    print(
+        json.dumps(
+            {
+                "status": (
+                    "batch-completed" if needs_attention == 0 else "batch-completed-with-attention"
+                ),
+                "selected": len(projects),
+                "verified": verified,
+                "awaitingNas": awaiting_nas,
+                "manualReview": manual_review,
+                "failed": failed,
+                "cases": results,
+                **({"warning": excel_warning} if excel_warning else {}),
             },
             ensure_ascii=False,
         )
@@ -3271,6 +3529,41 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--dry-run", action="store_true")
             command.add_argument("--finalize", action="store_true")
             command.set_defaults(workspace_required=True)
+
+    upload_batch = sub.add_parser(
+        "upload-batch",
+        help="在一个认证会话中按项目编号依次续传、终结、核验多个案卷",
+    )
+    upload_batch.add_argument(
+        "--project",
+        action="append",
+        required=True,
+        help="项目编号；每个案卷重复指定一次，严格按给定顺序处理",
+    )
+    upload_batch.add_argument("--api-base", required=True)
+    upload_batch.add_argument(
+        "--auth-config",
+        default=str(DEFAULT_AUTH_CONFIG),
+        help=(
+            "本地 TOML 认证配置；默认使用 "
+            "%%LOCALAPPDATA%%/xf-product-case-registry/admin-upload-config.toml"
+        ),
+    )
+    upload_batch.add_argument("--timeout", type=float, default=60.0)
+    upload_batch.add_argument("--dry-run", action="store_true")
+    upload_batch.add_argument("--finalize", action="store_true")
+    upload_batch.add_argument(
+        "--deep-content-verify",
+        action="store_true",
+        help="显式取回飞牛正文并下载校验内容 SHA-256",
+    )
+    upload_batch.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="核验成功后不自动收口本地工作目录",
+    )
+    add_workspace_resolution_options(upload_batch)
+    upload_batch.set_defaults(func=upload_batch_command, workspace_required=True)
     return parser
 
 

@@ -18,6 +18,7 @@
 2. 使用同一客户端 Cookie 容器立即请求 `GET /api/auth/session`。登录响应与会话响应的身份、`authMethod=SESSION`、内外层 CSRF 必须一致，`mustChangePassword` 必须为 `false`。
 3. ADMIN 不得绑定大队；BRIGADE 的平铺和嵌套大队 ID/编号必须一致，且与 manifest 大队编号相同。任一条件不满足立即停止。
 4. Cookie、密码和 CSRF 只留在当前进程内存。业务写请求逐次携带同源 `Origin`、`X-Product-Case-Client: web-v2` 和当前 CSRF；GET 只使用会话 Cookie。
+5. 两个及以上案卷使用 `upload-batch`：先离线预检全部显式项目编号，再登录和读取会话各一次、就绪检查一次，在同一客户端 Cookie 容器中依次处理。跨大队批量必须是 ADMIN；同一大队的 BRIGADE 批量仍逐案核对 `brigadeCode`。不得用外层循环逐案启动 `upload`。
 
 ## 固定四步
 
@@ -33,7 +34,9 @@
 - `validate` 和 `upload --dry-run` 只做本地 Schema、归属、PDF、页数和哈希校验，不读取认证配置，不建立网络连接。
 - 正式写入必须显式 `upload --finalize`；写入前核对服务就绪、项目编号和当前授权范围。
 - `upload-state.json` 使用封闭 V6，保存文件投影、不可变清单绑定、任务进度、目标、大队编号和不可逆身份摘要，不保存用户/大队 ID、密码、Cookie、CSRF 或完整服务端响应。
-- 只有服务端任务为 CREATED、UPLOADING 或 MANIFEST_RECEIVED，且包哈希、文件投影、清单绑定、项目、大队、目标和身份摘要完全一致时，才能幂等重传文件。服务端 FAILED/404、字段不足或对账失败时停止，不新建替代任务绕过错误。
+- 只有服务端任务为 CREATED、UPLOADING 或 MANIFEST_RECEIVED，且包哈希、文件投影、清单绑定、项目、大队、目标和身份摘要完全一致时，才能续传。服务端 GET 若提供 `files` 或 `uploadedFiles` 投影，逐项核对上传相对路径、SHA-256、MIME 和大小：服务端精确多出的已接收文件可以推进本地 `uploadedFileRefs`，本地声称已传但服务端缺失、服务端出现额外路径或任一属性不一致时立即停止。旧服务端未返回投影时，只信任本地在成功上传响应后原子写入的引用。
+- CREATED/UPLOADING 只上传 `uploadedFileRefs` 之外的文件，全部引用齐全后才提交 manifest。MANIFEST_RECEIVED 表示服务端已经接受完整文件图和清单：若服务端返回文件投影则必须完整等于本地投影；旧服务端没有投影时以该状态及项目编号对账为依据，直接 finalize，不重复上传 PDF 或 manifest。
+- 服务端 FAILED/404、字段不足或对账失败时停止，不新建替代任务绕过错误。只有登记系统提供 ADMIN 受限的“废弃/清理失败导入任务”能力，并证明任务未生成正式 Case、未 finalize、包哈希和授权范围匹配后，才可保留旧状态证据并安全重建；不得调用通用案卷删除、手工删库或删除已存在的正式案卷。
 - 旧 V4/V5 状态不得自动续传，也不能直接转换为 V6；将案卷登记为“历史案卷待重新清点”，保留原件，重新 inventory、compose 和 validate。
 - 第 1 至 3 步出现冲突、哈希不一致、引用不存在、槽位错误或 PDF 不合规时停止。第 4 步失败时保留本地状态，修正后仅在同一任务仍可完整对账时重试。
 
@@ -44,6 +47,8 @@
 - 本地 `validate` 或 `upload --dry-run` 失败：属于案卷数据、文件映射或 Skill 门禁；不访问网络，修正本地输入或 Skill 规则后重新验证。
 - DNS、TLS、连接建立失败、连接中断或超时：属于网络传输问题；只报告传输阶段和可重试性，不写成服务端业务错误。
 - 401、403、首次改密或大队范围不匹配：属于认证或权限问题；保持断点并请用户处理权限，不降级或绕过。
+- 429：属于登记系统认证限流或客户端未复用会话。读取数值型 `Retry-After`，明确报告等待秒数并停止本轮登录；多案改用一次登录的 `upload-batch`，不得并发登录、长时间自动睡眠或无界重试。
+- 大 PDF 上传仍在发送或等待响应时返回 408/代理超时，且本地文件、清单和哈希均已验证：先按登记系统链路问题反馈，请系统项目核查反向代理请求体/读取超时、API multipart 流式接收、临时文件清理和同一任务服务日志。保留成功文件引用；同一任务恢复时只补缺失文件，不整案重传。
 - `/api/health`、`/api/ready` 正常，认证和第 1 至 3 步成功，但第 4 步 finalize 对多个独立任务稳定返回 5xx 或服务端任务进入 FAILED：优先归类为登记系统服务端问题。暂停新的 finalize，但可继续其他案卷的 inventory、OCR/拆分、compose、validate 和 dry-run。
 - finalize 成功而飞牛不是 AVAILABLE、缺少 `nasVerifiedAt` 或目录哈希未就绪：属于远端存储核验未完成；不得归档，也不得称为网络或 finalize 失败。
 

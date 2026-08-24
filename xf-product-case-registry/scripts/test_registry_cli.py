@@ -964,9 +964,20 @@ def test_uploading_state_with_existing_case_recovers_without_second_post(
     assert read_json(tmp_path / "upload-state.json")["status"] == "UPLOADING"
 
 
-@pytest.mark.parametrize("job_status", ["CREATED", "UPLOADING", "MANIFEST_RECEIVED"])
+@pytest.mark.parametrize(
+    ("job_status", "uploaded_before"),
+    [
+        ("CREATED", False),
+        ("UPLOADING", False),
+        ("UPLOADING", True),
+        ("MANIFEST_RECEIVED", False),
+    ],
+)
 def test_upload_resumes_all_active_states_with_case_null(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, job_status: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    job_status: str,
+    uploaded_before: bool,
 ) -> None:
     source = tmp_path / "one.pdf"
     pdf(source)
@@ -988,7 +999,7 @@ def test_upload_resumes_all_active_states_with_case_null(
         "authIdentity": admin_state_identity(),
         "filesProjection": projection,
         "immutableBindingDigest": cli.immutable_manifest_binding(data, projection),
-        "uploadedFileRefs": [],
+        "uploadedFileRefs": ["file:one"] if uploaded_before else [],
     }
     cli.write_json(tmp_path / "upload-state.json", state)
     final_job = {
@@ -1079,8 +1090,10 @@ def test_upload_resumes_all_active_states_with_case_null(
         )
     )
     assert "/api/v2/import-jobs" not in requests
-    assert requests.count("/api/v2/import-jobs/job/files") == 1
-    assert requests.count("/api/v2/import-jobs/job/manifest") == 1
+    expected_file_replay = 0 if uploaded_before or job_status == "MANIFEST_RECEIVED" else 1
+    expected_manifest_replay = 0 if job_status == "MANIFEST_RECEIVED" else 1
+    assert requests.count("/api/v2/import-jobs/job/files") == expected_file_replay
+    assert requests.count("/api/v2/import-jobs/job/manifest") == expected_manifest_replay
     assert requests.count("/api/v2/import-jobs/job/finalize") == 1
     assert read_json(tmp_path / "upload-state.json")["status"] == "VERIFIED"
 
@@ -1207,6 +1220,19 @@ def test_http_error_does_not_echo_response_body() -> None:
     assert str(raised.value) == "认证 失败：HTTP 403"
 
 
+def test_http_429_uses_retry_after_without_echoing_body() -> None:
+    response = httpx.Response(
+        429,
+        headers={"Retry-After": "37"},
+        json={"message": "password=do-not-log; token=do-not-log"},
+    )
+    with pytest.raises(RegistryError) as raised:
+        cli.response_json(response, "登录")
+    message = str(raised.value)
+    assert "37 秒" in message and "upload-batch" in message
+    assert "password" not in message and "token" not in message
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -1251,6 +1277,98 @@ def test_parser_defaults_to_stable_local_auth_config() -> None:
         ]
     )
     assert Path(args.auth_config) == cli.DEFAULT_AUTH_CONFIG
+
+
+def test_upload_batch_parser_requires_explicit_projects_and_finalize_mode() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "upload-batch",
+            "--project",
+            PROJECT,
+            "--project",
+            "32002207C202600034",
+            "--api-base",
+            "https://registry.example",
+            "--finalize",
+        ]
+    )
+    assert args.project == [PROJECT, "32002207C202600034"]
+    assert args.finalize is True and args.func is cli.upload_batch_command
+    assert args.workspace_required is True
+
+
+def test_upload_batch_authenticates_and_checks_ready_once_for_multiple_cases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work_root = tmp_path / "business"
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    config_path = tmp_path / "workspace.toml"
+    config = workspace.configure_workspace(
+        work_root=work_root,
+        download_dir=downloads,
+        config_path=config_path,
+    )
+    layout = workspace.BusinessLayout.from_root(config.work_root)
+    projects = [PROJECT, "32002207C202600034"]
+    for index, project_no in enumerate(projects):
+        case_dir = layout.work_case_dir(project_no)
+        case_dir.mkdir(parents=True)
+        source_pdf = case_dir / f"source-{index}.pdf"
+        pdf(source_pdf)
+        data = manifest(source_pdf)
+        data["case"]["projectNo"] = project_no
+        data["packageSha256"] = "sha256:" + str(index + 1) * 64
+        (case_dir / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+        (case_dir / "upload-map.json").write_text(
+            json.dumps({"files": {"file:one": str(source_pdf)}}), encoding="utf-8"
+        )
+
+    calls = {"auth": 0, "ready": 0, "upload": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/ready"
+        calls["ready"] += 1
+        return httpx.Response(200, json={"status": "ready"})
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        cli.httpx,
+        "Client",
+        lambda **kwargs: real_client(
+            transport=httpx.MockTransport(handler),
+            timeout=kwargs.get("timeout"),
+            follow_redirects=False,
+        ),
+    )
+
+    def fake_authenticate(*_args: object, **_kwargs: object):
+        calls["auth"] += 1
+        return admin_state_identity(), {"X-CSRF-Token": TEST_CSRF}
+
+    def fake_upload(case_args: argparse.Namespace) -> None:
+        calls["upload"] += 1
+        assert case_args._shared_session["identity"]["role"] == "ADMIN"
+
+    monkeypatch.setattr(cli, "authenticate_client", fake_authenticate)
+    monkeypatch.setattr(cli, "upload_command", fake_upload)
+    monkeypatch.setattr(workspace, "export_waterline_xlsx", lambda _layout: _layout.waterline_xlsx)
+    args = cli.build_parser().parse_args(
+        [
+            "upload-batch",
+            "--project",
+            projects[0],
+            "--project",
+            projects[1],
+            "--api-base",
+            "https://registry.example",
+            "--finalize",
+            "--workspace-config",
+            str(config_path),
+        ]
+    )
+    cli.upload_batch_command(args)
+    assert calls == {"auth": 1, "ready": 1, "upload": 2}
 
 
 def test_real_upload_cli_requires_configured_case_workspace_before_network(
@@ -2030,6 +2148,72 @@ def test_get_import_job_allows_active_production_case_null(status: str) -> None:
             client, "https://registry.example", "job", package_sha, PROJECT, "XISHAN"
         )
     assert result["status"] == status
+
+
+def test_reconcile_uploaded_file_refs_advances_only_exact_server_projection() -> None:
+    projection = [
+        {
+            "clientRef": "file:one",
+            "relativePath": "files/one.pdf",
+            "sha256": "sha256:" + "4" * 64,
+            "mimeType": "application/pdf",
+            "pageCount": 1,
+            "sizeBytes": 123,
+        }
+    ]
+    state = {"uploadedFileRefs": []}
+    cli.reconcile_uploaded_file_refs(
+        state,
+        {
+            "status": "UPLOADING",
+            "uploadedFiles": [
+                {
+                    "relativePath": "files/one.pdf",
+                    "sha256": "sha256:" + "4" * 64,
+                    "mimeType": "application/pdf",
+                    "sizeBytes": "123",
+                }
+            ],
+        },
+        projection,
+    )
+    assert state["uploadedFileRefs"] == ["file:one"]
+
+    with pytest.raises(RegistryError, match="不一致"):
+        cli.reconcile_uploaded_file_refs(
+            {"uploadedFileRefs": []},
+            {
+                "status": "UPLOADING",
+                "files": [
+                    {
+                        "relativePath": "files/one.pdf",
+                        "sha256": "sha256:" + "5" * 64,
+                        "mimeType": "application/pdf",
+                        "sizeBytes": 123,
+                    }
+                ],
+            },
+            projection,
+        )
+
+
+def test_reconcile_uploaded_file_refs_rejects_server_rollback() -> None:
+    projection = [
+        {
+            "clientRef": "file:one",
+            "relativePath": "files/one.pdf",
+            "sha256": "sha256:" + "4" * 64,
+            "mimeType": "application/pdf",
+            "pageCount": 1,
+            "sizeBytes": 123,
+        }
+    ]
+    with pytest.raises(RegistryError, match="服务端文件投影中缺失"):
+        cli.reconcile_uploaded_file_refs(
+            {"uploadedFileRefs": ["file:one"]},
+            {"status": "UPLOADING", "files": []},
+            projection,
+        )
 
 
 @pytest.mark.parametrize(

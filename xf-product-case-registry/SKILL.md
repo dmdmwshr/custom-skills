@@ -33,7 +33,7 @@ description: 通过用户已登录的消防监督管理网页采集消防产品�
 4. 列表中只能点击“关联项目／案卷名称”进入详情；法律文书名称是文书或打印入口，不能当作案卷入口。点击前可见三元组必须与 `sourceAppearances` 完全一致；进入详情后回读地址中的 RWID，并核对 `清单 RWID = 详情 URL RWID`、`详情项目编号 = 记录项目编号 = 本案目录名`、`清单案卷名称 = 详情单位名称`（只允许已知主体类型后缀规范化）。任一不一致记录 `CASE_IDENTITY_CHAIN_MISMATCH`，只暂停当前案卷，禁止截图、ZIP、工作区或上传数据改绑。每个不同 RWID 都必须先打开详情读取项目编号，不能凭列表指纹跳过。按尾页开始的处理顺序，同一案卷名称第 1 条检查记录标“初查”、第 2 条标“复查”、第 3 条及以后标非阻塞的“检查记录次数异常”；异常继续进入详情、下载、提取和上传，只有项目编号或关键身份字段冲突才暂停该案。详情页同时出现项目编号和文书目录后保存完整截图；正式 `source add-page` 必须带列表截图，`source add-detail` 必须带去除 `runId` 后且仍含当前 RWID 的详情来源地址。项目编号已在 `CaseWaterlineV1` 中完成且上传和飞牛均为 `VERIFIED` 时才跳过下载；否则按项目编号合并重复 RWID，并为每案建立独立下载基线，再执行“打包 → 全选 → 核对叶子文书 → 开始打包”。点击后使用 `source await-download --download-baseline <基线> --attach` 等待来源系统异步生成；`.crdownload`、变化中的文件或多候选均不得绑定。若内置浏览器已完成来源响应却将 Blob 下载标记为 0 字节取消，按 `browser-acquisition.md` 的“Blob 本地恢复”使用 `scripts/browser_blob_receiver.mjs` 原子接收后再走同一校验；若 `Network.getResponseBody` 因原生消息帧上限无法交付大包，记录 `IAB_BLOB_DELIVERY_UNAVAILABLE` 并保持“详情已采集、案卷包待接收”，不得改用页面脚本分块、读取会话或重复打包。只有相对本案基线唯一新增、完成且大小稳定的 ZIP 才会按项目编号和 SHA-256 规范命名、移入工作根，且仅在哈希一致后删除下载目录中的该临时副本。
 5. 用 `source begin/add-page/add-detail/snapshot-downloads/await-download/attach-package/finalize` 持久化 `BrowserCaptureV1`、`SourceEvidenceV1` 和 `CaseWaterlineV1`。JSON 是机器事实源；进度询问先运行只读 `ledger status`，按项目编号区分文书记录、正式详情截图、已接收 ZIP、已创建任务、文件已传、finalize 成功和飞牛 VERIFIED，不能用目录总数、截图数或 `upload-state.json` 存在数互相代替。`ledger export` 只把 JSON 投影为 `案卷水位记录表.xlsx`。
 6. 对已接收完整 ZIP 的独立案卷运行 `inventory → ocr/split → compose → validate → upload --dry-run`。浏览器仍一次只操作一个来源案卷，但不同项目编号的本地整理、信息提取和已授权上传核验可与后续浏览器下载并行流水；同一项目编号只能由一个执行单元处理。执行单元只能读取 `原始案卷/待处理案卷/<同一项目编号>` 和 `工作区/<同一项目编号>`，开始前核对 `source-evidence.projectNo`、ZIP 文件名/完整哈希、`case-data.json` 和 manifest 项目编号一致；不得把兄弟项目目录或批次 `staging` 当作业务输入。只把可确认字段写入 `case-data.json`，只把已分类的规范 PDF 放入 51 个槽位或 `OTHER_ATTACHMENT`；证据不足时保留待确认，不猜测。
-7. 当前请求已经明确授权具体案卷和生产写入时，运行 `upload --finalize`，随后 `verify`；否则停在本地清单并一次性说明对象、影响和验证方式。
+7. 当前请求已经明确授权具体案卷和生产写入时，单案运行 `upload --finalize`；两个及以上案卷固定运行 `upload-batch --project <项目编号> ... --finalize`，严格按显式项目清单在一个认证会话中依次续传、终结和核验，不能为每案重新登录。批量命令先离线预检全部项目，单案失败只记录该案并继续后续项目，最后从 JSON 重建 Excel 水位表；否则停在本地清单并一次性说明对象、影响和验证方式。
 8. 只有 V6 上传状态和飞牛落盘证据均达到 `VERIFIED`，且无冲突、跳过项或 `created=false` 时才归档原始证据、工作区和核验摘要。飞牛离线或未落盘保持“已上传待飞牛核验”，单案异常不阻塞其他案卷。
 
 真实浏览器发布验收使用 `source begin --acceptance-sample`。筛选 JSON 必须同时写入实时总数、样本数和 `SINGLE_CASE_DOWNLOAD_PROOF`；该批次标为 `SAMPLE_ONLY`。列表截图按批次保存在 `原始案卷/案卷目录截图`，详情和 ZIP 只进入对应采集批次内的 `验收样本` 目录；这些证据均不进入正式待处理案卷或全局水位，也不能触发整理、上传和归档。
@@ -50,14 +50,15 @@ description: 通过用户已登录的消防监督管理网页采集消防产品�
 - 文件名只能辅助定位。依据正文、页码、文号、日期和明确关联决定槽位。每个上传文件必须恰好被一个槽位版本或其他附件引用；一个来源对应多个槽位时生成独立规范 PDF 和独立 `fileRef`。
 - 浏览器截图、来源 HTML、RWID、来源路径、OCR 原文和人工笔记不得进入 manifest 或上传状态。来源路径去除 `runId` 及其他会话参数。
 - 旧 V4/V5 状态不得自动续传或冒充新水位。当前遗留案卷首次只登记为“历史案卷待重新清点”，不移动、不删除原件；重新清点后才进入 V6 上传流程。
+- 项目工作区内只使用固定的 `inventory.json`、`ocr-result.json`、`split-plan.json`、`case-data.json`、`manifest.json`、`upload-map.json` 和 `upload-state.json`；不得为一次异常在兄弟目录散落临时包装脚本、第二份 manifest 或手工改名状态。需要保留旧失败状态时，只能在系统项目明确允许重建后按 `upload-state.failed-before-recreate-<UTC>.json` 留一份只读证据。
 
 ## 认证与写入
 
 - 登记系统认证只使用 `%LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml`；先运行 `init-auth-config` 创建空模板，由用户本人填写。不得在聊天、命令行、日志、manifest 或状态文件中展示凭据、Cookie 或 CSRF 令牌。
-- CLI 登录后必须回读会话并核对身份、认证方式、CSRF、首次改密状态和大队范围。全 8 大队批量上传必须使用 ADMIN；BRIGADE 账户只能上传与 manifest `brigadeCode` 一致的本大队案卷。
-- `validate` 与 `upload --dry-run` 不写网站；正式写入必须显式使用 `upload --finalize`。续传只允许 V6 状态与服务端 CREATED、UPLOADING 或 MANIFEST_RECEIVED 任务完全对账。
+- CLI 登录后必须回读会话并核对身份、认证方式、CSRF、首次改密状态和大队范围。全 8 大队批量上传必须使用 ADMIN；BRIGADE 账户只能上传与 manifest `brigadeCode` 一致的本大队案卷。多案正式写入只用 `upload-batch` 共用一次会话；不得用循环逐案调用 `upload` 造成重复登录。HTTP 429 读取 `Retry-After` 后保留断点并按提示等待，不自动长时间睡眠或反复登录。
+- `validate` 与 `upload --dry-run` 不写网站；正式写入必须显式使用 `upload --finalize` 或 `upload-batch --finalize`。续传只允许 V6 状态与服务端 CREATED、UPLOADING 或 MANIFEST_RECEIVED 任务完全对账：优先以服务端文件投影核对相对路径、SHA-256、MIME 和大小，只上传缺失引用；服务端已经 MANIFEST_RECEIVED 时直接进入 finalize，不重复上传 PDF 或清单。服务端投影回退、缺失或不一致必须停在本案断点。
 - `verify` 默认低流量核对目录 SHA-256、飞牛状态和落盘时间；只有显式 `--deep-content-verify` 才取回正文。网络异常、飞牛离线或等待超时只报告未完成，不伪报哈希不一致。
-- 上传故障先按证据分层：本地 `validate/dry-run` 失败属于数据或 Skill 门禁；连接失败、超时和 DNS/TLS 失败属于网络；401/403 属于认证或权限；健康与就绪正常、前 1 至 3 步成功而 finalize 稳定 5xx 或服务端任务 FAILED，优先判为登记系统问题。系统问题只把脱敏的阶段、状态码、项目编号和复现范围反馈给对应登记系统项目任务，不发送凭据、任务 ID、PDF/ZIP 或完整响应；本会话继续安全的本地整理，暂停新的 finalize，且不得直接修改系统仓库或绕过失败任务。
+- 上传故障先按证据分层：本地 `validate/dry-run` 失败属于数据或 Skill 门禁；DNS/TLS/连接中断属于网络；上传大 PDF 在客户端仍发送时由反向代理返回 408/超时，先由系统项目核查请求体流式接收、代理/API 超时、临时文件清理和日志，不能直接归因于文件；401/403 属于认证或权限；429 属于认证限流与客户端会话复用问题；健康与就绪正常、前 1 至 3 步成功而 finalize 稳定 5xx 或服务端任务 FAILED，优先判为登记系统问题。系统问题只把脱敏的阶段、状态码、项目编号和复现范围反馈给对应登记系统项目任务，不发送凭据、任务 ID、PDF/ZIP 或完整响应；本会话继续安全的本地整理，暂停新的 finalize，且不得直接修改系统仓库或绕过失败任务。失败导入任务只能使用登记系统提供的受限清理/废弃/安全重建流程，且必须确认没有正式 Case、没有 finalize；不得要求通用案卷删除接口、手工删库或删除已有正式案卷。
 
 ## 参考资料
 
