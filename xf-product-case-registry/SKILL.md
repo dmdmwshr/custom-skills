@@ -50,7 +50,7 @@ description: 通过用户已登录的消防监督管理网页采集消防产品�
 - 文件名只能辅助定位。依据正文、页码、文号、日期和明确关联决定槽位。每个上传文件必须恰好被一个槽位版本或其他附件引用；一个来源对应多个槽位时生成独立规范 PDF 和独立 `fileRef`。
 - 浏览器截图、来源 HTML、RWID、来源路径、OCR 原文和人工笔记不得进入 manifest 或上传状态。来源路径去除 `runId` 及其他会话参数。
 - 旧 V4/V5 状态不得自动续传或冒充新水位。当前遗留案卷首次只登记为“历史案卷待重新清点”，不移动、不删除原件；重新清点后才进入 V6 上传流程。
-- 项目工作区内只使用固定的 `inventory.json`、`ocr-result.json`、`split-plan.json`、`case-data.json`、`manifest.json`、`upload-map.json` 和 `upload-state.json`；不得为一次异常在兄弟目录散落临时包装脚本、第二份 manifest 或手工改名状态。需要保留旧失败状态时，只能在系统项目明确允许重建后按 `upload-state.failed-before-recreate-<UTC>.json` 留一份只读证据。
+- 项目工作区根级控制文件使用固定名称：`inventory.json`、`ocr-result.json`、`split-plan.json`、`split-index.json`、`case-data.json`、`manifest.json`、`upload-map.json` 和 `upload-state.json`；允许保留 CLI/OCR 生成的结构化诊断文件及其专用输出子目录。不得为一次异常在兄弟目录散落临时包装脚本、第二份 manifest 或手工改名状态。需要保留旧失败状态时，只能在系统项目明确允许重建后按 `upload-state.failed-before-recreate-<UTC>.json` 留一份只读证据。
 
 ## 认证与写入
 

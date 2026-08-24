@@ -30,7 +30,7 @@
 
 正式详情截图固定命名为 `原始案卷/待处理案卷/<项目编号>/案卷详情_<截图SHA-256前12位>.png`；原始 ZIP 固定命名为 `<项目编号>_案卷包_<ZIP SHA-256前12位>.zip`，同目录另存 `source-evidence.json`。项目处理产物只写 `工作区/<项目编号>`。任何执行单元都不得从兄弟项目目录或批次 staging 猜选输入；临时捕获在 SourceEvidence 已记录正式路径和相同哈希前不得删除，完成对账后可清理。
 
-每个项目工作区只允许一套当前事实文件：`inventory.json`、`ocr-result.json`、`split-plan.json`、`case-data.json`、`manifest.json`、`upload-map.json`、`upload-state.json`，以及 `normalized/` 下的规范 PDF。同一项目编号同时只能有一个写执行单元；跨项目并行时，每个执行单元显式绑定项目编号和上述两个项目目录。不得在工作根散落一次性上传包装脚本、第二份 manifest、手工复制的状态文件或以“第几行”命名的业务文件。登记系统明确允许清理 FAILED 任务并重建时，旧状态只按 `upload-state.failed-before-recreate-<UTC>.json` 保留一份只读证据，然后由正式 CLI 创建新 V6 状态。
+每个项目工作区只保留一套当前根级控制文件：`inventory.json`、`ocr-result.json`、`split-plan.json`、`split-index.json`、`case-data.json`、`manifest.json`、`upload-map.json`、`upload-state.json`，以及 `normalized/` 下的规范 PDF。CLI/OCR 生成的结构化诊断文件、文本层清单和专用输出子目录可按原名保留，不得改成另一套事实源。同一项目编号同时只能有一个写执行单元；跨项目并行时，每个执行单元显式绑定项目编号和上述两个项目目录。不得在工作根散落一次性上传包装脚本、第二份 manifest、手工复制的状态文件或以“第几行”命名的业务文件。登记系统明确允许清理 FAILED 任务并重建时，旧状态只按 `upload-state.failed-before-recreate-<UTC>.json` 保留一份只读证据，然后由正式 CLI 创建新 V6 状态。
 
 ## BrowserCaptureV1
 
