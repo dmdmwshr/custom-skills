@@ -22,7 +22,7 @@
 
 ## 固定四步
 
-1. `POST /api/v2/import-jobs`：按包哈希和导入元数据创建或取得幂等任务。
+1. `POST /api/v2/import-jobs`：请求头 `Idempotency-Key` 与正文 `idempotencyKey` 使用同一稳定值，正文同时提交 `packageSha256` 和详情项目编号 `projectNo`，按三者创建、取得幂等任务或安全重建符合门禁的 FAILED 任务。
 2. `POST /api/v2/import-jobs/{id}/files`：逐个流式上传已关联的规范 PDF。
 3. `PUT /api/v2/import-jobs/{id}/manifest`：提交 `CaseImportManifestV2`。
 4. `POST /api/v2/import-jobs/{id}/finalize`：由服务端执行 Schema 与语义校验并事务写入。
@@ -34,7 +34,7 @@
 - `validate` 和 `upload --dry-run` 只做本地 Schema、归属、PDF、页数和哈希校验，不读取认证配置，不建立网络连接。
 - 正式写入必须显式 `upload --finalize`；写入前核对服务就绪、项目编号和当前授权范围。
 - `upload-state.json` 使用封闭 V6，保存文件投影、不可变清单绑定、任务进度、目标、大队编号和不可逆身份摘要，不保存用户/大队 ID、密码、Cookie、CSRF 或完整服务端响应。
-- 只有服务端任务为 CREATED、UPLOADING 或 MANIFEST_RECEIVED，且包哈希、文件投影、清单绑定、项目、大队、目标和身份摘要完全一致时，才能续传。服务端 GET 若提供 `files` 或 `uploadedFiles` 投影，逐项核对上传相对路径、SHA-256、MIME 和大小：服务端精确多出的已接收文件可以推进本地 `uploadedFileRefs`，本地声称已传但服务端缺失、服务端出现额外路径或任一属性不一致时立即停止。旧服务端未返回投影时，只信任本地在成功上传响应后原子写入的引用。
+- 只有服务端任务为 CREATED、UPLOADING 或 MANIFEST_RECEIVED，且包哈希、`projectNo`、文件投影、清单绑定、大队、目标和身份摘要完全一致时，才能续传。服务端 GET 的正式水位字段为 `receivedFiles`，逐项核对上传相对路径、SHA-256 和大小；manifest 已提交后还可用其中的 `clientRef` 辅助对账，服务端若返回 MIME 再核对 MIME。服务端精确多出的已接收文件可以推进本地 `uploadedFileRefs`，本地声称已传但服务端缺失、服务端出现额外路径或任一属性不一致时立即停止。兼容旧服务端时可读取 `files`/`uploadedFiles`，但生产契约以 `receivedFiles` 为准；完全未返回投影时，只信任本地在成功上传响应后原子写入的引用。
 - CREATED/UPLOADING 只上传 `uploadedFileRefs` 之外的文件，全部引用齐全后才提交 manifest。MANIFEST_RECEIVED 表示服务端已经接受完整文件图和清单：若服务端返回文件投影则必须完整等于本地投影；旧服务端没有投影时以该状态及项目编号对账为依据，直接 finalize，不重复上传 PDF 或 manifest。
 - 服务端 FAILED/404、字段不足或对账失败时停止，不新建替代任务绕过错误。只有登记系统提供 ADMIN 受限的“废弃/清理失败导入任务”能力，并证明任务未生成正式 Case、未 finalize、包哈希和授权范围匹配后，才可保留旧状态证据并安全重建；不得调用通用案卷删除、手工删库或删除已存在的正式案卷。
 - 旧 V4/V5 状态不得自动续传，也不能直接转换为 V6；将案卷登记为“历史案卷待重新清点”，保留原件，重新 inventory、compose 和 validate。

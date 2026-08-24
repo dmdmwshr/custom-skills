@@ -56,7 +56,7 @@ description: 通过用户已登录的消防监督管理网页采集消防产品�
 
 - 登记系统认证只使用 `%LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml`；先运行 `init-auth-config` 创建空模板，由用户本人填写。不得在聊天、命令行、日志、manifest 或状态文件中展示凭据、Cookie 或 CSRF 令牌。
 - CLI 登录后必须回读会话并核对身份、认证方式、CSRF、首次改密状态和大队范围。全 8 大队批量上传必须使用 ADMIN；BRIGADE 账户只能上传与 manifest `brigadeCode` 一致的本大队案卷。多案正式写入只用 `upload-batch` 共用一次会话；不得用循环逐案调用 `upload` 造成重复登录。HTTP 429 读取 `Retry-After` 后保留断点并按提示等待，不自动长时间睡眠或反复登录。
-- `validate` 与 `upload --dry-run` 不写网站；正式写入必须显式使用 `upload --finalize` 或 `upload-batch --finalize`。续传只允许 V6 状态与服务端 CREATED、UPLOADING 或 MANIFEST_RECEIVED 任务完全对账：优先以服务端文件投影核对相对路径、SHA-256、MIME 和大小，只上传缺失引用；服务端已经 MANIFEST_RECEIVED 时直接进入 finalize，不重复上传 PDF 或清单。服务端投影回退、缺失或不一致必须停在本案断点。
+- `validate` 与 `upload --dry-run` 不写网站；正式写入必须显式使用 `upload --finalize` 或 `upload-batch --finalize`。创建任务同时提交相同的 `Idempotency-Key`/`idempotencyKey`、`packageSha256` 和详情项目编号 `projectNo`。续传只允许 V6 状态与服务端 CREATED、UPLOADING 或 MANIFEST_RECEIVED 任务完全对账：以 GET 返回的 `receivedFiles` 核对相对路径、SHA-256 和大小（服务端返回 MIME 时再核对 MIME），只上传缺失引用；服务端已经 MANIFEST_RECEIVED 时直接进入 finalize，不重复上传 PDF 或清单。服务端投影回退、缺失或不一致必须停在本案断点。
 - `verify` 默认低流量核对目录 SHA-256、飞牛状态和落盘时间；只有显式 `--deep-content-verify` 才取回正文。网络异常、飞牛离线或等待超时只报告未完成，不伪报哈希不一致。
 - 上传故障先按证据分层：本地 `validate/dry-run` 失败属于数据或 Skill 门禁；DNS/TLS/连接中断属于网络；上传大 PDF 在客户端仍发送时由反向代理返回 408/超时，先由系统项目核查请求体流式接收、代理/API 超时、临时文件清理和日志，不能直接归因于文件；401/403 属于认证或权限；429 属于认证限流与客户端会话复用问题；健康与就绪正常、前 1 至 3 步成功而 finalize 稳定 5xx 或服务端任务 FAILED，优先判为登记系统问题。系统问题只把脱敏的阶段、状态码、项目编号和复现范围反馈给对应登记系统项目任务，不发送凭据、任务 ID、PDF/ZIP 或完整响应；本会话继续安全的本地整理，暂停新的 finalize，且不得直接修改系统仓库或绕过失败任务。失败导入任务只能使用登记系统提供的受限清理/废弃/安全重建流程，且必须确认没有正式 Case、没有 finalize；不得要求通用案卷删除接口、手工删库或删除已有正式案卷。
 

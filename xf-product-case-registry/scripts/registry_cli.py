@@ -23,7 +23,7 @@ import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -1580,6 +1580,8 @@ def get_import_job(
         raise RegistryError("服务端导入任务 id 对账失败")
     if job.get("packageHash") != package_sha:
         raise RegistryError("服务端导入任务包哈希对账失败")
+    if job.get("projectNo") is not None and job.get("projectNo") != project_no:
+        raise RegistryError("服务端导入任务项目编号对账失败")
     status = job.get("status")
     if status == "FAILED":
         raise RegistryError("服务端导入任务已 FAILED，停止续传")
@@ -1617,7 +1619,7 @@ def reconcile_uploaded_file_refs(
     expected_by_path = {item["relativePath"]: item for item in projection}
     expected_refs = {item["clientRef"] for item in projection}
     server_field = None
-    for candidate in ("files", "uploadedFiles"):
+    for candidate in ("receivedFiles", "files", "uploadedFiles"):
         if candidate in job:
             if server_field is not None:
                 raise RegistryError("服务端导入任务同时返回多个文件投影字段，停止续传")
@@ -1653,7 +1655,15 @@ def reconcile_uploaded_file_refs(
         if (
             expected is None
             or server_item.get("sha256") != expected["sha256"]
-            or server_item.get("mimeType") != expected["mimeType"]
+            or (
+                server_field != "receivedFiles"
+                and server_item.get("mimeType") != expected["mimeType"]
+            )
+            or (
+                server_field == "receivedFiles"
+                and server_item.get("mimeType") is not None
+                and server_item.get("mimeType") != expected["mimeType"]
+            )
             or size_bytes != expected["sizeBytes"]
         ):
             raise RegistryError("服务端导入任务文件投影与本地规范 PDF 不一致，停止续传")
@@ -2712,14 +2722,19 @@ def upload_command(args: argparse.Namespace) -> None:
             existing = exact_case(client, api_base, manifest["case"]["projectNo"])
             if existing:
                 raise RegistryError("目标项目编号已存在；为防覆盖人工数据已停止")
+            idempotency_key = f"xfpcr-v2-{package_sha[7:]}"
             job = response_json(
                 client.post(
                     f"{api_base}/api/v2/import-jobs",
                     headers={
                         **write_headers,
-                        "Idempotency-Key": f"xfpcr-v2-{package_sha[7:]}",
+                        "Idempotency-Key": idempotency_key,
                     },
-                    json={"packageSha256": package_sha},
+                    json={
+                        "idempotencyKey": idempotency_key,
+                        "packageSha256": package_sha,
+                        "projectNo": manifest["case"]["projectNo"],
+                    },
                 ),
                 "创建导入任务",
             )

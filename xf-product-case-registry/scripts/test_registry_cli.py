@@ -719,6 +719,12 @@ def test_finalized_unverified_retries_read_only_and_origin_is_bound(
                 json={"data": [{"id": case_id, "projectNo": PROJECT}] if remote["case"] else []},
             )
         if request.url.path == "/api/v2/import-jobs":
+            request_body = json.loads(request.content)
+            assert request_body == {
+                "idempotencyKey": request.headers["idempotency-key"],
+                "packageSha256": data["packageSha256"],
+                "projectNo": PROJECT,
+            }
             return httpx.Response(
                 200,
                 json={"id": "job", "packageHash": data["packageSha256"], "status": "CREATED"},
@@ -2150,6 +2156,30 @@ def test_get_import_job_allows_active_production_case_null(status: str) -> None:
     assert result["status"] == status
 
 
+def test_get_import_job_rejects_project_number_mismatch() -> None:
+    package_sha = "sha256:" + "a" * 64
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "job",
+                "packageHash": package_sha,
+                "projectNo": "32002207C202600034",
+                "status": "UPLOADING",
+                "case": None,
+            },
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(RegistryError, match="项目编号对账失败"),
+    ):
+        cli.get_import_job(
+            client, "https://registry.example", "job", package_sha, PROJECT, "XISHAN"
+        )
+
+
 def test_reconcile_uploaded_file_refs_advances_only_exact_server_projection() -> None:
     projection = [
         {
@@ -2166,11 +2196,10 @@ def test_reconcile_uploaded_file_refs_advances_only_exact_server_projection() ->
         state,
         {
             "status": "UPLOADING",
-            "uploadedFiles": [
+            "receivedFiles": [
                 {
                     "relativePath": "files/one.pdf",
                     "sha256": "sha256:" + "4" * 64,
-                    "mimeType": "application/pdf",
                     "sizeBytes": "123",
                 }
             ],
