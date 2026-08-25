@@ -77,13 +77,26 @@ function Write-AtomicUtf8File {
     elseif (Test-Path -LiteralPath $Path) {
         throw "运行时清单目标不是普通文件：$Path"
     }
-    $temporary = Join-Path $directory ('.{0}.{1}.tmp' -f (Split-Path -Leaf $Path), [guid]::NewGuid().ToString('N'))
-    [System.IO.File]::WriteAllText($temporary, $Content, [System.Text.UTF8Encoding]::new($false))
-    if (Test-Path -LiteralPath $Path -PathType Leaf) {
-        [System.IO.File]::Replace($temporary, $Path, $null)
+    $leaf = Split-Path -Leaf $Path
+    $operationId = [guid]::NewGuid().ToString('N')
+    $temporary = Join-Path $directory ('.{0}.{1}.tmp' -f $leaf, $operationId)
+    $replacementBackup = Join-Path $directory ('.{0}.{1}.bak' -f $leaf, $operationId)
+    try {
+        [System.IO.File]::WriteAllText($temporary, $Content, [System.Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            # Windows PowerShell 5.1 rejects a null backup path for File.Replace.
+            # Keep the replacement atomic by using a unique same-directory backup.
+            [System.IO.File]::Replace($temporary, $Path, $replacementBackup)
+            [System.IO.File]::Delete($replacementBackup)
+        }
+        else {
+            [System.IO.File]::Move($temporary, $Path)
+        }
     }
-    else {
-        [System.IO.File]::Move($temporary, $Path)
+    finally {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+            [System.IO.File]::Delete($temporary)
+        }
     }
 }
 
