@@ -1569,6 +1569,67 @@ def test_http_429_uses_retry_after_without_echoing_body() -> None:
     assert "password" not in message and "token" not in message
 
 
+def test_api_request_paces_general_calls_and_retries_429(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"now": 0.0}
+    sleeps: list[float] = []
+    requests: list[str] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if len(requests) == 1:
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "1"},
+                json={"code": "RATE_LIMITED"},
+            )
+        return httpx.Response(200, json={"status": "ok"})
+
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+    monkeypatch.setattr(cli.random, "uniform", lambda _low, _high: 0.2)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        client._xfpcr_force_pacing = True  # type: ignore[attr-defined]
+        response = cli.api_request(client, "GET", "https://registry.example/api/ready")
+        assert response.status_code == 200
+        response = cli.api_request(client, "GET", "https://registry.example/api/ready")
+        assert response.status_code == 200
+
+    assert requests == ["/api/ready", "/api/ready", "/api/ready"]
+    assert sleeps == pytest.approx([1.2, cli.GENERAL_REQUEST_MIN_INTERVAL_SECONDS])
+
+
+def test_api_request_does_not_retry_or_pace_stream_upload_429(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests = 0
+    sleeps: list[float] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(429, headers={"Retry-After": "1"})
+
+    monkeypatch.setattr(cli.time, "sleep", sleeps.append)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        client._xfpcr_force_pacing = True  # type: ignore[attr-defined]
+        response = cli.api_request(
+            client,
+            "POST",
+            "https://registry.example/api/v2/import-jobs/job/files",
+            request_class="upload",
+            retry_on_429=False,
+        )
+    assert response.status_code == 429
+    assert requests == 1
+    assert sleeps == []
+
+
 @pytest.mark.parametrize(
     "payload",
     [

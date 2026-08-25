@@ -6,6 +6,7 @@ import importlib
 import json
 import mimetypes
 import os
+import random
 import re
 import shutil
 import stat
@@ -23,7 +24,7 @@ import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -67,6 +68,11 @@ VERSIONS = {"ELECTRONIC", "SCANNED"}
 RECALL_STATUSES = {"READY", "PENDING", "PROCESSING", "OFFLINE", "FAILED"}
 RECALL_POLL_INTERVAL_SECONDS = 2.0
 RECALL_MAX_POLLS = 30
+GENERAL_REQUEST_MIN_INTERVAL_SECONDS = 1.05
+RATE_LIMIT_MAX_RETRIES = 8
+RATE_LIMIT_MAX_AUTO_WAIT_SECONDS = 60.0
+RATE_LIMIT_MAX_TOTAL_WAIT_SECONDS = 60.0
+RATE_LIMIT_JITTER_SECONDS = (0.1, 0.35)
 MAX_DEEP_VERIFY_BYTES = 100 * 1024 * 1024
 MAX_ERROR_RESPONSE_BYTES = 16 * 1024
 
@@ -1435,6 +1441,55 @@ def load_supplement_inputs(
     return manifest, upload_map
 
 
+def api_request(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    request_class: str = "general",
+    retry_on_429: bool = True,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Apply the published API pacing and machine-readable 429 retry contract."""
+
+    if request_class not in {"general", "upload"}:
+        raise RegistryError("未知 API 限流类别")
+    transport = getattr(client, "_transport", None)
+    pacing_enabled = not isinstance(transport, httpx.MockTransport) or bool(
+        getattr(client, "_xfpcr_force_pacing", False)
+    )
+    total_retry_wait = 0.0
+    attempts = 0
+    while True:
+        if request_class == "general" and pacing_enabled:
+            last_started = getattr(client, "_xfpcr_last_general_request_started", None)
+            now = time.monotonic()
+            if isinstance(last_started, (int, float)):
+                pacing_wait = GENERAL_REQUEST_MIN_INTERVAL_SECONDS - (now - last_started)
+                if pacing_wait > 0:
+                    time.sleep(pacing_wait)
+            client._xfpcr_last_general_request_started = time.monotonic()  # type: ignore[attr-defined]
+        response = client.request(method.upper(), url, **kwargs)
+        if response.status_code != 429 or not retry_on_429:
+            return response
+        retry_after = response.headers.get("retry-after", "").strip()
+        if not re.fullmatch(r"[1-9][0-9]{0,5}", retry_after):
+            return response
+        delay = float(retry_after)
+        jitter = random.uniform(*RATE_LIMIT_JITTER_SECONDS)
+        wait_seconds = delay + jitter
+        if (
+            attempts >= RATE_LIMIT_MAX_RETRIES
+            or delay > RATE_LIMIT_MAX_AUTO_WAIT_SECONDS
+            or total_retry_wait + wait_seconds > RATE_LIMIT_MAX_TOTAL_WAIT_SECONDS
+        ):
+            return response
+        response.close()
+        time.sleep(wait_seconds)
+        total_retry_wait += wait_seconds
+        attempts += 1
+
+
 def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
     if not 200 <= response.status_code < 300:
         if response.status_code == 429:
@@ -1599,14 +1654,18 @@ def authenticate_client(
 ) -> tuple[dict[str, str | None], dict[str, str]]:
     username, password = read_auth_config(auth_config)
     login = response_json(
-        client.post(
+        api_request(
+            client,
+            "POST",
             f"{api_base}/api/auth/login",
             headers={"Origin": origin, WRITE_HEADER: WRITE_HEADER_VALUE},
             json={"username": username, "password": password},
         ),
         "登录",
     )
-    session = response_json(client.get(f"{api_base}/api/auth/session"), "读取登录会话")
+    session = response_json(
+        api_request(client, "GET", f"{api_base}/api/auth/session"), "读取登录会话"
+    )
     login_user, session_user = login.get("user"), session.get("user")
     if not isinstance(login_user, dict) or not isinstance(session_user, dict):
         raise RegistryError("认证响应缺少用户信息")
@@ -1947,7 +2006,9 @@ def finalize_summary(result: dict[str, Any]) -> dict[str, Any]:
 
 def exact_case(client: httpx.Client, api_base: str, project_no: str) -> dict[str, Any] | None:
     data = response_json(
-        client.get(
+        api_request(
+            client,
+            "GET",
             f"{api_base}/api/v2/cases", params={"search": project_no, "page": 1, "pageSize": 100}
         ),
         "精确案卷查询",
@@ -1971,7 +2032,10 @@ def get_import_job(
     brigade_code: str,
 ) -> dict[str, Any]:
     try:
-        job = response_json(client.get(f"{api_base}/api/v2/import-jobs/{job_id}"), "读取导入任务")
+        job = response_json(
+            api_request(client, "GET", f"{api_base}/api/v2/import-jobs/{job_id}"),
+            "读取导入任务",
+        )
     except RegistryError as error:
         if "HTTP 404" in str(error):
             raise RegistryError("服务端导入任务不存在；不得猜测或重建任务") from error
@@ -2150,7 +2214,10 @@ def get_supplement_job(
     brigade_code: str,
 ) -> dict[str, Any]:
     try:
-        job = response_json(client.get(f"{api_base}/api/v2/import-jobs/{job_id}"), "读取补录任务")
+        job = response_json(
+            api_request(client, "GET", f"{api_base}/api/v2/import-jobs/{job_id}"),
+            "读取补录任务",
+        )
     except RegistryError as error:
         if "HTTP 404" in str(error):
             raise RegistryError("服务端补录任务不存在；不得猜测或另建任务") from error
@@ -2405,8 +2472,11 @@ def recall_until_ready(
 
     def request_recall() -> dict[str, Any]:
         try:
-            response = client.post(
-                f"{api_base}/api/v2/files/{file_id}/recall", headers=write_headers
+            response = api_request(
+                client,
+                "POST",
+                f"{api_base}/api/v2/files/{file_id}/recall",
+                headers=write_headers,
             )
         except httpx.HTTPError as error:
             raise RegistryError("发起文件取回时网络异常") from error
@@ -2424,7 +2494,11 @@ def recall_until_ready(
             break
         time.sleep(min(RECALL_POLL_INTERVAL_SECONDS, remaining))
         try:
-            response = client.get(f"{api_base}/api/v2/file-recalls/{projection['recallId']}")
+            response = api_request(
+                client,
+                "GET",
+                f"{api_base}/api/v2/file-recalls/{projection['recallId']}",
+            )
         except httpx.HTTPError as error:
             raise RegistryError("读取文件取回进度时网络异常") from error
         if response.status_code == 409 and response_error_code(response) == "RECALL_REQUIRED":
@@ -2506,9 +2580,12 @@ def verify_with_client(
     case_id = listed.get("id")
     if not isinstance(case_id, str):
         raise RegistryError("目标案卷缺少 id")
-    detail = response_json(client.get(f"{api_base}/api/v2/cases/{case_id}"), "读取详情")
+    detail = response_json(
+        api_request(client, "GET", f"{api_base}/api/v2/cases/{case_id}"), "读取详情"
+    )
     directory = response_json(
-        client.get(f"{api_base}/api/v2/cases/{case_id}/directory"), "读取目录"
+        api_request(client, "GET", f"{api_base}/api/v2/cases/{case_id}/directory"),
+        "读取目录",
     )
     case_map = {
         "unitName": "unitName",
@@ -3256,7 +3333,9 @@ def upload_command(args: argparse.Namespace) -> None:
                 secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
             )
             if (
-                response_json(client.get(f"{api_base}/api/ready"), "服务就绪").get("status")
+                response_json(
+                    api_request(client, "GET", f"{api_base}/api/ready"), "服务就绪"
+                ).get("status")
                 != "ready"
             ):
                 raise RegistryError("服务未就绪")
@@ -3381,7 +3460,9 @@ def upload_command(args: argparse.Namespace) -> None:
                 raise RegistryError("目标项目编号已存在；为防覆盖人工数据已停止")
             idempotency_key = f"xfpcr-v2-{package_sha[7:]}"
             job = response_json(
-                client.post(
+                api_request(
+                    client,
+                    "POST",
                     f"{api_base}/api/v2/import-jobs",
                     headers={
                         **write_headers,
@@ -3427,8 +3508,12 @@ def upload_command(args: argparse.Namespace) -> None:
             projection_item = projection_by_ref[item["clientRef"]]
             with Path(upload[item["clientRef"]]).open("rb") as stream:
                 uploaded_response = response_json(
-                    client.post(
+                    api_request(
+                        client,
+                        "POST",
                         f"{api_base}/api/v2/import-jobs/{job_id}/files",
+                        request_class="upload",
+                        retry_on_429=False,
                         headers=write_headers,
                         params={"relativePath": item["relativePath"]},
                         files={"file": (Path(stream.name).name, stream, "application/pdf")},
@@ -3443,7 +3528,9 @@ def upload_command(args: argparse.Namespace) -> None:
             raise RegistryError("本地上传进度未覆盖全部规范 PDF，停止提交清单")
         if job_status != "MANIFEST_RECEIVED":
             manifest_response = response_json(
-                client.put(
+                api_request(
+                    client,
+                    "PUT",
                     f"{api_base}/api/v2/import-jobs/{job_id}/manifest",
                     headers=write_headers,
                     json=manifest,
@@ -3452,7 +3539,9 @@ def upload_command(args: argparse.Namespace) -> None:
             )
             check_manifest_response(manifest_response, job_id)
         response_json(
-            client.post(
+            api_request(
+                client,
+                "POST",
                 f"{api_base}/api/v2/import-jobs/{job_id}/finalize",
                 headers=write_headers,
             ),
@@ -3622,7 +3711,9 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 full_manifest,
                 secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
             )
-            ready = response_json(client.get(f"{api_base}/api/ready"), "服务就绪")
+            ready = response_json(
+                api_request(client, "GET", f"{api_base}/api/ready"), "服务就绪"
+            )
             if ready.get("status") != "ready":
                 raise RegistryError("服务未就绪")
         else:
@@ -3671,7 +3762,9 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 write_json(supplement_state_path, supplement_state)
         else:
             snapshot = response_json(
-                client.get(
+                api_request(
+                    client,
+                    "GET",
                     f"{api_base}/api/v2/case-import-state", params={"projectNo": project_no}
                 ),
                 "读取案卷同步快照",
@@ -3741,7 +3834,9 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 digest_material.encode("utf-8")
             ).hexdigest()
             job = response_json(
-                client.post(
+                api_request(
+                    client,
+                    "POST",
                     f"{api_base}/api/v2/import-jobs",
                     headers={**write_headers, "Idempotency-Key": idempotency_key},
                     json={
@@ -3789,8 +3884,12 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 projection_item = projection_by_ref[item["clientRef"]]
                 with Path(supplement_upload[item["clientRef"]]).open("rb") as stream:
                     uploaded = response_json(
-                        client.post(
+                        api_request(
+                            client,
+                            "POST",
                             f"{api_base}/api/v2/import-jobs/{job_id}/files",
+                            request_class="upload",
+                            retry_on_429=False,
                             headers=write_headers,
                             params={"relativePath": item["relativePath"]},
                             files={"file": (Path(stream.name).name, stream, "application/pdf")},
@@ -3807,7 +3906,9 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 raise RegistryError("补录文件上传进度不完整，停止提交清单")
             if job_status != "MANIFEST_RECEIVED":
                 manifest_response = response_json(
-                    client.put(
+                    api_request(
+                        client,
+                        "PUT",
                         f"{api_base}/api/v2/import-jobs/{job_id}/manifest",
                         headers=write_headers,
                         json=supplement,
@@ -3816,7 +3917,9 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 check_manifest_response(manifest_response, job_id)
             response_json(
-                client.post(
+                api_request(
+                    client,
+                    "POST",
                     f"{api_base}/api/v2/import-jobs/{job_id}/finalize",
                     headers=write_headers,
                 ),
@@ -3898,7 +4001,9 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 "finalize": summary,
             }
         fresh_snapshot = response_json(
-            client.get(
+            api_request(
+                client,
+                "GET",
                 f"{api_base}/api/v2/case-import-state", params={"projectNo": project_no}
             ),
             "补录后读取案卷同步快照",
@@ -4022,7 +4127,9 @@ def supplement_batch_command(args: argparse.Namespace) -> None:
             raise RegistryError("跨大队批量补录必须使用 ADMIN 账户")
         for *_paths, manifest in prepared:
             require_identity_scope(identity, manifest)
-        ready = response_json(client.get(f"{api_base}/api/ready"), "服务就绪")
+        ready = response_json(
+            api_request(client, "GET", f"{api_base}/api/ready"), "服务就绪"
+        )
         if ready.get("status") != "ready":
             raise RegistryError("服务未就绪")
         shared_session = {
@@ -4163,7 +4270,12 @@ def upload_batch_command(args: argparse.Namespace) -> None:
             raise RegistryError("跨大队批量上传必须使用 ADMIN 账户")
         for *_paths, manifest in prepared:
             require_identity_scope(identity, manifest)
-        if response_json(client.get(f"{api_base}/api/ready"), "服务就绪").get("status") != "ready":
+        if (
+            response_json(
+                api_request(client, "GET", f"{api_base}/api/ready"), "服务就绪"
+            ).get("status")
+            != "ready"
+        ):
             raise RegistryError("服务未就绪")
         shared_session = {
             "client": client,
