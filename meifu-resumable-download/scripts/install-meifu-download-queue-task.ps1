@@ -277,6 +277,7 @@ $networkTrigger = New-ScheduledTaskTrigger `
     -RepetitionInterval (New-TimeSpan -Minutes 30) `
     -RepetitionDuration (New-TimeSpan -Days 365)
 $settings = New-ScheduledTaskSettingsSet `
+    -Hidden `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -RunOnlyIfNetworkAvailable `

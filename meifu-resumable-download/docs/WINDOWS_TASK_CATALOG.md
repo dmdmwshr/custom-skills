@@ -9,6 +9,7 @@
 | TaskName | `DEV-MEIFU-AUTO-01-DownloadQueue` |
 | 用途 | 用 Windows 后台单工作进程处理已批准的通用 Meifu 下载队列；Codex 只入队、启动和读取状态。 |
 | 动作入口 | 固定 Python 3.12 的受管 GUI 启动器（配套 `pyvenv.cfg` 指向已核验的基础标准库）执行 `meifu_download_queue.py scheduled-run`。 |
+| 窗口与可见性 | 任务设置 `Hidden=true`，动作入口为经 PE 子系统核验的 Windows GUI `pythonw.exe`，不创建控制台窗口。 |
 | 工作目录 | 本 skill 的 `scripts` 目录。 |
 | 运行时数据 | `%LOCALAPPDATA%\MeifuDownloadQueue\queue.json`、控制文件与脱敏日志；最终文件和下载器断点状态仍在用户指定输出路径。 |
 | 触发器 | 当前用户登录后，以及每 30 分钟。 |
