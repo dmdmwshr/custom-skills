@@ -23,7 +23,7 @@ import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -48,6 +48,7 @@ DEFAULT_AUTH_CONFIG = default_auth_config_path()
 SYSTEM_POWERSHELL = Path(shutil.which("pwsh.exe") or "__missing_pwsh__")
 MINERU_SCRIPT = Path(r"D:\Program_Files\MinerU-Docker\run-mineru-docker.ps1")
 SCHEMA_PATH = SKILL_ROOT / "references" / "CaseImportManifestV2.schema.json"
+SUPPLEMENT_SCHEMA_PATH = SKILL_ROOT / "references" / "CaseFileSupplementManifestV1.schema.json"
 PROJECT_NO = re.compile(r"^\d{8}[A-Z]\d{9}$")
 UUID = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
@@ -1035,6 +1036,405 @@ def compose_command(args: argparse.Namespace) -> None:
     )
 
 
+def validate_supplement_manifest(
+    manifest: dict[str, Any], upload_map: dict[str, Any] | None = None
+) -> list[str]:
+    """Validate the published missing-file supplement contract without network I/O."""
+
+    errors: list[str] = []
+    root = only_keys(
+        manifest,
+        {
+            "schemaVersion",
+            "projectNo",
+            "baseSnapshotDigest",
+            "mode",
+            "packageSha256",
+            "createdAt",
+            "extractor",
+            "files",
+            "documentSlots",
+        },
+        "supplement",
+        errors,
+    )
+    if root.get("schemaVersion") != "CaseFileSupplementManifestV1":
+        errors.append("supplement.schemaVersion 必须为 CaseFileSupplementManifestV1")
+    if not isinstance(root.get("projectNo"), str) or not PROJECT_NO.fullmatch(
+        root["projectNo"]
+    ):
+        errors.append("supplement.projectNo 不合法")
+    if not isinstance(root.get("baseSnapshotDigest"), str) or not SHA256.fullmatch(
+        root["baseSnapshotDigest"]
+    ):
+        errors.append("supplement.baseSnapshotDigest 不合法")
+    if root.get("mode") != "MISSING_ONLY":
+        errors.append("supplement.mode 仅支持 MISSING_ONLY")
+    if "packageSha256" in root and (
+        not isinstance(root["packageSha256"], str)
+        or not SHA256.fullmatch(root["packageSha256"])
+    ):
+        errors.append("supplement.packageSha256 不合法")
+    try:
+        datetime.fromisoformat(str(root.get("createdAt")).replace("Z", "+00:00"))
+    except ValueError:
+        errors.append("supplement.createdAt 必须为 ISO 时间")
+    if "extractor" in root:
+        extractor = only_keys(
+            root["extractor"], {"name", "version"}, "supplement.extractor", errors
+        )
+        if (
+            not text(extractor.get("name"))
+            or not extractor["name"].strip()
+            or not text(extractor.get("version"))
+            or not extractor["version"].strip()
+        ):
+            errors.append("supplement.extractor.name/version 必须为非空文本")
+
+    files = root.get("files") if isinstance(root.get("files"), list) else []
+    if not isinstance(root.get("files"), list) or not files:
+        errors.append("supplement.files 必须是非空数组")
+    refs: set[str] = set()
+    paths: set[str] = set()
+    for item in files:
+        file = only_keys(
+            item,
+            {"clientRef", "relativePath", "sha256", "mimeType", "pageCount"},
+            "supplement.file",
+            errors,
+        )
+        file_ref, relative_path = file.get("clientRef"), file.get("relativePath")
+        if not ref(file_ref) or file_ref in refs:
+            errors.append("supplement 文件 clientRef 重复或不合法")
+        else:
+            refs.add(file_ref)
+        try:
+            if text(relative_path) and ("\\" in relative_path or "//" in relative_path):
+                raise RegistryError("路径包含不允许的分隔符")
+            normalized_path = safe_relative(relative_path) if text(relative_path) else ""
+        except RegistryError:
+            normalized_path = ""
+        if (
+            not normalized_path
+            or not normalized_path.lower().endswith(".pdf")
+            or normalized_path in paths
+        ):
+            errors.append("supplement 文件 relativePath 必须唯一安全 PDF")
+        else:
+            paths.add(normalized_path)
+        if not isinstance(file.get("sha256"), str) or not SHA256.fullmatch(file["sha256"]):
+            errors.append("supplement 文件 sha256 不合法")
+        if file.get("mimeType") != "application/pdf":
+            errors.append("supplement 文件 mimeType 必须为 application/pdf")
+        if "pageCount" in file and (
+            not isinstance(file["pageCount"], int)
+            or isinstance(file["pageCount"], bool)
+            or file["pageCount"] < 1
+        ):
+            errors.append("supplement 文件 pageCount 不合法")
+
+    slots = root.get("documentSlots") if isinstance(root.get("documentSlots"), list) else []
+    if not isinstance(root.get("documentSlots"), list) or not slots:
+        errors.append("supplement.documentSlots 必须是非空数组")
+    slot_refs: set[str] = set()
+    slot_identities: set[tuple[str, str]] = set()
+    used_refs: set[str] = set()
+    for item in slots:
+        slot = only_keys(
+            item,
+            {"clientRef", "slotCode", "ownerKey", "versions"},
+            "supplement.documentSlot",
+            errors,
+        )
+        slot_ref, code, owner_key = (
+            slot.get("clientRef"),
+            slot.get("slotCode"),
+            slot.get("ownerKey"),
+        )
+        if not ref(slot_ref) or slot_ref in slot_refs:
+            errors.append("supplement 槽位 clientRef 重复或不合法")
+        else:
+            slot_refs.add(slot_ref)
+        if code not in SLOT_META or code == "OTHER_ATTACHMENT":
+            errors.append("supplement slotCode 不在固定文书槽位中")
+            continue
+        multiplicity, stage = SLOT_META[code]
+        owner_valid = False
+        if multiplicity == "CASE":
+            owner_valid = owner_key == "case"
+        elif multiplicity == "INSPECTION":
+            owner_valid = owner_key == f"inspection:{stage}"
+        elif multiplicity == "PRODUCT":
+            owner_valid = (
+                isinstance(owner_key, str)
+                and owner_key.startswith("product:")
+                and bool(UUID.fullmatch(owner_key.removeprefix("product:")))
+            )
+        elif multiplicity == "NOTIFICATION_TARGET":
+            owner_valid = owner_key in {"notification:PRODUCTION", "notification:SALES"}
+        if not owner_valid:
+            errors.append("supplement 槽位 ownerKey 与槽位类型不匹配")
+        if isinstance(code, str) and isinstance(owner_key, str):
+            identity = (code, owner_key)
+            if identity in slot_identities:
+                errors.append("supplement 同一逻辑槽位重复")
+            slot_identities.add(identity)
+        versions = slot.get("versions")
+        if not isinstance(versions, list) or not 1 <= len(versions) <= 2:
+            errors.append("supplement 槽位 versions 必须有 1 至 2 项")
+            continue
+        kinds: set[str] = set()
+        for item_version in versions:
+            version = only_keys(
+                item_version, {"kind", "fileRef"}, "supplement.version", errors
+            )
+            kind, file_ref = version.get("kind"), version.get("fileRef")
+            if kind not in VERSIONS or kind in kinds:
+                errors.append("supplement 文件版本重复或不合法")
+            kinds.add(kind)
+            if file_ref not in refs:
+                errors.append("supplement 版本引用未知文件")
+            elif file_ref in used_refs:
+                errors.append("supplement 同一 fileRef 不得复用")
+            else:
+                used_refs.add(file_ref)
+        if code in PHOTO_SLOTS and kinds != {"SCANNED"}:
+            errors.append("supplement 现场照片仅允许一个 SCANNED 版本")
+    errors.extend(f"supplement 文件 {item} 未被引用" for item in refs - used_refs)
+
+    if upload_map is not None:
+        if set(upload_map) != refs:
+            errors.append("supplement-upload-map 必须精确覆盖 supplement.files")
+        for file in files:
+            file_ref = file.get("clientRef")
+            local = upload_map.get(file_ref) if isinstance(file_ref, str) else None
+            try:
+                sha256, pages = pdf_info(Path(local)) if text(local) else ("", 0)
+            except RegistryError:
+                sha256, pages = "", 0
+            if sha256 != file.get("sha256") or (
+                "pageCount" in file and pages != file["pageCount"]
+            ):
+                errors.append(f"supplement {file_ref} 本地 PDF/哈希/页数不匹配")
+    return errors
+
+
+def validate_case_import_state(snapshot: dict[str, Any], project_no: str) -> None:
+    if (
+        snapshot.get("schemaVersion") != "CaseImportStateV1"
+        or snapshot.get("projectNo") != project_no
+        or not isinstance(snapshot.get("snapshotDigest"), str)
+        or not SHA256.fullmatch(snapshot["snapshotDigest"])
+        or not isinstance(snapshot.get("case"), dict)
+        or not isinstance(snapshot.get("inspections"), list)
+        or not isinstance(snapshot.get("documentSlots"), list)
+        or not isinstance(snapshot.get("unresolvedConflicts"), list)
+    ):
+        raise RegistryError("服务器 CaseImportStateV1 快照字段不完整或项目编号不一致")
+    brigade = snapshot["case"].get("brigade")
+    if not isinstance(brigade, dict) or brigade.get("code") not in BRIGADES:
+        raise RegistryError("服务器案卷快照缺少可信大队编号")
+    product_owners: set[str] = set()
+    for inspection in snapshot["inspections"]:
+        if not isinstance(inspection, dict) or not isinstance(inspection.get("products"), list):
+            raise RegistryError("服务器案卷快照检查或产品投影无效")
+        for product in inspection["products"]:
+            owner_key = product.get("ownerKey") if isinstance(product, dict) else None
+            client_refs = product.get("clientRefs") if isinstance(product, dict) else None
+            if (
+                not isinstance(owner_key, str)
+                or not owner_key.startswith("product:")
+                or not UUID.fullmatch(owner_key.removeprefix("product:"))
+                or owner_key in product_owners
+                or not isinstance(client_refs, list)
+                or any(not isinstance(item, str) for item in client_refs)
+            ):
+                raise RegistryError("服务器案卷快照产品 ownerKey/clientRefs 无效")
+            product_owners.add(owner_key)
+    identities: set[tuple[str, str]] = set()
+    for slot in snapshot["documentSlots"]:
+        if not isinstance(slot, dict) or not isinstance(slot.get("files"), list):
+            raise RegistryError("服务器案卷快照槽位投影无效")
+        code, owner_key = slot.get("slotCode"), slot.get("ownerKey")
+        if not isinstance(code, str) or not isinstance(owner_key, str):
+            raise RegistryError("服务器案卷快照槽位身份无效")
+        identity = (code, owner_key)
+        if identity in identities:
+            raise RegistryError("服务器案卷快照存在重复逻辑槽位")
+        identities.add(identity)
+        kinds: set[str] = set()
+        for file in slot["files"]:
+            kind = file.get("versionKind") if isinstance(file, dict) else None
+            sha256 = file.get("sha256") if isinstance(file, dict) else None
+            if kind not in VERSIONS or kind in kinds or not isinstance(sha256, str):
+                raise RegistryError("服务器案卷快照槽位文件版本无效")
+            if not SHA256.fullmatch(sha256):
+                raise RegistryError("服务器案卷快照槽位文件哈希无效")
+            kinds.add(kind)
+
+
+def supplement_owner_key(
+    slot: dict[str, Any], full_manifest: dict[str, Any], snapshot: dict[str, Any]
+) -> str:
+    code = slot.get("slotCode")
+    if code not in SLOT_META or code == "OTHER_ATTACHMENT":
+        raise RegistryError("补录只支持固定文书槽位")
+    multiplicity, stage = SLOT_META[code]
+    if multiplicity == "CASE":
+        return "case"
+    if multiplicity == "INSPECTION":
+        inspection_ref = slot.get("inspectionRef")
+        inspections = [
+            item
+            for key in ("initialInspection", "recheckInspection")
+            if isinstance((item := full_manifest.get(key)), dict)
+        ]
+        matches = [item for item in inspections if item.get("clientRef") == inspection_ref]
+        if len(matches) != 1 or matches[0].get("stage") != stage:
+            raise RegistryError("本地检查级槽位无法映射到唯一检查阶段")
+        return f"inspection:{stage}"
+    if multiplicity == "NOTIFICATION_TARGET":
+        target = slot.get("notificationTarget")
+        if target not in {"PRODUCTION", "SALES"}:
+            raise RegistryError("本地通报槽位缺少明确生产或销售对象")
+        return f"notification:{target}"
+    product_ref = slot.get("productRef")
+    candidates = [
+        product.get("ownerKey")
+        for inspection in snapshot["inspections"]
+        for product in inspection.get("products", [])
+        if isinstance(product, dict) and product_ref in product.get("clientRefs", [])
+    ]
+    if len(candidates) != 1 or not isinstance(candidates[0], str):
+        raise RegistryError("本地产品级槽位无法通过 clientRef 映射到唯一服务器产品")
+    return candidates[0]
+
+
+def build_supplement_manifest(
+    full_manifest: dict[str, Any],
+    full_upload_map: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, int]]:
+    """Project the full local manifest onto server-confirmed missing slot versions only."""
+
+    project_no = full_manifest.get("case", {}).get("projectNo")
+    validate_case_import_state(snapshot, project_no)
+    files_by_ref = {
+        item["clientRef"]: item
+        for item in full_manifest.get("files", [])
+        if isinstance(item, dict) and isinstance(item.get("clientRef"), str)
+    }
+    remote_slots = {
+        (slot["slotCode"], slot["ownerKey"]): slot for slot in snapshot["documentSlots"]
+    }
+    open_conflicts = {
+        item.get("path")
+        for item in snapshot["unresolvedConflicts"]
+        if isinstance(item, dict)
+        and item.get("category") == "DOCUMENT_SLOT"
+        and isinstance(item.get("path"), str)
+    }
+    selected_slots: list[dict[str, Any]] = []
+    selected_refs: set[str] = set()
+    already_present = 0
+    for local_slot in full_manifest.get("documentSlots", []):
+        if not isinstance(local_slot, dict):
+            continue
+        owner_key = supplement_owner_key(local_slot, full_manifest, snapshot)
+        remote_slot = remote_slots.get((local_slot["slotCode"], owner_key))
+        remote_versions = {
+            item["versionKind"]: item
+            for item in (remote_slot.get("files", []) if remote_slot else [])
+            if isinstance(item, dict) and item.get("versionKind") in VERSIONS
+        }
+        local_kinds = {
+            version.get("kind")
+            for version in local_slot.get("versions", [])
+            if isinstance(version, dict)
+        }
+        unexpected_kinds = set(remote_versions) - local_kinds
+        if unexpected_kinds:
+            raise RegistryError("正式槽位包含本地清单未声明的文件版本，缺失补录已停止")
+        missing_versions: list[dict[str, str]] = []
+        for version in local_slot.get("versions", []):
+            if not isinstance(version, dict):
+                continue
+            kind, file_ref = version.get("kind"), version.get("fileRef")
+            local_file = files_by_ref.get(file_ref)
+            if kind not in VERSIONS or not isinstance(local_file, dict):
+                raise RegistryError("本地槽位版本或文件引用无效")
+            remote_file = remote_versions.get(kind)
+            conflict_path = f"slot:{local_slot['clientRef']}.{kind}"
+            if remote_file:
+                if remote_file.get("sha256") != local_file.get("sha256"):
+                    raise RegistryError("正式槽位已有不同哈希文件，MISSING_ONLY 禁止覆盖")
+                already_present += 1
+                continue
+            if conflict_path not in open_conflicts:
+                raise RegistryError("缺失槽位版本没有对应的未解决历史冲突，停止自动补录")
+            missing_versions.append({"kind": kind, "fileRef": file_ref})
+            selected_refs.add(file_ref)
+        if missing_versions:
+            selected_slots.append(
+                {
+                    "clientRef": local_slot["clientRef"],
+                    "slotCode": local_slot["slotCode"],
+                    "ownerKey": owner_key,
+                    "versions": missing_versions,
+                }
+            )
+    if not selected_slots:
+        unresolved_local = {
+            f"slot:{slot['clientRef']}.{version['kind']}"
+            for slot in full_manifest.get("documentSlots", [])
+            if isinstance(slot, dict)
+            for version in slot.get("versions", [])
+            if isinstance(version, dict)
+        } & open_conflicts
+        if unresolved_local:
+            raise RegistryError("文件已存在但历史槽位冲突仍未解决，停止自动收口")
+        return None, {}, {"missingVersions": 0, "alreadyPresentVersions": already_present}
+    selected_files = [
+        item for item in full_manifest["files"] if item.get("clientRef") in selected_refs
+    ]
+    selected_upload = {
+        file_ref: full_upload_map[file_ref]
+        for file_ref in sorted(selected_refs)
+        if file_ref in full_upload_map
+    }
+    supplement = {
+        "schemaVersion": "CaseFileSupplementManifestV1",
+        "projectNo": project_no,
+        "baseSnapshotDigest": snapshot["snapshotDigest"],
+        "mode": "MISSING_ONLY",
+        "createdAt": utc_now(),
+        "extractor": {"name": "xf-product-case-registry", "version": VERSION},
+        "files": selected_files,
+        "documentSlots": selected_slots,
+    }
+    errors = validate_supplement_manifest(supplement, selected_upload)
+    if errors:
+        raise RegistryError("补录清单校验失败：\n- " + "\n- ".join(errors))
+    return supplement, selected_upload, {
+        "missingVersions": len(selected_files),
+        "missingSlots": len(selected_slots),
+        "alreadyPresentVersions": already_present,
+    }
+
+
+def load_supplement_inputs(
+    manifest_path: Path, upload_map_path: Path
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    manifest = read_json(manifest_path)
+    upload_map = read_json(upload_map_path).get("files")
+    if not isinstance(upload_map, dict):
+        raise RegistryError("supplement-upload-map.files 必须是对象")
+    errors = validate_supplement_manifest(manifest, upload_map)
+    if errors:
+        raise RegistryError("补录状态文件校验失败：\n- " + "\n- ".join(errors))
+    return manifest, upload_map
+
+
 def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
     if not 200 <= response.status_code < 300:
         if response.status_code == 429:
@@ -1607,6 +2007,263 @@ def get_import_job(
     elif status == "MANIFEST_RECEIVED" and job.get("packageName") != project_no:
         raise RegistryError("服务端已接收清单任务项目编号对账失败")
     return job
+
+
+SUPPLEMENT_STATE_BASE_KEYS = {
+    "stateVersion",
+    "status",
+    "origin",
+    "sourceManifestSha256",
+    "supplementManifestSha256",
+    "baseSnapshotDigest",
+    "projectNo",
+    "brigadeCode",
+    "jobId",
+    "authIdentity",
+    "filesProjection",
+    "uploadedFileRefs",
+}
+SUPPLEMENT_STATE_OPTIONAL_KEYS = {
+    "caseId",
+    "finalizedAt",
+    "finalizeSummary",
+    "verification",
+    "verifiedAt",
+}
+
+
+def validate_supplement_state(state: dict[str, Any]) -> None:
+    extra = set(state) - SUPPLEMENT_STATE_BASE_KEYS - SUPPLEMENT_STATE_OPTIONAL_KEYS
+    missing = SUPPLEMENT_STATE_BASE_KEYS - set(state)
+    if extra or missing or state.get("stateVersion") != 1:
+        raise RegistryError("supplement-state V1 字段不完整或包含额外字段")
+    status = state.get("status")
+    if status not in {
+        "UPLOADING",
+        "FINALIZED_UNVERIFIED",
+        "FINALIZED_WITH_CONFLICTS",
+        "VERIFIED",
+    }:
+        raise RegistryError("supplement-state V1 状态无效")
+    if (
+        not isinstance(state.get("origin"), str)
+        or not SHA256.fullmatch(str(state.get("sourceManifestSha256")))
+        or not SHA256.fullmatch(str(state.get("supplementManifestSha256")))
+        or not SHA256.fullmatch(str(state.get("baseSnapshotDigest")))
+        or not isinstance(state.get("projectNo"), str)
+        or not PROJECT_NO.fullmatch(state["projectNo"])
+        or state.get("brigadeCode") not in BRIGADES
+        or not isinstance(state.get("jobId"), str)
+        or not state["jobId"]
+        or not isinstance(state.get("filesProjection"), list)
+        or not state["filesProjection"]
+        or not isinstance(state.get("uploadedFileRefs"), list)
+    ):
+        raise RegistryError("supplement-state V1 基础字段无效")
+    projection_refs: set[str] = set()
+    for item in state["filesProjection"]:
+        if not isinstance(item, dict) or set(item) != {
+            "clientRef",
+            "relativePath",
+            "sha256",
+            "mimeType",
+            "pageCount",
+            "sizeBytes",
+        }:
+            raise RegistryError("supplement-state V1 文件投影无效")
+        if (
+            not ref(item.get("clientRef"))
+            or item["clientRef"] in projection_refs
+            or not isinstance(item.get("relativePath"), str)
+            or not SHA256.fullmatch(str(item.get("sha256")))
+            or item.get("mimeType") != "application/pdf"
+            or not isinstance(item.get("pageCount"), int)
+            or isinstance(item.get("pageCount"), bool)
+            or item["pageCount"] < 1
+            or not isinstance(item.get("sizeBytes"), int)
+            or isinstance(item.get("sizeBytes"), bool)
+            or item["sizeBytes"] < 1
+        ):
+            raise RegistryError("supplement-state V1 文件投影无效")
+        projection_refs.add(item["clientRef"])
+    uploaded_refs = state["uploadedFileRefs"]
+    if (
+        any(not isinstance(item, str) for item in uploaded_refs)
+        or len(set(uploaded_refs)) != len(uploaded_refs)
+        or set(uploaded_refs) - projection_refs
+    ):
+        raise RegistryError("supplement-state V1 已上传引用无效")
+    identity = state.get("authIdentity")
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != {"digest", "role", "brigadeCode"}
+        or not SHA256.fullmatch(str(identity.get("digest")))
+        or identity.get("role") not in {"ADMIN", "BRIGADE"}
+        or (identity.get("role") == "ADMIN" and identity.get("brigadeCode") is not None)
+        or (identity.get("role") == "BRIGADE" and not identity.get("brigadeCode"))
+    ):
+        raise RegistryError("supplement-state V1 身份摘要无效")
+    if identity.get("role") == "BRIGADE" and identity.get("brigadeCode") != state[
+        "brigadeCode"
+    ]:
+        raise RegistryError("supplement-state V1 大队与身份摘要不一致")
+    if status == "UPLOADING" and set(state) != SUPPLEMENT_STATE_BASE_KEYS:
+        raise RegistryError("UPLOADING supplement-state 包含完成字段")
+    if status != "UPLOADING":
+        summary = state.get("finalizeSummary")
+        if (
+            not isinstance(state.get("caseId"), str)
+            or not isinstance(state.get("finalizedAt"), str)
+            or not isinstance(summary, dict)
+            or set(summary)
+            != {"caseId", "addedFiles", "replacedFiles", "conflictCount", "skippedCount"}
+            or summary.get("caseId") != state.get("caseId")
+        ):
+            raise RegistryError("supplement-state V1 终结摘要无效")
+        for key in {"addedFiles", "replacedFiles", "conflictCount", "skippedCount"}:
+            value = summary[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise RegistryError("supplement-state V1 终结计数无效")
+        if summary["replacedFiles"] != 0:
+            raise RegistryError("MISSING_ONLY 补录不得替换正式文件")
+        if status in {"FINALIZED_UNVERIFIED", "VERIFIED"} and summary["conflictCount"]:
+            raise RegistryError("补录存在冲突时不得进入待核验或 VERIFIED")
+    if status == "VERIFIED":
+        verification = state.get("verification")
+        if (
+            not isinstance(verification, dict)
+            or set(verification) != {"caseId", "inspections", "products", "filesVerified"}
+            or verification.get("caseId") != state.get("caseId")
+            or not isinstance(state.get("verifiedAt"), str)
+        ):
+            raise RegistryError("supplement-state V1 核验摘要无效")
+    elif "verification" in state or "verifiedAt" in state:
+        raise RegistryError("未 VERIFIED 的 supplement-state 不得包含核验字段")
+
+
+def get_supplement_job(
+    client: httpx.Client,
+    api_base: str,
+    job_id: str,
+    project_no: str,
+    base_snapshot_digest: str,
+    brigade_code: str,
+) -> dict[str, Any]:
+    try:
+        job = response_json(client.get(f"{api_base}/api/v2/import-jobs/{job_id}"), "读取补录任务")
+    except RegistryError as error:
+        if "HTTP 404" in str(error):
+            raise RegistryError("服务端补录任务不存在；不得猜测或另建任务") from error
+        raise
+    if (
+        job.get("id") != job_id
+        or job.get("mode") != "SUPPLEMENT_EXISTING"
+        or job.get("projectNo") != project_no
+        or job.get("baseSnapshotDigest") != base_snapshot_digest
+        or job.get("packageHash") not in {None, ""}
+    ):
+        raise RegistryError("服务端补录任务模式、项目或快照对账失败")
+    status = job.get("status")
+    if status == "FAILED":
+        raise RegistryError("服务端补录任务已 FAILED，停止续传并保留断点")
+    if status not in {"CREATED", "UPLOADING", "MANIFEST_RECEIVED", "FINALIZED"}:
+        raise RegistryError("服务端补录任务状态不受支持")
+    if status == "FINALIZED":
+        case = job.get("case")
+        brigade = case.get("brigade") if isinstance(case, dict) else None
+        route_path = brigade.get("routePath") if isinstance(brigade, dict) else None
+        if (
+            not isinstance(case, dict)
+            or case.get("projectNo") != project_no
+            or not isinstance(route_path, str)
+            or route_path.strip("/").upper() != brigade_code
+            or not isinstance(job.get("finalizedAt"), str)
+            or not isinstance(job.get("resultSummary"), dict)
+        ):
+            raise RegistryError("服务端已终结补录任务的案卷归属或摘要无效")
+    return job
+
+
+def finalized_supplement_summary(job: dict[str, Any]) -> dict[str, Any]:
+    if job.get("status") != "FINALIZED" or not isinstance(job.get("resultSummary"), dict):
+        raise RegistryError("服务端补录任务尚未终结")
+    result = job["resultSummary"]
+    added, replaced = result.get("added"), result.get("replaced")
+    conflicts, skipped = result.get("conflicts"), result.get("skipped")
+    if (
+        not isinstance(result.get("caseId"), str)
+        or result.get("created") is not False
+        or result.get("mode") != "SUPPLEMENT_EXISTING"
+        or result.get("policy") != "MISSING_ONLY"
+        or not isinstance(added, dict)
+        or not isinstance(replaced, dict)
+        or not isinstance(conflicts, list)
+        or not isinstance(skipped, list)
+    ):
+        raise RegistryError("补录 finalize 响应缺少受支持的摘要字段")
+    added_files, replaced_files = added.get("files"), replaced.get("files")
+    if (
+        not isinstance(added_files, int)
+        or isinstance(added_files, bool)
+        or added_files < 0
+        or replaced_files != 0
+    ):
+        raise RegistryError("补录 finalize 文件计数无效或发生了禁止的替换")
+    return {
+        "caseId": result["caseId"],
+        "addedFiles": added_files,
+        "replacedFiles": 0,
+        "conflictCount": len(conflicts),
+        "skippedCount": len(skipped),
+    }
+
+
+def close_original_upload_state_after_supplement(
+    state_path: Path,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    upload_map: dict[str, Any],
+    origin: str,
+    identity: dict[str, str | None],
+    verification: dict[str, Any],
+    finalized_at: str,
+) -> dict[str, Any]:
+    if not state_path.exists():
+        raise RegistryError("缺少原始 upload-state，不能证明历史冲突案卷的补录来源")
+    state = read_json(state_path)
+    validate_upload_state(state)
+    if state["status"] == "VERIFIED":
+        return state
+    if state["status"] != "FINALIZED_WITH_CONFLICTS":
+        raise RegistryError("只有 FINALIZED_WITH_CONFLICTS 案卷允许自动补录收口")
+    summary = state.get("finalizeSummary")
+    if not isinstance(summary, dict) or summary.get("created") is not True:
+        raise RegistryError("原始任务未证明新建案卷成功，禁止自动补录")
+    projection = files_projection(manifest, upload_map)
+    if (
+        state.get("origin") != origin
+        or state.get("manifestSha256") != file_sha256(manifest_path)
+        or state.get("packageSha256") != manifest.get("packageSha256")
+        or state.get("projectNo") != manifest.get("case", {}).get("projectNo")
+        or state.get("brigadeCode") != manifest.get("case", {}).get("brigadeCode")
+        or state.get("filesProjection") != projection
+        or state.get("immutableBindingDigest") != immutable_manifest_binding(manifest, projection)
+        or state.get("caseId") != verification.get("caseId")
+    ):
+        raise RegistryError("补录核验成功，但原始 upload-state 与当前案卷清单不一致")
+    require_same_state_identity(state, identity)
+    state.pop("finalizeSummary", None)
+    state.update(
+        {
+            "status": "VERIFIED",
+            "finalizedAt": finalized_at,
+            "verification": verification,
+            "verifiedAt": utc_now(),
+        }
+    )
+    validate_upload_state(state)
+    write_json(state_path, state)
+    return state
 
 
 def reconcile_uploaded_file_refs(
@@ -2896,6 +3553,535 @@ def upload_command(args: argparse.Namespace) -> None:
     )
 
 
+def supplement_artifact_paths(manifest_path: Path) -> tuple[Path, Path, Path]:
+    return (
+        manifest_path.parent / "supplement-manifest.json",
+        manifest_path.parent / "supplement-upload-map.json",
+        manifest_path.parent / "supplement-state.json",
+    )
+
+
+def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
+    manifest_path, full_manifest, full_upload = load_inputs(args.manifest, args.upload_map)
+    enforce_upload_workspace_preflight(args, manifest_path, full_manifest)
+    project_no = full_manifest["case"]["projectNo"]
+    brigade_code = full_manifest["case"]["brigadeCode"]
+    source_manifest_sha = file_sha256(manifest_path)
+    main_state_path = manifest_path.parent / "upload-state.json"
+    if not main_state_path.exists():
+        raise RegistryError("补录前必须存在原始 upload-state")
+    main_state = read_json(main_state_path)
+    validate_upload_state(main_state)
+    if main_state.get("projectNo") != project_no:
+        raise RegistryError("原始 upload-state 与补录项目编号不一致")
+    if main_state.get("status") not in {"FINALIZED_WITH_CONFLICTS", "VERIFIED"}:
+        raise RegistryError("只有历史冲突案卷或已核验案卷可进入 supplement")
+    if main_state.get("status") == "FINALIZED_WITH_CONFLICTS":
+        summary = main_state.get("finalizeSummary")
+        if not isinstance(summary, dict) or summary.get("created") is not True:
+            raise RegistryError("原始任务未证明新建案卷成功，禁止自动补录")
+    if getattr(args, "dry_run", False):
+        return {
+            "projectNo": project_no,
+            "status": "SUPPLEMENT_DRY_RUN_OK",
+            "network": False,
+            "writes": [],
+        }
+
+    api_base, origin = origin_of(args.api_base)
+    supplement_path, supplement_map_path, supplement_state_path = supplement_artifact_paths(
+        manifest_path
+    )
+    supplement_state = read_json(supplement_state_path) if supplement_state_path.exists() else {}
+    if supplement_state:
+        validate_supplement_state(supplement_state)
+    shared_session = getattr(args, "_shared_session", None)
+    if shared_session is None:
+        client_scope = httpx.Client(
+            timeout=httpx.Timeout(args.timeout, read=max(args.timeout, 300.0)),
+            follow_redirects=False,
+        )
+    elif (
+        not isinstance(shared_session, dict)
+        or shared_session.get("apiBase") != api_base
+        or shared_session.get("origin") != origin
+        or not isinstance(shared_session.get("client"), httpx.Client)
+        or not isinstance(shared_session.get("identity"), dict)
+        or not isinstance(shared_session.get("writeHeaders"), dict)
+    ):
+        raise RegistryError("批量补录共享会话与当前目标不一致")
+    else:
+        client_scope = nullcontext(shared_session["client"])
+
+    with client_scope as client:
+        if shared_session is None:
+            identity, write_headers = authenticate_client(
+                client,
+                api_base,
+                origin,
+                full_manifest,
+                secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
+            )
+            ready = response_json(client.get(f"{api_base}/api/ready"), "服务就绪")
+            if ready.get("status") != "ready":
+                raise RegistryError("服务未就绪")
+        else:
+            identity = shared_session["identity"]
+            write_headers = shared_session["writeHeaders"]
+            require_identity_scope(identity, full_manifest)
+        require_same_state_identity(main_state, identity)
+        if supplement_state:
+            require_same_state_identity(supplement_state, identity)
+            supplement, supplement_upload = load_supplement_inputs(
+                supplement_path, supplement_map_path
+            )
+            projection = files_projection(supplement, supplement_upload)
+            if (
+                supplement_state.get("origin") != origin
+                or supplement_state.get("sourceManifestSha256") != source_manifest_sha
+                or supplement_state.get("supplementManifestSha256")
+                != file_sha256(supplement_path)
+                or supplement_state.get("baseSnapshotDigest")
+                != supplement.get("baseSnapshotDigest")
+                or supplement_state.get("projectNo") != project_no
+                or supplement_state.get("brigadeCode") != brigade_code
+                or supplement_state.get("filesProjection") != projection
+            ):
+                raise RegistryError("supplement-state 与当前清单、快照或文件投影不一致")
+            job = get_supplement_job(
+                client,
+                api_base,
+                supplement_state["jobId"],
+                project_no,
+                supplement["baseSnapshotDigest"],
+                brigade_code,
+            )
+            if getattr(args, "plan", False):
+                return {
+                    "projectNo": project_no,
+                    "status": "SUPPLEMENT_PLAN_EXISTING",
+                    "jobStatus": job["status"],
+                    "missingVersions": len(supplement["files"]),
+                    "missingSlots": len(supplement["documentSlots"]),
+                }
+            job_id = supplement_state["jobId"]
+            job_status = job["status"]
+            if job_status != "FINALIZED":
+                reconcile_uploaded_file_refs(supplement_state, job, projection)
+                write_json(supplement_state_path, supplement_state)
+        else:
+            snapshot = response_json(
+                client.get(
+                    f"{api_base}/api/v2/case-import-state", params={"projectNo": project_no}
+                ),
+                "读取案卷同步快照",
+            )
+            validate_case_import_state(snapshot, project_no)
+            if snapshot["case"]["brigade"].get("code") != brigade_code:
+                raise RegistryError("服务器案卷快照与本地 manifest 大队不一致")
+            supplement, supplement_upload, plan = build_supplement_manifest(
+                full_manifest, full_upload, snapshot
+            )
+            if getattr(args, "plan", False):
+                return {
+                    "projectNo": project_no,
+                    "status": "SUPPLEMENT_PLAN_OK",
+                    **plan,
+                    "writes": [],
+                }
+            if supplement is None:
+                try:
+                    verification = verify_with_poll(
+                        client,
+                        api_base,
+                        full_manifest,
+                        write_headers,
+                        getattr(args, "deep_content_verify", False),
+                        min(max(float(args.timeout), 1.0), 60.0),
+                    )
+                except RegistryError as error:
+                    mark_verification_error(args, manifest_path, full_manifest, main_state, error)
+                    raise
+                if verification is None:
+                    raise RegistryError("正式槽位已齐全，但飞牛落盘核验仍在进行")
+                closed = close_original_upload_state_after_supplement(
+                    main_state_path,
+                    manifest_path,
+                    full_manifest,
+                    full_upload,
+                    origin,
+                    identity,
+                    verification,
+                    main_state.get("finalizedAt", utc_now()),
+                )
+                mark_verified_pending_archive(args, manifest_path, full_manifest, closed)
+                archive_result = archive_verified_state(args, manifest_path, full_manifest, closed)
+                return {
+                    "projectNo": project_no,
+                    "status": "VERIFIED",
+                    "missingVersions": 0,
+                    "verification": verification,
+                    **archive_result_fields(archive_result),
+                }
+            write_json(supplement_path, supplement)
+            write_json(supplement_map_path, {"files": supplement_upload})
+            projection = files_projection(supplement, supplement_upload)
+            supplement_sha = file_sha256(supplement_path)
+            digest_material = json.dumps(
+                {
+                    "projectNo": project_no,
+                    "baseSnapshotDigest": supplement["baseSnapshotDigest"],
+                    "supplementManifestSha256": supplement_sha,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            idempotency_key = "xfpcr-supplement-v1-" + hashlib.sha256(
+                digest_material.encode("utf-8")
+            ).hexdigest()
+            job = response_json(
+                client.post(
+                    f"{api_base}/api/v2/import-jobs",
+                    headers={**write_headers, "Idempotency-Key": idempotency_key},
+                    json={
+                        "idempotencyKey": idempotency_key,
+                        "projectNo": project_no,
+                        "mode": "SUPPLEMENT_EXISTING",
+                        "baseSnapshotDigest": supplement["baseSnapshotDigest"],
+                    },
+                ),
+                "创建缺失文件补录任务",
+            )
+            job_id = job.get("id") if isinstance(job.get("id"), str) else ""
+            if (
+                not job_id
+                or job.get("mode") != "SUPPLEMENT_EXISTING"
+                or job.get("baseSnapshotDigest") != supplement["baseSnapshotDigest"]
+                or job.get("status") not in {"CREATED", "UPLOADING"}
+                or job.get("packageHash") not in {None, ""}
+                or job.get("projectNoHint", project_no) != project_no
+            ):
+                raise RegistryError("创建补录任务响应无法安全对账")
+            supplement_state = {
+                "stateVersion": 1,
+                "status": "UPLOADING",
+                "origin": origin,
+                "sourceManifestSha256": source_manifest_sha,
+                "supplementManifestSha256": supplement_sha,
+                "baseSnapshotDigest": supplement["baseSnapshotDigest"],
+                "projectNo": project_no,
+                "brigadeCode": brigade_code,
+                "jobId": job_id,
+                "authIdentity": identity,
+                "filesProjection": projection,
+                "uploadedFileRefs": [],
+            }
+            validate_supplement_state(supplement_state)
+            write_json(supplement_state_path, supplement_state)
+            job_status = job["status"]
+
+        if job_status != "FINALIZED":
+            projection_by_ref = {item["clientRef"]: item for item in projection}
+            for item in supplement["files"]:
+                if item["clientRef"] in supplement_state["uploadedFileRefs"]:
+                    continue
+                projection_item = projection_by_ref[item["clientRef"]]
+                with Path(supplement_upload[item["clientRef"]]).open("rb") as stream:
+                    uploaded = response_json(
+                        client.post(
+                            f"{api_base}/api/v2/import-jobs/{job_id}/files",
+                            headers=write_headers,
+                            params={"relativePath": item["relativePath"]},
+                            files={"file": (Path(stream.name).name, stream, "application/pdf")},
+                        ),
+                        "上传补录 PDF",
+                    )
+                check_uploaded_file_response(uploaded, projection_item, job_id)
+                supplement_state["uploadedFileRefs"] = sorted(
+                    {*supplement_state["uploadedFileRefs"], item["clientRef"]}
+                )
+                write_json(supplement_state_path, supplement_state)
+            expected_refs = {item["clientRef"] for item in projection}
+            if set(supplement_state["uploadedFileRefs"]) != expected_refs:
+                raise RegistryError("补录文件上传进度不完整，停止提交清单")
+            if job_status != "MANIFEST_RECEIVED":
+                manifest_response = response_json(
+                    client.put(
+                        f"{api_base}/api/v2/import-jobs/{job_id}/manifest",
+                        headers=write_headers,
+                        json=supplement,
+                    ),
+                    "提交缺失文件补录清单",
+                )
+                check_manifest_response(manifest_response, job_id)
+            response_json(
+                client.post(
+                    f"{api_base}/api/v2/import-jobs/{job_id}/finalize",
+                    headers=write_headers,
+                ),
+                "完成缺失文件补录",
+            )
+            job = get_supplement_job(
+                client,
+                api_base,
+                job_id,
+                project_no,
+                supplement["baseSnapshotDigest"],
+                brigade_code,
+            )
+        summary = finalized_supplement_summary(job)
+        if summary["addedFiles"] + summary["skippedCount"] + summary["conflictCount"] != len(
+            supplement["files"]
+        ):
+            raise RegistryError("补录 finalize 计数未覆盖全部补录文件")
+        supplement_state.update(
+            {
+                "status": (
+                    "FINALIZED_WITH_CONFLICTS"
+                    if summary["conflictCount"]
+                    else "FINALIZED_UNVERIFIED"
+                ),
+                "caseId": summary["caseId"],
+                "finalizedAt": job["finalizedAt"],
+                "finalizeSummary": summary,
+            }
+        )
+        validate_supplement_state(supplement_state)
+        write_json(supplement_state_path, supplement_state)
+        if summary["conflictCount"]:
+            update_case_waterline(
+                args,
+                manifest_path,
+                full_manifest,
+                state="NEEDS_MANUAL_REVIEW",
+                upload={
+                    "status": "FINALIZED_WITH_CONFLICTS",
+                    "finalizedAt": job["finalizedAt"],
+                    "created": False,
+                    "conflictCount": summary["conflictCount"],
+                    "skippedCount": summary["skippedCount"],
+                },
+                nas_verification={"status": "NOT_STARTED"},
+                error_summary="缺失文件补录仍存在正式文件冲突，需人工核对",
+            )
+            return {
+                "projectNo": project_no,
+                "status": "FINALIZED_WITH_CONFLICTS",
+                "finalize": summary,
+            }
+        mark_awaiting_nas(
+            args,
+            manifest_path,
+            full_manifest,
+            supplement_state,
+            "缺失文件补录已终结，等待飞牛落盘核验",
+        )
+        try:
+            verification = verify_with_poll(
+                client,
+                api_base,
+                full_manifest,
+                write_headers,
+                getattr(args, "deep_content_verify", False),
+                min(max(float(args.timeout), 1.0), 60.0),
+            )
+        except RegistryError as error:
+            mark_verification_error(
+                args, manifest_path, full_manifest, supplement_state, error
+            )
+            raise
+        if verification is None:
+            return {
+                "projectNo": project_no,
+                "status": "FINALIZED_UNVERIFIED",
+                "finalize": summary,
+            }
+        fresh_snapshot = response_json(
+            client.get(
+                f"{api_base}/api/v2/case-import-state", params={"projectNo": project_no}
+            ),
+            "补录后读取案卷同步快照",
+        )
+        remaining, _unused_map, remaining_plan = build_supplement_manifest(
+            full_manifest, full_upload, fresh_snapshot
+        )
+        if remaining is not None or remaining_plan["missingVersions"]:
+            raise RegistryError("补录后服务器仍存在本地清单中的缺失槽位版本")
+        supplement_state.update(
+            {"status": "VERIFIED", "verification": verification, "verifiedAt": utc_now()}
+        )
+        validate_supplement_state(supplement_state)
+        write_json(supplement_state_path, supplement_state)
+        closed = close_original_upload_state_after_supplement(
+            main_state_path,
+            manifest_path,
+            full_manifest,
+            full_upload,
+            origin,
+            identity,
+            verification,
+            job["finalizedAt"],
+        )
+        mark_verified_pending_archive(args, manifest_path, full_manifest, closed)
+        archive_result = archive_verified_state(args, manifest_path, full_manifest, closed)
+        return {
+            "projectNo": project_no,
+            "status": "VERIFIED",
+            "finalize": summary,
+            "verification": verification,
+            **archive_result_fields(archive_result),
+        }
+
+
+def supplement_command(args: argparse.Namespace) -> None:
+    print(json.dumps(supplement_case(args), ensure_ascii=False))
+
+
+def supplement_batch_command(args: argparse.Namespace) -> None:
+    projects = list(dict.fromkeys(args.project))
+    if len(projects) != len(args.project):
+        raise RegistryError("supplement-batch 的 --project 不得重复")
+    workspace = workspace_api()
+    try:
+        _config, layout = workspace.resolve_workspace(
+            work_root=getattr(args, "work_root", None),
+            config_path=getattr(args, "workspace_config", None),
+            create_layout=False,
+        )
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(f"无法安全解析批量补录工作根：{error}") from error
+    prepared: list[tuple[str, Path, Path, dict[str, Any]]] = []
+    results: list[dict[str, Any]] = []
+    for project_no in projects:
+        if not PROJECT_NO.fullmatch(project_no):
+            results.append(
+                {"projectNo": project_no, "status": "PRECHECK_FAILED", "error": "项目编号无效"}
+            )
+            continue
+        manifest_path = layout.work_case_dir(project_no) / "manifest.json"
+        upload_map_path = layout.work_case_dir(project_no) / "upload-map.json"
+        try:
+            resolved_path, manifest, _upload = load_inputs(
+                str(manifest_path), str(upload_map_path)
+            )
+            if manifest.get("case", {}).get("projectNo") != project_no:
+                raise RegistryError("manifest 项目编号与所选项目不一致")
+            enforce_upload_workspace_preflight(args, resolved_path, manifest)
+            main_state = read_json(resolved_path.parent / "upload-state.json")
+            validate_upload_state(main_state)
+            if main_state.get("status") not in {"FINALIZED_WITH_CONFLICTS", "VERIFIED"}:
+                raise RegistryError("案卷不是可补录的历史冲突或 VERIFIED 状态")
+        except RegistryError as error:
+            results.append(
+                {"projectNo": project_no, "status": "PRECHECK_FAILED", "error": str(error)}
+            )
+            continue
+        prepared.append((project_no, resolved_path, upload_map_path, manifest))
+    if args.dry_run:
+        results.extend(
+            {"projectNo": project_no, "status": "SUPPLEMENT_DRY_RUN_OK"}
+            for project_no, *_rest in prepared
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "supplement-batch-dry-run",
+                    "network": False,
+                    "selected": len(projects),
+                    "ready": len(prepared),
+                    "failed": len(projects) - len(prepared),
+                    "cases": results,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
+    if not prepared:
+        print(
+            json.dumps(
+                {"status": "supplement-batch-not-started", "cases": results},
+                ensure_ascii=False,
+            )
+        )
+        return
+    api_base, origin = origin_of(args.api_base)
+    with httpx.Client(
+        timeout=httpx.Timeout(args.timeout, read=max(args.timeout, 300.0)),
+        follow_redirects=False,
+    ) as client:
+        identity, write_headers = authenticate_client(
+            client,
+            api_base,
+            origin,
+            prepared[0][3],
+            secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
+        )
+        brigades = {manifest["case"]["brigadeCode"] for *_paths, manifest in prepared}
+        if len(brigades) > 1 and identity.get("role") != "ADMIN":
+            raise RegistryError("跨大队批量补录必须使用 ADMIN 账户")
+        for *_paths, manifest in prepared:
+            require_identity_scope(identity, manifest)
+        ready = response_json(client.get(f"{api_base}/api/ready"), "服务就绪")
+        if ready.get("status") != "ready":
+            raise RegistryError("服务未就绪")
+        shared_session = {
+            "client": client,
+            "apiBase": api_base,
+            "origin": origin,
+            "identity": identity,
+            "writeHeaders": write_headers,
+        }
+        for project_no, manifest_path, upload_map_path, _manifest in prepared:
+            case_args = argparse.Namespace(**vars(args))
+            case_args.manifest = str(manifest_path)
+            case_args.upload_map = str(upload_map_path)
+            case_args._shared_session = shared_session
+            try:
+                results.append(supplement_case(case_args))
+            except RegistryError as error:
+                results.append({"projectNo": project_no, "status": "FAILED", "error": str(error)})
+            except httpx.TransportError:
+                results.append(
+                    {
+                        "projectNo": project_no,
+                        "status": "FAILED",
+                        "error": "网络传输失败，请检查连接后从本案补录断点重试",
+                    }
+                )
+    excel_warning = None
+    if args.finalize:
+        try:
+            workspace.export_waterline_xlsx(layout)
+        except workspace.WorkspaceStateError as error:
+            excel_warning = f"JSON 水位已保留，但 Excel 水位表刷新失败：{error}"
+    failed = sum(1 for item in results if item["status"] in {"PRECHECK_FAILED", "FAILED"})
+    verified = sum(1 for item in results if item["status"] == "VERIFIED")
+    planned = sum(1 for item in results if item["status"].startswith("SUPPLEMENT_PLAN"))
+    awaiting_nas = sum(1 for item in results if item["status"] == "FINALIZED_UNVERIFIED")
+    conflicts = sum(1 for item in results if item["status"] == "FINALIZED_WITH_CONFLICTS")
+    print(
+        json.dumps(
+            {
+                "status": (
+                    "supplement-batch-completed"
+                    if failed + awaiting_nas + conflicts == 0
+                    else "supplement-batch-completed-with-attention"
+                ),
+                "selected": len(projects),
+                "planned": planned,
+                "verified": verified,
+                "awaitingNas": awaiting_nas,
+                "manualReview": conflicts,
+                "failed": failed,
+                "cases": results,
+                **({"warning": excel_warning} if excel_warning else {}),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
 def upload_batch_command(args: argparse.Namespace) -> None:
     projects = list(dict.fromkeys(args.project))
     if len(projects) != len(args.project):
@@ -3544,6 +4730,80 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--dry-run", action="store_true")
             command.add_argument("--finalize", action="store_true")
             command.set_defaults(workspace_required=True)
+
+    supplement = sub.add_parser(
+        "supplement",
+        help="按服务器 CaseImportStateV1 快照只补既有案卷的缺失文书版本",
+    )
+    supplement.add_argument("--manifest", required=True)
+    supplement.add_argument("--upload-map", required=True)
+    supplement.add_argument("--api-base", required=True)
+    supplement.add_argument(
+        "--auth-config",
+        default=str(DEFAULT_AUTH_CONFIG),
+        help=(
+            "本地 TOML 认证配置；默认使用 "
+            "%%LOCALAPPDATA%%/xf-product-case-registry/admin-upload-config.toml"
+        ),
+    )
+    supplement.add_argument("--timeout", type=float, default=60.0)
+    supplement.add_argument(
+        "--deep-content-verify",
+        action="store_true",
+        help="显式取回飞牛正文并下载校验内容 SHA-256",
+    )
+    supplement.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="核验成功后不自动收口本地工作目录",
+    )
+    supplement_action = supplement.add_mutually_exclusive_group(required=True)
+    supplement_action.add_argument("--dry-run", action="store_true")
+    supplement_action.add_argument(
+        "--plan", action="store_true", help="只读取实时服务器快照并输出缺失数量，不写入"
+    )
+    supplement_action.add_argument("--finalize", action="store_true")
+    add_workspace_resolution_options(supplement)
+    supplement.set_defaults(func=supplement_command, workspace_required=True)
+
+    supplement_batch = sub.add_parser(
+        "supplement-batch",
+        help="在一个认证会话中按项目编号依次补录服务器确认缺失的文书版本",
+    )
+    supplement_batch.add_argument(
+        "--project",
+        action="append",
+        required=True,
+        help="项目编号；每个案卷重复指定一次，严格按给定顺序处理",
+    )
+    supplement_batch.add_argument("--api-base", required=True)
+    supplement_batch.add_argument(
+        "--auth-config",
+        default=str(DEFAULT_AUTH_CONFIG),
+        help=(
+            "本地 TOML 认证配置；默认使用 "
+            "%%LOCALAPPDATA%%/xf-product-case-registry/admin-upload-config.toml"
+        ),
+    )
+    supplement_batch.add_argument("--timeout", type=float, default=60.0)
+    supplement_batch.add_argument(
+        "--deep-content-verify",
+        action="store_true",
+        help="显式取回飞牛正文并下载校验内容 SHA-256",
+    )
+    supplement_batch.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="核验成功后不自动收口本地工作目录",
+    )
+    supplement_batch_action = supplement_batch.add_mutually_exclusive_group(required=True)
+    supplement_batch_action.add_argument("--dry-run", action="store_true")
+    supplement_batch_action.add_argument(
+        "--plan", action="store_true", help="只读取实时服务器快照并输出缺失数量，不写入"
+    )
+    supplement_batch_action.add_argument("--finalize", action="store_true")
+    add_workspace_resolution_options(supplement_batch)
+    supplement_batch.set_defaults(func=supplement_batch_command, workspace_required=True)
 
     upload_batch = sub.add_parser(
         "upload-batch",

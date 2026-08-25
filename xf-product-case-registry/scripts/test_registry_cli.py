@@ -570,6 +570,336 @@ def slot_owner(data: dict[str, object], source: Path) -> dict[str, object]:
     return owner
 
 
+def import_snapshot(
+    data: dict[str, object],
+    *,
+    document_slots: list[dict[str, object]] | None = None,
+    conflicts: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    products = data["initialInspection"]["products"]
+    return {
+        "schemaVersion": "CaseImportStateV1",
+        "projectNo": PROJECT,
+        "snapshotDigest": "sha256:" + "b" * 64,
+        "case": {"brigade": {"code": "XISHAN"}},
+        "inspections": [
+            {
+                "ownerKey": "inspection:INITIAL_CHECK",
+                "stage": "INITIAL_CHECK",
+                "clientRefs": ["initial"],
+                "products": [
+                    {
+                        "ownerKey": "product:11111111-1111-4111-8111-111111111111",
+                        "clientRefs": [product["clientRef"]],
+                    }
+                    for product in products
+                ],
+            }
+        ],
+        "documentSlots": document_slots or [],
+        "unresolvedConflicts": conflicts or [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("code", "expected_owner"),
+    [
+        ("INITIAL_CCC_CERTIFICATE", "product:11111111-1111-4111-8111-111111111111"),
+        ("ILLEGAL_PRODUCT_NOTIFICATION_LETTER", "notification:PRODUCTION"),
+    ],
+)
+def test_supplement_plan_uses_server_owner_key_and_only_missing_versions(
+    tmp_path: Path, code: str, expected_owner: str
+) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = document_slot_data(source, code)
+    slot = data["documentSlots"][0]
+    snapshot = import_snapshot(
+        data,
+        conflicts=[
+            {
+                "path": f"slot:{slot['clientRef']}.ELECTRONIC",
+                "code": "LEGACY_SLOT_CONFLICT",
+                "category": "DOCUMENT_SLOT",
+            }
+        ],
+    )
+    supplement, upload_map, plan = cli.build_supplement_manifest(
+        data, {"file:one": str(source)}, snapshot
+    )
+    assert supplement is not None
+    assert supplement["schemaVersion"] == "CaseFileSupplementManifestV1"
+    assert supplement["documentSlots"][0]["ownerKey"] == expected_owner
+    assert supplement["documentSlots"][0]["versions"] == [
+        {"kind": "ELECTRONIC", "fileRef": "file:one"}
+    ]
+    assert upload_map == {"file:one": str(source)}
+    assert plan == {"missingVersions": 1, "missingSlots": 1, "alreadyPresentVersions": 0}
+    assert cli.validate_supplement_manifest(supplement, upload_map) == []
+
+
+def test_supplement_plan_skips_same_hash_and_rejects_different_hash(tmp_path: Path) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = document_slot_data(source, "AUTHORIZATION_LETTER")
+    same = {
+        "slotCode": "AUTHORIZATION_LETTER",
+        "ownerKey": "case",
+        "files": [{"versionKind": "ELECTRONIC", "sha256": data["files"][0]["sha256"]}],
+    }
+    supplement, upload_map, plan = cli.build_supplement_manifest(
+        data,
+        {"file:one": str(source)},
+        import_snapshot(data, document_slots=[same]),
+    )
+    assert supplement is None and upload_map == {}
+    assert plan["alreadyPresentVersions"] == 1
+    different = json.loads(json.dumps(same))
+    different["files"][0]["sha256"] = "sha256:" + "c" * 64
+    with pytest.raises(RegistryError, match="不同哈希"):
+        cli.build_supplement_manifest(
+            data,
+            {"file:one": str(source)},
+            import_snapshot(data, document_slots=[different]),
+        )
+
+
+def test_supplement_parser_separates_offline_plan_and_finalize() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "supplement-batch",
+            "--project",
+            PROJECT,
+            "--api-base",
+            "https://registry.example",
+            "--plan",
+        ]
+    )
+    assert args.plan is True and args.func is cli.supplement_batch_command
+    assert args.workspace_required is True
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            [
+                "supplement",
+                "--manifest",
+                "manifest.json",
+                "--upload-map",
+                "upload-map.json",
+                "--api-base",
+                "https://registry.example",
+                "--plan",
+                "--finalize",
+            ]
+        )
+
+
+def test_supplement_finalize_only_adds_missing_file_and_closes_original_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work_root = tmp_path / "business"
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    config_path = tmp_path / "workspace.toml"
+    config = workspace.configure_workspace(
+        work_root=work_root,
+        download_dir=downloads,
+        config_path=config_path,
+    )
+    layout = workspace.BusinessLayout.from_root(config.work_root)
+    case_dir = layout.work_case_dir(PROJECT)
+    case_dir.mkdir(parents=True)
+    source = case_dir / "one.pdf"
+    pdf(source)
+    data = document_slot_data(source, "AUTHORIZATION_LETTER")
+    manifest_path = case_dir / "manifest.json"
+    upload_map_path = case_dir / "upload-map.json"
+    manifest_path.write_text(json.dumps(data), encoding="utf-8")
+    upload_map_path.write_text(
+        json.dumps({"files": {"file:one": str(source)}}), encoding="utf-8"
+    )
+    projection = cli.files_projection(data, {"file:one": str(source)})
+    case_id = "33333333-3333-4333-8333-333333333333"
+    cli.write_json(
+        case_dir / "upload-state.json",
+        {
+            "stateVersion": 6,
+            "status": "FINALIZED_WITH_CONFLICTS",
+            "origin": "https://registry.example",
+            "manifestSha256": cli.file_sha256(manifest_path),
+            "packageSha256": data["packageSha256"],
+            "projectNo": PROJECT,
+            "brigadeCode": "XISHAN",
+            "jobId": "original-job",
+            "authIdentity": admin_state_identity(),
+            "filesProjection": projection,
+            "immutableBindingDigest": cli.immutable_manifest_binding(data, projection),
+            "uploadedFileRefs": ["file:one"],
+            "caseId": case_id,
+            "finalizedAt": "2026-08-24T00:00:00Z",
+            "finalizeSummary": {
+                "caseId": case_id,
+                "created": True,
+                "addedProducts": 0,
+                "addedSlots": 0,
+                "addedAttachments": 0,
+                "replacedSlots": 0,
+                "conflictCount": 1,
+                "skippedCount": 0,
+            },
+        },
+    )
+    remote = {"finalized": False}
+    paths: list[tuple[str, str]] = []
+
+    def snapshot() -> dict[str, object]:
+        if remote["finalized"]:
+            return import_snapshot(
+                data,
+                document_slots=[
+                    {
+                        "slotCode": "AUTHORIZATION_LETTER",
+                        "ownerKey": "case",
+                        "files": [
+                            {
+                                "versionKind": "ELECTRONIC",
+                                "sha256": data["files"][0]["sha256"],
+                            }
+                        ],
+                    }
+                ],
+            )
+        return import_snapshot(
+            data,
+            conflicts=[
+                {
+                    "path": "slot:slot:one.ELECTRONIC",
+                    "code": "LEGACY_SLOT_CONFLICT",
+                    "category": "DOCUMENT_SLOT",
+                }
+            ],
+        )
+
+    summary = {
+        "caseId": case_id,
+        "created": False,
+        "mode": "SUPPLEMENT_EXISTING",
+        "policy": "MISSING_ONLY",
+        "added": {"files": 1},
+        "replaced": {"files": 0},
+        "conflicts": [],
+        "skipped": [],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        auth_response = auth_route(request)
+        if auth_response is not None:
+            return auth_response
+        paths.append((request.method, request.url.path))
+        if request.url.path == "/api/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/api/v2/case-import-state":
+            return httpx.Response(200, json=snapshot())
+        if request.url.path == "/api/v2/import-jobs" and request.method == "POST":
+            body = json.loads(request.content)
+            assert body["mode"] == "SUPPLEMENT_EXISTING"
+            assert body["baseSnapshotDigest"] == "sha256:" + "b" * 64
+            assert "packageSha256" not in body
+            return httpx.Response(
+                200,
+                json={
+                    "id": "supplement-job",
+                    "projectNoHint": PROJECT,
+                    "mode": "SUPPLEMENT_EXISTING",
+                    "baseSnapshotDigest": "sha256:" + "b" * 64,
+                    "packageHash": None,
+                    "status": "CREATED",
+                },
+            )
+        if request.url.path.endswith("/files"):
+            return httpx.Response(
+                201,
+                json={
+                    "jobId": "supplement-job",
+                    "relativePath": "files/one.pdf",
+                    "sha256": data["files"][0]["sha256"],
+                    "mimeType": "application/pdf",
+                    "sizeBytes": str(source.stat().st_size),
+                },
+            )
+        if request.url.path.endswith("/manifest"):
+            submitted = json.loads(request.content)
+            assert submitted["schemaVersion"] == "CaseFileSupplementManifestV1"
+            assert submitted["documentSlots"][0]["ownerKey"] == "case"
+            return httpx.Response(200, json={"id": "supplement-job", "status": "MANIFEST_RECEIVED"})
+        if request.url.path.endswith("/finalize"):
+            remote["finalized"] = True
+            return httpx.Response(200, json=summary)
+        if request.url.path == "/api/v2/import-jobs/supplement-job":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "supplement-job",
+                    "projectNo": PROJECT,
+                    "mode": "SUPPLEMENT_EXISTING",
+                    "baseSnapshotDigest": "sha256:" + "b" * 64,
+                    "packageHash": None,
+                    "status": "FINALIZED",
+                    "finalizedAt": "2026-08-25T00:00:00Z",
+                    "case": {
+                        "projectNo": PROJECT,
+                        "brigade": {"routePath": "xishan"},
+                    },
+                    "resultSummary": summary,
+                },
+            )
+        raise AssertionError(request.url)
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        cli.httpx,
+        "Client",
+        lambda **kwargs: real_client(
+            transport=httpx.MockTransport(handler),
+            timeout=kwargs.get("timeout"),
+            follow_redirects=False,
+        ),
+    )
+    verification = {
+        "caseId": case_id,
+        "inspections": 1,
+        "products": 0,
+        "filesVerified": 1,
+    }
+    monkeypatch.setattr(cli, "verify_with_poll", lambda *_args, **_kwargs: verification)
+    args = cli.build_parser().parse_args(
+        [
+            "supplement",
+            "--manifest",
+            str(manifest_path),
+            "--upload-map",
+            str(upload_map_path),
+            "--api-base",
+            "https://registry.example",
+            "--auth-config",
+            str(auth_config(tmp_path)),
+            "--workspace-config",
+            str(config_path),
+            "--no-archive",
+            "--finalize",
+        ]
+    )
+    result = cli.supplement_case(args)
+    assert result["status"] == "VERIFIED"
+    assert paths.count(("POST", "/api/v2/import-jobs")) == 1
+    assert paths.count(("POST", "/api/v2/import-jobs/supplement-job/files")) == 1
+    original_state = read_json(case_dir / "upload-state.json")
+    supplement_state = read_json(case_dir / "supplement-state.json")
+    assert original_state["status"] == "VERIFIED" and "finalizeSummary" not in original_state
+    assert supplement_state["status"] == "VERIFIED"
+    assert supplement_state["finalizeSummary"]["addedFiles"] == 1
+
+
 @pytest.mark.parametrize(
     "code",
     [

@@ -18,7 +18,7 @@
 2. 使用同一客户端 Cookie 容器立即请求 `GET /api/auth/session`。登录响应与会话响应的身份、`authMethod=SESSION`、内外层 CSRF 必须一致，`mustChangePassword` 必须为 `false`。
 3. ADMIN 不得绑定大队；BRIGADE 的平铺和嵌套大队 ID/编号必须一致，且与 manifest 大队编号相同。任一条件不满足立即停止。
 4. Cookie、密码和 CSRF 只留在当前进程内存。业务写请求逐次携带同源 `Origin`、`X-Product-Case-Client: web-v2` 和当前 CSRF；GET 只使用会话 Cookie。
-5. 两个及以上案卷使用 `upload-batch`：先离线预检全部显式项目编号，再登录和读取会话各一次、就绪检查一次，在同一客户端 Cookie 容器中依次处理。跨大队批量必须是 ADMIN；同一大队的 BRIGADE 批量仍逐案核对 `brigadeCode`。不得用外层循环逐案启动 `upload`。
+5. 两个及以上新案卷使用 `upload-batch`，两个及以上既有案卷缺失文件补录使用 `supplement-batch`：先离线预检全部显式项目编号，再登录和读取会话各一次、就绪检查一次，在同一客户端 Cookie 容器中依次处理。跨大队批量必须是 ADMIN；同一大队的 BRIGADE 批量仍逐案核对 `brigadeCode`。不得用外层循环逐案启动单案命令。
 
 ## 固定四步
 
@@ -28,6 +28,18 @@
 4. `POST /api/v2/import-jobs/{id}/finalize`：由服务端执行 Schema 与语义校验并事务写入。
 
 不得访问 `/api/v1`，不得提交 V1 清单、来源证据、审核项、未关联文件，也不得增加独立“版本同步”步骤。
+
+## 既有案卷缺失文件补录
+
+完整导入已经创建唯一正式 Case 后，不得删除后重传，也不得再次运行完整 finalize。只有以下条件同时满足时才能补录：
+
+- 本地完整 `manifest.json`、`upload-map.json` 和 V6 `upload-state.json` 精确对账；原始状态必须为 `FINALIZED_WITH_CONFLICTS`、`created=true`，项目编号、包哈希、文件投影和认证身份不变。
+- 先读取 `GET /api/v2/case-import-state?projectNo=...`，核对 `CaseImportStateV1` 项目编号、大队、产品 `clientRefs`、固定槽位 `ownerKey`、正式文件摘要、未解决槽位冲突和 `snapshotDigest`。
+- `supplement --plan` 或 `supplement-batch --plan` 只把完整清单中“服务器无该版本、且存在对应未解决历史槽位冲突”的文件纳入计划；服务器已有同哈希版本时跳过，已有不同哈希版本或本地产品不能通过 `clientRef` 唯一映射时停止。
+
+正式补录仍复用四个端点，但任务创建改为 `mode=SUPPLEMENT_EXISTING`，清单使用 `CaseFileSupplementManifestV1`、`mode=MISSING_ONLY`、实时 `baseSnapshotDigest` 和服务器 `ownerKey`。补录不提交案卷、检查或产品字段，不复用完整导入的 `packageSha256`，也不允许覆盖已有不同文件。固定本地断点为 `supplement-manifest.json`、`supplement-upload-map.json`、`supplement-state.json`；续传仍以服务端 `receivedFiles` 为准。
+
+补录 finalize 的 `created=false` 是既有 Case 模式的正常语义，不能套用完整导入的 `created=false` 失败门禁；但 `replaced.files` 必须为 0、冲突数必须为 0，新增数、同哈希跳过数和冲突数必须覆盖全部补录文件。随后必须用完整 `manifest.json` 核验案卷字段、检查、产品、全部槽位文件 SHA-256、飞牛 AVAILABLE 和 `nasVerifiedAt`，并再次读取同步快照确认历史槽位冲突已解决，才能把原 V6 状态收口为 VERIFIED 并归档。
 
 ## 本地门禁与续传
 
@@ -57,10 +69,10 @@
 ## 飞牛核验
 
 - finalize 成功后保存服务端 `finalizedAt` 和白名单摘要，并进入“已上传待飞牛核验”。有限轮询目录 SHA-256、`remoteState=AVAILABLE` 和 `nasVerifiedAt`；约 60 秒未满足时保持 `FINALIZED_UNVERIFIED`，稍后可单独运行 `verify`。
-- finalize 摘要包含冲突、跳过项或 `created=false` 时进入 `FINALIZED_WITH_CONFLICTS`，标记“需人工处理”；不得自动核验、重新终结或称为完成。
+- 完整导入 finalize 摘要包含冲突、跳过项或 `created=false` 时进入 `FINALIZED_WITH_CONFLICTS`，标记“需人工处理”；不得自动核验、重新终结或称为完成。`SUPPLEMENT_EXISTING` 的 `created=false` 按上节补录专用门禁判断，不能用于完整导入。
 - `verify` 默认低流量核对目录 SHA-256、飞牛状态和落盘时间，不下载全部正文。证据缺失或仍处理中时保持“已上传待飞牛核验”。
 - 只有显式 `--deep-content-verify` 才允许正文核验。遇结构化 `RECALL_REQUIRED` 后可用当前登记系统会话发起或复用 recall，轮询到 READY 再下载；PENDING/PROCESSING 继续等待，OFFLINE/FAILED/超时停止。网络异常不能写成哈希不一致。
-- 只有文件计数、目录 SHA-256、飞牛 AVAILABLE 和 `nasVerifiedAt` 全部满足，且无冲突、跳过或 `created=false`，才能把 V6 上传状态标记为 `VERIFIED`。本地水位先进入“已核验、归档待处理”，归档成功后才是“已完成”。
+- 完整清单的文件计数、目录 SHA-256、飞牛 AVAILABLE 和 `nasVerifiedAt` 必须全部满足；完整导入还必须无冲突、跳过或 `created=false`，补录则必须无冲突、无替换且已解决对应历史冲突，才能把原 V6 上传状态标记为 `VERIFIED`。本地水位先进入“已核验、归档待处理”，归档成功后才是“已完成”。
 
 ## VERIFIED 后自动归档
 
@@ -71,4 +83,4 @@
 3. 在 `工作区/核验记录/<项目编号>-<时间>-<清单哈希>.json` 写入不可覆盖的最终摘要。
 4. 原子更新 `CaseWaterlineV1`，再由 JSON 重建 `案卷水位记录表.xlsx`。Excel 被占用时保留 JSON 成功状态并报告可稍后导出。
 
-飞牛离线、核验等待、网络失败、冲突、跳过、`created=false`、旧状态或任何人工处理项均不得触发归档。归档失败不撤销服务端 VERIFIED，但水位必须明确记录“已核验、归档待处理”，再次运行只重试未完成的本地归档步骤。
+飞牛离线、核验等待、网络失败、冲突、跳过、旧状态或任何人工处理项均不得触发归档；完整导入的 `created=false` 同样阻止归档，补录则按本节专用门禁判断。归档失败不撤销服务端 VERIFIED，但水位必须明确记录“已核验、归档待处理”，再次运行只重试未完成的本地归档步骤。
