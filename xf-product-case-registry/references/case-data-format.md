@@ -20,7 +20,7 @@
 - `工作区/采集批次/<批次>`：浏览器分页清单、稳定性轮次和断点；
 - `工作区/采集批次/<批次>/staging`：只保存尚未完成本地接收的临时 `详情_<RWID>.json/.png` 和 `下载交付异常_<RWID>.json`；不是 inventory、compose 或上传输入；
 - `工作区/采集批次/<批次>/验收样本/<项目编号>`：真实单案下载验收的隔离截图、来源证据和 ZIP；不属于正式待处理案卷；
-- `工作区/<项目编号>`：解压、清点、OCR、拆分、`normalized/`、`case-data.json`、完整 manifest、V6 上传状态，以及必要时固定命名的缺失补录清单/映射/状态；
+- `工作区/<项目编号>`：解压、清点、OCR、拆分、`normalized/`、`case-data.json`、完整 manifest、V6 上传状态，以及字段发生差异时的 `field-resolution.json` 和必要时固定命名的缺失补录清单/映射/状态；
 - `工作区/核验记录/<项目编号>-<时间>-<清单哈希>.json`：不可覆盖的最终核验摘要；
 - `工作区/历史工作区/<项目编号>-<时间>-<包哈希>`：VERIFIED 后的项目工作产物；
 - `案卷水位记录.json`：`CaseWaterlineV1` 唯一机器事实源；
@@ -30,7 +30,7 @@
 
 正式详情截图固定命名为 `原始案卷/待处理案卷/<项目编号>/案卷详情_<截图SHA-256前12位>.png`；原始 ZIP 固定命名为 `<项目编号>_案卷包_<ZIP SHA-256前12位>.zip`，同目录另存 `source-evidence.json`。项目处理产物只写 `工作区/<项目编号>`。任何执行单元都不得从兄弟项目目录或批次 staging 猜选输入；临时捕获在 SourceEvidence 已记录正式路径和相同哈希前不得删除，完成对账后可清理。
 
-每个项目工作区只保留一套当前根级控制文件：`inventory.json`、`ocr-result.json`、`split-plan.json`、`split-index.json`、`case-data.json`、`manifest.json`、`upload-map.json`、`upload-state.json`，以及 `normalized/` 下的规范 PDF。已有案卷进入正式 `MISSING_ONLY` 补录时，另固定生成 `supplement-manifest.json`、`supplement-upload-map.json`、`supplement-state.json`；三者只记录本次服务器快照确认缺失的文件版本和可续传断点，不能替代完整 manifest。CLI/OCR 生成的结构化诊断文件、文本层清单和专用输出子目录可按原名保留，不得改成另一套事实源。同一项目编号同时只能有一个写执行单元；跨项目并行时，每个执行单元显式绑定项目编号和上述两个项目目录。不得在工作根散落一次性上传包装脚本、第二份完整 manifest、手工复制的状态文件或以“第几行”命名的业务文件。登记系统明确允许清理 FAILED 任务并重建时，旧状态只按 `upload-state.failed-before-recreate-<UTC>.json` 留一份只读证据，然后由正式 CLI 创建新 V6 状态。
+每个项目工作区只保留一套当前根级控制文件：`inventory.json`、`ocr-result.json`、`split-plan.json`、`split-index.json`、按需生成的 `field-resolution.json`、`case-data.json`、`manifest.json`、`upload-map.json`、`upload-state.json`，以及 `normalized/` 下的规范 PDF。已有案卷进入正式 `MISSING_ONLY` 补录时，另固定生成 `supplement-manifest.json`、`supplement-upload-map.json`、`supplement-state.json`；三者只记录本次服务器快照确认缺失的文件版本和可续传断点，不能替代完整 manifest。CLI/OCR 生成的结构化诊断文件、文本层清单和专用输出子目录可按原名保留，不得改成另一套事实源。同一项目编号同时只能有一个写执行单元；跨项目并行时，每个执行单元显式绑定项目编号和上述两个项目目录。不得在工作根散落一次性上传包装脚本、第二份完整 manifest、手工复制的状态文件或以“第几行”命名的业务文件。登记系统明确允许清理 FAILED 任务并重建时，旧状态只按 `upload-state.failed-before-recreate-<UTC>.json` 留一份只读证据，然后由正式 CLI 创建新 V6 状态。
 
 ## BrowserCaptureV1
 
@@ -73,6 +73,12 @@ RWID 只用于来源去重和追溯，不进入 V2 manifest。Cookie、令牌、
 
 Excel 至少展示项目编号、单位、大队、标签、来源进度、本地整理、上传、飞牛核验、完成时间和错误摘要，并能回读验证行数、项目编号和关键状态与 JSON 一致。
 
+## FieldResolutionV1
+
+只有多个已确认来源对同一 manifest 字段给出不同值时，才在 `工作区/<项目编号>/field-resolution.json` 保存 `FieldResolutionV1`。它至少包含格式版本、项目编号、裁决时间、固定策略 `DETAIL_UI_THEN_ELECTRONIC`、逐字段 `fieldPath`、全部候选的原值与来源类型、最终值、权威来源和裁决理由，以及仍未解决的字段列表。
+
+案卷、检查和产品字段先使用详情页结构化采集值，详情截图只验证当时页面显示；同一文书的电子版与手写或扫描版不一致时，电子版字段优先。扫描版、检验报告、营业执照等原始文件仍按正文和版本分类完整保留，不能因字段未被采用而删除或改写。`field-resolution.json` 不进入 manifest、上传状态或系统接口，也不能覆盖 RWID、项目编号和 ZIP 哈希身份链。`case-data.json` 中的最终值必须与该文件记录的最终值一致；仍有未解决字段时不得进入正式上传。
+
 ### 统一进度查询口径
 
 进度询问固定运行 `ledger status`；开始新一轮浏览器扫描、开始批量上传、批量结束和对外回答进度时各回读一次，比较同一批次的前后水位。需要复核旧批次时显式使用 `--batch-id`。省略批次时只选择更新时间最新的 `scope=all` 正式批次，验收样本、`历史工作区` 和不属于该批次的遗留案卷一律排除。命令只读，不更新 JSON、Excel、上传任务或浏览器状态。
@@ -92,7 +98,7 @@ Excel 至少展示项目编号、单位、大队、标签、来源进度、本�
 ## 本地证据到 manifest
 
 - `packageSha256` 来自原始 ZIP 或目录清点；同一包重试时保持不变。
-- `case`、`initialInspection`、可选 `recheckInspection` 和产品字段只使用详情页、PDF 正文或本机 OCR 中相互一致的可确认事实。
+- `case`、`initialInspection`、可选 `recheckInspection` 和产品字段优先使用详情页结构化采集值；同一文书电子版与手写或扫描版不一致时使用电子版字段。存在差异但已按该顺序裁决时，把全部候选和决定保存在 `field-resolution.json`，manifest 只接收裁决后的单值。
 - `files` 只列将上传的规范 PDF，包含稳定 `clientRef`、上传相对路径、SHA-256、PDF MIME 类型和页数。
 - `documentSlots` 使用现有 51 个固定槽位；`otherAttachments` 只接收明确不属于固定槽位的独立 PDF。
 - 供 `compose` 使用的 `case-data.json` 允许 `files[]` 额外使用 `sourceRelativePath` 指向 inventory 或 split 的真实 PDF；`relativePath` 是上传路径。`compose` 重新校验 PDF、页数与哈希，并删除本地辅助字段后生成正式 manifest。
