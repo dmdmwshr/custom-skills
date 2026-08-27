@@ -74,6 +74,16 @@
 
 若 CDP 不开放 `Network.getResponseBody`、返回 `native pipe message exceeds frame limit` 等原生消息帧超限、包体不完整、原子落盘失败或 ZIP 校验失败，记录 `IAB_BLOB_DELIVERY_UNAVAILABLE` 并停在“详情已采集、案卷包待接收”；保存项目编号、RWID、`totalBytes`、来源打包已完成和非阻塞批次标记，但不把请求 ID、下载 GUID、Blob URL 或建议文件名写入上传 manifest。消息帧超限后控制通道可能短暂积压，下一次浏览器动作前先回读当前地址与加载状态；调用超时不能当作动作成功，也不能盲目补点。不得改用页面脚本读取 Blob、分块拼包、读取会话或迁移浏览器配置，也不得反复点击打包。此时只能由用户在支持原生下载的外部浏览器手工登录来源系统后继续，不能导出或迁移内置浏览器会话。
 
+### 外部 Edge 响应流接收
+
+此路径只用于外部 Edge，并且仅在同一来源下载接口已经有证据表明：HTTP 200 响应正在持续传输，但页面会在完整响应前固定取消大包，因而既没有完成的 `Network.loadingFinished`，也没有原生下载事件或文件。它不是内置浏览器 Blob 恢复，也不是已失败案卷的额外重试次数。已经点击两次的案卷保持原断点；在**尚未点击过的下一案卷**上先启用本路径，仍只产生一次“开始打包”点击。
+
+1. 先完成当前案卷两轮身份回读、叶子全选核对和独立下载基线。在点击前，以当前 Edge 页的 CDP 会话启用 `Fetch` 的 Response 阶段拦截，URL pattern 必须精确限定为 `/api/blade-fileserver/api/fileserver/usualDownloadFile`；同时启动同一基线的 `source await-download --attach`。不要读取或记录事件中的请求头、Cookie、令牌、请求体、浏览器存储或配置。
+2. 只接收当前点击产生的唯一暂停响应。必须同时满足 HTTP 200、`Content-Type` 为 ZIP 或 `application/octet-stream`、存在合法且不超过 2 GiB 的 `Content-Length`，并且当前页面 RWID、详情项目编号和下载基线仍与断点一致；零个、多个或任一身份不一致都取消本案接收。响应建议名只作审计，落盘使用当前 RWID 生成的安全直接 `.zip` 名，不允许目录、覆盖或跨案卷复用。
+3. 对该暂停响应立即调用 `Fetch.takeResponseBodyAsStream`，再由 `receiveEdgeCdpZip` 使用不带 offset 的顺序 `IO.read`。程序以排他 `.edge-stream.part` 文件增量写入、同步到磁盘并计算 SHA-256；只有流到 EOF、实际字节数精确等于 `Content-Length`、文件头为 ZIP 且目标不存在时，才用硬链接原子生成下载目录中的最终 ZIP。完成后关闭 IO 流并以 `Fetch.failRequest(Aborted)` 结束原页面请求，使页面退出等待；取流后不得再 `continueRequest`，接收结束前不得停用 Fetch。
+4. 仍由并行等待的 `source await-download --attach` 做最终门禁：相对基线唯一、连续稳定、ZIP 可打开、哈希规范命名、工作根复核和下载临时副本清理。Edge 接收程序成功不等于案卷已下载，只有该命令把水位更新为 `PACKAGE_RECEIVED` 才能进入整理和上传。
+5. 流在 EOF 前被页面或网络取消、`IO.read` 失败、长度超出或不足、MIME/状态不符、出现多个响应、临时写入失败、目标已存在或 ZIP 校验失败时，程序必须关闭句柄并删除 `.edge-stream.part`；保存 `下载交付异常_<RWID>.json`，错误码为 `EDGE_CDP_STREAM_UNAVAILABLE`，只记录项目编号、RWID、预期字节数、已接收字节数、失败阶段、发生时间和非阻塞标记。请求 ID、URL、响应建议名、响应头全文及任何认证数据都不得持久化。该案保持 `PACKAGE_WAITING`，不得再次点击；关闭或换新当前页面以注销残留监听后，才可继续下一案卷。
+
 ### 模块 E：下一案卷与断点恢复
 
 1. 初始处理顺序仍按稳定清单尾部向前，但不得把“同页 row - 1”当作下一案卷身份。每次返回列表或重新加载后先读取实时总数、当前页和主结果表可见行；以稳定清单保存的“案卷名称＋文书名称/编号＋创建时间”重新定位目标，若当前页找不到则根据实时新增量检查相邻页。原页码、行号只作位置证据。
@@ -105,7 +115,7 @@
 2. 一行中必须点击“关联项目／案卷名称”列进入详情，不点击“文号或文书名称”列的法律文书／打印入口。点击前核对案卷名称、文书名称/编号和创建时间均与该 RWID 的 `sourceAppearances` 一致且只命中一行；详情页回读 URL 的 RWID，并至少同时出现项目编号、单位名称和文书目录后再截图。任何 RWID、项目编号或单位名称不一致都记录 `CASE_IDENTITY_CHAIN_MISMATCH` 并只暂停当前案卷。字段直接读取表格与目录结构，截图只作本地核查证据。
 3. 详情页的按钮文字可能显示为“打 包”。以正则 `打\s*包` 匹配并限定在案卷详情操作区；点击后等待打包面板出现，再点击该面板中的“全选”。
 4. “全选”不是成功依据。一次性读取打包面板文书树的可下载**叶子**复选框状态：叶子数必须大于 0，且全部为已选；父级半选状态、按钮变色或树根选中均不能替代这项核对。对多节点状态使用一次 `evaluateAll` 或等价批量读取，禁止逐叶子发起浏览器往返。
-5. 仅在叶子文书全选核对通过后，立即执行本案 `source snapshot-downloads --batch-id <批次> --rwid <RWID>`；随后先注册下载监听再点击“开始打包”：内置浏览器使用 `tab.playwright.waitForEvent('download')`，纯 Playwright/Edge 使用 `page.waitForEvent('download')`。Edge 收到下载事件后，只把该事件的文件以不覆盖方式保存到工作配置下载目录的直接子文件，再交给同一基线门禁；不得读取或迁移浏览器配置。监听仅作快速信号，监听超时不得单独判定失败；始终以下载目录基线和 `source await-download --attach` 的唯一完整 ZIP 判定交付，避免把旧 ZIP 或未完成临时文件误认成新包。
+5. 仅在叶子文书全选核对通过后，立即执行本案 `source snapshot-downloads --batch-id <批次> --rwid <RWID>`；随后先注册下载监听再点击“开始打包”：内置浏览器使用 `tab.playwright.waitForEvent('download')`，纯 Playwright/Edge 使用 `page.waitForEvent('download')`。Edge 收到下载事件后，只把该事件的文件以不覆盖方式保存到工作配置下载目录的直接子文件，再交给同一基线门禁；不得读取或迁移浏览器配置。只有已经符合“外部 Edge 响应流接收”前置证据且本案尚未点击时，才在点击前改为该节的精确 Response 阶段取流；两种路径不能在点击后临时切换。监听仅作快速信号，监听超时不得单独判定失败；始终以下载目录基线和 `source await-download --attach` 的唯一完整 ZIP 判定交付，避免把旧 ZIP 或未完成临时文件误认成新包。
 6. 浏览器建议名即使乱码也只记录为审计信息。只有相对本案基线唯一新增、临时扩展名消失、大小多次稳定并能作为 ZIP 打开的文件，才可交给 `source attach-package`；该命令负责按 `<项目编号>_案卷包_<哈希前12位>.zip` 存入对应验收或待处理目录，并在哈希复核成功后清理下载目录中的同一文件。
 
 ### 慢页面、超时与会话恢复
