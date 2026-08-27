@@ -209,7 +209,8 @@ def _default_filters(value: datetime | str | None, explicit: dict[str, Any]) -> 
     defaults: dict[str, Any] = {
         "year": requested_year,
         "startDate": f"{requested_year}-01-01",
-        "endDate": current.date().isoformat(),
+        "endDate": f"{requested_year}-12-31",
+        "dateShortcut": "本年",
         "jurisdiction": "全部管辖单位(含派出所)",
         "brigadeScope": "ALL",
         "documentType": "消防产品监督检查记录",
@@ -243,7 +244,8 @@ def _default_filters(value: datetime | str | None, explicit: dict[str, Any]) -> 
     fixed_contract = {
         "year": current.year,
         "startDate": f"{current.year}-01-01",
-        "endDate": current.date().isoformat(),
+        "endDate": f"{current.year}-12-31",
+        "dateShortcut": "本年",
         "jurisdiction": "全部管辖单位(含派出所)",
         "documentType": "消防产品监督检查记录",
         "documentTypePage": 2,

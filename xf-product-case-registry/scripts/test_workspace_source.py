@@ -840,6 +840,7 @@ def test_capture_defaults_follow_shanghai_new_year_boundary(
         "year": 2099,
         "startDate": "2099-01-01",
         "endDate": "2099-12-31",
+        "dateShortcut": "本年",
         "jurisdiction": "全部管辖单位(含派出所)",
         "brigadeScope": "ALL",
         "documentType": "消防产品监督检查记录",
@@ -848,7 +849,8 @@ def test_capture_defaults_follow_shanghai_new_year_boundary(
     }
     assert after["filters"]["year"] == 2100
     assert after["filters"]["startDate"] == "2100-01-01"
-    assert after["filters"]["endDate"] == "2100-01-01"
+    assert after["filters"]["endDate"] == "2100-12-31"
+    assert after["filters"]["dateShortcut"] == "本年"
     assert before["workspaceRoot"] == after["workspaceRoot"] == str(layout.root)
 
 
@@ -858,6 +860,7 @@ def test_capture_defaults_follow_shanghai_new_year_boundary(
         {"timezone": "UTC"},
         {"startDate": "2099-01-02"},
         {"endDate": "2099-08-20"},
+        {"dateShortcut": "今年"},
         {"jurisdiction": "全部消防机构"},
         {"documentType": "消防产品监督检查记录表"},
         {"documentTypePage": 1},
