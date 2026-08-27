@@ -1,9 +1,9 @@
 {
   "version": 1,
   "template_sources": {
-    "external_root": "E:\\文件夹\\1、工作\\知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板",
-    "bulletin_skeleton": "E:\\文件夹\\1、工作\\知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板\\月通报模板",
-    "score_skeleton": "E:\\文件夹\\1、工作\\知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板\\月通报模板\\（X-1）月巡查",
+    "external_root": "E:\\文件夹\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板",
+    "bulletin_skeleton": "E:\\文件夹\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板\\月通报模板",
+    "score_skeleton": "E:\\文件夹\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板\\月通报模板\\（X-1）月巡查",
     "skill_snapshot": "resources/monthly_templates"
   },
   "data_sources": {
@@ -231,7 +231,7 @@
     "product_stats_required_counts": {
       "brigade_column": 1,
       "target_column": 2,
-      "pending_columns": "B:H",
+      "pending_columns": "B:J",
       "value": "（{staff_count}）",
       "pending_style": "spreadsheet_pending_style"
     }
@@ -253,7 +253,9 @@
       "G": "administrative_case_year"
     },
     "manual_review_columns": {
-      "H": "光伏、锂离子电池等相关企业与消防处置力量配备次数需人工核对。"
+      "H": "光伏、锂离子电池等相关企业与消防处置力量配备次数需人工核对。",
+      "I": "网售消防产品检查次数需人工核对，按总次数（检查出不合格次数）填写。",
+      "J": "维修后的灭火器检查次数需人工核对，按总次数（检查出不合格次数）填写。"
     }
   },
   "personal_stats_rules": {

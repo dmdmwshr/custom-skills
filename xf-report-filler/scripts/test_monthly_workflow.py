@@ -22,7 +22,7 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
         self.assertTrue(Path(config["template_sources"]["external_root"]).is_absolute())
         self.assertTrue(Path(config["template_sources"]["bulletin_skeleton"]).is_absolute())
         self.assertTrue(Path(config["template_sources"]["score_skeleton"]).is_absolute())
-        self.assertIn("知识库（物料，模板，依据文件，教学文件，名单清单）", config["template_sources"]["external_root"])
+        self.assertIn("9、知识库（物料，模板，依据文件，教学文件，名单清单）", config["template_sources"]["external_root"])
         self.assertIn("26年产品科技工作计划.xls", config["data_sources"]["work_plan"]["path"])
         self.assertIn("26年\\2、案卷信息采集\\产品案卷数据.xlsx", config["data_sources"]["case_data"]["path"])
 
@@ -49,6 +49,9 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
         self.assertIn("root_office_record", external_keys)
         self.assertIn("work_dynamic", external_keys)
         self.assertIn("monthly_product_supervision_stats_work_check", external_keys)
+        self.assertEqual(config["pending_rules"]["product_stats_required_counts"]["pending_columns"], "B:J")
+        self.assertIn("网售消防产品检查次数", config["case_data_mapping"]["manual_review_columns"]["I"])
+        self.assertIn("维修后的灭火器检查次数", config["case_data_mapping"]["manual_review_columns"]["J"])
         self.assertNotIn("product_archive_detail", external_keys)
         self.assertNotIn("product_summary", external_keys)
         self.assertNotIn("office_record", external_keys)

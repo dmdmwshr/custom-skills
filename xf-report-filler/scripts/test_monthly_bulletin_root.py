@@ -38,6 +38,7 @@ class MonthlyBulletinRootTests(unittest.TestCase):
         self.assertEqual(root.parse_staff_count("江阴大队12人"), 12)
         self.assertEqual(root.parse_staff_count("经开大队6人"), 6)
         self.assertEqual(root.product_stats_pending_value(8), "（8）")
+        self.assertEqual(root.product_stats_pending_columns(), list("BCDEFGHIJ"))
 
     def test_timeliness_text_matches_may_style(self):
         text = root.product_timeliness_text(["6月底前完成1起消防产品行政处罚案件"], required_count=12, actual_count=7)
@@ -177,6 +178,33 @@ class MonthlyBulletinRootTests(unittest.TestCase):
         self.assertEqual(result["blockers"], [])
         self.assertTrue(result["warnings"])
         self.assertTrue(any(item.get("type") == "product_stats_mismatch" and item.get("brigade") == "江阴大队" for item in warnings))
+
+    def test_read_product_stats_includes_new_manual_columns(self):
+        class FakeSheet:
+            nrows = 1
+            ncols = 10
+
+            def cell_value(self, row, col):
+                values = ["梁溪大队", "9次（12）", "1份", "1份", "1份", "1次", "0份", "检查相关企业0次", "3次（1次）", "2次（0次）"]
+                return values[col]
+
+        fake_book = SimpleNamespace(sheet_by_index=lambda index: FakeSheet())
+        with patch.object(root.xlrd, "open_workbook", return_value=fake_book):
+            stats = root.read_product_stats(Path("fake.xls"))
+
+        self.assertEqual(stats["梁溪大队"]["columns"]["I"]["value"], "3次（1次）")
+        self.assertEqual(stats["梁溪大队"]["columns"]["J"]["value"], "2次（0次）")
+
+    def test_audit_product_stats_marks_new_columns_for_manual_review(self):
+        stats = {
+            brigade: {"row": 1, "columns": {column: {"value": "0次", "count": 0} for column in "BCDEFGHIJ"}}
+            for brigade in root.BRIGADE_ORDER
+        }
+        result = root.audit_product_stats(stats, {})
+
+        manual_warnings = [item for item in result["warnings"] if item.get("message") == "消防产品监督统计表列需人工核对"]
+        self.assertTrue(any(item["column"] == "I" for item in manual_warnings))
+        self.assertTrue(any(item["column"] == "J" for item in manual_warnings))
 
     def test_timeliness_uses_product_stats_required_and_actual_count(self):
         stats = {

@@ -144,6 +144,11 @@ def column_range_letters(column_range):
     return [get_column_letter(col) for col in range(min_col, max_col + 1)]
 
 
+def product_stats_pending_columns():
+    rule = CONFIG["pending_rules"]["product_stats_required_counts"]
+    return column_range_letters(rule.get("pending_columns", "B:B"))
+
+
 def skeleton_path(template_dir, item):
     return workflow.bulletin_skeleton_dir(config=CONFIG, template_dir=template_dir) / item["skeleton"]
 
@@ -483,8 +488,10 @@ def read_product_stats(path):
         brigade = normalize_brigade(sheet.cell_value(row, 0))
         if brigade in BRIGADE_ORDER:
             row_values = {}
-            for col in range(1, min(sheet.ncols, 8)):
-                letter = get_column_letter(col + 1)
+            for letter in product_stats_pending_columns():
+                col = coordinate_to_tuple(f"{letter}1")[1] - 1
+                if col >= sheet.ncols:
+                    continue
                 value = sheet.cell_value(row, col)
                 row_values[letter] = {
                     "value": value,
@@ -524,6 +531,11 @@ def audit_product_stats(stats, case_counts):
     warnings = []
     mapping = CONFIG.get("case_data_mapping", {}).get("product_stats_audit", {})
     manual_columns = CONFIG.get("case_data_mapping", {}).get("manual_review_columns", {})
+    available_columns = {
+        column
+        for row_stats in stats.values()
+        for column in row_stats.get("columns", {})
+    }
     for brigade in BRIGADE_ORDER:
         if brigade not in stats:
             add_blocker(blockers, "消防产品监督统计表缺少大队行", brigade=brigade)
@@ -558,7 +570,19 @@ def audit_product_stats(stats, case_counts):
                     }
                 )
         for column, reason in manual_columns.items():
+            if column not in available_columns:
+                continue
             warnings.append({"message": "消防产品监督统计表列需人工核对", "brigade": brigade, "column": column, "reason": reason})
+    for column, reason in manual_columns.items():
+        if column not in available_columns:
+            warnings.append(
+                {
+                    "type": "product_stats_missing_manual_column",
+                    "message": "消防产品监督统计表缺少人工核对列，已保留现有表，不自动补列",
+                    "column": column,
+                    "reason": reason,
+                }
+            )
     return {"blockers": blockers, "warnings": warnings}
 
 
@@ -765,13 +789,17 @@ def ensure_product_stats_required_value(value, staff_count):
 def mark_pending_product_stats(path, staff_counts):
     excel = excel_com()
     changed = []
-    rule = CONFIG["pending_rules"]["product_stats_required_counts"]
-    pending_letters = column_range_letters(rule.get("pending_columns", "B:B"))
+    pending_letters = product_stats_pending_columns()
     try:
         workbook = excel.Workbooks.Open(str(Path(path).resolve()))
         try:
             sheet = workbook.Worksheets(1)
             used_rows = sheet.UsedRange.Rows.Count
+            pending_letters = [
+                letter
+                for letter in pending_letters
+                if str(sheet.Cells(1, coordinate_to_tuple(f"{letter}1")[1]).Value or "").strip()
+            ]
             for row in range(1, used_rows + 1):
                 brigade = normalize_brigade(sheet.Cells(row, 1).Value)
                 if brigade not in staff_counts:
@@ -834,7 +862,11 @@ def mark_pending_cells(
             "path": str(paths["office_record"]["pending"]),
             "cells": "产品案卷核查行、联网系统核查行、产品工作实效行 D:K",
         },
-        {"kind": "mark_pending_product_stats_cells", "path": str(paths["product_stats"]["pending"]), "cells": "B:H 大队行红底，B列写要求数"},
+        {
+            "kind": "mark_pending_product_stats_cells",
+            "path": str(paths["product_stats"]["pending"]),
+            "cells": f"{CONFIG['pending_rules']['product_stats_required_counts'].get('pending_columns', 'B:B')} 大队行红底，B列写要求数",
+        },
     ]
     if not apply:
         actions.extend({**item, "status": "planned"} for item in planned)
