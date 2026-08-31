@@ -1,4 +1,4 @@
 interface:
   display_name: "项目任务接力"
-  short_description: "为过长的普通开发任务创建同项目后继任务并安全归档旧任务"
-  default_prompt: "使用 $codex-project-task-handoff 总结当前项目并创建后继任务，初始化成功后重命名并归档当前任务。"
+  short_description: "维护项目唯一交接文档，创建同项目后继任务并安全归档旧任务"
+  default_prompt: "使用 $codex-project-task-handoff 更新项目内唯一交接文档，创建同项目后继任务；初始化核验成功后重命名并归档当前任务。"
