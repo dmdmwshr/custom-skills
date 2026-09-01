@@ -7,8 +7,12 @@
 | 字段 | 含义 | 禁止内容 |
 | --- | --- | --- |
 | `cc_connect_project` | 稳定的路由别名 | 会话键、平台用户标识 |
-| `state` | `standby_unbound`、`binding_pending`、`awaiting_first_inbound`、`active` 或 `suspended` | “健康”之类无法判定行动的笼统状态 |
-| `work_dir` | 中枢项目内的控制目录 | 业务仓的私有运行目录 |
+| `state` | `standby_unbound`、`binding_pending`、`awaiting_first_inbound`、`active`、`suspended` 或 `mode_unknown` | “健康”之类无法判定行动的笼统状态 |
+| `session_mode` | 新建路由默认为 `cc_connect_fixed_session`，或明确登记 `desktop_owner_outbound_only` | 为既有路由补猜默认模式，或由标题、项目位置、目录截断显示推断 |
+| `inbound_policy` | 双向模式为 `fixed_session`；桌面专属模式为 `silent_drop` | 把入站转投其他任务、Bridge 或 CLI |
+| `session_owner` | 双向模式为 `cc_connect`；桌面专属模式为 `desktop` | 同一路由存在两个会话写入者 |
+| `automation_owner` | `none`、`cc_connect_cron` 或 `desktop_heartbeat` | 同一路由同时启用两个计时器所有者 |
+| `work_dir` | 双向模式为中枢控制目录；桌面专属模式为已登记且受审的 Desktop 实际目录 | 因项目归属而改写，或从目录末级显示推断 |
 | `target_repository` | 业务规则的事实归属 | 私有数据目录 |
 | `session_policy` | 独立持久流或明确的一次性流 | 共享所有业务上下文 |
 | `session_hook` | 该路由固定会话可执行的最小提示入口和动作约束 | 任意消息正文、私有会话键、跨路由 hook |
@@ -16,7 +20,14 @@
 | `hook_hash` | `.codex/hooks.json` 的 exact 内容哈希 | 模糊版本、未核验副本 |
 | `mobile_channel` | 脱敏的既有通道别名，或 `null` | App ID、令牌、用户标识、会话键 |
 
-一个路由对应一个“业务项目 + 职责”组合。业务代码不复制到控制目录；控制目录只放职责边界、固定 prompt hook、协调说明和可公开的验收材料。固定会话及 Hook 只承接用户从移动端发起的双向协作，不参与代码触发的自动通知；自动通知由中枢 `direct_feishu` 直接传输。交易授权 Hook 只处理当前用户逐条明确发起、业务仓允许的授权协作，不承担自动通知，也不得触发执行。
+一个路由对应一个“业务项目 + 职责”组合。业务代码不复制到控制目录；控制目录只放职责边界、固定 prompt hook、协调说明和可公开的验收材料。`cc_connect_fixed_session` 的固定会话及 Hook 承接用户从移动端发起的双向协作；`desktop_owner_outbound_only` 必须登记 `session_owner=desktop` 与 `automation_owner=desktop_heartbeat`，由目标 Desktop fixed task 独占会话和 heartbeat，飞书入站按 `silent_drop` 静默丢弃。两种模式的代码触发自动通知都由中枢 `direct_feishu` 直接传输。交易授权 Hook 只处理当前用户逐条明确发起、业务仓允许的授权协作，不承担自动通知，也不得触发执行。
+
+| `session_mode` | `inbound_policy` | `session_owner` | 允许的 `automation_owner` | 实际目录规则 |
+| --- | --- | --- | --- | --- |
+| `cc_connect_fixed_session` | `fixed_session` | `cc_connect` | `none` 或 `cc_connect_cron` | 精确等于该路由的中枢控制目录 |
+| `desktop_owner_outbound_only` | `silent_drop` | `desktop` | `desktop_heartbeat` | 精确等于登记且受审的 Desktop `work_dir` |
+
+既有路由缺失 `session_mode` 或上述所有权字段时进入 `mode_unknown`，只允许只读核验和形成待审登记变更；不得把“新建默认值”用于改写既有运行态。真实 Desktop 任务身份与 heartbeat 目标必须在受保护回读中按内部标识精确比较，公开别名或显示标题只用于定位，不能作为同一性证据。
 
 新增绑定的最小控制目录必须包含：`AGENTS.md`（职责和边界）、`SESSION_INITIALIZATION.md`（首次激活说明）、一个与职责匹配的独立 hook 和 `.codex/hooks.json`。Hook 只允许 SessionStart 的 `startup`、`resume`、`clear`、`compact` 事件，并用 `additionalContext` 注入职责说明。通知发布使用 `SESSION_NOTIFICATION_HOOK.md`，开发或交易授权协作使用独立的 `SESSION_DEVELOPMENT_CONTROL_HOOK.md`；不得把两类提示词互换或共用。交易授权 Hook 必须明确允许的模式与授权动作，并明确禁止计划修改、模式切换、执行接口、凭据和 `live`。已有目录或文件必须复用并逐项核对，不得重复添加。
 
@@ -24,19 +35,22 @@
 
 推荐由中枢 `scripts/scaffold_control_route.py` 生成待审查目录和 `ROUTE_MANIFEST.pending.json`。合并公开登记、完成私有绑定后，把新控制目录加入 Codex 桌面 `cc-connect-operations` 项目的源目录：优先使用产品公开项目编辑能力；没有 API 时可在用户已授权本次接入后使用可见桌面交互完成并回读。添加源目录只影响侧栏可见性，不决定路由；任何情况下都不得直接编辑 Codex SQLite、索引或会话文件。
 
-即使多个控制子目录被用户添加为同一个 Codex 桌面项目的源目录，每条活动路由的实际 `work_dir` 也必须精确等于自己的控制目录。控制目录是路由身份；`CC_PROJECT` 只用于核对公开项目别名是否一致，不能据此选择路由、覆盖 `work_dir` 或把根目录旧会话认作活动路由。
+即使多个目录被用户添加为同一个 Codex 桌面项目的源目录，每条活动路由的实际 `work_dir` 也必须精确等于登记值：`cc_connect_fixed_session` 使用自己的中枢控制目录，`desktop_owner_outbound_only` 使用已登记且受审的 Desktop 实际目录。实际目录与 Hook 共同构成路由身份；`CC_PROJECT` 只用于核对公开项目别名是否一致，不能据此选择路由、覆盖 `work_dir` 或把根目录旧会话认作活动路由。项目归属只负责整理：把既有任务加入项目后，必须回读任务身份、完整实际 `work_dir`、受审 Hook 和自动化目标均未改变；界面仅显示目录末级名称不能代替完整目录回读。若界面要求重建任务或 `work_dir` 偏离登记值，取消该操作并保留原状态。
 
 ## 固定会话 Codex 运行时
 
+- `desktop_owner_outbound_only` 不运行 cc-connect 固定会话 Agent、Bridge 会话注入或 cc-connect cron。依赖已登录 Chrome、浏览器扩展、可见桌面 UI 或同一桌面运行环境的能力，只能由目标 Desktop fixed task 的 heartbeat 执行；cc-connect 只保留 `direct_feishu` 出站，不得模拟或绕过这些能力。
 - cc-connect 固定会话使用独立、版本一致且完整的 Codex CLI 运行包。主程序、命令运行器、沙箱辅助程序和随包工具必须来自同一版本；不能借用桌面应用的版本化内置文件补齐缺项。
 - 发现共享模型缓存缺少当前 CLI 必需字段时，先核对 CLI 与缓存格式的版本兼容性，再升级完整独立运行包。不得删除、编辑、降级或伪造共享缓存，也不得通过改写 Codex 数据库、索引、认证或会话文件修复。
 - 模型刷新直连超时时，使用不含正文或凭据的探针分别核对直连和 Windows 当前用户系统代理。只有代理端点为合法 HTTP(S)、无用户信息且探针证明可达时，才可把代理限定到 cc-connect 的 Codex 子进程；同时把回环地址、控制网关和飞书/Lark 域名加入 `NO_PROXY`，不能把代理扩散到全局项目进程。
 - 运行时升级必须使用版本化启动器、精确旧版本门禁、计划任务 XML 备份和可验证回滚；升级后回读唯一进程链、实际 CLI 版本和一次无业务事实的固定会话探针。
 - 移动入站失败时，不能把模型缓存、内部日志、标准错误或堆栈原样发送到聊天。外部只显示稳定错误类别与简短可行动说明；完整诊断只留在受控本机日志，并排除消息正文、凭据、会话键和平台标识。
 
-这些检查只约束移动入站固定会话、Timer 和明确启用的会话注入。代码触发的 `direct_feishu` 自动通知不依赖 Codex CLI，不能因固定会话 Agent 故障而被错误关闭。
+这些检查只约束 `cc_connect_fixed_session` 的移动入站固定会话、Timer 和明确启用的会话注入。代码触发的 `direct_feishu` 自动通知不依赖 Codex CLI，不能因固定会话 Agent 故障而被错误关闭。`desktop_owner_outbound_only` 不允许用这些兼容能力替代 Desktop heartbeat。
 
 ## 状态转换
+
+下列状态转换只适用于 `cc_connect_fixed_session`：
 
 ```text
 standby_unbound
@@ -49,8 +63,11 @@ standby_unbound
 - cc-connect 无离线预建会话命令时，等待真实首条入站；不能把空会话或自发测试消息当作成功。
 - `suspended` 保留路由身份和历史归属，不删除会话、通道或业务数据。
 - 以中枢根目录创建的旧会话必须由用户显式指定项目与职责后才可做一次性人工初始化；它不能接收自动投递。持续使用时从正确控制目录创建后继候选，并按换代协议核验后激活。
+- `desktop_owner_outbound_only` 不创建私有绑定候选，也不等待或处理移动入站。它仅在唯一 Desktop task 的身份、完整 `work_dir`、受审 Hook、Desktop heartbeat、`silent_drop` 入站和 `direct_feishu` 出站边界均已核验后才可报告为活动。
 
 ## 私有绑定的安全迁移
+
+本节只适用于 `cc_connect_fixed_session`。`desktop_owner_outbound_only` 不使用 Bridge、私有绑定迁移、会话换代或“激活新会话”。
 
 1. 先由受控工具创建可恢复备份，并记录迁移前后的整体校验摘要。
 2. 只改经结构化对比唯一定位的字段，例如路由名、工作目录和已记录的会话绑定引用。
@@ -63,5 +80,7 @@ standby_unbound
 | 工作 | 归属 |
 | --- | --- |
 | 数据来源、业务判断、去重、版本化、发送条件 | 业务仓 |
-| 固定会话、移动通道、桥接进程、投递和脱敏回读 | cc-connect-operations |
+| `cc_connect_fixed_session` 的固定会话、移动通道、桥接进程、投递和脱敏回读 | cc-connect-operations |
+| `desktop_owner_outbound_only` 的固定会话、Desktop heartbeat、Chrome/扩展与可见桌面能力 | 指定 Desktop fixed task |
+| `desktop_owner_outbound_only` 的投递意图核验与 `direct_feishu` 出站 | cc-connect-operations |
 | 真实交易、正式外发、凭据和不可逆清理 | 各业务仓的独立授权边界 |
