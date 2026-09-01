@@ -1,0 +1,7 @@
+interface:
+  display_name: "Codex 归档复盘"
+  short_description: "审计归档任务、沉淀可复用经验并完成技能发布、同步与回读核验"
+  default_prompt: "使用 $codex-archive-retrospective 审计归档任务，先做分页去重与证据分层，再按 audit/plan/publish 模式处理经验落位和发布验证。"
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,4 @@
+interface:
+  display_name: "OKXnew 回测运维"
+  short_description: "冻结官方历史回测计划并核验覆盖、预热、无前视与完整证据门禁"
+  default_prompt: "使用 $okxnew-backtest-operations 在不触碰真实交易的前提下，核验或恢复 OKXnew 的原冻结回测计划、唯一 runner、来源证据、覆盖预热、无前视和研究验证未见数据分段。"
