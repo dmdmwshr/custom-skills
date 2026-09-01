@@ -1,4 +1,4 @@
 interface:
   display_name: "项目任务接力"
-  short_description: "维护项目唯一交接文档，创建同项目后继任务并安全归档旧任务"
-  default_prompt: "使用 $codex-project-task-handoff 更新项目内唯一交接文档，创建同项目后继任务；初始化核验成功后重命名并归档当前任务。"
+  short_description: "冻结项目唯一交接文档，从已提交 ref 创建后继任务并安全关闭旧任务"
+  default_prompt: "使用 $codex-project-task-handoff 盘点并排除敏感或运行态改动，将唯一交接文档纳入逻辑提交，校验分支、HEAD、精确 SHA-256 与清洁工作区后，从已提交 ref 创建后继任务；取得真实 threadId 并完成只读回读后再改名、归档旧任务。"
