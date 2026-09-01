@@ -122,6 +122,28 @@ class MonthlyReferenceDocsTests(unittest.TestCase):
                 for heading in REQUIRED_OBJECT_HEADINGS:
                     self.assertIn(heading, text)
 
+    def test_visual_qa_contract_is_shared_and_artifact_specific(self):
+        qa_path = workflow.SKILL_DIR / "references" / "artifact-visual-qa.md"
+        self.assertTrue(qa_path.exists())
+        self.assertTrue((workflow.SKILL_DIR / "scripts" / "artifact_visual_qa.py").exists())
+        qa_text = qa_path.read_text(encoding="utf-8")
+        for marker in [
+            "visual_qa_receipt",
+            "sources_unchanged",
+            "## Word 成品",
+            "## Excel 成品",
+            "outcome=passed|blocked|qa_pending",
+        ]:
+            self.assertIn(marker, qa_text)
+
+        monthly_text = (workflow.SKILL_DIR / "references" / "monthly" / "validation_and_audit.md").read_text(encoding="utf-8")
+        annual_text = (workflow.SKILL_DIR / "references" / "annual_problem_summary" / "validation_and_audit.md").read_text(encoding="utf-8")
+        self.assertIn("../artifact-visual-qa.md", monthly_text)
+        self.assertIn("`.doc/.docx`", monthly_text)
+        self.assertIn("`.xls/.xlsx`", monthly_text)
+        self.assertIn("../artifact-visual-qa.md", annual_text)
+        self.assertIn("review JSON 继续只承担内容审计", annual_text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,13 +11,18 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 
 DEFAULT_URL = "http://127.0.0.1:8188"
 DEFAULT_TIMEOUT_SECONDS = 10
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+VIDEO_SUFFIXES = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
+IMAGE_SUFFIXES = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+COMPLETE_STATUS_VALUES = {"complete", "completed", "done", "success"}
+FAILED_STATUS_VALUES = {"cancelled", "canceled", "error", "failed", "failure"}
+MAX_PROBE_BYTES = 64 * 1024
 
 
 class ComfyApiError(RuntimeError):
@@ -248,6 +253,326 @@ def history_summary(payload: Any, limit: int) -> dict[str, Any]:
     }
 
 
+def queue_membership(payload: Any) -> dict[str, set[str]]:
+    """Extract prompt IDs without truncating the queue used by reconcile."""
+
+    if not isinstance(payload, Mapping):
+        raise ComfyApiError("本机 ComfyUI 的 queue 响应格式异常。")
+    result: dict[str, set[str]] = {}
+    for name in ("queue_running", "queue_pending"):
+        items = payload.get(name, [])
+        if items is None:
+            items = []
+        if not isinstance(items, list):
+            raise ComfyApiError(f"本机 ComfyUI 的 {name} 响应格式异常。")
+        prompt_ids: set[str] = set()
+        for item in items:
+            prompt_id = queue_item_summary(item).get("prompt_id")
+            if prompt_id is not None:
+                prompt_ids.add(str(prompt_id))
+        result[name] = prompt_ids
+    return result
+
+
+def history_entry(payload: Any, prompt_id: str) -> Any:
+    """Return one narrow history entry without falling back to full history."""
+
+    if not isinstance(payload, Mapping):
+        raise ComfyApiError("本机 ComfyUI 的 history 响应格式异常。")
+    if prompt_id in payload:
+        return payload[prompt_id]
+    # A few compatible servers return the entry itself for /history/<id>.
+    if "status" in payload or "outputs" in payload:
+        return payload
+    return None
+
+
+def history_state(payload: Any, prompt_id: str) -> dict[str, Any]:
+    entry = history_entry(payload, prompt_id)
+    if entry is None:
+        return {
+            "present": False,
+            "prompt_id": prompt_id,
+            "status": None,
+            "completed": None,
+            "output_nodes": [],
+            "success": False,
+            "failed": False,
+        }
+    summary = history_item_summary(prompt_id, entry)
+    status_value = summary.get("status")
+    status_text = str(status_value).strip().lower() if status_value is not None else ""
+    completed = summary.get("completed") is True
+    failed = status_text in FAILED_STATUS_VALUES
+    success = status_text in COMPLETE_STATUS_VALUES or (completed and not failed)
+    return {
+        "present": True,
+        "prompt_id": prompt_id,
+        "status": summary.get("status"),
+        "completed": summary.get("completed"),
+        "output_nodes": summary.get("output_nodes", []),
+        "success": success,
+        "failed": failed,
+    }
+
+
+def resolve_local_path(path_text: str) -> Path:
+    try:
+        return Path(path_text).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(f"本地输出路径无效：{path_text}（{exc}）") from exc
+
+
+def probe_sidecar_path(output_path: Path) -> Path:
+    if output_path.is_dir():
+        return output_path / ".probe.json"
+    return output_path.with_name(output_path.name + ".probe.json")
+
+
+def media_probe(output_path: Path, probe_path_text: str | None) -> dict[str, Any]:
+    """Read optional, user-provided probe evidence without opening media bytes."""
+
+    probe_path = (
+        resolve_local_path(probe_path_text)
+        if probe_path_text
+        else probe_sidecar_path(output_path)
+    )
+    result: dict[str, Any] = {
+        "available": False,
+        "valid": False,
+        "path": str(probe_path),
+    }
+    if not probe_path.is_file():
+        result["reason"] = "没有探针 JSON；仅凭文件存在不能证明媒体可解码。"
+        return result
+    try:
+        with probe_path.open("rb") as handle:
+            raw = handle.read(MAX_PROBE_BYTES + 1)
+    except OSError as exc:
+        result["reason"] = f"无法读取探针 JSON：{exc}"
+        return result
+    if len(raw) > MAX_PROBE_BYTES:
+        result["reason"] = "探针 JSON 超过 64 KiB 限制。"
+        return result
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        result["reason"] = f"探针 JSON 无法解析：{exc}"
+        return result
+    if not isinstance(payload, Mapping):
+        result["reason"] = "探针 JSON 顶层必须是对象。"
+        return result
+
+    result["available"] = True
+    for key in ("media_type", "decodable", "frame_count", "width", "height", "fps"):
+        if key in payload:
+            result[key] = payload[key]
+    errors: list[str] = []
+    if payload.get("decodable") is not True:
+        errors.append("decodable 不是 true")
+    frame_count = payload.get("frame_count")
+    if not isinstance(frame_count, int) or isinstance(frame_count, bool) or frame_count < 1:
+        errors.append("frame_count 缺失或不是正整数")
+
+    media_type = str(payload.get("media_type") or output_path.suffix.lstrip(".")).lower()
+    media_type = media_type.lstrip(".")
+    is_visual = (
+        media_type in {"image", "video"}
+        or f".{media_type}" in IMAGE_SUFFIXES
+        or f".{media_type}" in VIDEO_SUFFIXES
+    )
+    is_video = media_type == "video" or f".{media_type}" in VIDEO_SUFFIXES
+    if is_visual:
+        for key in ("width", "height"):
+            value = payload.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                errors.append(f"{key} 缺失或不是正整数")
+    if is_video:
+        fps = payload.get("fps")
+        if not isinstance(fps, (int, float)) or isinstance(fps, bool) or fps <= 0:
+            errors.append("fps 缺失或不是正数")
+    result["valid"] = not errors
+    result["status"] = "verified" if not errors else "invalid"
+    if errors:
+        result["reason"] = "；".join(errors)
+    return result
+
+
+def local_output_summary(path_text: str, probe_path_text: str | None) -> dict[str, Any]:
+    path = resolve_local_path(path_text)
+    probe_path = (
+        resolve_local_path(probe_path_text)
+        if probe_path_text
+        else probe_sidecar_path(path)
+    )
+    result: dict[str, Any] = {
+        "path": str(path),
+        "exists": False,
+        "kind": "missing",
+        "bytes": None,
+        "file_count": None,
+    }
+    try:
+        if path.is_file():
+            result.update({"exists": True, "kind": "file", "bytes": path.stat().st_size})
+        elif path.is_dir():
+            file_count = sum(
+                1
+                for child in path.iterdir()
+                if child.is_file() and child.resolve(strict=False) != probe_path
+            )
+            result.update({"exists": True, "kind": "directory", "file_count": file_count})
+    except OSError as exc:
+        result["reason"] = f"无法读取本地输出路径：{exc}"
+    result["media_probe"] = media_probe(path, str(probe_path))
+    return result
+
+
+def output_present(output: Mapping[str, Any]) -> bool:
+    if output.get("kind") == "file":
+        return output.get("exists") is True and int(output.get("bytes") or 0) > 0
+    if output.get("kind") == "directory":
+        return output.get("exists") is True and int(output.get("file_count") or 0) > 0
+    return False
+
+
+def classify_reconcile_item(
+    queue_flags: Mapping[str, bool],
+    history: Mapping[str, Any],
+    output: Mapping[str, Any],
+) -> tuple[str, list[str]]:
+    """Classify evidence; queued/running is never treated as completed."""
+
+    reasons: list[str] = []
+    present = output_present(output)
+    probe = output.get("media_probe") if isinstance(output.get("media_probe"), Mapping) else {}
+    probe_available = probe.get("available") is True
+    probe_valid = probe.get("valid") is True
+    probe_invalid = probe_available and not probe_valid
+    queued = queue_flags.get("running") is True or queue_flags.get("pending") is True
+
+    if history.get("success") is True:
+        if not present:
+            return "race", ["history 已完成，但用户给定的本地输出不存在。"]
+        if probe_invalid:
+            return "race", ["history 已完成，但媒体探针明确不通过。"]
+        if not probe_valid:
+            return "unverified", ["文件存在，但没有足够探针证明媒体可解码、帧数和规格。"]
+        if queued:
+            reasons.append("history 已完成但 queue 仍标记为运行或等待。")
+            return "race", reasons
+        return "completed", reasons
+
+    if history.get("failed") is True:
+        if present:
+            return "race", ["history 报告失败，但本地输出仍存在。"]
+        return "unknown", ["history 报告失败，未形成可确认的完成证据。"]
+
+    if queued:
+        if present:
+            return "race", ["queue 仍在运行或等待，但本地输出已经存在。"]
+        return "unknown", ["任务仍在运行或等待；排队状态不是完成证据。"]
+
+    if present:
+        return "race", ["本地输出存在，但没有对应的 history 完成记录。"]
+    return "unknown", ["queue、history 和本地输出都没有形成完成证据。"]
+
+
+def reconcile(args: argparse.Namespace) -> dict[str, Any]:
+    prompt_ids = [str(prompt_id).strip() for prompt_id in (args.prompt_id or [])]
+    output_paths = list(args.output_path or [])
+    probe_paths = list(args.probe_path or [])
+    if not prompt_ids or any(not prompt_id for prompt_id in prompt_ids):
+        raise ValueError("reconcile 至少需要一个非空 --prompt-id。")
+    if len(set(prompt_ids)) != len(prompt_ids):
+        raise ValueError("reconcile 不接受重复的 --prompt-id。")
+    if len(output_paths) != len(prompt_ids):
+        raise ValueError("每个 --prompt-id 必须按相同顺序提供一个 --output-path。")
+    if probe_paths and len(probe_paths) != len(prompt_ids):
+        raise ValueError("提供 --probe-path 时，数量必须与 --prompt-id 相同。")
+
+    system = system_summary(request_json(args.url, "GET", "/system_stats", timeout=args.timeout))
+    queue_payload = request_json(args.url, "GET", "/queue", timeout=args.timeout)
+    membership = queue_membership(queue_payload)
+    queue = queue_summary(queue_payload, args.limit)
+    items: list[dict[str, Any]] = []
+    for index, prompt_id in enumerate(prompt_ids):
+        history_payload = request_json(
+            args.url,
+            "GET",
+            f"/history/{quote(prompt_id, safe='')}",
+            timeout=args.timeout,
+        )
+        history = history_state(history_payload, prompt_id)
+        output = local_output_summary(
+            output_paths[index],
+            probe_paths[index] if probe_paths else None,
+        )
+        queue_flags = {
+            "running": prompt_id in membership["queue_running"],
+            "pending": prompt_id in membership["queue_pending"],
+        }
+        status, reasons = classify_reconcile_item(queue_flags, history, output)
+        items.append(
+            {
+                "prompt_id": prompt_id,
+                "status": status,
+                "queue": queue_flags,
+                "history": history,
+                "output": output,
+                "reasons": reasons,
+            }
+        )
+    counts = {status: sum(item["status"] == status for item in items) for status in (
+        "completed",
+        "unknown",
+        "race",
+        "unverified",
+    )}
+    return {"system": system, "queue": queue, "items": items, "counts": counts}
+
+
+def checked_submission_response(response: Any) -> tuple[str, Any]:
+    """Require an explicit prompt ID and an empty node_errors field."""
+
+    if not isinstance(response, Mapping):
+        raise ComfyApiError("提交响应不是对象，提交结果不确定；不会自动重试。")
+    candidates: list[Mapping[str, Any]] = []
+    pending: list[Mapping[str, Any]] = [response]
+    seen: set[int] = set()
+    while pending and len(candidates) < 8:
+        candidate = pending.pop(0)
+        if id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        candidates.append(candidate)
+        for key in ("result", "response"):
+            nested = candidate.get(key)
+            if isinstance(nested, Mapping):
+                pending.append(nested)
+    source = next(
+        (
+            candidate
+            for candidate in candidates
+            if isinstance(candidate.get("prompt_id"), str)
+            and candidate["prompt_id"].strip()
+        ),
+        None,
+    )
+    prompt_id = source.get("prompt_id") if source is not None else None
+    if not isinstance(prompt_id, str) or not prompt_id.strip():
+        raise ComfyApiError("提交响应缺少有效 prompt_id，提交结果不确定；不会自动重试。")
+    node_errors = next(
+        (candidate["node_errors"] for candidate in candidates if "node_errors" in candidate),
+        None,
+    )
+    if node_errors is None:
+        raise ComfyApiError("提交响应缺少 node_errors，提交结果不确定；不会自动重试。")
+    if node_errors:
+        raise ComfyApiError("ComfyUI 报告 node_errors，工作流未被安全确认；不会自动重试。")
+    return prompt_id.strip(), node_errors
+
+
 def nodes_summary(payload: Any, query: str | None, limit: int) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise ComfyApiError("本机 ComfyUI 的 object_info 响应格式异常。")
@@ -357,10 +682,13 @@ def run_operation(args: argparse.Namespace) -> dict[str, Any]:
         if args.client_id:
             body["client_id"] = args.client_id
         response = request_json(args.url, "POST", "/prompt", body=body, timeout=args.timeout)
+        prompt_id, node_errors = checked_submission_response(response)
         return {
             "submitted": True,
             "workflow_path": str(path),
             "workflow_sha256": report["workflow_sha256"],
+            "prompt_id": prompt_id,
+            "node_errors": node_errors,
             "response": response,
         }
     if args.operation == "queue":
@@ -368,9 +696,11 @@ def run_operation(args: argparse.Namespace) -> dict[str, Any]:
             request_json(args.url, "GET", "/queue", timeout=args.timeout), args.limit
         )
     if args.operation == "history":
-        path = "/history" if not args.prompt_id else f"/history/{args.prompt_id}"
+        path = "/history" if not args.prompt_id else f"/history/{quote(args.prompt_id, safe='')}"
         payload = request_json(args.url, "GET", path, timeout=args.timeout)
         return history_summary(payload, args.limit)
+    if args.operation == "reconcile":
+        return reconcile(args)
     if args.operation == "cancel-running":
         require_yes(args, "中断正在运行的渲染")
         response = request_json(args.url, "POST", "/interrupt", body={}, timeout=args.timeout)
@@ -430,6 +760,28 @@ def build_parser() -> argparse.ArgumentParser:
     history = subparsers.add_parser("history")
     history.add_argument("--prompt-id")
     history.add_argument("--limit", type=bounded_limit, default=10)
+    reconcile_parser = subparsers.add_parser(
+        "reconcile",
+        help="只读对照 queue、逐任务 history 和用户给定的本地输出路径。",
+    )
+    reconcile_parser.add_argument(
+        "--prompt-id",
+        action="append",
+        required=True,
+        help="任务 ID；可重复，须与 --output-path 按顺序一一对应。",
+    )
+    reconcile_parser.add_argument(
+        "--output-path",
+        action="append",
+        required=True,
+        help="用户给定的本地输出文件或目录；可重复，须与 --prompt-id 一一对应。",
+    )
+    reconcile_parser.add_argument(
+        "--probe-path",
+        action="append",
+        help="可选探针 JSON；按顺序与任务 ID 一一对应，不提供时读取输出路径旁的 .probe.json。",
+    )
+    reconcile_parser.add_argument("--limit", type=bounded_limit, default=20)
     cancel_running = subparsers.add_parser("cancel-running")
     cancel_running.add_argument("--yes", action="store_true")
     cancel_pending = subparsers.add_parser("cancel-pending")

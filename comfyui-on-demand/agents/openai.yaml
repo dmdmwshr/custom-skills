@@ -1,4 +1,4 @@
 interface:
   display_name: "ComfyUI 按需控制"
-  short_description: "按需调用本机 ComfyUI 并安全管理工作流队列、状态与显存"
-  default_prompt: "Use $comfyui-on-demand to check local ComfyUI readiness or run a reviewed workflow."
+  short_description: "按需调用本机 ComfyUI，核对队列、历史与本地输出"
+  default_prompt: "Use $comfyui-on-demand to check local ComfyUI readiness, reconcile reviewed jobs, or run a reviewed workflow."

@@ -102,6 +102,22 @@ projects/<project>/
 - `references/audiovisual-source-analysis.md`：从已授权视频/音频提取故事与视听语言，再做可追溯 AI 重构的边界与台账。
 - `references/minimax-h3-production.md`：以 MiniMax H3 为主力时的参考素材、提示词、声音与实验梯度。
 
+### 媒体安全复核与批次状态
+
+媒体复核先保持轻量并保留可追溯边界：
+
+1. 先读取项目 `manifest.json`、资产矩阵、台账、文件清单和低清联系表，按逻辑资产去重；视频先读尺寸、帧率、时长、编码等探针，不先加载完整视频或原图。
+2. 记录并分别报告上下文 token、会话累计记录大小和最近一次实际请求体字节数；三者不可互相推算。通常每轮只查看 1–2 张必要高清图，其余使用联系表或缩略图。
+3. 出现一次 `408 Request body read timed out` 或连续重连后，停止向原重型会话追加媒体，先形成不含原始媒体的轻量事实摘要；用户明确要求接力时，按 `$codex-project-task-handoff` 更新项目内唯一交接文件并在同一项目的后继任务继续。轻量后继任务仍失败时，才把代理、路由或上传链路列为次级假设；不得仅凭界面进度把目标服务、模型、显卡或生成任务判为失败。
+
+候选和正式资产必须分层登记，不得把结构校验当作视觉验收：
+
+- 状态依次使用 `candidate_pending_user_review` → 用户选定 → `locked_pending_visual_approval` → 视觉复核 → `approved/formal`；`freeze` 本身不等于批准。
+- 固定剧情角色使用完整锚点；有台词、特写或返场的未命名角色先提供候选，纯群众保留可复现的模块组合。身份签名不因服装、道具或状态变化而改变。
+- `abandoned`、`superseded` 和明确否决项默认排除在候选、参考图和正式工作流搜索之外；恢复它们必须有单独授权和审计依据。
+
+H3 或其他批次在取消、断连或切换版本后，必须重新扫描实际输出并与取消前的 queue/history/manifest 快照对照，报告晚落盘、缺失或重复等差异。`submitted`、`queued`、`running` 只是运行态，不是完成证据；只有逐镜头 history、文件存在、可解码、帧数/分辨率/帧率/连续性及 manifest 回写均核对后，才可标为正式完成。
+
 需要新建生产包时，优先使用 `scripts/init_novel_video_packet.py` 生成不会覆盖既有文件的台账骨架；填完后使用 `scripts/validate_novel_video_packet.py` 做结构检查。两个脚本都不启动 ComfyUI、不下载模型、不生成素材。
 
 ## MCP / Agent 使用边界

@@ -1,4 +1,4 @@
 interface:
   display_name: "OKXnew 数据模块运维"
-  short_description: "巡检 OKXnew 数据水位并补采五源官方宏观日历与公开实际值"
-  default_prompt: "使用 $okxnew-data-operations 巡检 OKXnew 数据状态，并在需要时通过受控浏览器补采五源官方宏观日历、Federal Reserve 目标利率和 DOL 周度申领实际值。"
+  short_description: "分层巡检 OKXnew 数据水位、来源证据与损坏修复"
+  default_prompt: "使用 $okxnew-data-operations 分层巡检 OKXnew 的收藏、全市场、策略、模拟和历史数据状态，核对官方来源证据并在需要时受控补采；历史回测转交 $okxnew-backtest-operations。"

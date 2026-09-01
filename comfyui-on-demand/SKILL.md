@@ -1,6 +1,6 @@
 ---
 name: comfyui-on-demand
-description: 按需调用本机 ComfyUI 的官方 HTTP 接口，检查健康、显存、节点、模型、工作流、队列和历史，并在用户明确要求时提交、取消任务或释放显存。用户提到运行本机 ComfyUI、提交工作流、查看队列、检查节点或显存、取消渲染时使用；普通创作规划、模型下载和 ComfyUI 文件治理使用 comfyui-production-manager。
+description: 按需调用本机 ComfyUI 的官方 HTTP 接口，检查健康、显存、节点、模型、工作流、队列和历史，按 prompt ID 只读对照队列、历史与本地输出，并在用户明确要求时提交、取消任务或释放显存。用户提到运行本机 ComfyUI、提交工作流、查看队列、检查节点或显存、核对输出、取消渲染时使用；普通创作规划、模型下载和 ComfyUI 文件治理使用 comfyui-production-manager。
 ---
 
 # ComfyUI 按需控制
@@ -13,6 +13,7 @@ description: 按需调用本机 ComfyUI 的官方 HTTP 接口，检查健康、�
 - 每次实际调用前先运行 health。服务不可用时如实报告，不自动启动、重启、重试或切换端口。
 - 普通读取可直接执行；提交、取消和释放显存必须由用户在当前请求明确要求，并附带 --yes。
 - 仅提交用户已审阅的 API 格式工作流 JSON。Skill 不根据一句提示词私自选择模型、下载模型或生成隐式工作流。
+- 提交响应必须同时确认非空 `prompt_id` 和空的 `node_errors`；任一缺失或异常时按结果不确定处理，不自动重试或再次提交。
 - 不安装或删除模型/自定义节点，不修改 ComfyUI 设置、工作流母版或输出文件；这些工作交由 comfyui-production-manager 的既有审计流程。
 - 不使用全局 comfyui MCP。若需要启动、停止或重启 ComfyUI，先取得当前用户明确授权，并按 comfyui-production-manager 的运行前验证处理。
 
@@ -31,6 +32,7 @@ description: 按需调用本机 ComfyUI 的官方 HTTP 接口，检查健康、�
 | 对照当前节点集做运行前检查 | preflight --workflow "文件.json" |
 | 查看队列 | queue |
 | 查看历史或指定任务 | history 或 history --prompt-id "任务 ID" |
+| 对照一个或多个任务的队列、历史和本地输出 | reconcile --prompt-id "任务 ID" --output-path "本地输出路径"（参数可按顺序重复） |
 
 workflow-check 只做本地结构检查；preflight 会额外读取本机服务与节点定义。缺节点、模型、输入或显存风险时停止在诊断阶段，不排队执行。
 
@@ -47,12 +49,25 @@ workflow-check 只做本地结构检查；preflight 会额外读取本机服务�
 
 提交前始终先运行 workflow-check 和 preflight；完成后回读 history --prompt-id 或 queue。取消和释放显存会影响正在运行的 ComfyUI 工作，必须在结果中说明影响。
 
+## 只读 reconcile
+
+`reconcile` 先执行 health，再读取一次完整 queue，随后按每个 `--prompt-id` 单独读取 history，并只检查用户给定的 `--output-path`。多个任务时，`--prompt-id` 与 `--output-path` 必须按相同顺序一一对应；可选的 `--probe-path` 也按同样顺序提供。整个操作不提交、取消、重试、覆盖或生成文件。
+
+结果对每个任务只使用四种状态：
+
+- `completed`：history 明确成功、本地输出存在、没有仍在排队/运行，并有有效媒体探针证据。
+- `unknown`：缺少足够的 queue/history/本地输出完成证据；排队或运行中只能归入此类。
+- `race`：history、queue 和本地输出互相矛盾，例如 history 已完成但文件缺失、取消快照与实际文件数量不一致，或文件存在但没有对应 history。
+- `unverified`：history 已完成且文件存在，但没有探针证明媒体可解码、帧数和必要规格；不能仅凭文件存在标为完成。
+
+默认从 `<output-path>.probe.json`（目录则为 `<output-path>/.probe.json`）读取小型探针证据，也可用 `--probe-path` 明确指定。探针至少应提供 `decodable: true`、正 `frame_count`；图片/视频还需正的 `width`、`height`，视频需正的 `fps`。本 Skill 只读探针 JSON，不读取或回传媒体内容；探针缺失、不完整或不通过时保持 `unverified`/`race`。
+
 ## 与生产管理 Skill 的分工
 
 - comfyui-on-demand：短生命周期的本机 API 调用与队列控制。
 - comfyui-production-manager：工作流母版、模型依赖、项目资产、下载路由、生产台账和可追溯验证。
 
-迁移映射和未迁移的高影响功能见 references/mcp-capability-map.md。修改脚本后，运行 python scripts/test_comfyui_api.py；测试使用临时模拟服务器，不访问真实 ComfyUI。
+迁移映射和未迁移的高影响功能见 references/mcp-capability-map.md。修改脚本后，运行 python scripts/test_comfyui_api.py；测试使用临时模拟服务器，不访问真实 ComfyUI。`reconcile` 的离线测试必须覆盖多 prompt ID、queue/history/输出路径交叉状态、探针缺失和提交响应缺少 `prompt_id`/包含 `node_errors` 的失败闭环。
 
 ## 资源
 

@@ -9,6 +9,8 @@
 
 ## 强制验证
 
+任务清单记录的项目目录、动作 WorkingDirectory、脚本目录和运行进程 CurrentDirectory 是四个不同字段；启动时逐一回读，不能以项目根目录存在代替动作工作目录正确。
+
 1. 读取 PE 头，确认启动器子系统为 `Windows GUI`，不能只是名称为 `pythonw.exe`。
 2. 计算 SHA-256，确认 `.venv\TaskScripts\pythonw.exe` 不等于 `.venv\Scripts\python.exe` 或 `.venv\Scripts\pythonw.exe` 的控制台重定向器。
 3. Python 参数首部默认使用 `-B`，避免高频任务生成 `__pycache__` 和 `.pyc`。
@@ -22,6 +24,8 @@
 - 缓存治理优先从启动参数禁止生成；清理脚本只使用项目和缓存目录的精确白名单，排除 `.git`、`.venv`、数据库、日志、运行态、私有配置和重解析点。
 
 ## 生命周期验收
+
+“无窗口”覆盖根进程和所有后代进程。每个子进程必须使用 GUI 子系统，或由父进程以受验证的无控制台创建方式启动；检查进程树中没有新的 OpenConsole.exe、conhost.exe 或 WindowsTerminal.exe，不得只凭根进程名验收。
 
 1. 回读任务动作路径、参数、工作目录、运行账户和设置。
 2. 启动任务，确认没有新增控制台窗口宿主，并按任务语义检查进程、端口、健康接口或产出。

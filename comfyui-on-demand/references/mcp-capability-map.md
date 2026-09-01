@@ -7,7 +7,7 @@
 | 系统状态、GPU、显存 | health、status | 只读，不启动服务。 |
 | 节点、模型、模板查询 | nodes、models、templates | 只读；模型目录治理仍由生产管理 Skill 审计。 |
 | 工作流解析与节点检查 | workflow-check、preflight | 不隐式改写工作流或替换模型。 |
-| 排队、队列、历史 | submit、queue、history | 提交须用户明确授权和 --yes。 |
+| 排队、队列、历史与本地输出一致性 | submit、queue、history、reconcile | reconcile 只读；按 prompt ID 对照 queue、窄 history 和用户给定输出路径。提交须用户明确授权和 --yes。 |
 | 中断、取消、释放显存 | cancel-running、cancel-pending、free-vram | 会影响运行任务，须用户明确授权和 --yes。 |
 | 高级图片/视频/音频一键生成 | 不直接复制 | 必须先在项目中确定工作流、模型和输入，再提交 API 工作流。 |
 | 自动下载/删除模型、安装节点、改搜索路径 | 不复制 | 走既有模型审计、下载路由和明确授权流程。 |

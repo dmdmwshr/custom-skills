@@ -24,6 +24,8 @@ description: "根据消防产品底册、联网监测源表和月度模板整理
 - 用户指出某个文件不合规：只加载该目标文件对象、它依赖的数据源对象和 `validation_and_audit.md`，再改配置、脚本和测试。
 - 新增或修改规则时，必须落到具体文件对象文档、对应工作流配置和测试里，不只写在聊天记录或总览文档中。
 
+正式生成 Word 或 Excel 成品时，先按 `references/artifact-visual-qa.md` 运行 `scripts/artifact_visual_qa.py baseline` 冻结本次实际采用源；全量渲染或打印预览并形成轻量 inspection JSON 后，运行 `finalize` 和只读 `verify`。收据为 `qa_pending`、`blocked` 或无法回读时，不能宣称最终验收通过。
+
 ## 月度执行顺序
 
 先只读审计，不要直接覆盖成品：
