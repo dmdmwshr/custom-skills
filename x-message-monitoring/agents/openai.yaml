@@ -1,0 +1,7 @@
+interface:
+  display_name: "X 消息监控"
+  short_description: "唯一 Desktop 固定会话的 X 消息监控、账本与安全投递收口"
+  default_prompt: "$x-message-monitoring 在唯一 Desktop 固定会话内按受控 heartbeat 完成 X 消息采集、分析、账本与投递收口。"
+
+policy:
+  allow_implicit_invocation: true
