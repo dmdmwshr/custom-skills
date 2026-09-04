@@ -221,6 +221,27 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "禁止先固定 `waitForTimeout` 再读取",
         )
 
+    def test_readiness_deadlines_are_caught_and_mapped_to_stable_surface_reasons(self) -> None:
+        self.assert_contains(
+            self.fast_path,
+            "`MAIN_PROBE`、`REPLY_SEARCH_PROBE` 与 `PERMALINK_PROBE` 的 locator readiness 都必须使用同一规则",
+            "条件等待最多 5 秒",
+            "在同一调用内 `catch` deadline",
+            "不得让原始 Playwright timeout 逃逸到调用结果",
+            "deadline 后只允许做一次无等待、无循环的页面包络核验",
+            "当前规范 URL、预期标题、唯一主列、登录门、验证码/风控门、显式错误面、可信空态",
+            "不得返回原始异常、错误栈、selector、HTML、正文或页面异常原文",
+            "也不得 reload、滚动、换浏览器、换 selector 或再次等待",
+            "main_surface_not_ready",
+            "reply_search_surface_not_ready",
+            "permalink_surface_not_ready",
+            "main_watermark_unreached",
+            "reply_watermark_unreached",
+            "不能伪装成普通结构异常",
+            "不得降级为 generic `structure_ambiguous` 后继续探索",
+            "包络核验 1；外部重试 0",
+        )
+
     def test_permalink_probe_waits_for_the_minimum_semantic_container(self) -> None:
         self.assert_contains(
             self.fast_path,
@@ -233,7 +254,10 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "`topLevelCards(conversation).length >= 2`",
             "此等待只证明最小容器的直接顶层成员已就绪，不构成父帖证据",
             "不得固定 sleep、滚动、重载、读取正文或延长等待",
-            "超时直接以 `permalink_conversation_chain_size_untrusted` 失败关闭",
+            "deadline 必须按统一规则 catch 并做一次页面包络核验",
+            "可信永久链接页面仍未出现目标或最小会话卡时返回 `permalink_surface_not_ready`",
+            "readiness 成功就绪后只做一次同步提取",
+            "只有该提取所得链长度仍不满足 2～200 时，才使用 `permalink_conversation_chain_size_untrusted`",
             "就绪后只做一次同步提取",
             "禁止用 `targetCell.parentElement.children` 猜父",
             "禁止从 `primaryColumn.querySelectorAll('article')` 的整页平铺结果挑父",

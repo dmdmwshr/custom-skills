@@ -96,9 +96,18 @@ FAILED_PENDING_FINISH → FINISHED_FAILED
 
 ## 页面阶段与唯一分支
 
+### 统一条件等待收口
+
+`MAIN_PROBE`、`REPLY_SEARCH_PROBE` 与 `PERMALINK_PROBE` 的 locator readiness 都必须使用同一规则：在当前 Computer Use 调用内条件等待最多 5 秒，并在同一调用内 `catch` deadline；不得让原始 Playwright timeout 逃逸到调用结果。
+
+deadline 后只允许做一次无等待、无循环的页面包络核验。该核验只判断当前规范 URL、预期标题、唯一主列、登录门、验证码/风控门、显式错误面、可信空态及本阶段必需卡片是否存在；核验自身异常也必须被同一调用捕获。不得返回原始异常、错误栈、selector、HTML、正文或页面异常原文，也不得 reload、滚动、换浏览器、换 selector 或再次等待。
+
+页面包络不可信时只返回阶段稳定子原因 `main_surface_untrusted`、`reply_search_surface_untrusted` 或 `permalink_surface_untrusted`；明确登录失效或风控时仍映射到项目既有 `login_unavailable` 或 `risk_challenge`，不能伪装成普通结构异常。页面包络可信但必需卡片仍未出现时，主页返回 `main_surface_not_ready`，Latest 搜索返回 `reply_search_surface_not_ready`，永久链接返回 `permalink_surface_not_ready`；若主页或 Latest 搜索已有动态可信水位且当前可信页面未能包含该双字段锚，则分别返回 `main_watermark_unreached` 或 `reply_watermark_unreached`。这些子原因都进入既有失败关闭与同轮 finish，不得降级为 generic `structure_ambiguous` 后继续探索。
+
 ### MAIN_PROBE
 
 - 一次调用完成导航、最多 5 秒的主列就绪核验和一次同步 DOM 提取，只返回契约所需的可见事实与数量。
+- 主列或首批必需卡片的条件等待必须使用统一收口；deadline 后不得直接抛出 Playwright timeout，也不得为了判断页面是否可用而追加第二次页面读取。
 - 不做无条件固定等待；水位未到时才执行下一次有界分页探针。
 - 每次分页必须增加至少一个唯一状态；无进展、重复、错序、超过 200 或到达第 12 次仍未命中双字段水位时失败关闭。
 
@@ -112,6 +121,7 @@ FAILED_PENDING_FINISH → FINISHED_FAILED
 ### REPLY_SEARCH_PROBE
 
 - 一次进入 Latest 搜索，按有界分页累计唯一候选直到动态回复水位。
+- 首个 `article` 的 locator readiness 必须在同一调用内捕获 5 秒 deadline 并执行统一页面包络核验；不得把原始 timeout 上抛为 generic `structure_ambiguous`。deadline 收口分支不得 reload、滚动或切换浏览器。
 - 每次读取必须严格按 `stable status link → placeholder filter → bounded same-viewport re-read → strict candidate validation → pagination` 执行。先从目标作者的规范 `/status/<id>` 链接取得稳定身份；没有稳定状态 ID/规范链接且呈加载骨架的 `article` 只是瞬态占位节点，忽略且不计进度，不能因此报结构异常。
 - 一旦节点已经有稳定状态 ID，它就是正式候选：作者、规范 UTC 和状态类型必须完整。字段暂缺时只允许在**同一次 Computer Use 调用、同一视口**内做一次有界补读；仍缺失立即失败，不能把它降级为排除项或非 AI 回复。
 - `isMediaOnly=true` 是有效候选，不是页面异常：`visibleText` 必须精确使用项目保留标记 `[Media-only post; no visible text.]`，后续按 `ai_related=null` 处理。转推只以状态卡自己的专用 social-context 标记判断，禁止在整张卡片正文中搜索“reposted/转帖/转发”等词来推断。
@@ -124,7 +134,7 @@ FAILED_PENDING_FINISH → FINISHED_FAILED
 - 每个动态候选恰好一次 Computer Use 调用：在同一调用内导航永久链接、最多 5 秒核验唯一最小主 `status_permalink` 会话容器、提取有序顶层 ID 链及父/目标事实。
 - 不拆成“导航一次、睡眠一次、读取一次”，不跨候选循环，不读取整页平铺卡片。
 - 容器定位只使用一个预批准 selector：目标卡最近的 `[data-testid="primaryColumn"] section[role="region"][aria-labelledby]` 语义容器。先证明 `[data-testid="primaryColumn"]` 唯一，并证明目标规范状态只对应一张非嵌套顶层 `article[data-testid="tweet"]`；只沿目标卡祖先链取得这个最小容器，绝不把 `primaryColumn`、更外层祖先或其他 section 当候选。禁止用 `targetCell.parentElement.children` 猜父，禁止从 `primaryColumn.querySelectorAll('article')` 的整页平铺结果挑父，也不得失败后换 selector。
-- 固定伪代码（同一 `tab.playwright` 单候选调用内一次执行）：`conversation = closestApprovedSemanticContainer(targetCard)`；若缺失或不在唯一 primary 内则失败。先条件等待最多 5 秒：`topLevelCards(conversation).length >= 2`；这里的 `topLevelCards` 只保留最近同类语义容器正是 `conversation`、且未嵌套在另一张 article 内的卡。此等待只证明最小容器的直接顶层成员已就绪，不构成父帖证据；不得固定 sleep、滚动、重载、读取正文或延长等待。超时直接以 `permalink_conversation_chain_size_untrusted` 失败关闭；就绪后只做一次同步提取。
+- 固定伪代码（同一 `tab.playwright` 单候选调用内一次执行）：`conversation = closestApprovedSemanticContainer(targetCard)`；若缺失或不在唯一 primary 内则失败。先条件等待最多 5 秒：`topLevelCards(conversation).length >= 2`；这里的 `topLevelCards` 只保留最近同类语义容器正是 `conversation`、且未嵌套在另一张 article 内的卡。此等待只证明最小容器的直接顶层成员已就绪，不构成父帖证据；不得固定 sleep、滚动、重载、读取正文或延长等待。deadline 必须按统一规则 catch 并做一次页面包络核验；可信永久链接页面仍未出现目标或最小会话卡时返回 `permalink_surface_not_ready`。readiness 成功就绪后只做一次同步提取；只有该提取所得链长度仍不满足 2～200 时，才使用 `permalink_conversation_chain_size_untrusted`。
 - 同步提取仍只读 `conversation` 的直接顶层 `article[data-testid="tweet"]`，按 DOM 顺序形成完整局部链；嵌套的推荐、额外 timeline/region 或其他分区不得成为链成员，推荐卡、其他回复分支或其他分区不得成为父目标链成员。链必须为 2～200、ID 全唯一，目标恰好一次且索引至少为 1，`parentIndex = targetIndex - 1` 的槽位精确命中父/目标；父/目标均为顶层、非引用、非推广、规范 ID/作者/UTC/永久链接一致，父作者等于回复对象且父 UTC/数值 ID 早于目标。宽链携带完整链和显式索引；精确二卡链也可携带索引。任一不可信条件均失败关闭。
 - 父帖有可见正文时一并保留其原文和规范永久链接供后续 AI 判断；不得用引用卡、祖先卡或媒体占位代替父正文。第一处无法证明唯一容器、父目标相邻或父帖事实时，立即终止整条回复流；不尝试第二套 selector。
 - 探针失败只返回一个稳定脱敏子原因，不回传 selector、HTML、截图、正文或浏览器异常原文：`permalink_primary_column_untrusted`、`permalink_target_status_not_unique`、`permalink_target_top_level_untrusted`、`permalink_conversation_container_missing`、`permalink_conversation_chain_size_untrusted`、`permalink_conversation_chain_identity_untrusted`、`permalink_target_not_unique_top_level`、`permalink_adjacent_parent_untrusted`、`permalink_conversation_container_ambiguous`、`permalink_conversation_partition_untrusted`、`permalink_parent_or_target_card_untrusted`、`permalink_parent_author_mismatch` 或 `permalink_parent_time_order_untrusted`。
@@ -150,6 +160,7 @@ FAILED_PENDING_FINISH → FINISHED_FAILED
 | Latest 有稳定 ID 但字段暂缺 | 同调用、同视口有界补读 | 1 次 |
 | Latest `isMediaOnly=true` | 使用固定标记保留为正式候选 | 不失败 |
 | Latest 重复、错序、无进展、超限或水位未到 | 回复流失败 | 替代查询 0 |
+| MAIN/Latest/permalink readiness 达到 5 秒 deadline | 同调用 catch，并只做一次页面包络核验后失败关闭 | 包络核验 1；外部重试 0 |
 | 单条 permalink 结构不可信 | 第一处即停止 | 每候选 1 调用 |
 | `collect` 拒绝/不可解析 | 不改载荷，进入收口 | 每账号 1 |
 | `scan` 拒绝/不可解析 | 不改分析，进入收口 | 每账号 1 |
