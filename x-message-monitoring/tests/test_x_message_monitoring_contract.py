@@ -290,7 +290,7 @@ class XMessageMonitoringContractTests(unittest.TestCase):
         self.assertEqual(self.fast_path.count("`while`"), 1)
         self.assertEqual(self.fast_path.count("`setTimeout`"), 1)
         self.assertEqual(self.fast_path.count("`requestAnimationFrame`"), 1)
-        self.assertEqual(self.fast_path.count("`evaluate`"), 2)
+        self.assertEqual(self.fast_path.count("`evaluate`"), 3)
         self.assertEqual(self.fast_path.count("primaryColumn.querySelectorAll('article')"), 1)
         strict_extract = self.fast_path.split("- 同步提取仍只读", 1)[1].split("- 探针失败只返回", 1)[0]
         self.assert_contains(
@@ -307,11 +307,21 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "目标必须与 Latest 冻结观察的状态 ID、作者、规范 UTC、规范永久链接、可见正文或媒体标记、回复/转推/引用标志逐项一致",
             "父作者等于回复对象",
             "父帖有可见正文时一并保留其原文和规范永久链接",
-            "`parseTargetAndParentDetails`",
+            "`parseTargetDetail`",
+            "`parseParentFacts`",
+            "状态 ID 顺序不得使用 `BigInt`",
+            "`compareDecimalStatusIds(left,right)`",
+            "先比较长度、等长再按 ASCII 十进制字符串比较",
+            "只有严格 `parent < target` 才通过",
+            "`parentReadable`",
+            "页面外禁止引用页面内的 `marker` 或其他局部变量",
+            "`parentReadable=true` 才把父帖正文与永久链接成对写入候选",
+            "false 时完全省略这两个可选键",
             "permalink_target_or_parent_detail_invalid",
             "permalink_final_observed_mismatch",
         )
         self.assertNotIn("`permalink_conversation_chain_identity_untrusted`", self.fast_path)
+        self.assertNotIn("BigInt(", strict_extract)
 
 
 if __name__ == "__main__":
