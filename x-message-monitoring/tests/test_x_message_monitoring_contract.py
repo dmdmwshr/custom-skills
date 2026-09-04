@@ -163,6 +163,28 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "不得手输、覆盖、从旧轮复制或申请第二个 lease",
         )
 
+    def test_ordinary_heartbeat_only_loads_fast_path_until_contract_adjudication(self) -> None:
+        self.assert_contains(
+            self.skill,
+            "普通 heartbeat 启动时只完整读取 [固定快速路径]",
+            "不预读完整投递契约",
+            "不要例行加载 [heartbeat 与投递契约]",
+            "只有快速路径列出的初始化、上下文/指纹/schema 变化或契约裁决条件命中时才读取",
+        )
+        self.assertNotIn(
+            "先读取 [heartbeat 与投递契约](references/heartbeat-and-delivery.md) 和 [固定快速路径]",
+            self.skill,
+        )
+        self.assert_contains(
+            self.fast_path,
+            "普通 heartbeat 启动时唯一必须完整读取的支持文件就是本快速路径",
+            "固定会话首次运行、上下文丢失、项目或 Skill 文件指纹变化、机器 schema 变化时",
+            "普通轮次不得为“保险起见”预读完整契约",
+            "机器回执给出的浏览器备用原因、回复证据、直接父帖、投递状态或 finish 结果无法由本快速路径唯一裁决",
+            "契约裁决只用于选择更严格的既有动作，不授权重试",
+            "常规 AI 分类或额度分析本身都不是契约裁决触发条件",
+        )
+
     def test_fast_path_has_one_way_state_machine_and_strict_retry_limits(self) -> None:
         self.assert_contains(
             self.fast_path,
@@ -199,11 +221,16 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "禁止先固定 `waitForTimeout` 再读取",
         )
 
-    def test_permalink_probe_uses_one_semantic_container_and_explicit_indexes(self) -> None:
+    def test_permalink_probe_selects_smallest_viable_semantic_container(self) -> None:
         self.assert_contains(
             self.fast_path,
             '`[data-testid="primaryColumn"] section[role="region"][aria-labelledby]`',
-            "沿目标卡祖先链过滤后必须恰好一个",
+            "祖先链可以有多个**候选**",
+            "不得因为最近 `section` 过窄、链少于两张就立即失败",
+            "最近语义 region 归属",
+            "嵌套的推荐、额外 timeline/region 或其他分区不会误并入外层链",
+            "所有可用链中只选择 DOM 上离目标最近的（最小）一个",
+            "无可用链或最小选择不唯一均失败关闭",
             "禁止用 `targetCell.parentElement.children` 猜父",
             "禁止从 `primaryColumn.querySelectorAll('article')` 的整页平铺结果挑父",
             '`article[data-testid="tweet"]`',
@@ -211,6 +238,8 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "宽链携带完整链和显式索引",
             "稳定脱敏子原因",
             "permalink_conversation_container_missing",
+            "permalink_conversation_chain_size_untrusted",
+            "permalink_adjacent_parent_untrusted",
             "permalink_parent_author_mismatch",
         )
 

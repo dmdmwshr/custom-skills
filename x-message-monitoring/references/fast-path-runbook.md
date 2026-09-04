@@ -4,10 +4,23 @@
 
 ## 一次初始化，普通轮次直接执行
 
-- 固定会话首次运行、上下文压缩后、项目文件指纹变化或机器 schema 变化时，才重新读取完整项目规则、入口帮助和两份 Skill 参考。
+- 普通 heartbeat 启动时唯一必须完整读取的支持文件就是本快速路径；不要例行读取 `heartbeat-and-delivery.md`、项目 `README.md` 或固定入口帮助。
+- 固定会话首次运行、上下文丢失、项目或 Skill 文件指纹变化、机器 schema 变化时，才完整读取项目 `AGENTS.md`、`README.md`、固定入口帮助与 `heartbeat-and-delivery.md`，并刷新当前上下文中的规则指纹和 schema 认知。
 - 普通轮次不枚举 CLI、不搜索浏览器模块、不试探 `agent`、`@oai/browser` 或版本化内部模块；直接使用当前 Computer Use 工具文档给出的 `cua.createBrowserTab` / 已返回标签句柄。
 - 全轮只维护两个稳定概念对象：本地阶段对象 `xMonCycle` 与受控浏览器对象 `globalThis.xMonBrowserCycle`。禁止 `xCycle17*`、`probe2Final*` 等编号式临时对象。
 - `xMonCycle.lease` 只可由本轮一次 `heartbeat-acquire` 回执赋值；不得手输、覆盖、从旧轮复制或申请第二个 lease。
+
+## 契约裁决触发
+
+普通轮次不得为“保险起见”预读完整契约。仅在下列任一条件成立时，快速路径才明确要求暂停当前编排并完整读取一次 `heartbeat-and-delivery.md`：
+
+1. 固定会话首次运行，或上下文丢失后无法证明当前规则和状态机仍完整。
+2. 项目 `AGENTS.md`、本 Skill、两份参考或自动化提示的文件指纹与当前上下文记录不一致。
+3. `health` 或后续机器回执出现未知 schema、未知字段语义，或已知 schema 发生变化。
+4. 机器回执给出的浏览器备用原因、回复证据、直接父帖、投递状态或 finish 结果无法由本快速路径唯一裁决。
+5. 本快速路径与当前项目规则或机器回执表面冲突，需要按更严格规则确定唯一动作。
+
+契约裁决只用于选择更严格的既有动作，不授权重试、换 selector、换浏览器、修改已拒载荷或申请第二个 lease。普通无新增、已知失败码、候选数量增加、常规 AI 分类或额度分析本身都不是契约裁决触发条件。
 
 ## 固定本地入口包装
 
@@ -110,11 +123,11 @@ FAILED_PENDING_FINISH → FINISHED_FAILED
 
 - 每个动态候选恰好一次 Computer Use 调用：在同一调用内导航永久链接、最多 5 秒核验唯一最小主 `status_permalink` 会话容器、提取有序顶层 ID 链及父/目标事实。
 - 不拆成“导航一次、睡眠一次、读取一次”，不跨候选循环，不读取整页平铺卡片。
-- 语义容器只允许一个预批准 selector：目标顶层卡祖先链中的 `[data-testid="primaryColumn"] section[role="region"][aria-labelledby]`。沿目标卡祖先链过滤后必须恰好一个；禁止用 `targetCell.parentElement.children` 猜父，禁止从 `primaryColumn.querySelectorAll('article')` 的整页平铺结果挑父，也禁止临场尝试第二个容器 selector。
-- 只在该唯一容器内读取顶层 `article[data-testid="tweet"]`：每张卡最近的同类语义 region 必须仍是该容器，且不得嵌套在另一张 article 内。按 DOM 顺序得到完整 2～200 条 ID 链；ID 必须唯一，推荐、推广、额外 timeline/region 或其他分区成员一律失败。不得把推荐卡、其他回复分支或其他分区混入父目标链。
-- 目标状态必须在链中恰好一次且索引至少为 1；`parentIndex = targetIndex - 1`，链对应槽位必须精确命中父/目标。父作者必须等于回复对象，父 UTC/数值 ID 必须早于目标；父与目标都必须顶层、非引用、非推广、规范 ID/作者/UTC/永久链接一致。宽链携带完整链和显式索引；精确二卡链也可携带索引。
+- 语义容器只允许一个预批准 selector：目标顶层卡祖先链中的 `[data-testid="primaryColumn"] section[role="region"][aria-labelledby]`。祖先链可以有多个**候选**，不得因为最近 `section` 过窄、链少于两张就立即失败；对每个候选仅在其自身局部区域形成链，再选择能完整证明父目标关系的唯一最小候选。禁止用 `targetCell.parentElement.children` 猜父，禁止从 `primaryColumn.querySelectorAll('article')` 的整页平铺结果挑父，也禁止临场尝试第二个容器 selector。
+- 对每个祖先语义区域候选，只读取其中顶层 `article[data-testid="tweet"]`，并按**最近语义 region 归属**过滤：卡片最近的同类 region 必须正是当前候选，且不得嵌套在另一张 article 内。这样嵌套的推荐、额外 timeline/region 或其他分区不会误并入外层链；候选自身保留下来的推荐、推广或其他不可信成员仍失败。按 DOM 顺序得到完整 2～200 条 ID 链，ID 必须唯一；不得把推荐卡、其他回复分支或其他分区混入父目标链。
+- 一个候选只有同时满足以下条件才是可用链：目标状态在链中恰好一次且索引至少为 1，`parentIndex = targetIndex - 1` 的对应槽位精确命中父/目标，且父/目标均为顶层、非引用、非推广、规范 ID/作者/UTC/永久链接一致。父作者必须等于回复对象，父 UTC/数值 ID 必须早于目标。所有可用链中只选择 DOM 上离目标最近的（最小）一个；无可用链或最小选择不唯一均失败关闭。宽链携带完整链和显式索引；精确二卡链也可携带索引。
 - 父帖有可见正文时一并保留其原文和规范永久链接供后续 AI 判断；不得用引用卡、祖先卡或媒体占位代替父正文。第一处无法证明唯一容器、父目标相邻或父帖事实时，立即终止整条回复流；不尝试第二套 selector。
-- 探针失败只返回一个稳定脱敏子原因，不回传 selector、HTML、截图、正文或浏览器异常原文：`permalink_primary_column_untrusted`、`permalink_target_status_not_unique`、`permalink_conversation_container_missing`、`permalink_conversation_container_ambiguous`、`permalink_conversation_partition_untrusted`、`permalink_top_level_chain_identity_untrusted`、`permalink_parent_author_mismatch` 或 `permalink_parent_time_order_untrusted`。
+- 探针失败只返回一个稳定脱敏子原因，不回传 selector、HTML、截图、正文或浏览器异常原文：`permalink_primary_column_untrusted`、`permalink_target_status_not_unique`、`permalink_conversation_container_missing`、`permalink_conversation_chain_size_untrusted`、`permalink_conversation_chain_identity_untrusted`、`permalink_target_not_unique_top_level`、`permalink_adjacent_parent_untrusted`、`permalink_conversation_container_ambiguous`、`permalink_conversation_partition_untrusted`、`permalink_parent_or_target_card_untrusted`、`permalink_parent_author_mismatch` 或 `permalink_parent_time_order_untrusted`。
 - 每核验 5 个候选后续租一次；续租应与下一候选的同一工具批次编排，不额外探索页面。
 
 ### BUILD_AND_CLOSE
