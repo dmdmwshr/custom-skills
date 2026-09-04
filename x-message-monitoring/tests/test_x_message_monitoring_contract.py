@@ -258,10 +258,17 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "不拼接作者、不要求当前视口可见",
             "section[role=\"region\"][aria-labelledby]:has(",
             "`conversationLocator = sectionCandidates.last()`",
-            "await conversationLocator.waitFor({state:'attached', timeout:5000})",
+            "`deadlineAt = Date.now() + 5000`",
+            "`remaining() = Math.max(1, deadlineAt - Date.now())`",
+            "以下全部等待只用 `timeout: remaining()`",
+            "不得各自重置为 5 秒",
             "`topLevelTweetLocator = conversationLocator.locator('article[data-testid=\"tweet\"]:not(article[data-testid=\"tweet\"] article[data-testid=\"tweet\"])')`",
-            "await topLevelTweetLocator.nth(1).waitFor({state:'attached', timeout:5000})",
-            "第二张非嵌套 tweet 只作成员 readiness",
+            "读取一次 `topLevelCount`",
+            "用一个 `Promise.all` 并发等待",
+            "各自至少出现一个 `a[href*=\"/status/\"] time` attached",
+            "不再是无身份骨架",
+            "最终同步提取仍须排除 quoteTweet 并证明每张卡恰有一个自身规范 time-link",
+            "任一成员在总截止前未就绪统一进入 `permalink_members_not_ready`",
             "随后仅一次同步 `evaluate` 验证唯一 closest 容器和完整非嵌套顶层链",
             "禁止在 `evaluate` 内用 `while`、`setTimeout`、`requestAnimationFrame` 或任何轮询等待页面",
             "全部 locator 等待必须置于同一 `try`",
@@ -285,7 +292,8 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "permalink_adjacent_parent_untrusted",
             "permalink_parent_author_mismatch",
         )
-        self.assertNotIn('a[href*=\"/status/', self.fast_path)
+        self.assertEqual(self.fast_path.count('a[href*=\"/status/\"] time'), 1)
+        self.assertNotIn("a[href*=\"/status/' + targetStatusId", self.fast_path)
         self.assertNotIn('a[href^=\"/status/', self.fast_path)
         self.assertEqual(self.fast_path.count("`while`"), 1)
         self.assertEqual(self.fast_path.count("`setTimeout`"), 1)
