@@ -18,15 +18,16 @@ description: 在 Windows 上诊断和管理 Browser Tamer 的安装、HTTP/HTTPS
 7. 浏览器内部链接、内嵌 WebView 和显式 `microsoft-edge:` 链接可能绕过系统默认处理器；不要声称全部链接都能拦截。
 8. Browser Tamer 6.0.2 的 `browser set default` 官方实现存在不调用实际 `set_default` 的源码缺口。此版本不要依赖该命令改变默认目标；使用界面或在用户明确授权后安全修改配置。
 
-## 先区分问题层级
+## 四层快速诊断（短路）
 
-Browser Tamer 只负责把外部 `http:`/`https:` URL 路由到已登记的“浏览器 + 配置文件”。开始操作前先判断问题属于哪一层：
+Browser Tamer 只负责把外部 `http:`/`https:` URL 路由到已登记的“浏览器 + 配置文件”。快速诊断固定按以下四层执行，并在第一处失败或无法确认时停止：
 
-1. **外部链接路由层**：默认处理器、域名规则、picker、目标浏览器或目标配置文件错误，使用本 skill。
-2. **浏览器进程与配置启动层**：浏览器未运行、启动后出现“谁在使用 Chrome”选择器、快捷方式没有指定配置文件，核验浏览器可执行文件、用户数据目录与 `--profile-directory`；这不是规则命中本身。
-3. **Codex 浏览器扩展连接层**：扩展未安装、未启用、未与桌面端连接，或 `agent.browsers.get(...)` 不可用，按浏览器扩展/桌面连接能力诊断。Browser Tamer 配置正确不能证明该连接可用。
+1. **OS URL / Browser Tamer 路由**：只读核对 `HTTP`、`HTTPS` 的 `UserChoice` 是否均为 `BrowserTamerHTM`，再核对 v6 配置存在且 `validate`、`list` 成功。任一失败返回稳定结论 `route_not_ready`，后续三层标记 `not_run`。
+2. **浏览器配置选择器（profile chooser）**：使用 `list -AsJson` 返回的精确浏览器名和配置文件名，核对目标配置是否唯一、启动参数是否明确指定既有用户数据目录和配置文件标识。名称不唯一、参数缺失或实际弹出浏览器选择器返回 `profile_selector_not_ready`，后续两层标记 `not_run`；仅凭头像、显示名称或规则命中不得推断通过。
+3. **浏览器进程**：核对配置中的浏览器可执行文件和目标进程是否存在，并在可读时核对其实际用户数据目录/配置文件参数。未运行返回 `browser_process_not_running`，参数无法核对返回 `browser_process_unverified`，后续扩展层标记 `not_run`。
+4. **Codex 扩展连接**：仅用目标浏览器配置的扩展握手或 `agent.browsers.get(...)` 的直接结果判断。连接成功返回 `codex_extension_connected`，未安装、未启用或握手失败返回 `codex_extension_unavailable`；没有直接结果返回 `codex_extension_unverified`。
 
-不得用修改域名规则来掩盖进程或扩展故障。反过来，扩展连接成功也不能证明 Windows 外部链接会经过 Browser Tamer。
+每轮输出至少包含 `conclusion` 和 `stop_after`；`conclusion` 只能取上述稳定结论之一或 `ok`，`stop_after` 只能取 `route`、`profile_selector`、`browser_process`、`codex_extension`、`none`。前层 `ok` 只表示该层的证据成立，不证明任何后层可用；`not_run` 也不得被解释为通过。不得用修改域名规则掩盖进程、配置选择器或扩展故障，也不得用浏览器窗口可见推断扩展已连接。
 
 ## 工具优先级
 
