@@ -248,17 +248,27 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             '`[data-testid="primaryColumn"] section[role="region"][aria-labelledby]`',
             "只沿目标卡祖先链取得这个最小容器",
             "绝不把 `primaryColumn`、更外层祖先或其他 section 当候选",
-            "固定伪代码",
-            "`conversation = closestApprovedSemanticContainer(targetCard)`",
-            "先条件等待最多 5 秒",
-            "`topLevelCards(conversation).length >= 2`",
-            "此等待只证明最小容器的直接顶层成员已就绪，不构成父帖证据",
-            "不得固定 sleep、滚动、重载、读取正文或延长等待",
-            "deadline 必须按统一规则 catch 并做一次页面包络核验",
-            "可信永久链接页面仍未出现目标或最小会话卡时返回 `permalink_surface_not_ready`",
-            "readiness 成功就绪后只做一次同步提取",
-            "只有该提取所得链长度仍不满足 2～200 时，才使用 `permalink_conversation_chain_size_untrusted`",
-            "就绪后只做一次同步提取",
+            "可复制的 locator readiness 形状",
+            "只以动态 `targetStatusId` 构造",
+            "`targetTimeLink = 'article[data-testid=\"tweet\"] a[href$=\"/status/' + targetStatusId + '\"] time'`",
+            "以状态路径精确结尾避免 ID 前缀误命中",
+            "不拼接作者、不要求当前视口可见",
+            "section[role=\"region\"][aria-labelledby]:has(",
+            "`conversationLocator = sectionCandidates.last()`",
+            "await conversationLocator.waitFor({state:'attached', timeout:5000})",
+            "`topLevelTweetLocator = conversationLocator.locator('article[data-testid=\"tweet\"]:not(article[data-testid=\"tweet\"] article[data-testid=\"tweet\"])')`",
+            "await topLevelTweetLocator.nth(1).waitFor({state:'attached', timeout:5000})",
+            "第二张非嵌套 tweet 只作成员 readiness",
+            "随后仅一次同步 `evaluate` 验证唯一 closest 容器和完整非嵌套顶层链",
+            "禁止在 `evaluate` 内用 `while`、`setTimeout`、`requestAnimationFrame` 或任何轮询等待页面",
+            "全部 locator 等待必须置于同一 `try`",
+            "deadline 只进入一次 `catch`",
+            "调用一次无等待、无循环的页面包络核验并返回它的单个稳定 envelope",
+            "目标 time-link deadline 返回 `permalink_target_not_ready`",
+            "section 或第二张 tweet deadline 返回 `permalink_members_not_ready`",
+            "readiness 绝不构成作者、永久链接、UTC 或正文事实",
+            "成功后只做上述一次同步提取",
+            "只有该提取所得链长度仍不满足 2～200 时才使用 `permalink_conversation_chain_size_untrusted`",
             "禁止用 `targetCell.parentElement.children` 猜父",
             "禁止从 `primaryColumn.querySelectorAll('article')` 的整页平铺结果挑父",
             '`article[data-testid="tweet"]`',
@@ -266,9 +276,27 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "宽链携带完整链和显式索引",
             "稳定脱敏子原因",
             "permalink_conversation_container_missing",
+            "permalink_target_not_ready",
+            "permalink_members_not_ready",
             "permalink_conversation_chain_size_untrusted",
             "permalink_adjacent_parent_untrusted",
             "permalink_parent_author_mismatch",
+        )
+        self.assertNotIn('a[href*=\"/status/', self.fast_path)
+        self.assertNotIn('a[href^=\"/status/', self.fast_path)
+        self.assertEqual(self.fast_path.count("`while`"), 1)
+        self.assertEqual(self.fast_path.count("`setTimeout`"), 1)
+        self.assertEqual(self.fast_path.count("`requestAnimationFrame`"), 1)
+        self.assertEqual(self.fast_path.count("`evaluate`"), 2)
+        self.assertEqual(self.fast_path.count("primaryColumn.querySelectorAll('article')"), 1)
+        strict_extract = self.fast_path.split("- 同步提取仍只读", 1)[1].split("- 探针失败只返回", 1)[0]
+        self.assert_contains(
+            strict_extract,
+            "ID 全唯一",
+            "父/目标均为顶层、非引用、非推广",
+            "规范 ID/作者/UTC/永久链接一致",
+            "父作者等于回复对象",
+            "父帖有可见正文时一并保留其原文和规范永久链接",
         )
 
 
