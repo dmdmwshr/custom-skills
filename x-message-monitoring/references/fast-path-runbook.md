@@ -99,6 +99,10 @@ FAILED_PENDING_FINISH → FINISHED_FAILED
 ### REPLY_SEARCH_PROBE
 
 - 一次进入 Latest 搜索，按有界分页累计唯一候选直到动态回复水位。
+- 每次读取必须严格按 `stable status link → placeholder filter → bounded same-viewport re-read → strict candidate validation → pagination` 执行。先从目标作者的规范 `/status/<id>` 链接取得稳定身份；没有稳定状态 ID/规范链接且呈加载骨架的 `article` 只是瞬态占位节点，忽略且不计进度，不能因此报结构异常。
+- 一旦节点已经有稳定状态 ID，它就是正式候选：作者、规范 UTC 和状态类型必须完整。字段暂缺时只允许在**同一次 Computer Use 调用、同一视口**内做一次有界补读；仍缺失立即失败，不能把它降级为排除项或非 AI 回复。
+- `isMediaOnly=true` 是有效候选，不是页面异常：`visibleText` 必须使用项目保留的 media-only 固定标记，后续按 `ai_related=null` 处理。转推只以状态卡自己的专用 social-context 标记判断，禁止在整张卡片正文中搜索“reposted/转帖/转发”等词来推断。
+- 补读不得 reload、不得再次滚动、不得切浏览器；禁止先固定 `waitForTimeout` 再读取。只对身份稳定但字段暂缺的候选等待最多 5 秒，并在当前调用内重读一次。
 - 每次分页必须增加唯一候选；重复、错序、无进展、超过 200 或第 12 次仍未到水位时失败关闭。
 - 冻结最终候选顺序后再进入永久链接核验，不在核验期间改变搜索集合。
 
@@ -126,6 +130,9 @@ FAILED_PENDING_FINISH → FINISHED_FAILED
 | Chrome 结构歧义、水位未到、风控或 V2 拒绝 | 失败收口 | 重试 0 |
 | Edge 首次 `browser_not_running` | 启动、等待 8 秒、重取句柄 | 启动 1；重取 1 |
 | `/with_replies` 初次 0 卡 | 同地址重载并重探 | 重载 1 |
+| Latest 无稳定状态链接的骨架卡 | 忽略且不计进度 | 0 次外部重试 |
+| Latest 有稳定 ID 但字段暂缺 | 同调用、同视口有界补读 | 1 次 |
+| Latest `isMediaOnly=true` | 使用固定标记保留为正式候选 | 不失败 |
 | Latest 重复、错序、无进展、超限或水位未到 | 回复流失败 | 替代查询 0 |
 | 单条 permalink 结构不可信 | 第一处即停止 | 每候选 1 调用 |
 | `collect` 拒绝/不可解析 | 不改载荷，进入收口 | 每账号 1 |

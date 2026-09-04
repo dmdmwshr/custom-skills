@@ -186,6 +186,19 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "推荐卡、其他回复分支或其他分区",
         )
 
+    def test_latest_search_filters_transient_placeholders_without_weakening_candidates(self) -> None:
+        self.assert_contains(
+            self.fast_path,
+            "stable status link → placeholder filter → bounded same-viewport re-read → strict candidate validation → pagination",
+            "瞬态占位节点，忽略且不计进度",
+            "同一次 Computer Use 调用、同一视口",
+            "不能把它降级为排除项或非 AI 回复",
+            "`isMediaOnly=true` 是有效候选，不是页面异常",
+            "media-only 固定标记",
+            "专用 social-context 标记判断",
+            "禁止先固定 `waitForTimeout` 再读取",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
