@@ -194,9 +194,24 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "同一次 Computer Use 调用、同一视口",
             "不能把它降级为排除项或非 AI 回复",
             "`isMediaOnly=true` 是有效候选，不是页面异常",
-            "media-only 固定标记",
+            "[Media-only post; no visible text.]",
             "专用 social-context 标记判断",
             "禁止先固定 `waitForTimeout` 再读取",
+        )
+
+    def test_permalink_probe_uses_one_semantic_container_and_explicit_indexes(self) -> None:
+        self.assert_contains(
+            self.fast_path,
+            '`[data-testid="primaryColumn"] section[role="region"][aria-labelledby]`',
+            "沿目标卡祖先链过滤后必须恰好一个",
+            "禁止用 `targetCell.parentElement.children` 猜父",
+            "禁止从 `primaryColumn.querySelectorAll('article')` 的整页平铺结果挑父",
+            '`article[data-testid="tweet"]`',
+            "`parentIndex = targetIndex - 1`",
+            "宽链携带完整链和显式索引",
+            "稳定脱敏子原因",
+            "permalink_conversation_container_missing",
+            "permalink_parent_author_mismatch",
         )
 
 

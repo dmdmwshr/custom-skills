@@ -101,17 +101,20 @@ FAILED_PENDING_FINISH → FINISHED_FAILED
 - 一次进入 Latest 搜索，按有界分页累计唯一候选直到动态回复水位。
 - 每次读取必须严格按 `stable status link → placeholder filter → bounded same-viewport re-read → strict candidate validation → pagination` 执行。先从目标作者的规范 `/status/<id>` 链接取得稳定身份；没有稳定状态 ID/规范链接且呈加载骨架的 `article` 只是瞬态占位节点，忽略且不计进度，不能因此报结构异常。
 - 一旦节点已经有稳定状态 ID，它就是正式候选：作者、规范 UTC 和状态类型必须完整。字段暂缺时只允许在**同一次 Computer Use 调用、同一视口**内做一次有界补读；仍缺失立即失败，不能把它降级为排除项或非 AI 回复。
-- `isMediaOnly=true` 是有效候选，不是页面异常：`visibleText` 必须使用项目保留的 media-only 固定标记，后续按 `ai_related=null` 处理。转推只以状态卡自己的专用 social-context 标记判断，禁止在整张卡片正文中搜索“reposted/转帖/转发”等词来推断。
+- `isMediaOnly=true` 是有效候选，不是页面异常：`visibleText` 必须精确使用项目保留标记 `[Media-only post; no visible text.]`，后续按 `ai_related=null` 处理。转推只以状态卡自己的专用 social-context 标记判断，禁止在整张卡片正文中搜索“reposted/转帖/转发”等词来推断。
 - 补读不得 reload、不得再次滚动、不得切浏览器；禁止先固定 `waitForTimeout` 再读取。只对身份稳定但字段暂缺的候选等待最多 5 秒，并在当前调用内重读一次。
 - 每次分页必须增加唯一候选；重复、错序、无进展、超过 200 或第 12 次仍未到水位时失败关闭。
 - 冻结最终候选顺序后再进入永久链接核验，不在核验期间改变搜索集合。
 
 ### PERMALINK_PROBE
 
-- 每个动态候选恰好一次 Computer Use 调用：在同一调用内导航永久链接、最多 5 秒核验唯一最小主会话容器、提取有序顶层 ID 链及父/目标事实。
+- 每个动态候选恰好一次 Computer Use 调用：在同一调用内导航永久链接、最多 5 秒核验唯一最小主 `status_permalink` 会话容器、提取有序顶层 ID 链及父/目标事实。
 - 不拆成“导航一次、睡眠一次、读取一次”，不跨候选循环，不读取整页平铺卡片。
-- 只从包含目标帖的唯一最小主 `status_permalink` 会话容器取顶层链；不得把同一时间线里的推荐卡、其他回复分支或其他分区加入链。
-- 父与目标必须相邻且身份一致。第一处无法证明唯一容器、父目标相邻或父帖事实时，立即终止整条回复流；不尝试第二套 selector。
+- 语义容器只允许一个预批准 selector：目标顶层卡祖先链中的 `[data-testid="primaryColumn"] section[role="region"][aria-labelledby]`。沿目标卡祖先链过滤后必须恰好一个；禁止用 `targetCell.parentElement.children` 猜父，禁止从 `primaryColumn.querySelectorAll('article')` 的整页平铺结果挑父，也禁止临场尝试第二个容器 selector。
+- 只在该唯一容器内读取顶层 `article[data-testid="tweet"]`：每张卡最近的同类语义 region 必须仍是该容器，且不得嵌套在另一张 article 内。按 DOM 顺序得到完整 2～200 条 ID 链；ID 必须唯一，推荐、推广、额外 timeline/region 或其他分区成员一律失败。不得把推荐卡、其他回复分支或其他分区混入父目标链。
+- 目标状态必须在链中恰好一次且索引至少为 1；`parentIndex = targetIndex - 1`，链对应槽位必须精确命中父/目标。父作者必须等于回复对象，父 UTC/数值 ID 必须早于目标；父与目标都必须顶层、非引用、非推广、规范 ID/作者/UTC/永久链接一致。宽链携带完整链和显式索引；精确二卡链也可携带索引。
+- 父帖有可见正文时一并保留其原文和规范永久链接供后续 AI 判断；不得用引用卡、祖先卡或媒体占位代替父正文。第一处无法证明唯一容器、父目标相邻或父帖事实时，立即终止整条回复流；不尝试第二套 selector。
+- 探针失败只返回一个稳定脱敏子原因，不回传 selector、HTML、截图、正文或浏览器异常原文：`permalink_primary_column_untrusted`、`permalink_target_status_not_unique`、`permalink_conversation_container_missing`、`permalink_conversation_container_ambiguous`、`permalink_conversation_partition_untrusted`、`permalink_top_level_chain_identity_untrusted`、`permalink_parent_author_mismatch` 或 `permalink_parent_time_order_untrusted`。
 - 每核验 5 个候选后续租一次；续租应与下一候选的同一工具批次编排，不额外探索页面。
 
 ### BUILD_AND_CLOSE
