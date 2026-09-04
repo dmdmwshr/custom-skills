@@ -114,8 +114,11 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "父帖中文翻译",
             "规范永久链接",
             "与 Codex 额度重置：无直接关联",
+            "准备普通投递的 `ai_related=true` 回复",
             "媒体占位、引用帖、祖先帖",
             "ai_reply_parent_structure_required",
+            "父帖稳定身份可信但正文缺失或仅媒体",
+            "必须保持 `ai_related=null` 并进入已处理/已抑制路径",
             "visible_reply_marker",
             "既有历史事件保持冻结，不能由新规则自动重分类",
         )
@@ -273,7 +276,7 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "禁止从 `primaryColumn.querySelectorAll('article')` 的整页平铺结果挑父",
             '`article[data-testid="tweet"]`',
             "`parentIndex = targetIndex - 1`",
-            "宽链携带完整链和显式索引",
+            "宽链携带完整 ID 链和显式索引",
             "稳定脱敏子原因",
             "permalink_conversation_container_missing",
             "permalink_target_not_ready",
@@ -292,12 +295,23 @@ class XMessageMonitoringContractTests(unittest.TestCase):
         strict_extract = self.fast_path.split("- 同步提取仍只读", 1)[1].split("- 探针失败只返回", 1)[0]
         self.assert_contains(
             strict_extract,
+            "链身份与父目标详情必须分两层解析",
+            "`parseStableIdentity`",
+            "链中非父目标成员不要求正文或媒体事实",
+            "禁止因祖先/后续成员正文为空而返回 null",
+            "permalink_chain_member_identity_missing",
+            "permalink_chain_duplicate",
+            "不得静默去重",
             "ID 全唯一",
-            "父/目标均为顶层、非引用、非推广",
-            "规范 ID/作者/UTC/永久链接一致",
+            "父/目标均须为顶层、非引用、非推广",
+            "目标必须与 Latest 冻结观察的状态 ID、作者、规范 UTC、规范永久链接、可见正文或媒体标记、回复/转推/引用标志逐项一致",
             "父作者等于回复对象",
             "父帖有可见正文时一并保留其原文和规范永久链接",
+            "`parseTargetAndParentDetails`",
+            "permalink_target_or_parent_detail_invalid",
+            "permalink_final_observed_mismatch",
         )
+        self.assertNotIn("`permalink_conversation_chain_identity_untrusted`", self.fast_path)
 
 
 if __name__ == "__main__":

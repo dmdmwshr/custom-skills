@@ -36,7 +36,7 @@ Chrome 与 Edge 都只能操作本轮新建的标签。禁止 Playwright、Codex
 - `reset_analysis` 只回答更窄的 Codex 额度重置问题；`AiRelevanceV1` 独立回答外部回复及其已验证直接父帖是否属于广义 AI 话题。它固定使用 `ai_related=true`、`ai_related=false` 或 `ai_related=null`/未评估三态。`reset_analysis.related=true` 必须同时为 `ai_related=true`，但 AI 相关不等于与额度重置直接相关。
 - 评估回复与父帖的合并语境，而不是孤立匹配回复文字。广义 AI 主题包括模型、推理、训练、代理、生成式内容、AI 编程/开发者工具、部署、评测、安全、政策与生态；仅仅没有提到额度重置不能判为非 AI。
 - 外部回复的普通投递资格严格为：`ai_related=true`、`latest_search_unique_adjacent_parent` 或 `latest_search_permalink_unique_parent`，以及完整唯一直接父帖结构。不得把 `reset_analysis.related` 当作投递门槛。
-- 直接父帖必须是回复对象自身的顶层可见作者正文；投递正文必须单列父作者、父帖可见原文、父帖中文翻译和规范永久链接。通知同时带额度区块；当 `reset_analysis.related=false` 时，该区块明确写为“与 Codex 额度重置：无直接关联”。媒体占位、引用帖、祖先帖、空正文、非相邻父项或任一 raw/enriched 不一致都是 `ai_reply_parent_structure_required` 级别的失败关闭。
+- 准备普通投递的 `ai_related=true` 回复，其直接父帖必须是回复对象自身的顶层可见作者正文；投递正文必须单列父作者、父帖可见原文、父帖中文翻译和规范永久链接。通知同时带额度区块；当 `reset_analysis.related=false` 时，该区块明确写为“与 Codex 额度重置：无直接关联”。对这类可投递回复，媒体占位、引用帖、祖先帖、空正文、非相邻父项或任一 raw/enriched 不一致都是 `ai_reply_parent_structure_required` 级别的失败关闭。父帖稳定身份可信但正文缺失或仅媒体、因而无法完成 AI 判断的回复必须保持 `ai_related=null` 并进入已处理/已抑制路径，不能伪造父正文或创建普通投递。
 - `ai_related=false` 的非 AI 回复与 `ai_related=null`/未评估回复必须写入已处理/已抑制和不可变分析结论，不创建普通投递、不外送、也不在后续扫描中再次翻译或分析。既有历史事件保持冻结，不能由新规则自动重分类。`visible_reply_marker` 只能用于此类抑制，不能生成 AI 相关回复投递。
 
 ## 投递、提醒和静默
