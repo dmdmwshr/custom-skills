@@ -12,14 +12,14 @@ metadata:
 
 ## 先确认边界
 
-1. 先读取项目 `AGENTS.md`、当前 `README.md` 和固定入口的帮助/健康回执；只使用项目的 `fixed_session_entry.py` 与其固定数据目录。
+1. 固定会话首次运行、上下文压缩后、项目规则指纹变化或机器 schema 变化时，完整读取项目 `AGENTS.md`、当前 `README.md` 和固定入口帮助；普通整点轮次不重复探索这些接口，直接从 `health` 开始。只使用项目的 `fixed_session_entry.py` 与其固定数据目录。
 2. 固定会话是唯一写入者：不得新建、唤醒、转移、恢复或并行使用第二个 Codex 任务；`cc-connect` 仅作已核验一对一直送，入站保持 `silent_drop`。
 3. 不创建或修改 cc-connect cron、Windows 计划任务、飞书应用、独立发送者或浏览器配置。不得读取、复制、导出、填写或记录密码、Cookie、令牌、浏览器存储、验证码、HTML、截图或 HAR。
-4. 只操作本轮新建的 X 标签，完成后关闭该标签；绝不读取、导航、复用或关闭用户原有标签。禁止 Playwright、内置浏览器、无头浏览器和第三种浏览器。
+4. 只操作本轮新建的 X 标签，完成后关闭该标签；绝不读取、导航、复用或关闭用户原有标签。禁止用 Playwright CLI、Python/Node Playwright、调试端口或独立进程启动、连接或控制浏览器；当前受控 Chrome/Edge 扩展标签自身提供的 `tab.playwright` DOM 操作门面是允许且优先的页面接口，不属于独立 Playwright。禁止内置浏览器、无头浏览器和第三种浏览器。
 
 ## heartbeat 主流程
 
-先读取 [heartbeat 与投递契约](references/heartbeat-and-delivery.md)。每轮以本轮机器回执为唯一状态源：
+先读取 [heartbeat 与投递契约](references/heartbeat-and-delivery.md) 和 [固定快速路径](references/fast-path-runbook.md)。先按快速路径建立唯一状态对象、命令包装器、页面阶段、分支和调用预算；不得临场改名、重组步骤、试探旧浏览器 API，或在契约拒绝后修改载荷重试。每轮以本轮机器回执为唯一状态源：
 
 1. `health`：只读确认账本、冻结账号集合、动态 SQLite 可信水位与运行条件；健康不足或锁异常时失败关闭。
 2. `heartbeat-acquire`：取得 20 分钟本轮 lease。取得失败、会话正忙或状态不完整时不扫描、不补跑、不静默。

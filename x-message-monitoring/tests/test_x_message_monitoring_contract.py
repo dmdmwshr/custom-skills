@@ -20,7 +20,8 @@ class XMessageMonitoringContractTests(unittest.TestCase):
         cls.skill = document("SKILL.md")
         cls.agent = document("agents/openai.yaml")
         cls.contract = document("references/heartbeat-and-delivery.md")
-        cls.combined = "\n".join((cls.skill, cls.agent, cls.contract))
+        cls.fast_path = document("references/fast-path-runbook.md")
+        cls.combined = "\n".join((cls.skill, cls.agent, cls.contract, cls.fast_path))
 
     def assert_contains(self, text: str, *phrases: str) -> None:
         for phrase in phrases:
@@ -47,7 +48,8 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             "cc-connect cron",
             "Windows 计划任务",
             "不触碰原有标签",
-            "禁止 Playwright",
+            "禁止用 Playwright CLI、Python/Node Playwright",
+            "`tab.playwright` DOM 操作门面是允许且优先的页面接口",
             "第三种浏览器",
             "密码、Cookie、令牌",
         )
@@ -148,6 +150,41 @@ class XMessageMonitoringContractTests(unittest.TestCase):
             self.assertNotIn(forbidden, self.combined)
         self.assertNotRegex(self.combined, r"\b\d{15,}\b")
         self.assert_contains(self.combined, "不得写入目标账号、当前状态 ID、历史正文或固定顺序")
+
+    def test_fast_path_eliminates_runtime_api_and_payload_exploration(self) -> None:
+        self.assert_contains(
+            self.fast_path,
+            "普通轮次不枚举 CLI",
+            "不试探 `agent`、`@oai/browser`",
+            "不使用旧 `agent.browsers`",
+            "不导入 `@oai/browser`",
+            "不从标签列表重新绑定刚创建的标签",
+            "全轮只维护两个稳定概念对象",
+            "不得手输、覆盖、从旧轮复制或申请第二个 lease",
+        )
+
+    def test_fast_path_has_one_way_state_machine_and_strict_retry_limits(self) -> None:
+        self.assert_contains(
+            self.fast_path,
+            "INIT → HEALTHY → LEASED → ROUTE_READY → BROWSER_SELECTED",
+            "FAILED_PENDING_FINISH → FINISHED_FAILED",
+            "每个动态候选恰好一次 Computer Use 调用",
+            "不拆成“导航一次、睡眠一次、读取一次”",
+            "`collect` 每账号最多一次",
+            "`scan` 一次",
+            "不重发、不二次 finish",
+            "主页和搜索分页各最多 12",
+            "约为 `N + 6` 次浏览器调用",
+        )
+
+    def test_fast_path_keeps_controlled_tab_dom_but_forbids_independent_playwright(self) -> None:
+        self.assert_contains(
+            self.fast_path,
+            "`tab.playwright` 只表示当前受控标签的 DOM 操作门面",
+            "独立 Playwright 浏览器、CLI、Python/Node 包、调试端口和额外进程",
+            "唯一最小主 `status_permalink` 会话容器",
+            "推荐卡、其他回复分支或其他分区",
+        )
 
 
 if __name__ == "__main__":
