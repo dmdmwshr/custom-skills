@@ -26,6 +26,10 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("partial_failed",fast)
         self.assertIn("-filter:replies -filter:retweets",fast)
         self.assertIn("media_only_not_inspected",fast)
+        driver=BUSINESS/"scripts/desktop_monitor_driver.js"
+        if driver.is_file():
+            version=re.search(r"const version = '([0-9.]+)'",driver.read_text(encoding="utf-8")).group(1)
+            self.assertIn("驱动 "+version,fast)
         self.assertIn("15 秒",fast)
         self.assertIn("40 秒",fast)
         self.assertIn("$x-message-monitoring",(ROOT/"agents/openai.yaml").read_text(encoding="utf-8"))

@@ -1,4 +1,4 @@
-# 固定快速路径（分流协议 1 / 驱动 1.1.1）
+# 固定快速路径（分流协议 1 / 驱动 1.2.0）
 
 这是操作清单，不是让模型重写采集器的伪代码。真实扫描仅在唯一固定任务完成；初始化和验收仍留在该任务。
 
@@ -41,6 +41,8 @@
 3. `page(...,"search")`，未到水位才 `page(...,"search",true)`。搜索冻结后 `observation-fingerprint` 输入 `{lease,payload:xMonCycle.search.map(i=>i.statusId)}`，取机器 fingerprint。
 4. `await xMonDriver.permalinkBatch(xMonTab,xMonCycle,fingerprint)`，每次最多两条，仅 ok=true,done=false 继续下一批。完整唯一主会话链、相邻父帖和独立回复对象由驱动核验。文本加图片父帖可读，头像不是帖子媒体；纯媒体不编造文字。
 5. `xMonRaw=xMonDriver.rawStream(xMonCycle,"reply")`。保留该对象原样，不重新调用以免改变 collectedAt。仅经受控标准输入传递，不保存采集正文文件。
+
+驱动以独立 `User-Name` 加 `tweetText` 的嵌入链接块识别当前 X 引用结构；其文字不属于外层作者正文。遇到其他多正文形态仍报告明确错误，不现场挑选第一段或改写驱动。
 
 ## 本地载荷：程序机械组装
 
