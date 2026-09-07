@@ -1,4 +1,4 @@
-# 固定快速路径（分流协议 1 / 驱动 1.1.0）
+# 固定快速路径（分流协议 1 / 驱动 1.1.1）
 
 这是操作清单，不是让模型重写采集器的伪代码。真实扫描仅在唯一固定任务完成；初始化和验收仍留在该任务。
 
@@ -7,7 +7,7 @@
 - 命令工作目录：`C:\Users\12070\Desktop\项目开发\cc-connect-operations\projects\x-monitor\notifications`。
 - 业务目录：`C:\Users\12070\Desktop\项目开发\X监控`；解释器 `.venv\Scripts\python.exe`；入口 `scripts\fixed_session_entry.py`；数据仅在业务 `data`。
 - 全部命令通过 UTF-8 对象序列化后标准输入，禁止正文/凭据出现在参数、普通日志或临时脚本中。PowerShell 输入输出均设 `[Text.UTF8Encoding]::new($false)`；不要手拼 JSON。
-- CUA 状态只用 `let xMonDriver`、`let xMonTab`、`let xMonCycle`、`let xMonRaw`。本轮 lease 来自一次 acquire；不能复制旧值。工具会话重置时不接续旧浏览器句柄，登记失败并 finish。
+- CUA 状态只用 `let xMonDriver`、`let xMonTab`、`let xMonCycle`、`let xMonRaw`；各变量第一次使用必须声明，已经存在时只赋值，不能遗漏初始化或重复声明。本轮 lease 来自一次 acquire；不能复制旧值。工具会话重置时不接续旧浏览器句柄，登记失败并 finish。
 
 ## 按表执行，失败不探索
 
@@ -27,7 +27,7 @@
 1. 第一次 CUA 调用仅执行 `let xMonTab = await cua.createBrowserTab("chrome", url, {sessionName:"🌐 X监控"})`；url 为 `https://x.com/search?q=` 加 `encodeURIComponent("from:"+account+" -filter:replies -filter:retweets")` 加 `&f=live`。读取工具返回的文档和初始状态。驱动核验准确查询和 Latest 选项；不要读取或排序主页卡片来替代主帖搜索。
 2. 驱动未加载或版本变化时，完整读取业务 `scripts/desktop_monitor_driver.js` 原文，将**原样工厂表达式**绑定为 `let xMonDriver = <原样表达式>`；变量已存在时只赋值 `xMonDriver = <原样表达式>`，不重复声明。它只接收受支持的标签句柄。不能导入内部模块、执行独立 Playwright、使用 `globalThis`、自行 eval/桥接或重写 selector。新轮次只创建 cycle，不重复生成 2 万多字符代码。
 3. `xMonCycle = xMonDriver.createCycle({account, authenticatedAccount:"dmdmws", source:"desktop_chrome_extension", fallbackReason:null, watermarks, sourceTimezone})`。参数来自本轮配置。设 `xMonCycle.ownTab=xMonTab`、`xMonCycle.lastUrl=url`，避免再次导航创建时的同一地址。
-4. 工具调用上限 40 秒；page 一次一页，permalinkBatch 一次最多两个永久链接，页面总探测预算 15 秒。就绪立即继续，不固定等待、不增加重试循环。`tab.playwright` 是允许的受控扩展 DOM 门面，独立 Playwright 不允许。
+4. 工具调用上限 40 秒；page 一次一页，permalinkBatch 一次最多两个永久链接，页面总探测预算 15 秒。驱动等待账号头部文本和目标卡片脱离骨架态后抽取一次；仅出现时间链接不等于正文就绪。就绪立即继续，不固定等待、不增加重试循环。`tab.playwright` 是允许的受控扩展 DOM 门面，独立 Playwright 不允许。
 5. 首次 Chrome 明确 `browser_not_running`：仅一次项目 `start_managed_browser.ps1 -Browser chrome`，无 URL，等待规定 8 秒，重试一次创建标签。其他失败不重启 Chrome。
 6. Chrome 最终仅 `browser_not_running`、`extension_unavailable`、`login_unavailable` 可调用 `chrome-fallback-authorize`，输入 `{lease,account,reason}`。机器明确允许后才用 Edge；按项目规定只启动一次、等待 8 秒、创建一次新 Edge 标签。source 改为 `desktop_edge_extension`，fallbackReason 保留 Chrome 原因。已提交/采集后不跨浏览器混合事实。
 7. Edge 失败调用 `browser-failure`：`{lease,account,browser:"edge",reason:<Chrome原因>,state:<稳定状态>}`；状态为 `extension_disconnected` / `login_required` / `risk_challenge`。只有 Chrome 时 browser 为 chrome。账号不符走严格 login-state，账号必须来自实际观察。随后 finish；不改登录态，不触碰用户原有标签。
@@ -51,7 +51,7 @@
 - reset_analysis 不相关仅为 `{related:false}`。相关必须包含 `related:true,time_expression,reasoning,estimate_precision,possible_range_beijing,confidence`；confidence 仅 low/medium/high，estimate_precision 仅 exact/range_only。exact 另需 most_likely_beijing，range_only 必须省略该键。证据不足不给精确时刻；先中文翻译，再时间，再判断，公开帖不是账号额度重置的官方证明。
 - `isMediaOnly=true` 时不得猜测图片内容：reset_analysis 必须为 `{related:null,unassessed_reason:"media_only_not_inspected"}`，中文翻译、中文概述与完整分析三项都须明确包含“未读取媒体内容”；若为回复，ai_relevance 也只能为 null 并说明未读取媒体。图文有可信正文时不属于纯媒体。
 - 回复 ai_relevance 为 `{schema_version:"AiRelevanceV1",ai_related:true|false,reasoning:<依据>}`；无法判断用 `{schema_version:"AiRelevanceV1",ai_related:null,unassessed_reason:<稳定原因>}`。结合回复和直接父帖，AI 不等于额度相关；非 AI/未评估抑制并推进可信水位，不重分类历史。
-- 局部失败 `stream-failure`：`{lease,payload:{account,stream:"main"|"reply",stage,failure_code}}`，可附驱动 timings。若 collect/scan 已登记失败，不二次覆盖。
+- 局部失败 `stream-failure`：`{lease,payload:{account,stream:"main"|"reply",stage,failure_code}}`。浏览器已选择时，附 `browser:xMonCycle.source,driver_version:xMonDriver.version,timings:<本流有界耗时>`，机器核验其与本轮浏览器授权一致；记录这些诊断不代表采集成功。若 collect/scan 已登记失败，不二次覆盖。
 
 ## 最终回执
 
