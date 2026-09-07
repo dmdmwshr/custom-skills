@@ -1,51 +1,40 @@
-# heartbeat 与投递契约
+# 分流 heartbeat 与投递边界
 
-此契约适用于已绑定的唯一 Desktop 固定会话。它不授权创建任务、定时器、浏览器配置、飞书应用或新的发送者。
+## 不变量
 
-## 机器回执优先
+- SQLite 是正式账本；每轮 health、acquire 冻结账号和两个水位，不使用聊天历史或硬编码 ID。
+- 主帖与回复独立事务。每条流必须完整验证至自身 ID + UTC instant 可信锚；只回滚失败流。共同预检不通过，两流都不开工。运行中路由/身份故障停止后续工作，不撤销已经合法提交的结果。
+- 单个 20 分钟 lease，唯一 Desktop 固定会话和原 heartbeat；不建第二任务、cc-connect cron、Windows 任务或发送者。cc-connect outbound-only；入站 silent_drop。
+- 新入口 collect-stream / scan-stream 不接受假空 counterpart。旧双流 collect / scan 保留兼容，但不能混入分流周期绕过新门禁。
+- 历史记录不回填为新周期证据。已有 V2/V3 冻结内容、哈希、已抑制决定、未知投递永久保留，不重分类、不重发。
 
-- SQLite 是正式账本；当前启用账号、可信主帖/回复水位、失败事件与投递状态必须从本轮 `health`、`heartbeat-acquire` 和后续机器回执取得。不得把历史聊天、固定样例、网页文本或字符串时间比较当作水位事实。
-- 水位由状态 ID 与带时区 UTC 时间点共同组成。比较时解析为 UTC instant；同一 instant 的不同 RFC3339 小数精度等价。
-- 本轮 lease 有效期为 20 分钟。除 `health` 和 `heartbeat-acquire` 外，所有入口都使用该 lease 的 UTF-8 标准输入包络；失效、忙碌、缺步骤或未知结果均失败关闭。
+## 固定驱动与浏览器
 
-## 固定顺序
+driver 1.0.0 为业务项目固定源。正常轮次复用 CUA 会话中的普通 lexical 绑定；版本变化才加载，不使用 globalThis、内部 API、独立控制进程或 Playwright CLI。允许受控扩展标签的 tab.playwright 和 dom_cua。
 
-按下面的语义顺序执行，并在每个需续租节点重新取得成功回执：
+Chrome dmdmwshr 首选，仅三种实测失败 browser_not_running / extension_unavailable / login_unavailable 可在机器授权后降级 Edge。首次 Chrome 未运行只启动/重取一次；Edge 也只允许一次启动/连接；规定启动等待 8 秒保留。页面探测没有额外固定睡眠：15 秒页预算、两永久链接/调用、40 秒调用上限。结构、水位、父帖歧义不得换浏览器。
 
-`health → heartbeat-acquire → heartbeat-renew → publish-pending（预检）→ Chrome/Edge 采集 → collect → 受控分析 → scan → publish（由 heartbeat-finish 的机器两阶段处理）→ heartbeat-finish`
+只操作本轮创建的标签。不得读取、导出、填写密码、Cookie、令牌、存储、验证码；不保存 HTML、HAR、截图或采集正文文件，不碰既有标签。唯一直接父帖从主会话最小容器的完整相邻链取得；不能从整页平铺卡挑父。头像不算媒体；有可见文字的图文父帖允许，纯媒体不虚构原文。独立回复对象先核对后派生，不能先赋值再当验证。
 
-`publish-pending` 的预检不是发送成功，也不是周期完成。`heartbeat-finish` 是唯一完成入口：它处理最终受控投递、聚合冻结账号集合并产生最终通知决定。无论本轮在哪一步失败，都先以同轮可用 lease 执行收口；不能以 `NO_REPLY` 或普通聊天文本代替机器完成回执。
+## 分析与普通通知
 
-每个账号的主帖阶段、回复阶段、每五个永久链接详情核验之后以及 finish 前均需要续租。不得把 lease 累积延长、换用旧 lease 或在失败后并行补跑。
+模型仅处理 analysis-plan 返回的新内容。程序负责 raw V2 → enriched V3 字段与上下文转换和可见事实指纹。历史/水位证明项在内存使用明确“仅核验”占位，机器保证它们不能生成新事件；不回写原分析。缺少任一真正新条目的分析，scan-analysis 拒绝。
 
-## 浏览器路径
+主帖资格不变。回复和可信直接父帖合并判定广义 AI：模型、训练推理、AI 编程、智能体、AI 产品/API、算力、安全治理等；普通科技不自动算 AI。AiRelevanceV1 为 true/false/null；reset_analysis 独立回答 Codex 额度重置。额度相关必然 AI 相关，反向不成立。
 
-| 条件 | 唯一允许动作 | 不能做的事 |
-| --- | --- | --- |
-| Chrome 可用 | 用 `dmdmwshr` Chrome 的扩展新建本轮自己的 X 标签，验证登录后的双流结构，完成后关闭该标签。 | 不触碰原有标签，不导出浏览器状态。 |
-| 首次 Chrome 句柄为 `browser_not_running` | 仅一次无 URL 的 `start_managed_browser.ps1 -Browser chrome`，等待 8 秒，仅重取一次 Chrome 句柄。 | 不附加 URL、配置、调试端口或额外启动参数；其他 Chrome 错误不得重启。 |
-| Chrome 最终为 `browser_not_running`、`extension_unavailable` 或 `login_unavailable` | 仅先以本轮 lease 调用 `chrome-fallback-authorize`；机器明确授权后才可进入 Edge，一次路径。若 Edge 也为 `browser_not_running`，仅一次无 URL 的 Edge 启动/8 秒/重取。 | 不因结构歧义、水位未到、风控、V2 校验或已采集候选改用 Edge。 |
-| Edge 不可用或其他不可备用错误 | 用 `browser-failure` 登记终态，再由 `heartbeat-finish` 失败关闭。 | 不再重试、不开第三种浏览器、不生成平行提醒。 |
+AI 相关回复需要 latest_search_unique_adjacent_parent 或 latest_search_permalink_unique_parent 证据及父作者、父原文、父中文翻译、父链接；通知同时给回复原文/翻译/北京时间/链接及额度说明。无关额度明确“与 Codex 额度重置无直接关系”。AI 候选缺唯一直接父结构或父原文不能发送；仅媒体且无法判断保持 null、抑制入账，不编造。非 AI 和未评估回复仍去重、抑制并推进可信水位。
 
-Chrome 与 Edge 都只能操作本轮新建的标签。禁止 Playwright、Codex 内置浏览器、无头浏览器、第三种浏览器、专用 profile、密码/验证码处理，以及 Cookie、令牌、存储、HTML、截图和 HAR 的读取或保存。
+相对时间以源发布时间和作者时区线索推算北京时间 UTC+8，先翻译再解释依据、最可能时间、范围和置信度；证据不足不给精确时刻。长帖保留关键原文、完整中文概述与链接，完整分析仅保存在事件账本。
 
-## 采集、V3 分析和直接父帖
+## 投递与完成
 
-- 扩展只产生完整 `XCollectedTimelineV2` 可见事实；它保持不变。`collect` 只接受 UTF-8 标准输入，不能由参数、文件、网页正文或旁路浏览器结果替代。
-- 先到达动态双流可信水位，再按解析 UTC 与状态数值从旧到新交给 `scan`。分析产物必须是 `XMonitorScanInputV3`，不得以 V2 输入降级或绕过新判断；也不得写入目标账号、当前状态 ID、历史正文或固定顺序。
-- `reset_analysis` 只回答更窄的 Codex 额度重置问题；`AiRelevanceV1` 独立回答外部回复及其已验证直接父帖是否属于广义 AI 话题。它固定使用 `ai_related=true`、`ai_related=false` 或 `ai_related=null`/未评估三态。`reset_analysis.related=true` 必须同时为 `ai_related=true`，但 AI 相关不等于与额度重置直接相关。
-- 评估回复与父帖的合并语境，而不是孤立匹配回复文字。广义 AI 主题包括模型、推理、训练、代理、生成式内容、AI 编程/开发者工具、部署、评测、安全、政策与生态；仅仅没有提到额度重置不能判为非 AI。
-- 外部回复的普通投递资格严格为：`ai_related=true`、`latest_search_unique_adjacent_parent` 或 `latest_search_permalink_unique_parent`，以及完整唯一直接父帖结构。不得把 `reset_analysis.related` 当作投递门槛。
-- 准备普通投递的 `ai_related=true` 回复，其直接父帖必须是回复对象自身的顶层可见作者正文；投递正文必须单列父作者、父帖可见原文、父帖中文翻译和规范永久链接。通知同时带额度区块；当 `reset_analysis.related=false` 时，该区块明确写为“与 Codex 额度重置：无直接关联”。对这类可投递回复，媒体占位、引用帖、祖先帖、空正文、非相邻父项或任一 raw/enriched 不一致都是 `ai_reply_parent_structure_required` 级别的失败关闭。父帖稳定身份可信但正文缺失或仅媒体、因而无法完成 AI 判断的回复必须保持 `ai_related=null` 并进入已处理/已抑制路径，不能伪造父正文或创建普通投递。
-- `ai_related=false` 的非 AI 回复与 `ai_related=null`/未评估回复必须写入已处理/已抑制和不可变分析结论，不创建普通投递、不外送、也不在后续扫描中再次翻译或分析。既有历史事件保持冻结，不能由新规则自动重分类。`visible_reply_marker` 只能用于此类抑制，不能生成 AI 相关回复投递。
+- 唯一原 direct_feishu 通道；scan 只创建幂等意图。开始时和 finish 内有限 GET 对账，不能无限轮询。
+- 已登记、transport_accepted、可见送达已核验是不同证据等级。状态接口没有可信可见凭据时，哪怕返回 delivered 字样也不能升格；保持未核实。
+- 旧 intent_registered 对账只追加可靠证据，绝不重新提交。历史未知单列；本轮关联意图未知则 REPORT、重置健康连续计数。
+- heartbeat-finish 是唯一完成/释放入口；分流协议必须两阶段。XMonitorHeartbeatFinalizeV2：全部双流成功且最终投递处理确定才 completed；部分扫描成功为 partial_failed；无可信完整流/共同预检故障为 failed_closed。只有 heartbeat_complete=true、completed、notification_decision=DONT_NOTIFY 可静默。
+- 首次、持续 24 小时、恢复提醒由 SQLite 去重，并显示受影响流；登录提醒不再叠加通用提醒。中枢不可用时保留安全意图，恢复合并一次，不补刷失败历史。
+- 每 4 次完整且零可推送的**定时**周期生成唯一 x_heartbeat_no_new_summary。非 AI 回复不打断；手动不累计；失败、部分成功、锁冲突、本轮投递未知或任何新可推送内容清零。未知摘要不重发，下一组用新单调序号。只有最终机器允许时 Codex 输出 DONT_NOTIFY。
 
-## 投递、提醒和静默
+## 验证
 
-- 投递意图经 SQLite 幂等键与受控 cc-connect 一对一直送处理；`transport_accepted`、未知或无回执都不等于送达，且未知状态绝不自动重发。
-- 双浏览器失败属于同一连续失败事件：机器账本只在首次创建提醒意图，持续未恢复满 24 小时至多再创建一个，恢复后至多一个恢复提醒。不要自行发送、复制正文或创建第二条失败流。
-- 只有 `heartbeat-finish` 机器回执同时证明周期完整、投递确定且 `notification_decision=DONT_NOTIFY` 时，才可静默。其他任何状态都需要脱敏失败结果。
-- “每 4 个已完成且零可通知周期”的机器计数以 `notifiable_count=0` 为准，而不是没有新 X 状态。被抑制/已处理的非 AI 或无法判断回复不会重置计数，且机器健康摘要必须报告其忽略数量。第 4、8、12……轮由 SQLite 分配不可复用的摘要序号，生成 `x_heartbeat_no_new_summary`，仅在 `heartbeat-finish` 第二阶段经同一飞书直送；摘要未知不重发，下一组使用新序号。Codex 自动化在完整成功时始终返回 `DONT_NOTIFY`，不得自行推算、补发或另行显示摘要正文。
-
-## 调试与验证
-
-先做只读健康和本地契约验证。业务实现测试只能使用 fixture、mock 或临时 SQLite，不访问真实 X、不使用真实浏览器登录态、也不发送飞书。项目规则和机器回执与本参考冲突时，以更严格的当前项目规则为准。
+必须运行实际业务驱动的合成 DOM/模拟标签测试、临时数据库分流事务/回执/四轮测试，而不只检查 Skill 包含某句话。离线不得访问 X 或发送飞书。保持运行态暂停直到原固定任务完成真实验收；主帖通过但回复失败，可按已授权方案明确以“回复降级”恢复同一 heartbeat。

@@ -1,7 +1,7 @@
 interface:
   display_name: "X 消息监控"
-  short_description: "唯一 Desktop 固定会话的 X 消息监控、账本与安全投递收口"
-  default_prompt: "$x-message-monitoring 在唯一 Desktop 固定会话内按受控 heartbeat 完成 X 消息采集、分析、账本与投递收口。"
+  short_description: "固定驱动、主帖回复独立入账、飞书真实回执与四轮健康证明"
+  default_prompt: "$x-message-monitoring 在原固定任务使用版本化驱动，按主帖→回复独立提交，仅分析新内容，最后由 heartbeat-finish 判定。"
 
 policy:
   allow_implicit_invocation: true
