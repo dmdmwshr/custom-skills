@@ -26,6 +26,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("partial_failed",fast)
         self.assertIn("-filter:replies -filter:retweets",fast)
         self.assertIn("media_only_not_inspected",fast)
+        for step in ("--input-framing chunks","XMonitorInputReadyV1","echo_disabled=true","write_stdin","Array.from"):
+            self.assertIn(step,fast)
         driver=BUSINESS/"scripts/desktop_monitor_driver.js"
         if driver.is_file():
             version=re.search(r"const version = '([0-9.]+)'",driver.read_text(encoding="utf-8")).group(1)

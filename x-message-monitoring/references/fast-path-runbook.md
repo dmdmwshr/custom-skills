@@ -6,7 +6,7 @@
 
 - 命令工作目录：`C:\Users\12070\Desktop\项目开发\cc-connect-operations\projects\x-monitor\notifications`。
 - 业务目录：`C:\Users\12070\Desktop\项目开发\X监控`；解释器 `.venv\Scripts\python.exe`；入口 `scripts\fixed_session_entry.py`；数据仅在业务 `data`。
-- 全部命令通过 UTF-8 对象序列化后标准输入，禁止正文/凭据出现在参数、普通日志或临时脚本中。PowerShell 输入输出均设 `[Text.UTF8Encoding]::new($false)`；不要手拼 JSON。
+- 全部命令通过 UTF-8 对象序列化后标准输入，禁止正文/凭据出现在进程参数、普通日志或临时脚本中。公开帖的结构化工具返回值是授权事实载荷，允许进入模型上下文与当前 functions 内存供验证/分析，不能把它误当凭据或禁止的普通日志。PowerShell 输入输出均设 `[Text.UTF8Encoding]::new($false)`；不要手拼 JSON。
 - CUA 状态只用 `let xMonDriver`、`let xMonTab`、`let xMonCycle`、`let xMonRaw`；各变量第一次使用必须声明，已经存在时只赋值，不能遗漏初始化或重复声明。本轮 lease 来自一次 acquire；不能复制旧值。工具会话重置时不接续旧浏览器句柄，登记失败并 finish。
 
 ## 按表执行，失败不探索
@@ -45,6 +45,16 @@
 驱动以独立 `User-Name` 加 `tweetText` 的嵌入链接块识别当前 X 引用结构；其文字不属于外层作者正文。遇到其他多正文形态仍报告明确错误，不现场挑选第一段或改写驱动。
 
 ## 本地载荷：程序机械组装
+
+### 浏览器到本地入口的固定交接（无需桥接）
+
+1. `nodeRepl.write(xMonRaw)` 返回本流结构化公开事实。不是 HTML，也不写文件；模型此时只搬运事实，不翻译历史状态。将该原样对象与本轮 lease 放入 `functions.store("x-monitor-current", {lease,payload:<该对象>})`，只放一个账号的一条流。
+2. 准备好内存对象后，以 `exec_command` 的 `tty:true` 启动同一项目解释器和固定入口：`--input-framing chunks collect-stream --input -`；命令只有固定路径/动作，不含正文。先等到 `XMonitorInputReadyV1` 且 `echo_disabled=true`；没有这条回执不发送数据。不要使用默认无 TTY 管道，它会立即关闭 stdin。
+3. 在 functions 中以 `JSON.stringify(load("x-monitor-current"))` 得到帧内容，用 `Array.from` 按每 800 个字符分块；发送格式为第一行 `XMONITOR-JSON-CHUNKS/1`，随后每块一行、行首加 `+`，最后独立一行 `.`。通过原进程的 `write_stdin(session_id,chars)` 输入，一次发完。入口在读取前关闭输入回显，180 秒超时自动退出；输入正文不会回显到终端输出。
+4. 同一方式调用 `analysis-plan`，直接复用同一个 functions 内存对象。它返回机器验证后的 analysis_items；只分析这些新项。随后 `scan-analysis` 输入对象为 `{lease,payload:{collected:load("x-monitor-current").payload,analyses:<新项分析>}}`，不重复手工转写 raw。
+5. 每次入口读取一帧后就退出。只认最终业务回执；InputReady 不代表 collect 或 scan 成功。切换流/finish 后将 `x-monitor-current` 清空，不落盘，不另建常驻程序，不使用独立 Playwright 或内部浏览器接口。
+
+此通路使用现成终端工具的标准输入，不是新增网络桥接。正文禁入命令参数/日志的约束不禁止上述受控事实工具输出与 stdin；不得再以“没有无正文通路”为由跳过已通过浏览器验证的主帖。
 
 - `collect-stream`：`{lease,payload:xMonRaw}`。xMonRaw 为 XCollectedStreamV1：仅本流的 V2 可见事实和驱动耗时；不存在另一条流，不伪造空流。
 - `analysis-plan`：同一 `{lease,payload:xMonRaw}`。只分析 analysis_items，ID 恰好对应 new_status_ids；空列表直接提交空 analyses。不要翻译锚点或历史事件。
