@@ -1,4 +1,4 @@
-# 固定快速路径（分流协议 1 / 驱动 1.3.0）
+# 固定快速路径（分流协议 1 / 驱动 1.3.1）
 
 这是操作清单，不是让模型重写采集器的伪代码。真实扫描仅在唯一固定任务完成；初始化和验收仍留在该任务。
 
@@ -34,7 +34,7 @@
 
 ## 驱动调用
 
-每个 ok=false 直接使用返回 failure_code 和 stage，不现场改代码修载荷。导航、主列、目标、成员、父帖、水位分开记录。
+每个 ok=false 直接使用返回 failure_code 和 stage，不现场改代码修载荷。导航、主列、目标、成员、父帖、水位分开记录。当前 Unified CUA 使用 `Tab.scroll([x,y],"down",pages)`，坐标及页数由已读取的主列几何计算；导航/滚动后 `getAXState({emit:false})` 刷新观察，再读取 DOM。不要调用另一套旧接口的 `tab.dom_cua`。驱动已固化这些步骤，不在轮次中探索 API。
 
 1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次 `page(...,"main",true)`。完成后 `xMonRaw=xMonDriver.rawStream(xMonCycle,"main")`，立即提交 main。
 2. `await xMonDriver.replyGate(xMonTab,xMonCycle)`；只有 action=repeat_gate_once 才再调用一次。驱动限定零页或无标记且旧二元组不成立两种整流切换条件，不混合旧/新证据。
@@ -72,4 +72,5 @@ XMonitorHeartbeatFinalizeV2.streams 是逐账号逐流证据；scan_complete 仅
 - heartbeat_complete=true、outcome=completed 且 notification_decision=DONT_NOTIFY：精确输出 `DONT_NOTIFY`。
 - outcome=partial_failed：中文说明“主帖正常，回复降级”或反向，附失败阶段，不声称全部恢复。
 - REPORT、锁冲突、finish 缺失/不可解析：简短中文故障。历史冻结未知单列，本轮未知不能静默。
+- 手动验收必须给出本轮主帖/回复结果、零重复计数与送达证据等级；不能返回历史 `NO_REPLY`。失败轮次即使飞书提醒被 24 小时抑制，Codex 仍报告故障。
 - 四轮摘要只计完整、零可推送的定时运行，手动不计。登记/传输接受不代表可见送达，未知不重发。缺可见性证据时明确“送达未验证”。

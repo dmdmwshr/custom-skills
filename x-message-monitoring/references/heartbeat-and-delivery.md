@@ -10,7 +10,7 @@
 
 ## 固定驱动与浏览器
 
-driver 1.3.0 为业务项目固定源。命中水位立即停止、下一页等待新状态，不搬运水位后的旧卡片。主帖固定核验非回复/非转发 Latest 搜索，不把主页会话展示重排成时间线；嵌入链接块的独立作者文字不混入外层作者正文。正文/账号就绪后仅抽取一次，失败同样记录浏览器、版本和有界耗时。正常轮次复用 CUA 会话中的普通 lexical 绑定；版本变化才加载，不使用 globalThis、内部 API、独立控制进程或 Playwright CLI。允许受控扩展标签的 tab.playwright 和 dom_cua。
+driver 1.3.1 为业务项目固定源。命中水位立即停止、下一页等待新状态，不搬运水位后的旧卡片。主帖固定核验非回复/非转发 Latest 搜索，不把主页会话展示重排成时间线；嵌入链接块的独立作者文字不混入外层作者正文。正文/账号就绪后仅抽取一次，失败同样记录浏览器、版本和有界耗时。正常轮次复用 CUA 会话中的普通 lexical 绑定；版本变化才加载，不使用 globalThis、内部 API、独立控制进程或 Playwright CLI。允许受控扩展标签的 tab.playwright；UI 动作使用当前 Unified CUA 的 Tab.scroll([x,y],direction,pages) 和 getAXState，不混入旧 Browser API 的 dom_cua。合成 Tab 必须与当前工具实际返回的接口一致。
 
 Chrome dmdmwshr 首选，仅三种实测失败 browser_not_running / extension_unavailable / login_unavailable 可在机器授权后降级 Edge。首次 Chrome 未运行只启动/重取一次；Edge 也只允许一次启动/连接；规定启动等待 8 秒保留。页面探测没有额外固定睡眠：15 秒页预算、两永久链接/调用、40 秒调用上限。结构、水位、父帖歧义不得换浏览器。
 
