@@ -24,6 +24,8 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn(entry,fast)
         self.assertIn("manual_validation",fast)
         self.assertIn("partial_failed",fast)
+        self.assertIn("-filter:replies -filter:retweets",fast)
+        self.assertIn("media_only_not_inspected",fast)
         self.assertIn("15 秒",fast)
         self.assertIn("40 秒",fast)
         self.assertIn("$x-message-monitoring",(ROOT/"agents/openai.yaml").read_text(encoding="utf-8"))

@@ -1,4 +1,4 @@
-# 固定快速路径（分流协议 1 / 驱动 1.0.0）
+# 固定快速路径（分流协议 1 / 驱动 1.1.0）
 
 这是操作清单，不是让模型重写采集器的伪代码。真实扫描仅在唯一固定任务完成；初始化和验收仍留在该任务。
 
@@ -24,8 +24,8 @@
 
 ## 浏览器：固定源加载，不生成新驱动
 
-1. 第一次 CUA 调用仅执行 `let xMonTab = await cua.createBrowserTab("chrome", url, {sessionName:"🌐 X监控"})`；url 为本轮账号主页。读取工具返回的文档和初始状态。
-2. 驱动未加载或版本变化时，完整读取业务 `scripts/desktop_monitor_driver.js` 原文，将**原样工厂表达式**绑定为 `let xMonDriver = <原样表达式>`。它只接收受支持的标签句柄。不能导入内部模块、执行独立 Playwright、使用 `globalThis`、自行 eval/桥接或重写 selector。新轮次只创建 cycle，不重复生成 2 万多字符代码。
+1. 第一次 CUA 调用仅执行 `let xMonTab = await cua.createBrowserTab("chrome", url, {sessionName:"🌐 X监控"})`；url 为 `https://x.com/search?q=` 加 `encodeURIComponent("from:"+account+" -filter:replies -filter:retweets")` 加 `&f=live`。读取工具返回的文档和初始状态。驱动核验准确查询和 Latest 选项；不要读取或排序主页卡片来替代主帖搜索。
+2. 驱动未加载或版本变化时，完整读取业务 `scripts/desktop_monitor_driver.js` 原文，将**原样工厂表达式**绑定为 `let xMonDriver = <原样表达式>`；变量已存在时只赋值 `xMonDriver = <原样表达式>`，不重复声明。它只接收受支持的标签句柄。不能导入内部模块、执行独立 Playwright、使用 `globalThis`、自行 eval/桥接或重写 selector。新轮次只创建 cycle，不重复生成 2 万多字符代码。
 3. `xMonCycle = xMonDriver.createCycle({account, authenticatedAccount:"dmdmws", source:"desktop_chrome_extension", fallbackReason:null, watermarks, sourceTimezone})`。参数来自本轮配置。设 `xMonCycle.ownTab=xMonTab`、`xMonCycle.lastUrl=url`，避免再次导航创建时的同一地址。
 4. 工具调用上限 40 秒；page 一次一页，permalinkBatch 一次最多两个永久链接，页面总探测预算 15 秒。就绪立即继续，不固定等待、不增加重试循环。`tab.playwright` 是允许的受控扩展 DOM 门面，独立 Playwright 不允许。
 5. 首次 Chrome 明确 `browser_not_running`：仅一次项目 `start_managed_browser.ps1 -Browser chrome`，无 URL，等待规定 8 秒，重试一次创建标签。其他失败不重启 Chrome。
@@ -48,7 +48,8 @@
 - `analysis-plan`：同一 `{lease,payload:xMonRaw}`。只分析 analysis_items，ID 恰好对应 new_status_ids；空列表直接提交空 analyses。不要翻译锚点或历史事件。
 - `scan-analysis`：`{lease,payload:{collected:xMonRaw,analyses:{<新状态ID>:<分析对象>}}}`。程序转换 raw 字段、父帖上下文、索引及指纹，形成严格 XMonitorScanInputV3 并调用 scan-stream；模型不生成映射代码。
 - 分析对象必需 chinese_translation、chinese_summary、full_analysis、reset_analysis；回复另需 ai_relevance，AI 相关回复另需 reply_parent_chinese_translation。不能覆盖可见事实。
-- reset_analysis 不相关为 `{related:false}`。相关时按既有契约解释原文相对时间、北京时间、范围和置信度；证据不足不给精确时刻。先中文翻译，再时间，再判断；公开帖不是账号额度重置的官方证明。
+- reset_analysis 不相关仅为 `{related:false}`。相关必须包含 `related:true,time_expression,reasoning,estimate_precision,possible_range_beijing,confidence`；confidence 仅 low/medium/high，estimate_precision 仅 exact/range_only。exact 另需 most_likely_beijing，range_only 必须省略该键。证据不足不给精确时刻；先中文翻译，再时间，再判断，公开帖不是账号额度重置的官方证明。
+- `isMediaOnly=true` 时不得猜测图片内容：reset_analysis 必须为 `{related:null,unassessed_reason:"media_only_not_inspected"}`，中文翻译、中文概述与完整分析三项都须明确包含“未读取媒体内容”；若为回复，ai_relevance 也只能为 null 并说明未读取媒体。图文有可信正文时不属于纯媒体。
 - 回复 ai_relevance 为 `{schema_version:"AiRelevanceV1",ai_related:true|false,reasoning:<依据>}`；无法判断用 `{schema_version:"AiRelevanceV1",ai_related:null,unassessed_reason:<稳定原因>}`。结合回复和直接父帖，AI 不等于额度相关；非 AI/未评估抑制并推进可信水位，不重分类历史。
 - 局部失败 `stream-failure`：`{lease,payload:{account,stream:"main"|"reply",stage,failure_code}}`，可附驱动 timings。若 collect/scan 已登记失败，不二次覆盖。
 
