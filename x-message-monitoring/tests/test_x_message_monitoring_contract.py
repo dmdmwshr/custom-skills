@@ -20,7 +20,7 @@ class SkillContractTests(unittest.TestCase):
         documents="\n".join(p.read_text(encoding="utf-8") for p in ROOT.rglob("*.md"))
         self.assertNotRegex(documents,r"globalThis\.\w+\s*=")
         fast=(ROOT/"references/fast-path-runbook.md").read_text(encoding="utf-8")
-        for entry in ("collect-stream","reply-context-plan","cycle-failure","analysis-plan","scan-analysis","stream-failure","heartbeat-finish","sync-receipts"):
+        for entry in ("collect-stream","context-plan","reply-context-plan","quoteBatch","cycle-failure","analysis-plan","scan-analysis","stream-failure","heartbeat-finish","sync-receipts"):
             self.assertIn(entry,fast)
         self.assertIn("manual_validation",fast)
         self.assertIn("partial_failed",fast)
@@ -34,6 +34,9 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn("驱动 "+version,fast)
         self.assertIn("15 秒",fast)
         self.assertIn("40 秒",fast)
+        contract=(ROOT/"references/reply-reset-contract.md").read_text(encoding="utf-8")
+        for field in ("ResetAnalysisV3","XReplyContextV2","XQuoteContextV1","FrozenXMessageV5","subject_product","quote_context_chinese_translations","codex_reset_all_streams_quote_context_v1"):
+            self.assertIn(field,contract)
         self.assertIn("$x-message-monitoring",(ROOT/"agents/openai.yaml").read_text(encoding="utf-8"))
 
     def test_production_driver_behavior_not_just_document_phrases(self):
@@ -48,7 +51,7 @@ class SkillContractTests(unittest.TestCase):
         python=BUSINESS/".venv/Scripts/python.exe"
         if not python.is_file():
             self.skipTest("business test environment unavailable")
-        for pattern in ("test_independent_streams.py","test_receipt_sync.py","test_reply_reset_policy.py"):
+        for pattern in ("test_independent_streams.py","test_receipt_sync.py","test_reply_reset_policy.py","test_reset_quote_policy.py"):
             result=subprocess.run([str(python),"-m","unittest","discover","-s","tests","-p",pattern,"-q"],
                 cwd=BUSINESS,capture_output=True,text=True,encoding="utf-8",timeout=30,env={**os.environ,"PYTHONIOENCODING":"utf-8"})
             self.assertEqual(0,result.returncode,result.stdout+result.stderr)

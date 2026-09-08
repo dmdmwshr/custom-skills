@@ -1,4 +1,4 @@
-# 固定快速路径（分流协议 1 / 驱动 2.0.1）
+# 固定快速路径（分流协议 1 / 驱动 3.0.0）
 
 这是操作清单，不是让模型重写采集器的伪代码。真实扫描仅在唯一固定任务完成；初始化和验收仍留在该任务。
 
@@ -16,8 +16,8 @@
 | 1 | `health` → `heartbeat-acquire --stream-protocol independent` | 无有效锁才继续；定时默认 scheduled，手动显式 `--trigger-kind manual_validation`。账号来自 acquire，水位来自本轮 health。 |
 | 2 | `publish-pending` 预检；`sync-receipts` 对账一次 | 都用 `{lease}`。预检不通过，两流不开工。历史未知单列，不永久阻塞新扫描。 |
 | 3 | 创建本轮 Chrome 标签，加载/复用驱动 | 登录控件与 X 账号必须为 `@dmdmws`，不从配置或存储猜测。 |
-| 4 | 主帖 `page` → `rawStream(main)` → `collect-stream` → `analysis-plan` → `scan-analysis` → `publish-pending` | 只处理 main；局部失败登记 `stream-failure`，仍可继续 reply。 |
-| 5 | 回复 `page(search)` → `permalinkBatch` → `draftStream` → `reply-context-plan` → 必要的 `contextBatch` → 一次 `rawStream(reply)` → collect/analysis-plan/scan-analysis → `publish-pending` | 仅新回复补上文、只推送额度相关；回复失败保留旧水位和已提交主帖。 |
+| 4 | 主帖 `page` → `draftStream(main)` → `context-plan` → `applyContextPlan` → `quoteBatch(main)` → 一次 `rawStream(main)` → collect/analysis-plan/scan-analysis → `publish-pending` | 仅新主帖补引用、只推送 Codex 额度重置相关；局部失败登记 stream-failure，仍可继续 reply。 |
+| 5 | 回复 `page(search)` → `permalinkBatch` → `draftStream(reply)` → `context-plan` → `applyContextPlan` → 必要的 `contextBatch` 与 `quoteBatch(reply)` → 一次 `rawStream(reply)` → collect/analysis-plan/scan-analysis → `publish-pending` | 仅新回复补上文/引用、只推送 Codex 额度重置相关；失败保留旧水位和已提交主帖。 |
 | 6 | 关闭本轮标签；同一 lease 调用 `heartbeat-finish` | 机器两阶段处理最终投递、回执并释放锁。缺失/不可解析必须报告，不能 catch 后静默。 |
 
 20 分钟为整轮上限，不无限续租。每流最多 200 条，须到 ID 与 UTC instant 同时匹配的水位；`Z`、`.000Z` 等价。命中水位后立即停止该流的卡片读取，不携带更旧卡片。下一页滚到本次已观察边界，并在同一 15 秒预算内等待至少一张新状态；不能仅滚动少量像素就把仍显示旧卡片误当时间线结束。超过条数/时限不重置、不跳过历史。各流内部旧到新，跨流按提交完成顺序登记。
@@ -34,17 +34,17 @@
 
 ## 驱动调用
 
-每次加载前，在业务源码目录用 Node 的 fs 读取固定驱动文件，并用 vm.runInNewContext 仅实例化无浏览器副作用的原样工厂，打印 `{version,source_fingerprint:driver.sourceFingerprint()}` 作为预期值。这是离线源码核对，不建立浏览器或控制进程。CUA 原样加载后打印相同元数据并比较算法、长度、摘要；通过后才调用驱动采集。FNV 指纹仅检测意外转写变化，不是安全签名或页面证据。2.0.1 在搜索或详情初次快照没有目标时，共享十五秒预算内刷新一次 AX 再等待；失败之后不导航或采集重试，也不固定延长等待。
+每次加载前，在业务源码目录用 Node 的 fs 读取固定驱动文件，并用 vm.runInNewContext 仅实例化无浏览器副作用的原样工厂，打印 `{version,source_fingerprint:driver.sourceFingerprint()}` 作为预期值。这是离线源码核对，不建立浏览器或控制进程。CUA 原样加载后打印相同元数据并比较算法、长度、摘要；通过后才调用驱动采集。FNV 指纹仅检测意外转写变化，不是安全签名或页面证据。3.0.0 保留搜索或详情初次快照没有目标时的共享十五秒预算、一次 AX 刷新及就绪等待，并增加两流新项引用补读；失败之后不导航或采集重试，也不固定延长等待。
 
 每个 ok=false 直接使用返回 failure_code 和 stage，不现场改代码修载荷。导航、主列、目标、成员、父帖、水位分开记录。当前 Unified CUA 使用 `Tab.scroll([x,y],"down",pages)`，坐标及页数由已读取的主列几何计算；导航/滚动后 `getAXState({emit:false})` 刷新观察，再读取 DOM。不要调用另一套旧接口的 `tab.dom_cua`。驱动已固化这些步骤，不在轮次中探索 API。
 
-1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次 `page(...,"main",true)`。`action=main_permalink_details` 表示发现已冻结，后续同一 page 调用自动核验最多两条主帖全文，不再滚动搜索。驱动只对作者自己的可见“显示更多”补读规范原帖；必要时点击已核验目标唯一展开控件并在同一 15 秒预算内重读。身份、UTC、引用/媒体标志与预览前缀必须一致；仍截断不能分析或入账，不能现场省略完整性检查。仅 done=true 后 `xMonRaw=xMonDriver.rawStream(xMonCycle,"main")`，立即提交 main。
+1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次 `page(...,"main",true)`。`action=main_permalink_details` 表示发现已冻结，后续同一 page 调用自动核验最多两条主帖全文，不再滚动搜索。驱动只对作者自己的可见“显示更多”补读规范原帖；必要时点击已核验目标唯一展开控件并在同一 15 秒预算内重读。身份、UTC、引用/媒体标志与预览前缀必须一致；仍截断不能分析或入账。done=true 后按上下文契约执行 draftStream(main) → 只读 context-plan → applyContextPlan → quoteBatch(main) 至 done=true，再一次 rawStream(main) 并原样提交。
 2. 新回复直接进入下一项 Latest 搜索，不访问 with_replies，不调用旧回复主页前置步骤。
 3. `page(...,"search")`，未到水位才 `page(...,"search",true)`。搜索冻结后 `observation-fingerprint` 输入 `{lease,payload:xMonCycle.search.map(i=>i.statusId)}`，取机器 fingerprint。
 4. `await xMonDriver.permalinkBatch(xMonTab,xMonCycle,fingerprint)`，每次最多两条，仅 ok=true,done=false 继续下一批。完整唯一主会话链、相邻父帖和独立回复对象由驱动核验。文本加图片父帖可读，头像不是帖子媒体；纯媒体不编造文字。
-5. 先完整读取 [回复上下文与额度契约](reply-reset-contract.md)，执行 draftStream → 只读 reply-context-plan → applyContextPlan，仅新项必要时 contextBatch（至多三层，够用即停）。最后一次 `xMonRaw=xMonDriver.rawStream(xMonCycle,"reply")`，原样 collect-stream，不再更改时间或事实，不保存采集正文文件。
+5. 两流开始前完整读取 [上下文、引用与额度契约](reply-reset-contract.md)。回复执行 draftStream(reply) → 只读 context-plan → applyContextPlan，仅新项必要时 contextBatch（至多三层，够用即停）；quoteBatch(reply) 补直接一层引用至 done=true，每条最多五个来源归属，同轮复用。最后一次 rawStream(reply)，原样 collect-stream。reply-context-plan 保留兼容；不更改冻结事实、不保存正文文件。
 
-驱动以独立 `User-Name` 加 `tweetText` 的嵌入链接块识别当前 X 引用结构；其文字不属于外层作者正文。遇到其他多正文形态仍报告明确错误，不现场挑选第一段或改写驱动。
+驱动以独立 User-Name 加 tweetText 或真实帖子媒体的嵌入链接块识别引用；其文字不属于外层作者正文。顶层回复、直接对象和上文允许含引用，内嵌引用不能冒充直接对象。引用卡不含链接时只点击该外层对象内唯一已核验引用块，核对实际跳转；不猜 ID、不递归引用中的引用。明确删除/不可用记录事实；结构、身份、截断和超时仍失败关闭。
 
 ## 本地载荷：程序机械组装
 
@@ -61,9 +61,9 @@
 - `collect-stream`：`{lease,payload:xMonRaw}`。xMonRaw 为 XCollectedStreamV1：仅本流的 V2 可见事实和驱动耗时；不存在另一条流，不伪造空流。
 - `analysis-plan`：同一 `{lease,payload:xMonRaw}`。只分析 analysis_items，ID 恰好对应 new_status_ids；空列表直接提交空 analyses。不要翻译锚点或历史事件。
 - `scan-analysis`：`{lease,payload:{collected:xMonRaw,analyses:{<新状态ID>:<分析对象>}}}`。程序转换 raw 字段、父帖上下文、索引及指纹，形成严格 XMonitorScanInputV3 并调用 scan-stream；模型不生成映射代码。
-- 分析对象必需 chinese_translation、chinese_summary、full_analysis、reset_analysis。新回复必须用 ResetAnalysisV2，按回复契约携带来源 ID、相关/无关/无法判断；AI 判断只作辅助。只有额度相关回复通知，候选需父中文翻译，采用上文时补对应中文翻译。不能覆盖可见事实。
-- 主帖 reset_analysis 沿用旧结构：无关 `{related:false}`；相关携带时间表达、reasoning、estimate_precision=exact/range_only、possible_range_beijing、confidence，exact 另需 most_likely_beijing。新回复还允许 no_time，明确未提供可推算时间；两者不能互相替代。公开帖子不是账户已经重置的证据。
-- `isMediaOnly=true` 时不猜图片内容：主帖 reset 为 `{related:null,unassessed_reason:"media_only_not_inspected"}`；新回复按 ResetAnalysisV2 共同字段加同一原因。翻译、摘要、完整分析都包含“未读取媒体内容”；回复 AI 也为 null。图文有可信正文时不属于纯媒体。
+- 分析对象必需 chinese_translation、chinese_summary、full_analysis、reset_analysis。两流新项统一 ResetAnalysisV3，subject_product=codex/other/unknown，相关/无关/无法判断及 evidence_status_ids 按上下文契约提交。只有 Codex 额度重置相关内容通知；回复 AI 判断只作辅助，候选需父翻译，采用上文/引用需对应翻译，不覆盖可见事实。
+- 两流共同支持 exact/range_only/no_time。时间锚指向确实包含时间表达的采用来源；引用原文独立标注作者、翻译、发布时间和链接，不变成外层作者承诺。相关但无时间明确“未提供可推算时间”。仅讨论 Grok 等产品的重置不通知；公开帖子不是本账户已经重置的证据。
+- isMediaOnly=true 时不猜媒体内容：两流 ResetAnalysisV3 的 related=null、unassessed_reason=media_only_not_inspected，并携带其余共同字段。翻译、摘要、完整分析都包含“未读取媒体内容”；回复 AI 也为 null。引用不可读取按契约判断其余可信内容，不能用语义不足掩盖结构失败。
 - AI 字段 true/false 携带 reasoning，null 携带 unassessed_reason。额度相关必然 AI 相关，AI 相关不一定额度相关。新回复无关/无法判断分别抑制并推进可信水位，不重分类历史。
 - 局部失败 `stream-failure`：`{lease,payload:{account,stream:"main"|"reply",stage,failure_code}}`。浏览器已选择时，附 `browser:xMonCycle.source,driver_version:xMonDriver.version,timings:<本流有界耗时>`，机器核验其与本轮浏览器授权一致；记录这些诊断不代表采集成功。若 collect/scan 已登记失败，不二次覆盖。
 - 后续投递/回执/标签关闭/收口故障用 `cycle-failure` 追加。同一轮汇总所有受影响阶段并保留首错；不要因流已提交或已经失败而丢掉后续异常。首发/实质变化/满二十四小时一次/完整恢复一次由账本去重，每轮异常仍在原任务报告。
@@ -76,4 +76,4 @@ XMonitorHeartbeatFinalizeV2.streams 是逐账号逐流证据；scan_complete 仅
 - outcome=partial_failed：中文说明“主帖正常，回复降级”或反向，附失败阶段，不声称全部恢复。
 - REPORT、锁冲突、finish 缺失/不可解析：简短中文故障。历史冻结未知单列，本轮未知不能静默。
 - 手动验收必须给出本轮主帖/回复结果、零重复计数与送达证据等级；不能返回历史 `NO_REPLY`。失败轮次即使飞书提醒被 24 小时抑制，Codex 仍报告故障。
-- 四轮摘要只计完整、零可推送的定时运行，手动不计。登记/传输接受不代表可见送达，未知不重发。缺可见性证据时明确“送达未验证”。
+- 四轮摘要从新策略生效后重新累计完整、零可推送的定时运行，主帖/回复无关与无法判断分别计数，手动不计。登记/传输接受不代表可见送达，未知不重发。缺可见性证据时明确“送达未验证”。

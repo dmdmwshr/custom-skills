@@ -1,7 +1,7 @@
 interface:
   display_name: "X 消息监控"
-  short_description: "固定驱动、可信回复上下文、额度筛选、分阶段异常与飞书回执"
-  default_prompt: "$x-message-monitoring 在原固定任务使用版本化驱动，主帖独立提交；回复先只读去重并按需补上文，仅额度重置相关新回复通知，最后由 heartbeat-finish 汇总判定。"
+  short_description: "固定驱动、可信上下文与引用、两流额度筛选、异常与飞书回执"
+  default_prompt: "$x-message-monitoring 在原固定任务使用版本化驱动，两流先只读去重、补必要上下文和一层引用后分别冻结提交；仅 Codex 额度重置相关新主帖或回复通知，最后由 heartbeat-finish 汇总判定。"
 
 policy:
   allow_implicit_invocation: true
