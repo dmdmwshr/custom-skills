@@ -1,4 +1,4 @@
-# 固定快速路径（分流协议 1 / 驱动 1.4.0）
+# 固定快速路径（分流协议 1 / 驱动 1.4.2）
 
 这是操作清单，不是让模型重写采集器的伪代码。真实扫描仅在唯一固定任务完成；初始化和验收仍留在该任务。
 
@@ -25,7 +25,7 @@
 ## 浏览器：固定源加载，不生成新驱动
 
 1. 第一次 CUA 调用仅执行 `let xMonTab = await cua.createBrowserTab("chrome", url, {sessionName:"🌐 X监控"})`；url 为 `https://x.com/search?q=` 加 `encodeURIComponent("from:"+account+" -filter:replies -filter:retweets")` 加 `&f=live`。读取工具返回的文档和初始状态。驱动核验准确查询和 Latest 选项；不要读取或排序主页卡片来替代主帖搜索。
-2. 驱动未加载或版本变化时，完整读取业务 `scripts/desktop_monitor_driver.js` 原文，将**原样工厂表达式**绑定为 `let xMonDriver = <原样表达式>`；变量已存在时只赋值 `xMonDriver = <原样表达式>`，不重复声明。它只接收受支持的标签句柄。不能导入内部模块、执行独立 Playwright、使用 `globalThis`、自行 eval/桥接或重写 selector。新轮次只创建 cycle，不重复生成 2 万多字符代码。
+2. 驱动未加载或版本变化时，完整读取业务 `scripts/desktop_monitor_driver.js` 原文，将**原样工厂表达式**绑定为 `let xMonDriver = <原样表达式>`；变量已存在时只赋值 `xMonDriver = <原样表达式>`，不重复声明。驱动采集前必须核对 `version` 和 `sourceFingerprint()` 与本地源文件计算值逐项一致；该检查覆盖具名工厂原文、仅规范 LF，不等则停止，不修改指纹返回值或水位字段来掩盖差异。它只接收受支持的标签句柄。不能导入内部模块、执行独立 Playwright、使用 `globalThis`、自行 eval/桥接或重写 selector。新轮次只创建 cycle，不重复生成长代码。
 3. `xMonCycle = xMonDriver.createCycle({account, authenticatedAccount:"dmdmws", source:"desktop_chrome_extension", fallbackReason:null, watermarks, sourceTimezone})`。参数来自本轮配置。设 `xMonCycle.ownTab=xMonTab`、`xMonCycle.lastUrl=url`，避免再次导航创建时的同一地址。
 4. 工具调用上限 40 秒；page 一次一页，permalinkBatch 一次最多两个永久链接，页面总探测预算 15 秒。驱动等待账号头部文本和目标卡片脱离骨架态后抽取一次；仅出现时间链接不等于正文就绪。就绪立即继续，不固定等待、不增加重试循环。`tab.playwright` 是允许的受控扩展 DOM 门面，独立 Playwright 不允许。
 5. 首次 Chrome 明确 `browser_not_running`：仅一次项目 `start_managed_browser.ps1 -Browser chrome`，无 URL，等待规定 8 秒，重试一次创建标签。工具仅报告通用 Browser is not available、未区分未运行/无扩展时，先用该脚本 `-Browser chrome -CheckOnly` 只读检查：`browser_not_running` 才进入上述一次启动；`browser_running` 表示正确根目录实例存在，工具仍不可用按 `extension_unavailable` 处理，不重启；`process_probe_unavailable` 失败关闭，不猜未运行。脚本将带空格的 User Data 作为完整参数，只认可正确根目录主进程，旧 User 目录进程不计。其他失败不重启 Chrome，不清理任何浏览器目录或既有进程。
@@ -33,6 +33,8 @@
 7. Edge 失败调用 `browser-failure`：`{lease,account,browser:"edge",reason:<Chrome原因>,state:<稳定状态>}`；状态为 `extension_disconnected` / `login_required` / `risk_challenge`。只有 Chrome 时 browser 为 chrome。账号不符走严格 login-state，账号必须来自实际观察。随后 finish；不改登录态，不触碰用户原有标签。
 
 ## 驱动调用
+
+每次加载前，在业务源码目录用 Node 的 fs 读取固定驱动文件，并用 vm.runInNewContext 仅实例化无浏览器副作用的原样工厂，打印 `{version,source_fingerprint:driver.sourceFingerprint()}` 作为预期值。这是离线源码核对，不建立浏览器或控制进程。CUA 原样加载后打印相同元数据并比较算法、长度、摘要；通过后才调用驱动采集。FNV 指纹仅检测意外转写变化，不是安全签名或页面证据。1.4.2 在主帖详情初次快照没有目标时，预算内刷新一次 AX 再等待；失败之后不导航或采集重试。
 
 每个 ok=false 直接使用返回 failure_code 和 stage，不现场改代码修载荷。导航、主列、目标、成员、父帖、水位分开记录。当前 Unified CUA 使用 `Tab.scroll([x,y],"down",pages)`，坐标及页数由已读取的主列几何计算；导航/滚动后 `getAXState({emit:false})` 刷新观察，再读取 DOM。不要调用另一套旧接口的 `tab.dom_cua`。驱动已固化这些步骤，不在轮次中探索 API。
 
