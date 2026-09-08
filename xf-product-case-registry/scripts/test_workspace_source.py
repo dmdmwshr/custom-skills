@@ -956,6 +956,7 @@ def test_completed_case_is_queued_until_detail_project_number_is_verified(
         archive={"verificationRecord": "fixture-record"},
         history={"previousCompletion": {"completedAt": "2099-01-01T00:00:00+08:00"}},
     )
+    completed_before = workspace.load_waterline(layout)["cases"][PROJECT_A]
 
     listed = _begin_and_stabilize(
         layout,
@@ -993,8 +994,11 @@ def test_completed_case_is_queued_until_detail_project_number_is_verified(
     assert waterline["local"]["status"] == "ARCHIVED"
     assert waterline["upload"]["status"] == "VERIFIED"
     assert waterline["nasVerification"]["status"] == "VERIFIED"
-    assert waterline["source"]["batchId"] == "incremental-detail-gated"
-    assert waterline["source"]["projectIdentitySource"] == "DETAIL"
+    assert not layout.pending_case_dir(PROJECT_A).exists()
+    assert {key: value for key, value in waterline.items() if key != "lastSeenAt"} == {
+        key: value for key, value in completed_before.items() if key != "lastSeenAt"
+    }
+    assert resolved_record["detail"]["completedProjectObservation"] is True
 
 
 def test_capture_marks_continuously_changing_list_without_false_completion(

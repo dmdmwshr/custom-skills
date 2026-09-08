@@ -280,6 +280,116 @@ def test_explicit_51_slot_map_is_correct() -> None:
     assert cli.SLOT_META["INITIAL_CCC_CERTIFICATE"] == ("PRODUCT", "INITIAL_CHECK")
 
 
+def test_same_name_model_products_keep_distinct_client_refs(tmp_path: Path) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    data["initialInspection"]["products"] = [
+        {"clientRef": f"product:{letter}", "name": "产品", "modelSpec": "M", "location": letter}
+        for letter in ("a", "b")
+    ]
+    assert validate_manifest(data, {"file:one": str(source)}) == []
+    data["initialInspection"]["products"][1]["clientRef"] = "product:a"
+    assert any("clientRef 重复" in error for error in validate_manifest(data))
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [None, "missing_binding", "shared_binding", "wrong_case", "wrong_stage", "swapped_files"],
+)
+def test_verify_duplicate_names_uses_server_product_bindings(
+    tmp_path: Path, fault: str | None
+) -> None:
+    sources = [tmp_path / "one.pdf", tmp_path / "two.pdf"]
+    pdf(sources[0])
+    pdf(sources[1], pages=2)
+    data = manifest(sources[0])
+    product_ids = [
+        "11111111-1111-4111-8111-111111111112",
+        "11111111-1111-4111-8111-111111111113",
+    ]
+    data["initialInspection"]["products"] = [
+        {"clientRef": f"product:{index}", "name": "产品", "modelSpec": "M", "location": str(index)}
+        for index in range(2)
+    ]
+    data["files"] = [
+        {
+            "clientRef": f"file:{index}",
+            "relativePath": f"files/{index}.pdf",
+            "sha256": file_sha256(source),
+            "mimeType": "application/pdf",
+            "pageCount": index + 1,
+        }
+        for index, source in enumerate(sources)
+    ]
+    data["documentSlots"] = [
+        {
+            "clientRef": f"slot:{index}",
+            "slotCode": "INITIAL_CCC_CERTIFICATE",
+            "productRef": f"product:{index}",
+            "versions": [{"kind": "ELECTRONIC", "fileRef": f"file:{index}"}],
+        }
+        for index in range(2)
+    ]
+    data["otherAttachments"] = []
+    detail = detail_for(data)
+    detail["inspections"][0]["products"] = [
+        {"id": product_ids[index], **product}
+        for index, product in enumerate(data["initialInspection"]["products"])
+    ][::-1]
+    snapshot = import_snapshot(data)
+    snapshot["case"]["id"] = detail["id"]
+    snapshot["inspections"][0]["id"] = "initial-id"
+    snapshot["inspections"][0]["products"] = [
+        {"ownerKey": f"product:{product_ids[index]}", "clientRefs": [f"product:{index}"]}
+        for index in range(2)
+    ]
+    children = [
+        {
+            "productId": product_ids[index],
+            "versions": {"ELECTRONIC": {**directory_file(source), "id": f"file-id-{index}"}},
+        }
+        for index, source in enumerate(sources)
+    ]
+    if fault == "missing_binding":
+        snapshot["inspections"][0]["products"][1]["clientRefs"] = []
+    elif fault == "shared_binding":
+        snapshot["inspections"][0]["products"][0]["clientRefs"].append("product:1")
+    elif fault == "wrong_case":
+        snapshot["case"]["id"] = "22222222-2222-4222-8222-222222222222"
+    elif fault == "wrong_stage":
+        snapshot["inspections"][0]["stage"] = "RECHECK"
+    elif fault == "swapped_files":
+        children[0]["versions"], children[1]["versions"] = (
+            children[1]["versions"],
+            children[0]["versions"],
+        )
+    directory = {"rows": [{"slotKey": "INITIAL_CCC_CERTIFICATE", "children": children}]}
+    snapshots_read = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/cases":
+            return httpx.Response(200, json={"data": [{"id": detail["id"], "projectNo": PROJECT}]})
+        if request.url.path == f"/api/v2/cases/{detail['id']}":
+            return httpx.Response(200, json=detail)
+        if request.url.path == f"/api/v2/cases/{detail['id']}/directory":
+            return httpx.Response(200, json=directory)
+        if request.url.path == "/api/v2/case-import-state":
+            assert request.url.params["projectNo"] == PROJECT
+            snapshots_read.append(True)
+            return httpx.Response(200, json=snapshot)
+        raise AssertionError(request.url)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        if fault:
+            with pytest.raises(RegistryError):
+                cli.verify_with_client(client, "https://registry.example", data)
+        else:
+            result = cli.verify_with_client(client, "https://registry.example", data)
+            assert result["products"] == 2 and result["filesVerified"] == 2
+    assert snapshots_read == [True]
+
+
 @pytest.mark.parametrize("code", sorted(cli.SLOT_META))
 def test_each_slot_accepts_only_its_explicit_owner(code: str, tmp_path: Path) -> None:
     source = tmp_path / "one.pdf"
@@ -1673,6 +1783,45 @@ def test_http_error_rejects_unsafe_json_error_details(payload: dict[str, object]
     assert str(raised.value) == "提交清单 失败：HTTP 400"
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "文件内容代际已变化，请刷新案卷快照后重试",
+        "复查已有产品或文件，不能删除最后一条初查不合格产品",
+    ],
+)
+def test_http_error_reads_safe_message_from_current_server_envelope(message: str) -> None:
+    response = httpx.Response(
+        409,
+        json={
+            "statusCode": 409,
+            "code": "HTTP_409",
+            "message": message,
+            "requestId": "private-request-reference",
+            "timestamp": "2026-09-08T10:00:00Z",
+            "details": {"private": "must not appear"},
+        },
+    )
+    assert cli.safe_error_message(response) == message
+    with pytest.raises(RegistryError) as raised:
+        cli.response_json(response, "版本核验")
+    assert message in str(raised.value)
+    assert "private" not in str(raised.value) and "must not appear" not in str(raised.value)
+
+
+def test_server_error_envelope_still_rejects_sensitive_message() -> None:
+    response = httpx.Response(
+        409,
+        json={
+            "statusCode": 409,
+            "message": "cookie=private",
+            "requestId": "private",
+            "timestamp": "2026-09-08T10:00:00Z",
+        },
+    )
+    assert cli.safe_error_message(response) is None
+
+
 def test_parser_defaults_to_stable_local_auth_config() -> None:
     args = cli.build_parser().parse_args(
         [
@@ -1706,8 +1855,15 @@ def test_upload_batch_parser_requires_explicit_projects_and_finalize_mode() -> N
     assert args.workspace_required is True
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    ["success", "finalized", "transport-finalized", "invalid", "wrong-target", "conflicts"],
+)
 def test_upload_batch_authenticates_and_checks_ready_once_for_multiple_cases(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    outcome: str,
 ) -> None:
     work_root = tmp_path / "business"
     downloads = tmp_path / "downloads"
@@ -1758,6 +1914,50 @@ def test_upload_batch_authenticates_and_checks_ready_once_for_multiple_cases(
     def fake_upload(case_args: argparse.Namespace) -> None:
         calls["upload"] += 1
         assert case_args._shared_session["identity"]["role"] == "ADMIN"
+        if calls["upload"] == 1 and outcome != "success":
+            manifest_path = Path(case_args.manifest)
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            upload_map = json.loads(Path(case_args.upload_map).read_text(encoding="utf-8"))["files"]
+            projection = cli.files_projection(data, upload_map)
+            state = {
+                "stateVersion": 6,
+                "status": "FINALIZED_WITH_CONFLICTS"
+                if outcome == "conflicts"
+                else "FINALIZED_UNVERIFIED",
+                "origin": "https://registry.example",
+                "manifestSha256": file_sha256(manifest_path),
+                "packageSha256": data["packageSha256"],
+                "projectNo": data["case"]["projectNo"],
+                "brigadeCode": data["case"]["brigadeCode"],
+                "jobId": "fixture-job",
+                "authIdentity": admin_state_identity(),
+                "filesProjection": projection,
+                "immutableBindingDigest": cli.immutable_manifest_binding(data, projection),
+                "uploadedFileRefs": [item["clientRef"] for item in projection],
+                "caseId": "fixture-case",
+                "finalizedAt": "2026-09-08T10:00:00Z",
+                "finalizeSummary": {
+                    "caseId": "fixture-case",
+                    "created": True,
+                    "addedProducts": 1,
+                    "addedSlots": 1,
+                    "addedAttachments": 0,
+                    "replacedSlots": 0,
+                    "conflictCount": 1 if outcome == "conflicts" else 0,
+                    "skippedCount": 0,
+                },
+            }
+            cli.validate_upload_state(state)
+            if outcome == "invalid":
+                state.pop("filesProjection")
+            if outcome == "wrong-target":
+                state["origin"] = "https://different.example"
+            (manifest_path.parent / "upload-state.json").write_text(
+                json.dumps(state), encoding="utf-8"
+            )
+            if outcome == "transport-finalized":
+                raise httpx.ReadTimeout("fixture network failure")
+            raise RegistryError("fixture verify timeout")
 
     monkeypatch.setattr(cli, "authenticate_client", fake_authenticate)
     monkeypatch.setattr(cli, "upload_command", fake_upload)
@@ -1778,6 +1978,11 @@ def test_upload_batch_authenticates_and_checks_ready_once_for_multiple_cases(
     )
     cli.upload_batch_command(args)
     assert calls == {"auth": 1, "ready": 1, "upload": 2}
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert summary["verified"] == (2 if outcome == "success" else 1)
+    assert summary["awaitingNas"] == (1 if outcome in {"finalized", "transport-finalized"} else 0)
+    assert summary["manualReview"] == (1 if outcome == "conflicts" else 0)
+    assert summary["failed"] == (1 if outcome in {"invalid", "wrong-target"} else 0)
 
 
 def test_real_upload_cli_requires_configured_case_workspace_before_network(
@@ -3048,6 +3253,119 @@ def test_deep_download_non_recall_conflict_is_not_hash_mismatch() -> None:
             {"Origin": "https://registry.example", "X-CSRF-Token": TEST_CSRF},
             "file:one",
         )
+
+
+@pytest.mark.parametrize("bad_total", [False, True])
+def test_full_case_content_prepare_reuses_existing_batch_contract(
+    monkeypatch: pytest.MonkeyPatch, bad_total: bool
+) -> None:
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        if request.method == "POST":
+            return httpx.Response(
+                202,
+                json={
+                    "preparationId": "case-id",
+                    "caseId": "case-id",
+                    "status": "PENDING",
+                    "total": 3 if bad_total else 2,
+                    "ready": 0,
+                    "pending": 3 if bad_total else 2,
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "preparationId": "case-id",
+                "caseId": "case-id",
+                "status": "READY",
+                "total": 2,
+                "ready": 2,
+                "pending": 0,
+            },
+        )
+
+    monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        if bad_total:
+            with pytest.raises(RegistryError, match="范围或计数"):
+                cli.prepare_case_content(client, "https://registry.example", "case-id", 2, {})
+        else:
+            cli.prepare_case_content(client, "https://registry.example", "case-id", 2, {})
+    assert seen[0] == ("POST", "/api/v2/cases/case-id/export-preparations")
+    assert len(seen) == (1 if bad_total else 2)
+
+
+def test_deep_verify_two_files_prepares_whole_case_once(tmp_path, monkeypatch):
+    first, second = tmp_path / "one.pdf", tmp_path / "two.pdf"
+    pdf(first)
+    pdf(second, pages=2)
+    data = manifest(first)
+    data["files"].append(
+        {
+            "clientRef": "file:two",
+            "relativePath": "files/two.pdf",
+            "sha256": file_sha256(second),
+            "mimeType": "application/pdf",
+            "pageCount": 2,
+        }
+    )
+    data["otherAttachments"].append(
+        {
+            "clientRef": "attachment:two",
+            "slotCode": "OTHER_ATTACHMENT",
+            "title": "第二附件",
+            "fileRef": "file:two",
+        }
+    )
+    detail = detail_for(data)
+    children = [
+        {"title": title, "files": [{**directory_file(source), "id": f"file-{index}"}]}
+        for index, (title, source) in enumerate([("附件", first), ("第二附件", second)])
+    ]
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        path = request.url.path
+        if path == "/api/v2/cases":
+            return httpx.Response(200, json={"data": [{"id": detail["id"], "projectNo": PROJECT}]})
+        if path == f"/api/v2/cases/{detail['id']}":
+            return httpx.Response(200, json=detail)
+        if path.endswith("/directory"):
+            return httpx.Response(
+                200, json={"rows": [{"slotKey": "OTHER_ATTACHMENT", "children": children}]}
+            )
+        if path.endswith("/export-preparations"):
+            return httpx.Response(
+                202,
+                json={
+                    "preparationId": detail["id"],
+                    "caseId": detail["id"],
+                    "status": "READY",
+                    "total": 2,
+                    "ready": 2,
+                    "pending": 0,
+                },
+            )
+        if path in ["/api/v2/files/file-0", "/api/v2/files/file-1"]:
+            return httpx.Response(200, content=[first, second][int(path[-1])].read_bytes())
+        raise AssertionError(request.url)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result = cli.verify_with_client(client, "https://registry.example", data, {}, True)
+    assert result["filesVerified"] == 2
+    assert sum(method == "POST" for method, _ in seen) == 1
+    assert not any(path.endswith("/recall") for _, path in seen)
+
+
+def test_recall_quota_is_not_reported_as_login_rate_limit():
+    response = httpx.Response(429, json={"code": "RECALL_USER_QUOTA_EXCEEDED", "message": "quota"})
+    with pytest.raises(RegistryError, match="缓存配额") as error:
+        cli.response_json(response, "发起文件取回")
+    assert "登录" not in str(error.value)
 
 
 @pytest.mark.parametrize(

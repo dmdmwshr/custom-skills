@@ -29,7 +29,7 @@ if __package__:
 else:
     from upload_transport import upload_request
 
-VERSION = "1.6.6"
+VERSION = "1.6.7"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -662,7 +662,6 @@ def validate_manifest(
         errors.append("case.criminalCaseOverride 必须为布尔值")
     inspections: dict[str, str] = {}
     products: dict[str, tuple[str, dict[str, Any]]] = {}
-    product_identities: set[tuple[str, str, str]] = set()
 
     def inspect(value: Any, stage: str, label: str) -> None:
         item = only_keys(value, {"clientRef", "stage", "inspectionDate", "products"}, label, errors)
@@ -705,15 +704,6 @@ def validate_manifest(
                 errors.append("产品 clientRef 重复或不合法")
             else:
                 products[product_ref] = (stage, product)
-            product_identity = (
-                stage,
-                str(product.get("name", "")).strip(),
-                str(product.get("modelSpec", "")).strip(),
-            )
-            if product_identity in product_identities:
-                errors.append("同一检查中产品名称和型号重复，远端核验会产生歧义")
-            else:
-                product_identities.add(product_identity)
             field_limits = {
                 "name": 300,
                 "modelSpec": 300,
@@ -1497,6 +1487,15 @@ def api_request(
 def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
     if not 200 <= response.status_code < 300:
         if response.status_code == 429:
+            if response_error_code(response) in {
+                "RECALL_GLOBAL_QUOTA_EXCEEDED",
+                "RECALL_USER_QUOTA_EXCEEDED",
+                "RECALL_CASE_QUOTA_EXCEEDED",
+            }:
+                raise RegistryError(
+                    f"{label} 的文件取回缓存配额不足；保留已完成导入和核验断点，"
+                    "等待缓存释放，或在范围闭合时使用现有整卷取回准备"
+                )
             retry_after = response.headers.get("retry-after", "").strip()
             wait_hint = (
                 f"，请等待 {retry_after} 秒后重试"
@@ -1533,6 +1532,10 @@ def safe_error_message(response: httpx.Response) -> str | None:
         "error",
         "code",
         "errors",
+        # Current V2 error envelope metadata is ignored, never rendered.
+        "requestId",
+        "timestamp",
+        "details",
     }:
         return None
     raw: Any = value.get("message", value.get("errors"))
@@ -2607,6 +2610,60 @@ def download_verified_file(
     raise RegistryError(f"文件取回后仍无法下载：{file_ref}")
 
 
+def prepare_case_content(
+    client: httpx.Client,
+    api_base: str,
+    case_id: str,
+    expected_count: int,
+    write_headers: dict[str, str],
+) -> None:
+    """Use the existing bounded whole-case recall quota, without building a ZIP."""
+    deadline = time.monotonic() + min(600, max(90, expected_count * 15 + 90))
+    projection = response_json(
+        api_request(
+            client,
+            "POST",
+            f"{api_base}/api/v2/cases/{case_id}/export-preparations",
+            headers=write_headers,
+        ),
+        "整卷正文取回准备",
+    )
+    last_report = float("-inf")
+    while True:
+        counts = [projection.get(key) for key in ("total", "ready", "pending")]
+        if (
+            projection.get("preparationId") != case_id
+            or projection.get("caseId") != case_id
+            or any(
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+                for value in counts
+            )
+            or counts[0] != expected_count
+            or counts[1] + counts[2] != counts[0]
+        ):
+            raise RegistryError("整卷正文准备范围或计数不一致，停止核验")
+        status = projection.get("status")
+        if status == "READY" and counts[2] == 0:
+            return
+        if status not in {"PENDING", "PROCESSING"}:
+            raise RegistryError("整卷正文取回未完成；保留原取回任务和导入断点")
+        now = time.monotonic()
+        if now - last_report >= 10:
+            print(
+                f"整卷正文核验准备：已取回 {counts[1]}/{counts[0]} 份，等待现有任务。",
+                file=sys.stderr,
+                flush=True,
+            )
+            last_report = now
+        if now >= deadline:
+            raise RegistryError("整卷正文取回等待超时；任务仍由服务端保留")
+        time.sleep(min(RECALL_POLL_INTERVAL_SECONDS, deadline - now))
+        projection = response_json(
+            api_request(client, "GET", f"{api_base}/api/v2/case-export-preparations/{case_id}"),
+            "读取整卷正文准备",
+        )
+
+
 def verify_with_client(
     client: httpx.Client,
     api_base: str,
@@ -2685,6 +2742,39 @@ def verify_with_client(
     ):
         raise RegistryError("实际检查数量或阶段不一致")
     remote_product_by_ref: dict[str, dict[str, Any]] = {}
+    binding_snapshot: dict[str, Any] | None = None
+
+    def bound_product_id(product_ref: str, stage: str, inspection_id: str) -> str:
+        nonlocal binding_snapshot
+        if binding_snapshot is None:
+            binding_snapshot = response_json(
+                api_request(
+                    client,
+                    "GET",
+                    f"{api_base}/api/v2/case-import-state",
+                    params={"projectNo": manifest["case"]["projectNo"]},
+                ),
+                "读取产品绑定",
+            )
+            validate_case_import_state(binding_snapshot, manifest["case"]["projectNo"])
+            if (
+                binding_snapshot["case"].get("id") != case_id
+                or binding_snapshot["case"]["brigade"].get("code")
+                != manifest["case"]["brigadeCode"]
+            ):
+                raise RegistryError("产品绑定快照与案卷身份不一致")
+        inspections = [
+            item for item in binding_snapshot["inspections"] if item.get("stage") == stage
+        ]
+        if len(inspections) != 1 or inspections[0].get("id") != inspection_id:
+            raise RegistryError("产品绑定快照与检查阶段不一致")
+        products = [
+            item for item in inspections[0]["products"] if product_ref in item["clientRefs"]
+        ]
+        if len(products) != 1:
+            raise RegistryError("产品 clientRef 绑定不唯一或缺失，不能按名称猜测归属")
+        return products[0]["ownerKey"].removeprefix("product:")
+
     for expected in expected_inspections:
         actual = actual_inspections[expected["stage"]]
         if (
@@ -2696,20 +2786,36 @@ def verify_with_client(
         if not isinstance(candidates, list) or len(candidates) != len(expected["products"]):
             raise RegistryError("实际产品数量不一致")
         used: set[str] = set()
+        identities: dict[tuple[str, Any], int] = {}
         for product in expected["products"]:
+            identity = (product["name"], product.get("modelSpec"))
+            identities[identity] = identities.get(identity, 0) + 1
+        for product in expected["products"]:
+            identity = (product["name"], product.get("modelSpec"))
+            bound_id = (
+                bound_product_id(product["clientRef"], expected["stage"], actual.get("id"))
+                if identities[identity] > 1
+                else None
+            )
             matches = [
                 item
                 for item in candidates
                 if isinstance(item, dict)
                 and item.get("id") not in used
-                and item.get("name") == product["name"]
-                and item.get("modelSpec") == product.get("modelSpec")
+                and (
+                    item.get("id") == bound_id
+                    if bound_id is not None
+                    else item.get("name") == product["name"]
+                    and item.get("modelSpec") == product.get("modelSpec")
+                )
             ]
             if len(matches) != 1:
                 raise RegistryError("产品匹配不唯一或缺失")
             remote = matches[0]
             used.add(remote["id"])
             for field in (
+                "name",
+                "modelSpec",
                 "nominalProducer",
                 "location",
                 "method",
@@ -2736,6 +2842,7 @@ def verify_with_client(
             remote_product_by_ref[product["clientRef"]] = remote
     source_files = {item["clientRef"]: item for item in manifest["files"]}
     rows = directory.get("rows", [])
+    remote_files: dict[str, str] = {}
 
     def check_file(file_ref: str, remote: dict[str, Any]) -> None:
         expected = source_files[file_ref]
@@ -2752,15 +2859,7 @@ def verify_with_client(
         remote_id = remote.get("id")
         if not isinstance(remote_id, str):
             raise RegistryError(f"目录缺少文件标识：{file_ref}")
-        if deep_content_verify:
-            download_verified_file(
-                client,
-                api_base,
-                remote_id,
-                expected["sha256"],
-                write_headers,
-                file_ref,
-            )
+        remote_files[file_ref] = remote_id
 
     for slot in manifest.get("documentSlots", []):
         code, (multiplicity, stage) = slot["slotCode"], SLOT_META[slot["slotCode"]]
@@ -2835,6 +2934,39 @@ def verify_with_client(
         ):
             raise RegistryError("其他附件匹配不唯一或缺失")
         check_file(attachment["fileRef"], children[0]["files"][0])
+    if deep_content_verify:
+        if len(set(remote_files.values())) != len(source_files):
+            raise RegistryError("目录文件引用不唯一或缺失，停止正文核验")
+        all_directory_ids: set[str] = set()
+
+        def collect_file_ids(value: Any) -> None:
+            if isinstance(value, dict):
+                if isinstance(value.get("id"), str) and isinstance(value.get("sha256"), str):
+                    all_directory_ids.add(value["id"])
+                for child in value.values():
+                    collect_file_ids(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect_file_ids(child)
+
+        collect_file_ids(rows)
+        if (
+            len(source_files) > 1
+            and write_headers is not None
+            and all_directory_ids == set(remote_files.values())
+        ):
+            # Only prepare a whole case when every remote file is in the
+            # explicitly verified manifest. Never recall unrelated additions.
+            prepare_case_content(client, api_base, case_id, len(source_files), write_headers)
+        for file_ref, remote_id in remote_files.items():
+            download_verified_file(
+                client,
+                api_base,
+                remote_id,
+                source_files[file_ref]["sha256"],
+                write_headers,
+                file_ref,
+            )
     return {
         "caseId": case_id,
         "inspections": reported_inspection_count,
@@ -4224,6 +4356,45 @@ def supplement_batch_command(args: argparse.Namespace) -> None:
     )
 
 
+def interrupted_batch_upload_status(
+    manifest_path: Path,
+    upload_map_path: Path,
+    manifest: dict[str, Any],
+    origin: str,
+    identity: dict[str, Any],
+) -> str:
+    """Preserve proven finalize progress without counting failed verification as success."""
+    state_path = manifest_path.parent / "upload-state.json"
+    try:
+        if not state_path.exists():
+            return "FAILED"
+        state = read_json(state_path)
+        validate_upload_state(state)
+        if state["status"] not in {"FINALIZED_UNVERIFIED", "FINALIZED_WITH_CONFLICTS"}:
+            return "FAILED"
+        projection = files_projection(manifest, read_json(upload_map_path)["files"])
+        if (
+            state["origin"] != origin
+            or state["manifestSha256"] != file_sha256(manifest_path)
+            or state["packageSha256"] != manifest["packageSha256"]
+            or state["projectNo"] != manifest["case"]["projectNo"]
+            or state["brigadeCode"] != manifest["case"]["brigadeCode"]
+            or state["filesProjection"] != projection
+            or state["immutableBindingDigest"] != immutable_manifest_binding(manifest, projection)
+            or set(state["uploadedFileRefs"]) != {item["clientRef"] for item in projection}
+        ):
+            return "FAILED"
+        require_same_state_identity(state, identity)
+        summary = state["finalizeSummary"]
+        if state["status"] == "FINALIZED_UNVERIFIED" and (
+            not summary["created"] or summary["conflictCount"] or summary["skippedCount"]
+        ):
+            return "FAILED"
+        return state["status"]
+    except (RegistryError, OSError, KeyError, TypeError, ValueError):
+        return "FAILED"
+
+
 def upload_batch_command(args: argparse.Namespace) -> None:
     projects = list(dict.fromkeys(args.project))
     if len(projects) != len(args.project):
@@ -4338,12 +4509,22 @@ def upload_batch_command(args: argparse.Namespace) -> None:
                 )
                 results.append({"projectNo": project_no, "status": case_status})
             except RegistryError as error:
-                results.append({"projectNo": project_no, "status": "FAILED", "error": str(error)})
+                results.append(
+                    {
+                        "projectNo": project_no,
+                        "status": interrupted_batch_upload_status(
+                            manifest_path, upload_map_path, _manifest, origin, identity
+                        ),
+                        "error": str(error),
+                    }
+                )
             except httpx.TransportError:
                 results.append(
                     {
                         "projectNo": project_no,
-                        "status": "FAILED",
+                        "status": interrupted_batch_upload_status(
+                            manifest_path, upload_map_path, _manifest, origin, identity
+                        ),
                         "error": "网络传输失败，请检查连接后从本案断点重试",
                     }
                 )

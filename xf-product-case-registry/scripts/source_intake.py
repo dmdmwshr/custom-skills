@@ -1933,6 +1933,26 @@ def add_detail(
         _write_json(capture_path, state)
         raise SourceIntakeError("详情项目编号与清单不一致，已转人工处理")
     captured = _timestamp(captured_at)
+    if not _is_acceptance_sample(state) and _verified_completed_waterline(layout, project_no):
+        # Resolve the live detail identity first, but never recreate pending
+        # evidence or replace the provenance of an already archived case.
+        record["projectNo"] = project_no
+        record["detail"] = {
+            "projectNo": project_no,
+            "capturedAt": captured,
+            "sourceUrl": safe_url,
+            "fields": {"projectNo": project_no, "unitName": str(detail_unit_name).strip()},
+            "completedProjectObservation": True,
+        }
+        record["skippedAsUnchanged"] = True
+        record["skippedAsCompletedProject"] = True
+        record["skipReason"] = "PROJECT_NO_ALREADY_VERIFIED"
+        state["actionRwids"] = [item for item in state.get("actionRwids", []) if item != record_key]
+        _maybe_waterline(layout, project_no)
+        _refresh_progress(state)
+        state["updatedAt"] = captured
+        _write_json(capture_path, state)
+        return state
     tags = _derive_tags(clean_detail)
     fingerprint = _fingerprint(clean_detail)
     business_fingerprint = _business_detail_fingerprint(clean_detail)
