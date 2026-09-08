@@ -1,4 +1,4 @@
-# 固定快速路径（分流协议 1 / 驱动 1.3.1）
+# 固定快速路径（分流协议 1 / 驱动 1.4.0）
 
 这是操作清单，不是让模型重写采集器的伪代码。真实扫描仅在唯一固定任务完成；初始化和验收仍留在该任务。
 
@@ -28,7 +28,7 @@
 2. 驱动未加载或版本变化时，完整读取业务 `scripts/desktop_monitor_driver.js` 原文，将**原样工厂表达式**绑定为 `let xMonDriver = <原样表达式>`；变量已存在时只赋值 `xMonDriver = <原样表达式>`，不重复声明。它只接收受支持的标签句柄。不能导入内部模块、执行独立 Playwright、使用 `globalThis`、自行 eval/桥接或重写 selector。新轮次只创建 cycle，不重复生成 2 万多字符代码。
 3. `xMonCycle = xMonDriver.createCycle({account, authenticatedAccount:"dmdmws", source:"desktop_chrome_extension", fallbackReason:null, watermarks, sourceTimezone})`。参数来自本轮配置。设 `xMonCycle.ownTab=xMonTab`、`xMonCycle.lastUrl=url`，避免再次导航创建时的同一地址。
 4. 工具调用上限 40 秒；page 一次一页，permalinkBatch 一次最多两个永久链接，页面总探测预算 15 秒。驱动等待账号头部文本和目标卡片脱离骨架态后抽取一次；仅出现时间链接不等于正文就绪。就绪立即继续，不固定等待、不增加重试循环。`tab.playwright` 是允许的受控扩展 DOM 门面，独立 Playwright 不允许。
-5. 首次 Chrome 明确 `browser_not_running`：仅一次项目 `start_managed_browser.ps1 -Browser chrome`，无 URL，等待规定 8 秒，重试一次创建标签。其他失败不重启 Chrome。
+5. 首次 Chrome 明确 `browser_not_running`：仅一次项目 `start_managed_browser.ps1 -Browser chrome`，无 URL，等待规定 8 秒，重试一次创建标签。工具仅报告通用 Browser is not available、未区分未运行/无扩展时，先用该脚本 `-Browser chrome -CheckOnly` 只读检查：`browser_not_running` 才进入上述一次启动；`browser_running` 表示正确根目录实例存在，工具仍不可用按 `extension_unavailable` 处理，不重启；`process_probe_unavailable` 失败关闭，不猜未运行。脚本将带空格的 User Data 作为完整参数，只认可正确根目录主进程，旧 User 目录进程不计。其他失败不重启 Chrome，不清理任何浏览器目录或既有进程。
 6. Chrome 最终仅 `browser_not_running`、`extension_unavailable`、`login_unavailable` 可调用 `chrome-fallback-authorize`，输入 `{lease,account,reason}`。机器明确允许后才用 Edge；按项目规定只启动一次、等待 8 秒、创建一次新 Edge 标签。source 改为 `desktop_edge_extension`，fallbackReason 保留 Chrome 原因。已提交/采集后不跨浏览器混合事实。
 7. Edge 失败调用 `browser-failure`：`{lease,account,browser:"edge",reason:<Chrome原因>,state:<稳定状态>}`；状态为 `extension_disconnected` / `login_required` / `risk_challenge`。只有 Chrome 时 browser 为 chrome。账号不符走严格 login-state，账号必须来自实际观察。随后 finish；不改登录态，不触碰用户原有标签。
 
@@ -36,7 +36,7 @@
 
 每个 ok=false 直接使用返回 failure_code 和 stage，不现场改代码修载荷。导航、主列、目标、成员、父帖、水位分开记录。当前 Unified CUA 使用 `Tab.scroll([x,y],"down",pages)`，坐标及页数由已读取的主列几何计算；导航/滚动后 `getAXState({emit:false})` 刷新观察，再读取 DOM。不要调用另一套旧接口的 `tab.dom_cua`。驱动已固化这些步骤，不在轮次中探索 API。
 
-1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次 `page(...,"main",true)`。完成后 `xMonRaw=xMonDriver.rawStream(xMonCycle,"main")`，立即提交 main。
+1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次 `page(...,"main",true)`。`action=main_permalink_details` 表示发现已冻结，后续同一 page 调用自动核验最多两条主帖全文，不再滚动搜索。驱动只对作者自己的可见“显示更多”补读规范原帖；必要时点击已核验目标唯一展开控件并在同一 15 秒预算内重读。身份、UTC、引用/媒体标志与预览前缀必须一致；仍截断不能分析或入账，不能现场省略完整性检查。仅 done=true 后 `xMonRaw=xMonDriver.rawStream(xMonCycle,"main")`，立即提交 main。
 2. `await xMonDriver.replyGate(xMonTab,xMonCycle)`；只有 action=repeat_gate_once 才再调用一次。驱动限定零页或无标记且旧二元组不成立两种整流切换条件，不混合旧/新证据。
 3. `page(...,"search")`，未到水位才 `page(...,"search",true)`。搜索冻结后 `observation-fingerprint` 输入 `{lease,payload:xMonCycle.search.map(i=>i.statusId)}`，取机器 fingerprint。
 4. `await xMonDriver.permalinkBatch(xMonTab,xMonCycle,fingerprint)`，每次最多两条，仅 ok=true,done=false 继续下一批。完整唯一主会话链、相邻父帖和独立回复对象由驱动核验。文本加图片父帖可读，头像不是帖子媒体；纯媒体不编造文字。
