@@ -1,4 +1,4 @@
-# 固定快速路径（分流协议 1 / 驱动 1.4.2）
+# 固定快速路径（分流协议 1 / 驱动 2.0.0）
 
 这是操作清单，不是让模型重写采集器的伪代码。真实扫描仅在唯一固定任务完成；初始化和验收仍留在该任务。
 
@@ -17,7 +17,7 @@
 | 2 | `publish-pending` 预检；`sync-receipts` 对账一次 | 都用 `{lease}`。预检不通过，两流不开工。历史未知单列，不永久阻塞新扫描。 |
 | 3 | 创建本轮 Chrome 标签，加载/复用驱动 | 登录控件与 X 账号必须为 `@dmdmws`，不从配置或存储猜测。 |
 | 4 | 主帖 `page` → `rawStream(main)` → `collect-stream` → `analysis-plan` → `scan-analysis` → `publish-pending` | 只处理 main；局部失败登记 `stream-failure`，仍可继续 reply。 |
-| 5 | 回复 `replyGate` → `page(search)` → `permalinkBatch` → `rawStream(reply)` → 同上三个本地入口 → `publish-pending` | 回复失败保留回复旧水位，主帖提交不回滚；共同身份/路由故障停止后续账号。 |
+| 5 | 回复 `page(search)` → `permalinkBatch` → `draftStream` → `reply-context-plan` → 必要的 `contextBatch` → 一次 `rawStream(reply)` → collect/analysis-plan/scan-analysis → `publish-pending` | 仅新回复补上文、只推送额度相关；回复失败保留旧水位和已提交主帖。 |
 | 6 | 关闭本轮标签；同一 lease 调用 `heartbeat-finish` | 机器两阶段处理最终投递、回执并释放锁。缺失/不可解析必须报告，不能 catch 后静默。 |
 
 20 分钟为整轮上限，不无限续租。每流最多 200 条，须到 ID 与 UTC instant 同时匹配的水位；`Z`、`.000Z` 等价。命中水位后立即停止该流的卡片读取，不携带更旧卡片。下一页滚到本次已观察边界，并在同一 15 秒预算内等待至少一张新状态；不能仅滚动少量像素就把仍显示旧卡片误当时间线结束。超过条数/时限不重置、不跳过历史。各流内部旧到新，跨流按提交完成顺序登记。
@@ -25,7 +25,7 @@
 ## 浏览器：固定源加载，不生成新驱动
 
 1. 第一次 CUA 调用仅执行 `let xMonTab = await cua.createBrowserTab("chrome", url, {sessionName:"🌐 X监控"})`；url 为 `https://x.com/search?q=` 加 `encodeURIComponent("from:"+account+" -filter:replies -filter:retweets")` 加 `&f=live`。读取工具返回的文档和初始状态。驱动核验准确查询和 Latest 选项；不要读取或排序主页卡片来替代主帖搜索。
-2. 驱动未加载或版本变化时，完整读取业务 `scripts/desktop_monitor_driver.js` 原文，将**原样工厂表达式**绑定为 `let xMonDriver = <原样表达式>`；变量已存在时只赋值 `xMonDriver = <原样表达式>`，不重复声明。驱动采集前必须核对 `version` 和 `sourceFingerprint()` 与本地源文件计算值逐项一致；该检查覆盖具名工厂原文、仅规范 LF，不等则停止，不修改指纹返回值或水位字段来掩盖差异。它只接收受支持的标签句柄。不能导入内部模块、执行独立 Playwright、使用 `globalThis`、自行 eval/桥接或重写 selector。新轮次只创建 cycle，不重复生成长代码。
+2. 驱动未加载或版本变化时，在**当前 CUA JavaScript 会话**用公开 Node 标准库 `node:fs` 读取唯一业务 `scripts/desktop_monitor_driver.js` 的 UTF-8 原文，再用 `node:vm` 的 `vm.runInNewContext(source,{URL})` 原样实例化无浏览器副作用的工厂，绑定普通 `let xMonDriver`；变量已存在时只赋值，不重复声明。不要手工转写整段源码。驱动采集前必须核对 `version` 和 `sourceFingerprint()` 与本地源文件计算值逐项一致；不等则停止，不修改指纹返回值或水位字段来掩盖差异。该文件读取只用于加载固定源码，不读取浏览器数据。浏览器动作仍只由当前 CUA 的受支持标签句柄执行；不能导入内部模块、执行独立 Playwright、使用 `globalThis`、另建控制进程/桥接或重写 selector。其他 Node REPL 与 CUA 不共享变量，不能作为浏览器替代通道。新轮次只创建 cycle，不重复加载源码。
 3. `xMonCycle = xMonDriver.createCycle({account, authenticatedAccount:"dmdmws", source:"desktop_chrome_extension", fallbackReason:null, watermarks, sourceTimezone})`。参数来自本轮配置。设 `xMonCycle.ownTab=xMonTab`、`xMonCycle.lastUrl=url`，避免再次导航创建时的同一地址。
 4. 工具调用上限 40 秒；page 一次一页，permalinkBatch 一次最多两个永久链接，页面总探测预算 15 秒。驱动等待账号头部文本和目标卡片脱离骨架态后抽取一次；仅出现时间链接不等于正文就绪。就绪立即继续，不固定等待、不增加重试循环。`tab.playwright` 是允许的受控扩展 DOM 门面，独立 Playwright 不允许。
 5. 首次 Chrome 明确 `browser_not_running`：仅一次项目 `start_managed_browser.ps1 -Browser chrome`，无 URL，等待规定 8 秒，重试一次创建标签。工具仅报告通用 Browser is not available、未区分未运行/无扩展时，先用该脚本 `-Browser chrome -CheckOnly` 只读检查：`browser_not_running` 才进入上述一次启动；`browser_running` 表示正确根目录实例存在，工具仍不可用按 `extension_unavailable` 处理，不重启；`process_probe_unavailable` 失败关闭，不猜未运行。脚本将带空格的 User Data 作为完整参数，只认可正确根目录主进程，旧 User 目录进程不计。其他失败不重启 Chrome，不清理任何浏览器目录或既有进程。
@@ -39,10 +39,10 @@
 每个 ok=false 直接使用返回 failure_code 和 stage，不现场改代码修载荷。导航、主列、目标、成员、父帖、水位分开记录。当前 Unified CUA 使用 `Tab.scroll([x,y],"down",pages)`，坐标及页数由已读取的主列几何计算；导航/滚动后 `getAXState({emit:false})` 刷新观察，再读取 DOM。不要调用另一套旧接口的 `tab.dom_cua`。驱动已固化这些步骤，不在轮次中探索 API。
 
 1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次 `page(...,"main",true)`。`action=main_permalink_details` 表示发现已冻结，后续同一 page 调用自动核验最多两条主帖全文，不再滚动搜索。驱动只对作者自己的可见“显示更多”补读规范原帖；必要时点击已核验目标唯一展开控件并在同一 15 秒预算内重读。身份、UTC、引用/媒体标志与预览前缀必须一致；仍截断不能分析或入账，不能现场省略完整性检查。仅 done=true 后 `xMonRaw=xMonDriver.rawStream(xMonCycle,"main")`，立即提交 main。
-2. `await xMonDriver.replyGate(xMonTab,xMonCycle)`；只有 action=repeat_gate_once 才再调用一次。驱动限定零页或无标记且旧二元组不成立两种整流切换条件，不混合旧/新证据。
+2. 新回复直接进入下一项 Latest 搜索，不访问 with_replies，不调用旧回复主页前置步骤。
 3. `page(...,"search")`，未到水位才 `page(...,"search",true)`。搜索冻结后 `observation-fingerprint` 输入 `{lease,payload:xMonCycle.search.map(i=>i.statusId)}`，取机器 fingerprint。
 4. `await xMonDriver.permalinkBatch(xMonTab,xMonCycle,fingerprint)`，每次最多两条，仅 ok=true,done=false 继续下一批。完整唯一主会话链、相邻父帖和独立回复对象由驱动核验。文本加图片父帖可读，头像不是帖子媒体；纯媒体不编造文字。
-5. `xMonRaw=xMonDriver.rawStream(xMonCycle,"reply")`。保留该对象原样，不重新调用以免改变 collectedAt。仅经受控标准输入传递，不保存采集正文文件。
+5. 先完整读取 [回复上下文与额度契约](reply-reset-contract.md)，执行 draftStream → 只读 reply-context-plan → applyContextPlan，仅新项必要时 contextBatch（至多三层，够用即停）。最后一次 `xMonRaw=xMonDriver.rawStream(xMonCycle,"reply")`，原样 collect-stream，不再更改时间或事实，不保存采集正文文件。
 
 驱动以独立 `User-Name` 加 `tweetText` 的嵌入链接块识别当前 X 引用结构；其文字不属于外层作者正文。遇到其他多正文形态仍报告明确错误，不现场挑选第一段或改写驱动。
 
@@ -61,11 +61,12 @@
 - `collect-stream`：`{lease,payload:xMonRaw}`。xMonRaw 为 XCollectedStreamV1：仅本流的 V2 可见事实和驱动耗时；不存在另一条流，不伪造空流。
 - `analysis-plan`：同一 `{lease,payload:xMonRaw}`。只分析 analysis_items，ID 恰好对应 new_status_ids；空列表直接提交空 analyses。不要翻译锚点或历史事件。
 - `scan-analysis`：`{lease,payload:{collected:xMonRaw,analyses:{<新状态ID>:<分析对象>}}}`。程序转换 raw 字段、父帖上下文、索引及指纹，形成严格 XMonitorScanInputV3 并调用 scan-stream；模型不生成映射代码。
-- 分析对象必需 chinese_translation、chinese_summary、full_analysis、reset_analysis；回复另需 ai_relevance，AI 相关回复另需 reply_parent_chinese_translation。不能覆盖可见事实。
-- reset_analysis 不相关仅为 `{related:false}`。相关必须包含 `related:true,time_expression,reasoning,estimate_precision,possible_range_beijing,confidence`；confidence 仅 low/medium/high，estimate_precision 仅 exact/range_only。exact 另需 most_likely_beijing，range_only 必须省略该键。证据不足不给精确时刻；先中文翻译，再时间，再判断，公开帖不是账号额度重置的官方证明。
-- `isMediaOnly=true` 时不得猜测图片内容：reset_analysis 必须为 `{related:null,unassessed_reason:"media_only_not_inspected"}`，中文翻译、中文概述与完整分析三项都须明确包含“未读取媒体内容”；若为回复，ai_relevance 也只能为 null 并说明未读取媒体。图文有可信正文时不属于纯媒体。
-- 回复 ai_relevance 为 `{schema_version:"AiRelevanceV1",ai_related:true|false,reasoning:<依据>}`；无法判断用 `{schema_version:"AiRelevanceV1",ai_related:null,unassessed_reason:<稳定原因>}`。结合回复和直接父帖，AI 不等于额度相关；非 AI/未评估抑制并推进可信水位，不重分类历史。
+- 分析对象必需 chinese_translation、chinese_summary、full_analysis、reset_analysis。新回复必须用 ResetAnalysisV2，按回复契约携带来源 ID、相关/无关/无法判断；AI 判断只作辅助。只有额度相关回复通知，候选需父中文翻译，采用上文时补对应中文翻译。不能覆盖可见事实。
+- 主帖 reset_analysis 沿用旧结构：无关 `{related:false}`；相关携带时间表达、reasoning、estimate_precision=exact/range_only、possible_range_beijing、confidence，exact 另需 most_likely_beijing。新回复还允许 no_time，明确未提供可推算时间；两者不能互相替代。公开帖子不是账户已经重置的证据。
+- `isMediaOnly=true` 时不猜图片内容：主帖 reset 为 `{related:null,unassessed_reason:"media_only_not_inspected"}`；新回复按 ResetAnalysisV2 共同字段加同一原因。翻译、摘要、完整分析都包含“未读取媒体内容”；回复 AI 也为 null。图文有可信正文时不属于纯媒体。
+- AI 字段 true/false 携带 reasoning，null 携带 unassessed_reason。额度相关必然 AI 相关，AI 相关不一定额度相关。新回复无关/无法判断分别抑制并推进可信水位，不重分类历史。
 - 局部失败 `stream-failure`：`{lease,payload:{account,stream:"main"|"reply",stage,failure_code}}`。浏览器已选择时，附 `browser:xMonCycle.source,driver_version:xMonDriver.version,timings:<本流有界耗时>`，机器核验其与本轮浏览器授权一致；记录这些诊断不代表采集成功。若 collect/scan 已登记失败，不二次覆盖。
+- 后续投递/回执/标签关闭/收口故障用 `cycle-failure` 追加。同一轮汇总所有受影响阶段并保留首错；不要因流已提交或已经失败而丢掉后续异常。首发/实质变化/满二十四小时一次/完整恢复一次由账本去重，每轮异常仍在原任务报告。
 
 ## 最终回执
 

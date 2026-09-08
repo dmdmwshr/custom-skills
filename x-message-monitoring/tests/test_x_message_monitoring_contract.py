@@ -20,7 +20,7 @@ class SkillContractTests(unittest.TestCase):
         documents="\n".join(p.read_text(encoding="utf-8") for p in ROOT.rglob("*.md"))
         self.assertNotRegex(documents,r"globalThis\.\w+\s*=")
         fast=(ROOT/"references/fast-path-runbook.md").read_text(encoding="utf-8")
-        for entry in ("collect-stream","analysis-plan","scan-analysis","stream-failure","heartbeat-finish","sync-receipts"):
+        for entry in ("collect-stream","reply-context-plan","cycle-failure","analysis-plan","scan-analysis","stream-failure","heartbeat-finish","sync-receipts"):
             self.assertIn(entry,fast)
         self.assertIn("manual_validation",fast)
         self.assertIn("partial_failed",fast)
@@ -48,7 +48,7 @@ class SkillContractTests(unittest.TestCase):
         python=BUSINESS/".venv/Scripts/python.exe"
         if not python.is_file():
             self.skipTest("business test environment unavailable")
-        for pattern in ("test_independent_streams.py","test_receipt_sync.py"):
+        for pattern in ("test_independent_streams.py","test_receipt_sync.py","test_reply_reset_policy.py"):
             result=subprocess.run([str(python),"-m","unittest","discover","-s","tests","-p",pattern,"-q"],
                 cwd=BUSINESS,capture_output=True,text=True,encoding="utf-8",timeout=30,env={**os.environ,"PYTHONIOENCODING":"utf-8"})
             self.assertEqual(0,result.returncode,result.stdout+result.stderr)
