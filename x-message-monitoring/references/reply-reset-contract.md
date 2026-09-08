@@ -1,6 +1,6 @@
-# 两流上下文、引用与额度契约（驱动 3.0.9）
+# 两流上下文、引用与额度契约（驱动 3.0.10）
 
-3.0.9 的 packFacts/diffFacts 使用内存字典和草稿差异传递原事实，具体步骤见 fast-path-runbook 首节。context-plan、collect-stream、analysis-plan 及 scan-analysis.collected 接受 XMonitorFactTransferV1 后先还原原流对象；不会改变原 V2/V3、身份、水位、引用或冻结语义，也不添加正文文件或浏览器桥接。差异不允许改写草稿中已核验的核心事实及直接父对象。原生流对象仍兼容。
+3.0.10 的 packFactsGzip 使用已核验公开 node:zlib 的 gzipSync，在内存压缩原字典及 diffFacts 草稿差异，具体步骤见 fast-path-runbook 首节。context-plan、collect-stream、analysis-plan 及 scan-analysis.collected 接受 XMonitorFactTransferV1 后先校验大小、压缩完整性与原校验码，再还原原流对象；不会改变原 V2/V3、身份、水位、引用或冻结语义，也不添加正文文件、进程或浏览器桥接。差异不允许改写草稿中已核验的核心事实及直接父对象。原生流对象及旧字典仍兼容。
 
 3.0.8 允许已验证唯一直接父子关系后的父帖全文补读：仅当截断父帖控件需移位时，从该父帖已知永久链接读取其自身正文，身份、UTC、标志和正文前缀必须一致，引用事实保持独立；原父子链不变，不选择新父对象。每次最多两个永久链接，permalinkBatch 的 pending_parent 继续同批至 done=true；contextBatch 的 pending_status_ids 只续未完成 ID，不重复处理已返回 items 中的 ID。每页 15 秒、每次工具 40 秒；未完整时不能冻结，失败之后不重试。
 

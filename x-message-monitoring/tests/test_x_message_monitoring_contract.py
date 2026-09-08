@@ -28,7 +28,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("media_only_not_inspected",fast)
         for step in ("--input-framing chunks","XMonitorInputReadyV1","echo_disabled=true","write_stdin","Array.from"):
             self.assertIn(step,fast)
-        for step in ("packFacts","diffFacts","XMonitorFactTransferV1","reply_base","reply_delta","context_items","heartbeat-finish"):
+        for step in ("packFacts","packFactsGzip","node:zlib","TextEncoder","diffFacts","XMonitorFactTransferV1","reply_base","reply_delta","context_items","heartbeat-finish"):
             self.assertIn(step,fast)
         driver=BUSINESS/"scripts/desktop_monitor_driver.js"
         if driver.is_file():

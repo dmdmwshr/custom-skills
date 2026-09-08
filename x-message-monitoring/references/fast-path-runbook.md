@@ -1,13 +1,15 @@
-# 固定快速路径（分流协议 1 / 驱动 3.0.9）
+# 固定快速路径（分流协议 1 / 驱动 3.0.10）
 
-## 公开事实的内存传递（3.0.9，当前优先）
+## 公开事实的内存传递（3.0.10，当前优先）
 
 CUA 与 functions 不共享变量，这是已知接口边界，不是停止合法传递的理由。以下对象都是当前可验证公开帖子事实，允许进入模型工具上下文。开始 acquire 前读懂并准备本节；不等到二十分钟末尾才设计传递方式，不另建通道、正文文件或进程桥接。
 
-1. 草稿仍只调用一次 `draftStream`，保留 `xMonReplyDraft`（主帖变量同理）。CUA 用原固定工厂 `xMonDriver.packFacts(xMonReplyDraft)` 导出 `XMonitorFactTransferV1` 字典对象，工具回传该对象一次。functions 用 `store("reply_base", <刚返回的完整对象>)` 原样保存；不手工展开重复字段、改正文或推测引用。
-2. 立即经原 `--input-framing chunks`、InputReady/echo_disabled 与 write_stdin 提交 `{lease,payload:load("reply_base")}` 到 context-plan。固定入口只在内存还原原 XCollectedStreamV1，并校验规范 JSON 校验码；仍走原严格水位、身份与事实检查。此校验码只检测传递差错，采集与冻结原有哈希继续生效。
+预先在当前 CUA 通过公开 Node 标准库 `node:zlib` 取得 `gzipSync`，绑定已声明的 `xMonGzipSync`；原样工厂以 `vm.runInNewContext(source,{URL,TextEncoder})` 实例化。两项均为纯内存计算，不执行浏览器动作、进程或文件写入。该环境已实测 gzipSync 可用，不能改用未提供的 CompressionStream。工厂和压缩函数可跨轮复用；每次新 acquire 后必须重新 createCycle，并确认 mainDone/searchDone 为 false、mainPages/searchPages 为 0。
+
+1. 草稿仍只调用一次 `draftStream`，保留已声明的 `xMonReplyDraft`（主帖变量同理）。CUA 用原固定工厂 `xMonDriver.packFactsGzip(xMonReplyDraft,xMonGzipSync)` 导出 `XMonitorFactTransferV1` 的 `gzip_base64` 对象，工具回传该对象一次。functions 用 `store("reply_base", <刚返回的完整对象>)` 原样保存；不手工展开重复字段、改正文或推测引用。packFacts 的旧字典仍兼容小载荷；实际回复积压使用已准备好的 gzip 压缩，不能再次转抄约四万字符的旧字典。
+2. 立即经原 `--input-framing chunks`、InputReady/echo_disabled 与 write_stdin 提交 `{lease,payload:load("reply_base")}` 到 context-plan。固定入口限制解压大小，核对长度、压缩完整性、唯一 JSON 键和规范 JSON 校验码，再还原原 XCollectedStreamV1；仍走原严格水位、身份与事实检查。此校验码只检测传递差错，采集与冻结原有哈希继续生效。
 3. functions 可直接解析并保存固定入口返回的结构化计划。模型读取其中 context_items 判断必要上下文；传给 CUA applyContextPlan 的控制对象只需保留计划中的 schema_version、account、stream、draft_fingerprint、max_ancestors、max_quotes、new_status_ids，不重复传 context_items 正文。所有字段都取本次真实计划，不自己推断 new_status_ids。
-4. 按既有流程补必要上文/引用。最后仅一次 `rawStream` 得到 xMonReplyRaw；CUA 导出 `xMonDriver.diffFacts(xMonReplyDraft,xMonReplyRaw)`，functions 原样保存 reply_delta。后续同一内存 collected 对象为 `{schema_version:"XMonitorFactTransferV1",representation:"delta",base:load("reply_base"),patch:load("reply_delta")}`。collect-stream、analysis-plan 的 payload 直接用它；scan-analysis 的 collected 也用它，不重新转抄整条时间线。已核验正文、身份、直接父对象和观察序列在差异中不可变；只有新上文/引用、采集时间和耗时可补充。
+4. 按既有流程补必要上文/引用。最后仅一次 `rawStream` 得到 xMonReplyRaw；CUA 导出 `xMonDriver.packFactsGzip(xMonDriver.diffFacts(xMonReplyDraft,xMonReplyRaw),xMonGzipSync)`，functions 原样保存 reply_delta。后续同一内存 collected 对象为 `{schema_version:"XMonitorFactTransferV1",representation:"delta",base:load("reply_base"),patch:load("reply_delta")}`。collect-stream、analysis-plan 的 payload 直接用它；scan-analysis 的 collected 也用它，不重新转抄整条时间线。已核验正文、身份、直接父对象和观察序列在差异中不可变；只有新上文/引用、采集时间和耗时可补充。
 5. context-plan/analysis-plan 的可读新项事实是分析来源；相关/无关/无法判断按实际内容填写。批量分析可用 functions 的数组与公共字段机械组装严格对象，减少重复键名；不能以模板猜测结论或给已知项重新分析。空 new_status_ids 直接组装空 analyses，同一 functions 调用内可顺序完成标准入口调用，每一步仍检查成功回执。
 6. 只传递元数据时回报条数、压缩前后字符数、校验码与阶段耗时；正文只进授权工具上下文/无回显 stdin，不进普通日志。任何校验或原验证失败都报告，不把传输包装当作成功采集。
 7. 当前 lease 必须保留到同轮 heartbeat-finish 成功或明确失败回执之后才清理。时间到期、发布异常或浏览器关闭后也先用同 token 完成既有失败收口；不能先清空 lease 再声称无法 finish，不从历史取回 token、不用 renew 绕过整轮二十分钟上限。
@@ -22,6 +24,7 @@ CUA 与 functions 不共享变量，这是已知接口边界，不是停止合�
 - 业务目录：`C:\Users\12070\Desktop\项目开发\X监控`；解释器 `.venv\Scripts\python.exe`；入口 `scripts\fixed_session_entry.py`；数据仅在业务 `data`。
 - 全部命令通过 UTF-8 对象序列化后标准输入，禁止正文/凭据出现在进程参数、普通日志或临时脚本中。公开帖的结构化工具返回值是授权事实载荷，允许进入模型上下文与当前 functions 内存供验证/分析，不能把它误当凭据或禁止的普通日志。PowerShell 输入输出均设 `[Text.UTF8Encoding]::new($false)`；不要手拼 JSON。
 - CUA 状态只用 `let xMonDriver`、`let xMonTab`、`let xMonCycle`、`let xMonRaw`；各变量第一次使用必须声明，已经存在时只赋值，不能遗漏初始化或重复声明。本轮 lease 来自一次 acquire；不能复制旧值。工具会话重置时不接续旧浏览器句柄，登记失败并 finish。
+- 页面调用结果可直接用 `nodeRepl.write(await xMonDriver.page(...))` 输出，或赋给事先已声明的变量。给未声明变量赋值发生 ReferenceError 时，右侧 await 可能已经完成浏览器动作；不能因此说操作未执行或重放 page。先看本轮纯计数/已有回执，不能确认则失败收口，不通过第二次调用取得一个新结果。
 
 ## 按表执行，失败不探索
 
@@ -39,7 +42,7 @@ CUA 与 functions 不共享变量，这是已知接口边界，不是停止合�
 ## 浏览器：固定源加载，不生成新驱动
 
 1. 第一次 CUA 调用仅执行 `let xMonTab = await cua.createBrowserTab("chrome", url, {sessionName:"🌐 X监控"})`；url 为 `https://x.com/search?q=` 加 `encodeURIComponent("from:"+account+" -filter:replies -filter:retweets")` 加 `&f=live`。读取工具返回的文档和初始状态。驱动核验准确查询和 Latest 选项；不要读取或排序主页卡片来替代主帖搜索。
-2. 驱动未加载或版本变化时，在**当前 CUA JavaScript 会话**用公开 Node 标准库 `node:fs` 读取唯一业务 `scripts/desktop_monitor_driver.js` 的 UTF-8 原文，再用 `node:vm` 的 `vm.runInNewContext(source,{URL})` 原样实例化无浏览器副作用的工厂，绑定普通 `let xMonDriver`；变量已存在时只赋值，不重复声明。不要手工转写整段源码。驱动采集前必须核对 `version` 和 `sourceFingerprint()` 与本地源文件计算值逐项一致；不等则停止，不修改指纹返回值或水位字段来掩盖差异。该文件读取只用于加载固定源码，不读取浏览器数据。浏览器动作仍只由当前 CUA 的受支持标签句柄执行；不能导入内部模块、执行独立 Playwright、使用 `globalThis`、另建控制进程/桥接或重写 selector。其他 Node REPL 与 CUA 不共享变量，不能作为浏览器替代通道。新轮次只创建 cycle，不重复加载源码。
+2. 驱动未加载或版本变化时，在**当前 CUA JavaScript 会话**用公开 Node 标准库 `node:fs` 读取唯一业务 `scripts/desktop_monitor_driver.js` 的 UTF-8 原文，再用 `node:vm` 的 `vm.runInNewContext(source,{URL,TextEncoder})` 原样实例化无浏览器副作用的工厂，绑定普通 `let xMonDriver`；变量已存在时只赋值，不重复声明。不要手工转写整段源码。驱动采集前必须核对 `version` 和 `sourceFingerprint()` 与本地源文件计算值逐项一致；不等则停止，不修改指纹返回值或水位字段来掩盖差异。该文件读取只用于加载固定源码，不读取浏览器数据。浏览器动作仍只由当前 CUA 的受支持标签句柄执行；不能导入内部模块、执行独立 Playwright、使用 `globalThis`、另建控制进程/桥接或重写 selector。其他 Node REPL 与 CUA 不共享变量，不能作为浏览器替代通道。新轮次只创建 cycle，不重复加载源码。
 3. `xMonCycle = xMonDriver.createCycle({account, authenticatedAccount:"dmdmws", source:"desktop_chrome_extension", fallbackReason:null, watermarks, sourceTimezone})`。参数来自本轮配置。设 `xMonCycle.ownTab=xMonTab`、`xMonCycle.lastUrl=url`，避免再次导航创建时的同一地址。
 4. 工具调用上限 40 秒；page 一次一页，permalinkBatch 一次最多两个永久链接，页面总探测预算 15 秒。驱动等待账号头部文本和目标卡片脱离骨架态后抽取一次；仅出现时间链接不等于正文就绪。就绪立即继续，不固定等待、不增加重试循环。`tab.playwright` 是允许的受控扩展 DOM 门面，独立 Playwright 不允许。
 5. 首次 Chrome 明确 `browser_not_running`：仅一次项目 `start_managed_browser.ps1 -Browser chrome`，无 URL，等待规定 8 秒，重试一次创建标签。工具仅报告通用 Browser is not available、未区分未运行/无扩展时，先用该脚本 `-Browser chrome -CheckOnly` 只读检查：`browser_not_running` 才进入上述一次启动；`browser_running` 表示正确根目录实例存在，工具仍不可用按 `extension_unavailable` 处理，不重启；`process_probe_unavailable` 失败关闭，不猜未运行。脚本将带空格的 User Data 作为完整参数，只认可正确根目录主进程，旧 User 目录进程不计。其他失败不重启 Chrome，不清理任何浏览器目录或既有进程。
@@ -48,7 +51,7 @@ CUA 与 functions 不共享变量，这是已知接口边界，不是停止合�
 
 ## 驱动调用
 
-每次加载前，在业务源码目录用 Node 的 fs 读取固定驱动文件，并用 vm.runInNewContext 仅实例化无浏览器副作用的原样工厂，打印 `{version,source_fingerprint:driver.sourceFingerprint()}` 作为预期值。这是离线源码核对，不建立浏览器或控制进程。CUA 原样加载后打印相同元数据并比较算法、长度、摘要；通过后才调用驱动采集。FNV 指纹仅检测意外转写变化，不是安全签名或页面证据。3.0.9 保留搜索或详情初次快照没有目标时的共享十五秒预算、一次 AX 刷新及就绪等待，并增加两流新项引用补读；失败之后不导航或采集重试，也不固定延长等待。
+每次加载前，在业务源码目录用 Node 的 fs 读取固定驱动文件，并用 vm.runInNewContext 仅实例化无浏览器副作用的原样工厂，打印 `{version,source_fingerprint:driver.sourceFingerprint()}` 作为预期值。这是离线源码核对，不建立浏览器或控制进程。CUA 原样加载后打印相同元数据并比较算法、长度、摘要；通过后才调用驱动采集。FNV 指纹仅检测意外转写变化，不是安全签名或页面证据。3.0.10 保留搜索或详情初次快照没有目标时的共享十五秒预算、一次 AX 刷新及就绪等待，并增加两流新项引用补读；失败之后不导航或采集重试，也不固定延长等待。
 
 展开和引用点击使用驱动刚核验的实际时间链接属性定位，避免规范化后的账号大小写或链接查询串造成零匹配；该属性仅留在本轮驱动内存，事实仍使用规范永久链接。源卡和控件均须唯一，来源身份、展开后的完整正文仍由固定驱动核验，不能现场改选择器或按位置点选。
 
