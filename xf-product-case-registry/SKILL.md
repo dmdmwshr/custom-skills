@@ -54,6 +54,8 @@ description: 通过用户已登录的消防监督管理网页采集消防产品�
 
 ## 认证与写入
 
+- 本地上传进度最多每 2 秒在标准错误流显示文件、已接收数量、发送字节和耗时，标准输出保持原有 JSON。默认单文件总期限 210 秒、连续无进展 60 秒，可用 Ctrl+C 取消；发送字节不代表接收成功。上传中断后先回读同一任务的 `receivedFiles` 并保存可核实断点，本案停止，不自动重复发送正文或创建替代任务。
+
 - 登记系统认证只使用 `%LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml`；先运行 `init-auth-config` 创建空模板，由用户本人填写。不得在聊天、命令行、日志、manifest 或状态文件中展示凭据、Cookie 或 CSRF 令牌。
 - CLI 登录后必须回读会话并核对身份、认证方式、CSRF、首次改密状态和大队范围。全 8 大队批量上传或补录必须使用 ADMIN；BRIGADE 账户只能处理与 manifest `brigadeCode` 一致的本大队案卷。多案正式写入只用 `upload-batch` 或 `supplement-batch` 共用一次会话；不得用循环逐案调用单案命令造成重复登录。普通查询和控制请求的起始间隔固定不少于 1.05 秒，PDF 正文上传使用服务器独立额度。HTTP 429 只在收到数值型 `Retry-After` 且单次及累计等待都不超过 60 秒时自动加入短随机抖动后有限重试；更长等待、缺少有效响应头或流式 PDF 上传 429 必须保留断点并停止，流式正文只能由下一次命令重新打开后续传，不在同一文件句柄上自动重放。
 - `validate`、`upload --dry-run` 和 `supplement --dry-run` 不访问网站；`supplement --plan` 只登录并读取实时同步快照，不创建任务或写案卷。完整导入正式写入必须显式使用 `upload --finalize` 或 `upload-batch --finalize`；补录必须显式使用 `supplement --finalize` 或 `supplement-batch --finalize`。完整导入创建任务提交相同的 `Idempotency-Key`/`idempotencyKey`、`packageSha256` 和详情项目编号 `projectNo`。补录创建任务提交稳定幂等键、`projectNo`、`mode=SUPPLEMENT_EXISTING` 和服务器 `baseSnapshotDigest`，不复用完整案卷的 `packageSha256`；补录清单固定为 `CaseFileSupplementManifestV1/MISSING_ONLY`。两类任务续传都以 GET 返回的 `receivedFiles` 核对相对路径、SHA-256 和大小，只上传服务端缺失引用；服务端投影回退、缺失或不一致必须停在本案断点。

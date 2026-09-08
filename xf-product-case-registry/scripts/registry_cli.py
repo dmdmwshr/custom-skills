@@ -24,7 +24,12 @@ import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
-VERSION = "1.6.5"
+if __package__:
+    from .upload_transport import upload_request
+else:
+    from upload_transport import upload_request
+
+VERSION = "1.6.6"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -1066,9 +1071,7 @@ def validate_supplement_manifest(
     )
     if root.get("schemaVersion") != "CaseFileSupplementManifestV1":
         errors.append("supplement.schemaVersion 必须为 CaseFileSupplementManifestV1")
-    if not isinstance(root.get("projectNo"), str) or not PROJECT_NO.fullmatch(
-        root["projectNo"]
-    ):
+    if not isinstance(root.get("projectNo"), str) or not PROJECT_NO.fullmatch(root["projectNo"]):
         errors.append("supplement.projectNo 不合法")
     if not isinstance(root.get("baseSnapshotDigest"), str) or not SHA256.fullmatch(
         root["baseSnapshotDigest"]
@@ -1077,8 +1080,7 @@ def validate_supplement_manifest(
     if root.get("mode") != "MISSING_ONLY":
         errors.append("supplement.mode 仅支持 MISSING_ONLY")
     if "packageSha256" in root and (
-        not isinstance(root["packageSha256"], str)
-        or not SHA256.fullmatch(root["packageSha256"])
+        not isinstance(root["packageSha256"], str) or not SHA256.fullmatch(root["packageSha256"])
     ):
         errors.append("supplement.packageSha256 不合法")
     try:
@@ -1191,9 +1193,7 @@ def validate_supplement_manifest(
             continue
         kinds: set[str] = set()
         for item_version in versions:
-            version = only_keys(
-                item_version, {"kind", "fileRef"}, "supplement.version", errors
-            )
+            version = only_keys(item_version, {"kind", "fileRef"}, "supplement.version", errors)
             kind, file_ref = version.get("kind"), version.get("fileRef")
             if kind not in VERSIONS or kind in kinds:
                 errors.append("supplement 文件版本重复或不合法")
@@ -1218,9 +1218,7 @@ def validate_supplement_manifest(
                 sha256, pages = pdf_info(Path(local)) if text(local) else ("", 0)
             except RegistryError:
                 sha256, pages = "", 0
-            if sha256 != file.get("sha256") or (
-                "pageCount" in file and pages != file["pageCount"]
-            ):
+            if sha256 != file.get("sha256") or ("pageCount" in file and pages != file["pageCount"]):
                 errors.append(f"supplement {file_ref} 本地 PDF/哈希/页数不匹配")
     return errors
 
@@ -1421,11 +1419,15 @@ def build_supplement_manifest(
     errors = validate_supplement_manifest(supplement, selected_upload)
     if errors:
         raise RegistryError("补录清单校验失败：\n- " + "\n- ".join(errors))
-    return supplement, selected_upload, {
-        "missingVersions": len(selected_files),
-        "missingSlots": len(selected_slots),
-        "alreadyPresentVersions": already_present,
-    }
+    return (
+        supplement,
+        selected_upload,
+        {
+            "missingVersions": len(selected_files),
+            "missingSlots": len(selected_slots),
+            "alreadyPresentVersions": already_present,
+        },
+    )
 
 
 def load_supplement_inputs(
@@ -1454,6 +1456,8 @@ def api_request(
 
     if request_class not in {"general", "upload"}:
         raise RegistryError("未知 API 限流类别")
+    if request_class == "upload":
+        return upload_request(client, method.upper(), url, **kwargs)
     transport = getattr(client, "_transport", None)
     pacing_enabled = not isinstance(transport, httpx.MockTransport) or bool(
         getattr(client, "_xfpcr_force_pacing", False)
@@ -2009,7 +2013,8 @@ def exact_case(client: httpx.Client, api_base: str, project_no: str) -> dict[str
         api_request(
             client,
             "GET",
-            f"{api_base}/api/v2/cases", params={"search": project_no, "page": 1, "pageSize": 100}
+            f"{api_base}/api/v2/cases",
+            params={"search": project_no, "page": 1, "pageSize": 100},
         ),
         "精确案卷查询",
     )
@@ -2167,9 +2172,7 @@ def validate_supplement_state(state: dict[str, Any]) -> None:
         or (identity.get("role") == "BRIGADE" and not identity.get("brigadeCode"))
     ):
         raise RegistryError("supplement-state V1 身份摘要无效")
-    if identity.get("role") == "BRIGADE" and identity.get("brigadeCode") != state[
-        "brigadeCode"
-    ]:
+    if identity.get("role") == "BRIGADE" and identity.get("brigadeCode") != state["brigadeCode"]:
         raise RegistryError("supplement-state V1 大队与身份摘要不一致")
     if status == "UPLOADING" and set(state) != SUPPLEMENT_STATE_BASE_KEYS:
         raise RegistryError("UPLOADING supplement-state 包含完成字段")
@@ -2342,19 +2345,11 @@ def reconcile_uploaded_file_refs(
 
     expected_by_path = {item["relativePath"]: item for item in projection}
     expected_refs = {item["clientRef"] for item in projection}
-    server_field = None
-    for candidate in ("receivedFiles", "files", "uploadedFiles"):
-        if candidate in job:
-            if server_field is not None:
-                raise RegistryError("服务端导入任务同时返回多个文件投影字段，停止续传")
-            server_field = candidate
-    if server_field is None:
-        if job.get("status") == "MANIFEST_RECEIVED":
-            # The manifest endpoint accepts only a complete file graph. On an older
-            # server that does not expose its file projection, this terminal pre-
-            # finalize state is sufficient evidence that every expected PDF exists.
-            state["uploadedFileRefs"] = sorted(expected_refs)
-        return
+    server_field = "receivedFiles"
+    if server_field not in job:
+        raise RegistryError("服务端缺少 receivedFiles 接收清单，停止续传")
+    if "files" in job or "uploadedFiles" in job:
+        raise RegistryError("服务端导入任务同时返回多个文件投影字段，停止续传")
 
     server_files = job.get(server_field)
     if not isinstance(server_files, list):
@@ -2399,6 +2394,51 @@ def reconcile_uploaded_file_refs(
     if job.get("status") == "MANIFEST_RECEIVED" and server_refs != expected_refs:
         raise RegistryError("服务端已接收清单但文件投影不完整，停止终结")
     state["uploadedFileRefs"] = sorted(server_refs)
+
+
+def upload_pdf_with_receipt(
+    client: httpx.Client,
+    api_base: str,
+    job_id: str,
+    write_headers: dict[str, str],
+    local_path: Path,
+    item: dict[str, Any],
+    state: dict[str, Any],
+    state_path: Path,
+    projection: list[dict[str, Any]],
+    read_job: Any,
+) -> None:
+    """Send once; any ambiguous outcome is reconciled against the same job."""
+    try:
+        with local_path.open("rb") as stream:
+            result = response_json(
+                api_request(
+                    client,
+                    "POST",
+                    f"{api_base}/api/v2/import-jobs/{job_id}/files",
+                    request_class="upload",
+                    retry_on_429=False,
+                    headers=write_headers,
+                    params={"relativePath": item["relativePath"]},
+                    files={"file": (local_path.name, stream, "application/pdf")},
+                    upload_progress=(len(state["uploadedFileRefs"]), len(projection)),
+                ),
+                "上传 PDF",
+            )
+        check_uploaded_file_response(result, item, job_id)
+    except (httpx.HTTPError, RegistryError, KeyboardInterrupt):
+        try:
+            job = read_job()
+            reconcile_uploaded_file_refs(state, job, projection)
+            write_json(state_path, state)
+            print(
+                "上传已停止；已核对同一任务的接收清单并保存断点，未重复发送正文。", file=sys.stderr
+            )
+        except (httpx.HTTPError, RegistryError, OSError):
+            print("上传已停止；接收清单暂未核对成功，保留原断点，未重复发送正文。", file=sys.stderr)
+        raise
+    state["uploadedFileRefs"] = sorted({*state["uploadedFileRefs"], item["clientRef"]})
+    write_json(state_path, state)
 
 
 def check_uploaded_file_response(value: dict[str, Any], item: dict[str, Any], job_id: str) -> None:
@@ -3333,9 +3373,9 @@ def upload_command(args: argparse.Namespace) -> None:
                 secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
             )
             if (
-                response_json(
-                    api_request(client, "GET", f"{api_base}/api/ready"), "服务就绪"
-                ).get("status")
+                response_json(api_request(client, "GET", f"{api_base}/api/ready"), "服务就绪").get(
+                    "status"
+                )
                 != "ready"
             ):
                 raise RegistryError("服务未就绪")
@@ -3506,23 +3546,25 @@ def upload_command(args: argparse.Namespace) -> None:
             if item["clientRef"] in state["uploadedFileRefs"]:
                 continue
             projection_item = projection_by_ref[item["clientRef"]]
-            with Path(upload[item["clientRef"]]).open("rb") as stream:
-                uploaded_response = response_json(
-                    api_request(
-                        client,
-                        "POST",
-                        f"{api_base}/api/v2/import-jobs/{job_id}/files",
-                        request_class="upload",
-                        retry_on_429=False,
-                        headers=write_headers,
-                        params={"relativePath": item["relativePath"]},
-                        files={"file": (Path(stream.name).name, stream, "application/pdf")},
-                    ),
-                    "上传 PDF",
-                )
-            check_uploaded_file_response(uploaded_response, projection_item, job_id)
-            state["uploadedFileRefs"] = sorted({*state["uploadedFileRefs"], item["clientRef"]})
-            write_json(state_path, state)
+            upload_pdf_with_receipt(
+                client,
+                api_base,
+                job_id,
+                write_headers,
+                Path(upload[item["clientRef"]]),
+                projection_item,
+                state,
+                state_path,
+                projection,
+                lambda: get_import_job(
+                    client,
+                    api_base,
+                    job_id,
+                    package_sha,
+                    manifest["case"]["projectNo"],
+                    brigade_code,
+                ),
+            )
         expected_refs = {item["clientRef"] for item in projection}
         if set(state["uploadedFileRefs"]) != expected_refs:
             raise RegistryError("本地上传进度未覆盖全部规范 PDF，停止提交清单")
@@ -3711,9 +3753,7 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 full_manifest,
                 secure_auth_config_path(Path(getattr(args, "auth_config", DEFAULT_AUTH_CONFIG))),
             )
-            ready = response_json(
-                api_request(client, "GET", f"{api_base}/api/ready"), "服务就绪"
-            )
+            ready = response_json(api_request(client, "GET", f"{api_base}/api/ready"), "服务就绪")
             if ready.get("status") != "ready":
                 raise RegistryError("服务未就绪")
         else:
@@ -3730,8 +3770,7 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
             if (
                 supplement_state.get("origin") != origin
                 or supplement_state.get("sourceManifestSha256") != source_manifest_sha
-                or supplement_state.get("supplementManifestSha256")
-                != file_sha256(supplement_path)
+                or supplement_state.get("supplementManifestSha256") != file_sha256(supplement_path)
                 or supplement_state.get("baseSnapshotDigest")
                 != supplement.get("baseSnapshotDigest")
                 or supplement_state.get("projectNo") != project_no
@@ -3765,7 +3804,8 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 api_request(
                     client,
                     "GET",
-                    f"{api_base}/api/v2/case-import-state", params={"projectNo": project_no}
+                    f"{api_base}/api/v2/case-import-state",
+                    params={"projectNo": project_no},
                 ),
                 "读取案卷同步快照",
             )
@@ -3830,9 +3870,9 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            idempotency_key = "xfpcr-supplement-v1-" + hashlib.sha256(
-                digest_material.encode("utf-8")
-            ).hexdigest()
+            idempotency_key = (
+                "xfpcr-supplement-v1-" + hashlib.sha256(digest_material.encode("utf-8")).hexdigest()
+            )
             job = response_json(
                 api_request(
                     client,
@@ -3882,25 +3922,25 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 if item["clientRef"] in supplement_state["uploadedFileRefs"]:
                     continue
                 projection_item = projection_by_ref[item["clientRef"]]
-                with Path(supplement_upload[item["clientRef"]]).open("rb") as stream:
-                    uploaded = response_json(
-                        api_request(
-                            client,
-                            "POST",
-                            f"{api_base}/api/v2/import-jobs/{job_id}/files",
-                            request_class="upload",
-                            retry_on_429=False,
-                            headers=write_headers,
-                            params={"relativePath": item["relativePath"]},
-                            files={"file": (Path(stream.name).name, stream, "application/pdf")},
-                        ),
-                        "上传补录 PDF",
-                    )
-                check_uploaded_file_response(uploaded, projection_item, job_id)
-                supplement_state["uploadedFileRefs"] = sorted(
-                    {*supplement_state["uploadedFileRefs"], item["clientRef"]}
+                upload_pdf_with_receipt(
+                    client,
+                    api_base,
+                    job_id,
+                    write_headers,
+                    Path(supplement_upload[item["clientRef"]]),
+                    projection_item,
+                    supplement_state,
+                    supplement_state_path,
+                    projection,
+                    lambda: get_supplement_job(
+                        client,
+                        api_base,
+                        job_id,
+                        project_no,
+                        supplement["baseSnapshotDigest"],
+                        brigade_code,
+                    ),
                 )
-                write_json(supplement_state_path, supplement_state)
             expected_refs = {item["clientRef"] for item in projection}
             if set(supplement_state["uploadedFileRefs"]) != expected_refs:
                 raise RegistryError("补录文件上传进度不完整，停止提交清单")
@@ -3990,9 +4030,7 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 min(max(float(args.timeout), 1.0), 60.0),
             )
         except RegistryError as error:
-            mark_verification_error(
-                args, manifest_path, full_manifest, supplement_state, error
-            )
+            mark_verification_error(args, manifest_path, full_manifest, supplement_state, error)
             raise
         if verification is None:
             return {
@@ -4004,7 +4042,8 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
             api_request(
                 client,
                 "GET",
-                f"{api_base}/api/v2/case-import-state", params={"projectNo": project_no}
+                f"{api_base}/api/v2/case-import-state",
+                params={"projectNo": project_no},
             ),
             "补录后读取案卷同步快照",
         )
@@ -4067,9 +4106,7 @@ def supplement_batch_command(args: argparse.Namespace) -> None:
         manifest_path = layout.work_case_dir(project_no) / "manifest.json"
         upload_map_path = layout.work_case_dir(project_no) / "upload-map.json"
         try:
-            resolved_path, manifest, _upload = load_inputs(
-                str(manifest_path), str(upload_map_path)
-            )
+            resolved_path, manifest, _upload = load_inputs(str(manifest_path), str(upload_map_path))
             if manifest.get("case", {}).get("projectNo") != project_no:
                 raise RegistryError("manifest 项目编号与所选项目不一致")
             enforce_upload_workspace_preflight(args, resolved_path, manifest)
@@ -4127,9 +4164,7 @@ def supplement_batch_command(args: argparse.Namespace) -> None:
             raise RegistryError("跨大队批量补录必须使用 ADMIN 账户")
         for *_paths, manifest in prepared:
             require_identity_scope(identity, manifest)
-        ready = response_json(
-            api_request(client, "GET", f"{api_base}/api/ready"), "服务就绪"
-        )
+        ready = response_json(api_request(client, "GET", f"{api_base}/api/ready"), "服务就绪")
         if ready.get("status") != "ready":
             raise RegistryError("服务未就绪")
         shared_session = {
@@ -4271,9 +4306,9 @@ def upload_batch_command(args: argparse.Namespace) -> None:
         for *_paths, manifest in prepared:
             require_identity_scope(identity, manifest)
         if (
-            response_json(
-                api_request(client, "GET", f"{api_base}/api/ready"), "服务就绪"
-            ).get("status")
+            response_json(api_request(client, "GET", f"{api_base}/api/ready"), "服务就绪").get(
+                "status"
+            )
             != "ready"
         ):
             raise RegistryError("服务未就绪")

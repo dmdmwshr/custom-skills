@@ -725,9 +725,7 @@ def test_supplement_finalize_only_adds_missing_file_and_closes_original_state(
     manifest_path = case_dir / "manifest.json"
     upload_map_path = case_dir / "upload-map.json"
     manifest_path.write_text(json.dumps(data), encoding="utf-8")
-    upload_map_path.write_text(
-        json.dumps({"files": {"file:one": str(source)}}), encoding="utf-8"
-    )
+    upload_map_path.write_text(json.dumps({"files": {"file:one": str(source)}}), encoding="utf-8")
     projection = cli.files_projection(data, {"file:one": str(source)})
     case_id = "33333333-3333-4333-8333-333333333333"
     cli.write_json(
@@ -1370,6 +1368,9 @@ def test_upload_resumes_all_active_states_with_case_null(
                 "id": "job",
                 "packageHash": data["packageSha256"],
                 "status": job_status,
+                "receivedFiles": projection
+                if uploaded_before or job_status == "MANIFEST_RECEIVED"
+                else [],
                 **({"packageName": PROJECT} if job_status == "MANIFEST_RECEIVED" else {}),
                 "case": None,
             },
@@ -1634,6 +1635,7 @@ def test_api_request_does_not_retry_or_pace_stream_upload_429(
             "https://registry.example/api/v2/import-jobs/job/files",
             request_class="upload",
             retry_on_429=False,
+            files={"file": ("fixture.pdf", b"%PDF-1.4", "application/pdf")},
         )
     assert response.status_code == 429
     assert requests == 1
@@ -2614,7 +2616,7 @@ def test_reconcile_uploaded_file_refs_advances_only_exact_server_projection() ->
             {"uploadedFileRefs": []},
             {
                 "status": "UPLOADING",
-                "files": [
+                "receivedFiles": [
                     {
                         "relativePath": "files/one.pdf",
                         "sha256": "sha256:" + "5" * 64,
@@ -2641,7 +2643,7 @@ def test_reconcile_uploaded_file_refs_rejects_server_rollback() -> None:
     with pytest.raises(RegistryError, match="服务端文件投影中缺失"):
         cli.reconcile_uploaded_file_refs(
             {"uploadedFileRefs": ["file:one"]},
-            {"status": "UPLOADING", "files": []},
+            {"status": "UPLOADING", "receivedFiles": []},
             projection,
         )
 
