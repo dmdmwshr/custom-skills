@@ -28,6 +28,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("media_only_not_inspected",fast)
         for step in ("--input-framing chunks","XMonitorInputReadyV1","echo_disabled=true","write_stdin","Array.from"):
             self.assertIn(step,fast)
+        for step in ("packFacts","diffFacts","XMonitorFactTransferV1","reply_base","reply_delta","context_items","heartbeat-finish"):
+            self.assertIn(step,fast)
         driver=BUSINESS/"scripts/desktop_monitor_driver.js"
         if driver.is_file():
             version=re.search(r"const version = '([0-9.]+)'",driver.read_text(encoding="utf-8")).group(1)
@@ -51,7 +53,7 @@ class SkillContractTests(unittest.TestCase):
         python=BUSINESS/".venv/Scripts/python.exe"
         if not python.is_file():
             self.skipTest("business test environment unavailable")
-        for pattern in ("test_independent_streams.py","test_receipt_sync.py","test_reply_reset_policy.py","test_reset_quote_policy.py"):
+        for pattern in ("test_independent_streams.py","test_receipt_sync.py","test_reply_reset_policy.py","test_reset_quote_policy.py","test_fact_transfer.py"):
             result=subprocess.run([str(python),"-m","unittest","discover","-s","tests","-p",pattern,"-q"],
                 cwd=BUSINESS,capture_output=True,text=True,encoding="utf-8",timeout=30,env={**os.environ,"PYTHONIOENCODING":"utf-8"})
             self.assertEqual(0,result.returncode,result.stdout+result.stderr)

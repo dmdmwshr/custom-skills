@@ -1,4 +1,16 @@
-# 固定快速路径（分流协议 1 / 驱动 3.0.8）
+# 固定快速路径（分流协议 1 / 驱动 3.0.9）
+
+## 公开事实的内存传递（3.0.9，当前优先）
+
+CUA 与 functions 不共享变量，这是已知接口边界，不是停止合法传递的理由。以下对象都是当前可验证公开帖子事实，允许进入模型工具上下文。开始 acquire 前读懂并准备本节；不等到二十分钟末尾才设计传递方式，不另建通道、正文文件或进程桥接。
+
+1. 草稿仍只调用一次 `draftStream`，保留 `xMonReplyDraft`（主帖变量同理）。CUA 用原固定工厂 `xMonDriver.packFacts(xMonReplyDraft)` 导出 `XMonitorFactTransferV1` 字典对象，工具回传该对象一次。functions 用 `store("reply_base", <刚返回的完整对象>)` 原样保存；不手工展开重复字段、改正文或推测引用。
+2. 立即经原 `--input-framing chunks`、InputReady/echo_disabled 与 write_stdin 提交 `{lease,payload:load("reply_base")}` 到 context-plan。固定入口只在内存还原原 XCollectedStreamV1，并校验规范 JSON 校验码；仍走原严格水位、身份与事实检查。此校验码只检测传递差错，采集与冻结原有哈希继续生效。
+3. functions 可直接解析并保存固定入口返回的结构化计划。模型读取其中 context_items 判断必要上下文；传给 CUA applyContextPlan 的控制对象只需保留计划中的 schema_version、account、stream、draft_fingerprint、max_ancestors、max_quotes、new_status_ids，不重复传 context_items 正文。所有字段都取本次真实计划，不自己推断 new_status_ids。
+4. 按既有流程补必要上文/引用。最后仅一次 `rawStream` 得到 xMonReplyRaw；CUA 导出 `xMonDriver.diffFacts(xMonReplyDraft,xMonReplyRaw)`，functions 原样保存 reply_delta。后续同一内存 collected 对象为 `{schema_version:"XMonitorFactTransferV1",representation:"delta",base:load("reply_base"),patch:load("reply_delta")}`。collect-stream、analysis-plan 的 payload 直接用它；scan-analysis 的 collected 也用它，不重新转抄整条时间线。已核验正文、身份、直接父对象和观察序列在差异中不可变；只有新上文/引用、采集时间和耗时可补充。
+5. context-plan/analysis-plan 的可读新项事实是分析来源；相关/无关/无法判断按实际内容填写。批量分析可用 functions 的数组与公共字段机械组装严格对象，减少重复键名；不能以模板猜测结论或给已知项重新分析。空 new_status_ids 直接组装空 analyses，同一 functions 调用内可顺序完成标准入口调用，每一步仍检查成功回执。
+6. 只传递元数据时回报条数、压缩前后字符数、校验码与阶段耗时；正文只进授权工具上下文/无回显 stdin，不进普通日志。任何校验或原验证失败都报告，不把传输包装当作成功采集。
+7. 当前 lease 必须保留到同轮 heartbeat-finish 成功或明确失败回执之后才清理。时间到期、发布异常或浏览器关闭后也先用同 token 完成既有失败收口；不能先清空 lease 再声称无法 finish，不从历史取回 token、不用 renew 绕过整轮二十分钟上限。
 
 3.0.8 的父帖全文规则优先于下文旧父帖滚动步骤：父子关系已核验且截断父帖控件需要移位时，驱动直接读该父帖规范永久链接，以身份、UTC、标志和前缀绑定完整正文及独立引用事实。permalinkBatch 每次最多两个永久链接；pending_parent=true 是正常未完成进度，继续同一批次直到 done=true。contextBatch 返回 pending_status_ids 时只在下次续这些 ID，已返回 items 中的 ID 不重复调用；每页仍限 15 秒、整次工具限 40 秒，不在失败后补读或重试。
 
@@ -36,7 +48,7 @@
 
 ## 驱动调用
 
-每次加载前，在业务源码目录用 Node 的 fs 读取固定驱动文件，并用 vm.runInNewContext 仅实例化无浏览器副作用的原样工厂，打印 `{version,source_fingerprint:driver.sourceFingerprint()}` 作为预期值。这是离线源码核对，不建立浏览器或控制进程。CUA 原样加载后打印相同元数据并比较算法、长度、摘要；通过后才调用驱动采集。FNV 指纹仅检测意外转写变化，不是安全签名或页面证据。3.0.8 保留搜索或详情初次快照没有目标时的共享十五秒预算、一次 AX 刷新及就绪等待，并增加两流新项引用补读；失败之后不导航或采集重试，也不固定延长等待。
+每次加载前，在业务源码目录用 Node 的 fs 读取固定驱动文件，并用 vm.runInNewContext 仅实例化无浏览器副作用的原样工厂，打印 `{version,source_fingerprint:driver.sourceFingerprint()}` 作为预期值。这是离线源码核对，不建立浏览器或控制进程。CUA 原样加载后打印相同元数据并比较算法、长度、摘要；通过后才调用驱动采集。FNV 指纹仅检测意外转写变化，不是安全签名或页面证据。3.0.9 保留搜索或详情初次快照没有目标时的共享十五秒预算、一次 AX 刷新及就绪等待，并增加两流新项引用补读；失败之后不导航或采集重试，也不固定延长等待。
 
 展开和引用点击使用驱动刚核验的实际时间链接属性定位，避免规范化后的账号大小写或链接查询串造成零匹配；该属性仅留在本轮驱动内存，事实仍使用规范永久链接。源卡和控件均须唯一，来源身份、展开后的完整正文仍由固定驱动核验，不能现场改选择器或按位置点选。
 
