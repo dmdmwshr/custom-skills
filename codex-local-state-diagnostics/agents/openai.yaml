@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex 本地状态诊断"
-  short_description: "分层诊断 Codex 会话、MCP、进程、网络与归档状态"
-  default_prompt: "使用 $codex-local-state-diagnostics 只读分层诊断 Codex 本地会话、索引、MCP、进程、WebSocket/TLS、代理或归档问题，并输出证据与未闭环项。"
+  short_description: "分层诊断 Codex 浏览器控制、会话、MCP 与网络，按授权修复验收"
+  default_prompt: "使用 $codex-local-state-diagnostics 定位 Codex 浏览器控制或本地状态故障；按本次用户授权完成修复与实际回读，分别报告已验证层和未闭环项。"
