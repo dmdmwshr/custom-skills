@@ -8,6 +8,8 @@ metadata:
 
 # X 消息监控
 
+驱动 3.0.11 的 quote_evidence、probe_evidence 和 ordering_evidence 仅提供无正文定位；逆序不排序、等待失败不补读。已授权维护才在原任务使用 createDiagnosticCycle/diagnoseQuote，最多两个已核验外层来源各读一次；诊断事实不可冻结、入账或发送，正式验收另起全新周期。
+
 运行只在已登记的唯一 Desktop 固定会话；维护和离线测试可在开发任务完成，不代替固定会话进行真实扫描。
 
 1. 完整读取 [固定快速路径](references/fast-path-runbook.md)，按固定入口执行。普通轮次不再展开历史、搜索模块、生成浏览器采集代码或试探 API。规则/驱动版本变化或未知契约才读取 [完整边界](references/heartbeat-and-delivery.md)。

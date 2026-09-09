@@ -1,5 +1,7 @@
 # 分流 heartbeat 与投递边界
 
+当前驱动 3.0.11 补充无正文引用跳转和分页来源诊断，保留原等待、顺序及失败关闭边界；不能冻结的维护诊断周期仅由原固定任务执行，不计正式验收，也不允许入账/发送或重放失败事实。
+
 ## 2026-09-09 用户批准的同入口直传
 
 当前固定快速路径的标准输入客户端 1.0.0 优先于下方旧跨工具搬运步骤。允许原 CUA 宿主按固定源码启动原 Python 校验入口的有限子进程，仅 observation-fingerprint/context-plan/collect-stream/analysis-plan/scan-analysis；该子进程不控制浏览器，不是新增发送者或常驻服务。另有仅合成输入的固定 selfTest，首次启用/重置后必须取得 exact_match=true。

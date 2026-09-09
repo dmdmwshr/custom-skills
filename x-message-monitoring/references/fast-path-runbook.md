@@ -1,4 +1,6 @@
-# 固定快速路径（分流协议 1 / 驱动 3.0.10 / 标准输入客户端 1.0.0）
+# 固定快速路径（分流协议 1 / 驱动 3.0.11 / 标准输入客户端 1.0.0）
+
+3.0.11 失败诊断只记录规范公开身份和计数：引用等待前的一次 probe_evidence 包含实际页面类型及匹配时间链接数，quote_evidence 唯一标明正在处理的外层来源；ordering_evidence 标明首个逆序对的 ID/UTC、首次页号和当前页位置。原等待、顺序和失败关闭规则不变。维护已明确授权时，原固定任务可 createDiagnosticCycle（参数同 createCycle），对最多两个已核验的外层 `{author,statusId,permalink}` 各调用一次 diagnoseQuote；返回身份、长度、耗时而无正文。不可重试同一来源，诊断周期不能 draft/raw 冻结、collect/scan 或发送。必要搜索定位仅按原 page(search) 分页至成功或首次失败，读取本次 ordering_evidence 后关闭自有标签；不改序、不把诊断事实传入正式轮。
 
 ## 2026-09-09：同入口标准输入直传（当前优先，用户已批准）
 
