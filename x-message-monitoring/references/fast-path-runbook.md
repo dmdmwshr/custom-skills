@@ -1,6 +1,6 @@
 # 固定快速路径（分流协议 1 / 驱动 3.0.20 / 标准输入客户端 1.0.0）
 
-步骤修订：2026-09-09.5（主列与目标在原页面预算内分段就绪等待；连续手动验收整组后整理）。驱动版本未变也须在此步骤修订变化时刷新本页。
+步骤修订：2026-09-09.6（上下文整理后先完成静态准备，再 acquire；固定调用签名明确列出）。驱动版本未变也须在此步骤修订变化时刷新本页。
 
 本页只包含当前运行步骤。[维护诊断](diagnostics.md) 和 [历史传递](legacy-fact-transfer.md) 按需读取，普通轮次不加载。引用事实以 [当前契约](reply-reset-contract.md) 为准。
 
@@ -11,9 +11,10 @@
 - 原固定任务使用 gpt-5.6-luna、最高思考 max；通过 Codex 产品设置并回读，写提示词不等于模型生效。其他任务和全局默认保持。
 - 每轮只读当前 health 和机器计划的新项；水位、去重、抑制及投递以 SQLite 为准。规则/驱动/分析契约版本未变则复用；不读取旧聊天、维护过程、兼容实现或历史正文来决定新一轮。
 - 同 lease 两阶段 finish 已返回、标签关闭且无在途提交后，清理本轮 lease/事实/计划/分析。只保留精简运行检查点：规则入口、版本、最终机器回执、未解决故障码与必要待办；不携带正文、payload、长诊断或 token。
+- 检查点另保留静态绑定的准确名称：`xMonDriver`、`xMonStdinFactory`、`xMonStdin`，以及已核对的版本/源指纹和 selfTest 是否通过；它们不包含本轮事实。整理后先做纯内存 typeof、版本与指纹核对。变量存在且一致就复用；确实缺失或控制会话重置才按本页重新准备，并在 acquire 前完成所需 selfTest。`client` 等其他名称不存在，不能用作规范绑定丢失的证据。
 - 当前任务已提供原生 new_context 时，每个已收口周期最多重整一次上下文，记录已整理标记，随后只据保留的最终回执完成回复；不得重整循环或重跑扫描。持锁、待 finish 或仍有未知提交待处理时先收口。该操作保持同任务，不重置 CUA；驱动/客户端仍有效则继续复用。能力不可用就保留轻量结果并如实报告未执行主动重整，不另起控制进程。
 - 连续手动验收作为一组时，每轮仍须新 health/lease/cycle，并清理上一轮动态事实；静态驱动/客户端保持有效则直接复用。整组结果回传后再最多一次原生重整，避免每轮重复准备。定时轮仍各自收口后整理；任一本轮失败先完成双流收口再交回，不启动后续复扫。
-- 已完成的只读诊断，以及原 lease 的 finish 一次明确返回过期且 health 为 failed_closed/REPORT 的失败终态，也可整理：自有标签已关闭、无有效锁、finish_pending=0、无在途/待处理提交，先回传真实结果再最多一次重整。保留 heartbeat_complete=false 及失败码，不伪造两阶段完成，不重扫、续租或清除正式未知记录；不能因失败未成功而无限积累上下文。
+- 已完成的只读诊断，以及原 lease 的 finish 一次明确返回过期且 health 为 failed_closed 或 partial_failed、notification_decision=REPORT 的失败终态，也可整理：自有标签已关闭、无有效锁、finish_pending=0、无在途/待处理提交，先回传真实结果再最多一次重整。保留 heartbeat_complete=false 及失败码，不伪造两阶段完成，不重扫、续租或清除正式未知记录；不能因失败未成功而无限积累上下文。
 - 不删除聊天、正式账本或历史幂等证据，不以关闭 history.jsonl 保存声称输入消耗已减少。模型/上下文优化仍须实际双流与复扫验收，不改 DONT_NOTIFY 或故障报告条件。
 
 ## 同入口标准输入直传
@@ -79,6 +80,8 @@ nodeRepl.write({version:xMonStdinFactory.version,source_fingerprint:xMonStdinFac
 7. Edge 失败调用 `browser-failure`：`{lease,account,browser:"edge",reason:<Chrome原因>,state:<稳定状态>}`；状态为 `extension_disconnected` / `login_required` / `risk_challenge`。只有 Chrome 时 browser 为 chrome。账号不符走严格 login-state，账号必须来自实际观察。随后 finish；不改登录态，不触碰用户原有标签。
 
 ## 驱动调用
+
+纯内存方法的完整签名是 `draftStream(xMonCycle,stream)`、`applyContextPlan(xMonCycle,plan)`、`rawStream(xMonCycle,stream)`。`stream` 为 main 或 reply；`plan` 必须是 context-plan 包装回执成功后的完整 `response`，流由 plan.stream 指定。浏览器补读签名是 `contextBatch(xMonTab,xMonCycle,statusIds)` 和 `quoteBatch(xMonTab,xMonCycle,stream)`；前者一次只传本轮计划允许且仍待补充的最多两个回复 ID。所需签名与本页步骤在 acquire 前准备，不从旧周期恢复对象或 lease。每次工具调用仍只执行一个固定浏览器方法或一次标准输入请求。
 
 1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次仍调用相同方法，省略第四参数。驱动按 mainPages 自动判断首屏/续页；不手工写 true/false。`action=main_permalink_details` 表示发现已冻结，后续同一 page 调用自动核验最多两条主帖全文，不再滚动搜索。驱动只对作者自己的可见“显示更多”补读规范原帖；必要时点击已核验目标唯一展开控件并在同一 15 秒预算内重读。身份、UTC、引用/媒体标志与预览前缀必须一致；仍截断不能分析或入账。done=true 后按上下文契约执行 draftStream(main) → 只读 context-plan → applyContextPlan → quoteBatch(main) 至 done=true，再一次 rawStream(main) 并原样提交。
 2. 新回复直接进入下一项 Latest 搜索，不访问 with_replies，不调用旧回复主页前置步骤。
