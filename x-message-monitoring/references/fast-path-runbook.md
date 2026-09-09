@@ -1,6 +1,6 @@
 # 固定快速路径（分流协议 1 / 驱动 3.0.20 / 标准输入客户端 1.0.0）
 
-步骤修订：2026-09-09.6（上下文整理后先完成静态准备，再 acquire；固定调用签名明确列出）。驱动版本未变也须在此步骤修订变化时刷新本页。
+步骤修订：2026-09-09.7（锁前静态准备、固定调用签名及失败登记的准确入口/计时字段）。驱动版本未变也须在此步骤修订变化时刷新本页。
 
 本页只包含当前运行步骤。[维护诊断](diagnostics.md) 和 [历史传递](legacy-fact-transfer.md) 按需读取，普通轮次不加载。引用事实以 [当前契约](reply-reset-contract.md) 为准。
 
@@ -100,7 +100,9 @@ nodeRepl.write({version:xMonStdinFactory.version,source_fingerprint:xMonStdinFac
 - 两流共同支持 exact/range_only/no_time。时间锚指向确实包含时间表达的采用来源；引用原文独立标注作者、翻译、发布时间和链接，不变成外层作者承诺。相关但无时间明确“未提供可推算时间”。仅讨论 Grok 等产品的重置不通知；公开帖子不是本账户已经重置的证据。
 - isMediaOnly=true 时不猜媒体内容：两流 ResetAnalysisV3 的 related=null、unassessed_reason=media_only_not_inspected，并携带其余共同字段。翻译、摘要、完整分析都包含“未读取媒体内容”；回复 AI 也为 null。引用不可读取按契约判断其余可信内容，不能用语义不足掩盖结构失败。
 - AI 字段 true/false 携带 reasoning，null 携带 unassessed_reason。额度相关必然 AI 相关，AI 相关不一定额度相关。新回复无关/无法判断分别抑制并推进可信水位，不重分类历史。
-- 局部失败 `stream-failure`：`{lease,payload:{account,stream:"main"|"reply",stage,failure_code}}`。浏览器已选择时，附 `browser:xMonCycle.source,driver_version:xMonDriver.version,timings:<本流有界耗时>`，机器核验其与本轮浏览器授权一致；记录这些诊断不代表采集成功。若 collect/scan 已登记失败，不二次覆盖。
+- `stream-failure`、`cycle-failure`、`publish-pending`、`sync-receipts` 和 `heartbeat-finish` 均使用原固定 Python 入口的标准输入控制路径；它们不在 xMonStdin.send 的五项动作中。控制入口在 acquire 前准备，不把客户端 action_not_allowed 当作业务失败登记成功。
+- 局部失败 `stream-failure`：`{lease,payload:{account,stream:"main"|"reply",stage,failure_code}}`。浏览器已选择时成对附 `browser:xMonCycle.source,driver_version:xMonDriver.version`，机器核验本轮授权。可选 timings 只允许 elapsed_ms、navigation_ms、readiness_ms、extract_ms，每个必须是0～1200000的整数；只携带已观察且符合该契约的值，未确定时省略 timings 或使用空对象。不传分析/扫描耗时、计数、浮点值或整个指标对象，不猜数补齐。诊断字段不代表采集成功；若 collect/scan 已登记失败，不二次覆盖。
+- 回复预算不足的最小有效对象为 `{lease,payload:{account,stream:"reply",stage:"budget",failure_code:"heartbeat_budget_exhausted"}}`，通过上述固定入口提交，随后关闭自有标签并执行同 lease 两阶段 finish。临近到期时优先使用已知有效的最小失败对象并收口，不为补可选诊断字段延误 finish；输入被明确拒绝不能记为已登记，过期后不恢复旧 token 或反复提交。
 - 后续投递/回执/标签关闭/收口故障用 `cycle-failure` 追加。同一轮汇总所有受影响阶段并保留首错；不要因流已提交或已经失败而丢掉后续异常。首发/实质变化/满二十四小时一次/完整恢复一次由账本去重，每轮异常仍在原任务报告。
 
 ## 最终回执
