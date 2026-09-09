@@ -1,6 +1,6 @@
-# 固定快速路径（分流协议 1 / 驱动 3.0.18 / 标准输入客户端 1.0.0）
+# 固定快速路径（分流协议 1 / 驱动 3.0.19 / 标准输入客户端 1.0.0）
 
-步骤修订：2026-09-09.3（用户已批准回复八导航，保留单次采集边界、两流继续与重置后清理）。驱动版本未变也须在此步骤修订变化时刷新本页。
+步骤修订：2026-09-09.4（水位原样校验、自动首/续页；保留已批准八导航、两流继续与重置后清理）。驱动版本未变也须在此步骤修订变化时刷新本页。
 
 本页只包含当前运行步骤。[维护诊断](diagnostics.md) 和 [历史传递](legacy-fact-transfer.md) 按需读取，普通轮次不加载。引用事实以 [当前契约](reply-reset-contract.md) 为准。
 
@@ -71,7 +71,7 @@ nodeRepl.write({version:xMonStdinFactory.version,source_fingerprint:xMonStdinFac
 
 1. 第一次 CUA 调用仅执行 `let xMonTab = await cua.createBrowserTab("chrome", url, {sessionName:"🌐 X监控"})`；url 为 `https://x.com/search?q=` 加 `encodeURIComponent("from:"+account+" -filter:replies -filter:retweets")` 加 `&f=live`。读取工具返回的文档和初始状态。驱动核验准确查询和 Latest 选项；不要读取或排序主页卡片来替代主帖搜索。
 2. 驱动未加载或版本变化时，在**当前 CUA JavaScript 会话**用公开 Node 标准库 `node:fs` 读取唯一业务 `scripts/desktop_monitor_driver.js` 的 UTF-8 原文，再用 `node:vm` 的 `vm.runInNewContext(source,{URL,TextEncoder})` 原样实例化无浏览器副作用的工厂，绑定普通 `let xMonDriver`；变量已存在时只赋值，不重复声明。不要手工转写整段源码。驱动采集前必须核对 `version` 和 `sourceFingerprint()` 与本地源文件计算值逐项一致；不等则停止，不修改指纹返回值或水位字段来掩盖差异。该文件读取只用于加载固定源码，不读取浏览器数据。浏览器动作仍只由当前 CUA 的受支持标签句柄执行；不能导入内部模块、执行独立 Playwright、使用 `globalThis`、另建控制进程/桥接或重写 selector。其他 Node REPL 与 CUA 不共享变量，不能作为浏览器替代通道。新轮次只创建 cycle，不重复加载源码。
-3. `xMonCycle = xMonDriver.createCycle({account, authenticatedAccount:"dmdmws", source:"desktop_chrome_extension", fallbackReason:null, watermarks, sourceTimezone})`。参数来自本轮配置。设 `xMonCycle.ownTab=xMonTab`、`xMonCycle.lastUrl=url`，避免再次导航创建时的同一地址。
+3. 将本轮入口返回的 health 原对象（或原样 accounts 数组）保留为 xMonHealth，账号来自本轮 acquire。`xMonCycle = xMonDriver.createCycle({account, authenticatedAccount:"dmdmws", source:"desktop_chrome_extension", fallbackReason:null, watermarks:xMonDriver.watermarksFromHealth(xMonHealth,account), sourceTimezone})`。该固定方法只接受唯一启用账号，createCycle 再独立核验 state/status_id/published_at_utc 并保留不可变副本。禁止改成帖子的 statusId/publishedAtUtc、遗漏 state、猜水位或从历史恢复。纯内存读回 cycle.watermarks 与本轮 health 逐项相同后才采集；初始化失败本轮收口，不改参数接续旧 cycle。设 `xMonCycle.ownTab=xMonTab`、`xMonCycle.lastUrl=url`，避免再次导航创建时的同一地址。
 4. 工具调用上限 40 秒；page 一次一页，回复 permalinkBurst 一次最多八导航，其他永久链接方法最多两个，页面总探测预算 15 秒。八导航方法内部只工作 35 秒，剩余不足完整 15 秒页面预算即返回，预留 5 秒回传。驱动等待账号头部文本和目标卡片脱离骨架态后抽取一次；仅出现时间链接不等于正文就绪。就绪立即继续，不固定等待、不增加重试循环。`tab.playwright` 是允许的受控扩展 DOM 门面，独立 Playwright 不允许。
 5. 首次 Chrome 明确 `browser_not_running`：仅一次项目 `start_managed_browser.ps1 -Browser chrome`，无 URL，等待规定 8 秒，重试一次创建标签。工具仅报告通用 Browser is not available、未区分未运行/无扩展时，先用该脚本 `-Browser chrome -CheckOnly` 只读检查：`browser_not_running` 才进入上述一次启动；`browser_running` 表示正确根目录实例存在，工具仍不可用按 `extension_unavailable` 处理，不重启；`process_probe_unavailable` 失败关闭，不猜未运行。脚本将带空格的 User Data 作为完整参数，只认可正确根目录主进程，旧 User 目录进程不计。其他失败不重启 Chrome，不清理任何浏览器目录或既有进程。
 6. Chrome 最终仅 `browser_not_running`、`extension_unavailable`、`login_unavailable` 可调用 `chrome-fallback-authorize`，输入 `{lease,account,reason}`。机器明确允许后才用 Edge；按项目规定只启动一次、等待 8 秒、创建一次新 Edge 标签。source 改为 `desktop_edge_extension`，fallbackReason 保留 Chrome 原因。已提交/采集后不跨浏览器混合事实。
@@ -79,9 +79,9 @@ nodeRepl.write({version:xMonStdinFactory.version,source_fingerprint:xMonStdinFac
 
 ## 驱动调用
 
-1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次 `page(...,"main",true)`。`action=main_permalink_details` 表示发现已冻结，后续同一 page 调用自动核验最多两条主帖全文，不再滚动搜索。驱动只对作者自己的可见“显示更多”补读规范原帖；必要时点击已核验目标唯一展开控件并在同一 15 秒预算内重读。身份、UTC、引用/媒体标志与预览前缀必须一致；仍截断不能分析或入账。done=true 后按上下文契约执行 draftStream(main) → 只读 context-plan → applyContextPlan → quoteBatch(main) 至 done=true，再一次 rawStream(main) 并原样提交。
+1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次仍调用相同方法，省略第四参数。驱动按 mainPages 自动判断首屏/续页；不手工写 true/false。`action=main_permalink_details` 表示发现已冻结，后续同一 page 调用自动核验最多两条主帖全文，不再滚动搜索。驱动只对作者自己的可见“显示更多”补读规范原帖；必要时点击已核验目标唯一展开控件并在同一 15 秒预算内重读。身份、UTC、引用/媒体标志与预览前缀必须一致；仍截断不能分析或入账。done=true 后按上下文契约执行 draftStream(main) → 只读 context-plan → applyContextPlan → quoteBatch(main) 至 done=true，再一次 rawStream(main) 并原样提交。
 2. 新回复直接进入下一项 Latest 搜索，不访问 with_replies，不调用旧回复主页前置步骤。
-3. `page(...,"search")`，未到水位才 `page(...,"search",true)`。搜索冻结后在同一 CUA 宿主把完整 ID 序列直接交给客户端 observation-fingerprint，输入 `{lease:xMonLease,payload:xMonCycle.search.map(i=>i.statusId)}`，检查成功后直接取 response.fingerprint；每轮重新取得，不转抄、不复用旧轮值。
+3. `page(...,"search")`，仅 ok=true,done=false 时在下一次调用继续相同方法，省略第四参数。驱动只看 searchPages，主帖已翻页不代表回复搜索进入续页。兼容显式参数与本流状态不符时在浏览前失败，失败流不重读。搜索冻结后在同一 CUA 宿主把完整 ID 序列直接交给客户端 observation-fingerprint，输入 `{lease:xMonLease,payload:xMonCycle.search.map(i=>i.statusId)}`，检查成功后直接取 response.fingerprint；每轮重新取得，不转抄、不复用旧轮值。
 4. `await xMonDriver.permalinkBurst(xMonTab,xMonCycle,fingerprint)`，每次最多八导航；仅 ok=true,done=false 在同 lease 的下一次调用续未完成项，失败不续批。只调用一次固定方法，不在宿主加循环。回执包含 navigation_count、elapsed_ms、total_verified、pending_parent 与 stop_reason；预算预留导致未完成是续批状态，不代表失败。兼容 permalinkBatch 默认仍两导航。完整唯一主会话链、相邻父帖和独立回复对象由驱动核验。文本加图片父帖可读，头像不是帖子媒体；纯媒体不编造文字。
 5. 两流开始前完整读取 [上下文、引用与额度契约](reply-reset-contract.md)。回复执行 draftStream(reply) → 只读 context-plan → applyContextPlan，仅新项必要时 contextBatch（至多三层，够用即停）；quoteBatch(reply) 补直接一层引用至 done=true，每条最多五个来源归属，同轮复用。最后一次 rawStream(reply)，原样 collect-stream。reply-context-plan 保留兼容；不更改冻结事实、不保存正文文件。
 

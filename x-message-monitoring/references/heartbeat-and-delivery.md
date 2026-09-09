@@ -1,10 +1,10 @@
 # 分流 heartbeat 与投递边界
 
-当前驱动 3.0.18、客户端 1.0.0；执行步骤及 Luna/max 的准备与上下文整理见 [固定快速路径](fast-path-runbook.md)，新冻结格式与两流 Codex 额度筛选见 [当前契约](reply-reset-contract.md)。仅已授权维护读取 [有界诊断](diagnostics.md)。旧接口及历史记录保留原义，不用于新轮次降级。
+当前驱动 3.0.19、客户端 1.0.0；执行步骤及 Luna/max 的准备与上下文整理见 [固定快速路径](fast-path-runbook.md)，新冻结格式与两流 Codex 额度筛选见 [当前契约](reply-reset-contract.md)。仅已授权维护读取 [有界诊断](diagnostics.md)。旧接口及历史记录保留原义，不用于新轮次降级。
 
 ## 不变量
 
-- SQLite 是正式账本；每轮 health、acquire 冻结账号和两个水位，不使用聊天历史或硬编码 ID。
+- SQLite 是正式账本；每轮 health、acquire 冻结账号和两个水位，不使用聊天历史或硬编码 ID。watermarksFromHealth 原样提取唯一启用账号的 state/status_id/published_at_utc，createCycle 独立校验并保留不可变副本；不得转写成帖子驼峰字段。page 按本流计数自动区分首/续页，新调用不传第四参数，显式兼容参数冲突在浏览前失败。
 - 主帖与回复独立事务。每条流必须完整验证至自身 ID + UTC instant 可信锚；只回滚失败流。共同预检不通过，两流都不开工。运行中路由/身份故障停止后续工作，不撤销已经合法提交的结果。
 - 单个 20 分钟 lease，唯一 Desktop 固定会话和原 heartbeat；不建第二任务、cc-connect cron、Windows 任务或发送者。cc-connect outbound-only；入站 silent_drop。
 - 新入口 collect-stream / scan-stream 不接受假空 counterpart。旧双流 collect / scan 保留兼容，但不能混入分流周期绕过新门禁。
@@ -14,7 +14,7 @@
 
 新加载必须把 CUA 运行工厂的 version/sourceFingerprint() 与本地仓库源计算值核对一致，再调用驱动采集；该接口检查整个具名工厂原文并规范 LF，检测意外转写差异，不作为密码学身份保证。字段名转写错误、近似工厂或指纹不等不能作为真实验收，也不能通过改水位或指纹返回值掩盖。
 
-驱动使用业务项目当前固定源。命中水位立即停止、下一页等待新状态，不搬运水位后的旧卡片。主帖固定核验非回复/非转发 Latest 搜索，不把主页会话展示重排成时间线；嵌入链接块的独立作者文字不混入外层作者正文。作者自己的“显示更多”标记使主帖暂不完成，冻结发现后由同一 page(main,true) 分批核验原帖全文；必要时仅点击该目标唯一展开控件并在同一 15 秒预算内再读。身份/UTC/引用/媒体与预览前缀严格一致，仍截断或歧义失败关闭；引用内控件不计为作者正文截断。正文/账号就绪后抽取，失败同样记录浏览器、版本和有界耗时。正常轮次复用 CUA 会话中的普通 lexical 绑定；版本变化才加载，不使用 globalThis、内部 API、独立控制进程或 Playwright CLI。允许受控扩展标签的 tab.playwright；UI 动作使用当前 Unified CUA 的 Tab.scroll([x,y],direction,pages) 和 getAXState，不混入旧 Browser API 的 dom_cua。合成 Tab 必须与当前工具实际返回的接口一致。
+驱动使用业务项目当前固定源。命中水位立即停止、下一页等待新状态，不搬运水位后的旧卡片。主帖固定核验非回复/非转发 Latest 搜索，不把主页会话展示重排成时间线；嵌入链接块的独立作者文字不混入外层作者正文。作者自己的“显示更多”标记使主帖暂不完成，冻结发现后由同一 page(main) 分批核验原帖全文；必要时仅点击该目标唯一展开控件并在同一 15 秒预算内再读。身份/UTC/引用/媒体与预览前缀严格一致，仍截断或歧义失败关闭；引用内控件不计为作者正文截断。正文/账号就绪后抽取，失败同样记录浏览器、版本和有界耗时。正常轮次复用 CUA 会话中的普通 lexical 绑定；版本变化才加载，不使用 globalThis、内部 API、独立控制进程或 Playwright CLI。允许受控扩展标签的 tab.playwright；UI 动作使用当前 Unified CUA 的 Tab.scroll([x,y],direction,pages) 和 getAXState，不混入旧 Browser API 的 dom_cua。合成 Tab 必须与当前工具实际返回的接口一致。
 
 Chrome dmdmwshr 首选，仅三种实测失败 browser_not_running / extension_unavailable / login_unavailable 可在机器授权后降级 Edge。通用不可用错误先经受限脚本 -CheckOnly 核对正确 User Data 根目录，不能把扩展断连猜成进程未运行；无法读取进程信息则失败关闭。首次 Chrome 未运行只启动/重取一次；Edge 也只允许一次启动/连接；规定启动等待 8 秒保留。启动目录必须完整加引号，旧错误根目录不能满足进程核验，不主动清理未知进程或浏览器数据。页面探测没有额外固定睡眠：15 秒页预算、40 秒调用上限。用户已批准仅回复 permalinkBurst 每调用最多八导航，工作窗口 35 秒且预留完整页面预算；主帖、上文、引用、诊断与兼容 permalinkBatch 仍最多两链接。每次只调一个固定方法，结构、水位、父帖歧义不得换浏览器。
 
