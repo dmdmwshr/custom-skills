@@ -1,18 +1,6 @@
-# 两流上下文、引用与额度契约（驱动 3.0.15）
+# 两流上下文、引用与额度契约（驱动 3.0.16）
 
-驱动 3.0.15 允许一种已核验的尾部网址显示差异：引用正文尾部必须恰好对应唯一可见网址锚点，且其规范 href 同时出现在来源帖自身的可见链接中（排除内嵌引用）。去掉这一个网址显示后，剩余非空作者正文仍须严格匹配来源前缀。不同链接、任意标签文字、缺少锚点、重复或其他文字差异仍失败；不改变来源原文/UTC/身份、采集指纹或冻结格式。回执 preview_match=same_own_outgoing_url 仅说明该表示差异已核验。主帖、回复、父对象和引用永久链接在目标初始缺失时，均在单次等待前提供原有无正文页面诊断；不在失败后补读或重试。
-
-驱动 3.0.14 仅在已授权维护的 DiagnosticCycle 显式调用 diagnoseQuote(...,{includeMismatchExcerpt:true}) 时，从本次已观察文字返回首个差异处的预览最多 48 字符、来源最多 64 字符。它是有界公开事实工具上下文，禁止写普通运行日志、正文文件或账本；普通 quoteBatch 和默认诊断仍无正文。身份/正文严格失败不变，不追加 UI 读取或失败重试，诊断不可冻结。
-
-当前任务使用用户指定的 Luna/max；周期完整收口后按快速路径进行同任务原生上下文重整，只保留轻量结果。驱动 3.0.13 的 quote_match_evidence 仅为已有文字的无正文差异诊断，失败不放宽、不补读。历史传递流程仅在维护需要时查阅 legacy-fact-transfer.md，当前标准输入直传优先。
-
-3.0.12 无链接引用的定位点来自当前唯一引用卡的几何与命中测试，排除媒体、链接、按钮等交互目标，只用于受支持的 Tab.click([x,y])；不进入引用事实或指纹。点击后的作者、状态 ID、UTC、完整正文、预览一致性继续由原校验确定，位置可信不等于引用事实已验证。
-
-3.0.11 只增加无正文引用/分页失败定位和不能冻结的维护诊断周期，事实与额度契约不变。诊断不替代主帖、回复或引用成功证据，不通过排序消除搜索歧义；实际目标等待失败后仍停止该流。
-
-3.0.10 的 packFactsGzip 使用已核验公开 node:zlib 的 gzipSync，在内存压缩原字典及 diffFacts 草稿差异，具体步骤见 fast-path-runbook 首节。context-plan、collect-stream、analysis-plan 及 scan-analysis.collected 接受 XMonitorFactTransferV1 后先校验大小、压缩完整性与原校验码，再还原原流对象；不会改变原 V2/V3、身份、水位、引用或冻结语义，也不添加正文文件、进程或浏览器桥接。差异不允许改写草稿中已核验的核心事实及直接父对象。原生流对象及旧字典仍兼容。
-
-3.0.8 允许已验证唯一直接父子关系后的父帖全文补读：仅当截断父帖控件需移位时，从该父帖已知永久链接读取其自身正文，身份、UTC、标志和正文前缀必须一致，引用事实保持独立；原父子链不变，不选择新父对象。每次最多两个永久链接，permalinkBatch 的 pending_parent 继续同批至 done=true；contextBatch 的 pending_status_ids 只续未完成 ID，不重复处理已返回 items 中的 ID。每页 15 秒、每次工具 40 秒；未完整时不能冻结，失败之后不重试。
+执行、客户端传输及 Luna/max 上下文整理见 [固定快速路径](fast-path-runbook.md)。已授权维护的失败诊断见 [按需参考](diagnostics.md)，普通轮次不加载诊断与旧传递流程。
 
 本页定义新分流周期：主帖和回复统一只推送 Codex 额度重置相关的新内容。旧 ResetAnalysisV1/V2、XReplyContextV1 与 Frozen V1–V4 保留历史原义，不重新分类已发送、已抑制或投递未知记录。AI 功能发布、其他产品额度重置等无关内容仍入账、去重和推进水位。
 
@@ -21,6 +9,7 @@
 1. 主帖按快速路径完成 Latest 搜索与必要全文核验。回复直接 `page(tab,cycle,"search")`，准确查询 `from:<account> filter:replies`，核验 Latest、登录账号、目标作者，读取至 ID 与 UTC instant 同时命中的水位，不访问 with_replies。
 2. 完整冻结回复候选 ID 序列在同一 CUA 宿主经固定标准输入客户端送 observation-fingerprint，直接使用本轮机器回执的 fingerprint，再调用 permalinkBatch，每次最多两条。唯一最小主会话区域的完整顶层链中，直接对象与回复必须相邻；对象可为主帖或别人的回复。外层主帖、回复、对象及上文均允许带引用卡，内嵌引用节点不能充当父或子。推荐、重复、身份/时间冲突、父子不相邻或正文不完整仍失败；明确广告也不能替代中间缺失成员。
 3. 作者自己的截断标记只由固定驱动点击该卡唯一展开控件，在同一十五秒预算内重读。身份、UTC、预览前缀及完整性必须一致；外层作者正文与引用文字分别保存，不能取第一段或拼接。
+   已证明唯一直接父子关系后，视口外截断父帖可从其已知永久链接补读自身全文，身份、UTC、标志和前缀严格一致，不选择新父对象或改变原关系。permalinkBatch 的 pending_parent 及 contextBatch 的 pending_status_ids 仅续未完成项，每次最多两个永久链接；未完成不能冻结，失败后不重试。
 4. `draftStream(cycle,"main"|"reply")` 产生草稿；按快速路径客户端把宿主原内存对象 `{lease,payload:草稿}` 直接提交给统一 context-plan。它只读验证、去重，返回 XMonitorContextPlanV1 的 stream、new_status_ids、context_items、proof_only_count、max_ancestors=3、max_quotes=5。旧 reply-context-plan 仍为回复兼容别名。调用 `applyContextPlan(cycle,机器原样计划)`；历史锚点只核对核心事实，不补读、不分析。
 5. 新回复的直接对象和当前正文不足时，`contextBatch(tab,cycle,[至多两个新回复ID])` 每个 ID 沿可信父子边补一层，最多三层。足够时 `resolveContext(cycle,id,"sufficient")`；可信不可取得为 unavailable，三层用尽仍不足为 depth_limit。上文为 XReplyContextV2。不要把结构冲突或超时改成语义不足。
 6. 两流均执行 `quoteBatch(tab,cycle,"main"|"reply")` 至 ok=true、done=true；每次只补一个来源，最多涉及来源拥有帖和引用原帖两个永久链接，同一十五秒共享预算，工具上限四十秒。每个当前消息/直接对象/上文只补其直接一层引用，最多五个引用归属项；不追踪引用中的引用。后续补上文若增加引用，冻结前再完成 quoteBatch。同轮相同规范来源复用核验结果，依旧校验当前引用归属、预览、身份和时间。
@@ -30,6 +19,8 @@
 ## 引用事实
 
 XQuoteContextV1 为 `{schema_version:"XQuoteContextV1",quotes:[...]}`。每项记录 quoted_by_status_id、quoted_by_permalink、resolution、observed_permalink。verified 项携带 status：引用原帖自己的 status_id、author_handle、created_at、permanent_url、original_text、status_kind、is_media_only、is_quote、is_retweet、is_promoted、text_complete。引用作者与外层作者分开，链接、时间、完整性均须真实核验。
+
+无链接引用只通过当前唯一卡内几何及命中测试确认的非交互落点点击，排除媒体、链接、按钮、作者头部；仍核验实际跳转与来源事实。预览默认严格匹配完整来源正文的前缀。唯一允许的网址表示差异：预览尾部恰为一个可见网址锚点，其完整 href 同时出现在来源自身可见链接中（排除内嵌引用）；只去掉该尾部显示后，剩余非空正文仍严格匹配来源前缀。不同链接、任意标签、缺失/重复锚点或其他文字差异继续失败。来源全文、UTC/身份、指纹及冻结格式不改写。
 
 unavailable 项只携带 unavailable_reason=quote_deleted/quote_unavailable；observed_permalink 只有实际可确认时才填写，否则为 null。不伪造正文或时间，不把无法访问的帖子列入采用的证据 ID。引用不可访问时，当前可信正文已足够可以独立判断相关；否则抑制为无法判断。结构错误不能使用 unavailable 降级。
 
