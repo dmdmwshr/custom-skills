@@ -78,9 +78,9 @@
 
 此路径只用于外部 Edge，并且仅在同一来源下载接口已经有证据表明：HTTP 200 响应正在持续传输，但页面会在完整响应前固定取消大包，因而既没有完成的 `Network.loadingFinished`，也没有原生下载事件或文件。它不是内置浏览器 Blob 恢复，也不是已失败案卷的额外重试次数。已经点击两次的案卷保持原断点；在**尚未点击过的下一案卷**上先启用本路径，仍只产生一次“开始打包”点击。
 
-1. 先完成当前案卷两轮身份回读、叶子全选核对和独立下载基线。在点击前，以当前 Edge 页的 CDP 会话启用 `Fetch` 的 Response 阶段拦截，URL pattern 必须精确限定为 `/api/blade-fileserver/api/fileserver/usualDownloadFile`；同时启动同一基线的 `source await-download --attach`。不要读取或记录事件中的请求头、Cookie、令牌、请求体、浏览器存储或配置。
+1. 先完成当前案卷两轮身份回读、叶子全选核对和独立下载基线。在点击前，以当前 Edge 页的 CDP 会话启用 `Fetch` 的 Response 阶段拦截，URL pattern 必须精确限定为 `/api/blade-fileserver/api/fileserver/usualDownloadFile`；同时启动同一基线的 `source await-download --attach`。受控浏览器的 raw CDP 还须显式限定非页面资源类型 `XHR`、`Fetch`，不能拦截由浏览器管理的 Document 导航。不要读取或记录事件中的请求头、Cookie、令牌、请求体、浏览器存储或配置。
 2. 只接收当前点击产生的唯一暂停响应。必须同时满足 HTTP 200、`Content-Type` 为 ZIP 或 `application/octet-stream`、存在合法且不超过 2 GiB 的 `Content-Length`，并且当前页面 RWID、详情项目编号和下载基线仍与断点一致；零个、多个或任一身份不一致都取消本案接收。响应建议名只作审计，落盘使用当前 RWID 生成的安全直接 `.zip` 名，不允许目录、覆盖或跨案卷复用。
-3. 对该暂停响应立即调用 `Fetch.takeResponseBodyAsStream`，再由 `receiveEdgeCdpZip` 使用不带 offset 的顺序 `IO.read`。程序以排他 `.edge-stream.part` 文件增量写入、同步到磁盘并计算 SHA-256；只有流到 EOF、实际字节数精确等于 `Content-Length`、文件头为 ZIP 且目标不存在时，才用硬链接原子生成下载目录中的最终 ZIP。完成后关闭 IO 流并以 `Fetch.failRequest(Aborted)` 结束原页面请求，使页面退出等待；取流后不得再 `continueRequest`，接收结束前不得停用 Fetch。
+3. 对该暂停响应立即调用 `Fetch.takeResponseBodyAsStream`，再由 `receiveEdgeCdpZip` 使用不带 offset 的顺序 `IO.read`。程序以排他 `.edge-stream.part` 文件增量写入、同步到磁盘并计算 SHA-256；只有流到 EOF、实际字节数精确等于 `Content-Length`、文件头为 ZIP 且目标不存在时，才用硬链接原子生成下载目录中的最终 ZIP。完成后关闭 IO 流并以 `Fetch.failRequest(Aborted)` 结束原页面请求，使页面退出等待；取流后不得再 `continueRequest`，接收结束前不得停用 Fetch。受控 raw CDP 用 `Fetch.enable({patterns: []})` 清除本轮拦截，不调用被保留的 `Fetch.disable`。
 4. 仍由并行等待的 `source await-download --attach` 做最终门禁：相对基线唯一、连续稳定、ZIP 可打开、哈希规范命名、工作根复核和下载临时副本清理。Edge 接收程序成功不等于案卷已下载，只有该命令把水位更新为 `PACKAGE_RECEIVED` 才能进入整理和上传。
 5. 流在 EOF 前被页面或网络取消、`IO.read` 失败、长度超出或不足、MIME/状态不符、出现多个响应、临时写入失败、目标已存在或 ZIP 校验失败时，程序必须关闭句柄并删除 `.edge-stream.part`；保存 `下载交付异常_<RWID>.json`，错误码为 `EDGE_CDP_STREAM_UNAVAILABLE`，只记录项目编号、RWID、预期字节数、已接收字节数、失败阶段、发生时间和非阻塞标记。请求 ID、URL、响应建议名、响应头全文及任何认证数据都不得持久化。该案保持 `PACKAGE_WAITING`，不得再次点击；关闭或换新当前页面以注销残留监听后，才可继续下一案卷。
 
@@ -101,7 +101,7 @@
 | 产品监督 | 顶部 `tab` 的精确名称“产品监督”；若角色不稳定，回退到已观察的模块容器 `#tab-306`，但必须同时核对其可见文字 | 地址包含 `MODULE_ID=306` 或产品监督左侧菜单出现 |
 | 查询统计 | 仅在左侧 `ul.el-menu` 的子菜单标题中匹配精确文字“查询统计”，不要在整页直接按文字点击，因为顶部模块栏也有同名文字 | 对应子菜单处于展开状态，能看到“法律文书查询” |
 | 法律文书 | 先在已展开的“查询统计”中展开“法律文书查询”，再在该下级菜单内匹配精确菜单项“法律文书” | 查询页显示日期区间、管辖单位、执法单位、法律文书类型和“搜索” |
-| 日期区间 | 限定到查询表单的 `.el-date-editor.el-range-editor`，打开后只点击左侧精确快捷项“本年”一次；仅在快捷项未提交时回退为逐端输入 | 面板按组件语义关闭；重开后两端值为上海时间当年 `01-01` 和 `12-31`，左右月份为一月和十二月；只看到输入文字或快捷项高亮不算成功 |
+| 日期区间 | 创建日期是查询表单直接列中的范围控件（当前结构 `.avue-view form > .el-col > div > .el-date-editor.el-range-editor`），不要混入审批日期表单项；打开后只点击精确快捷项“本年”一次 | 面板提交关闭；重开后创建日期两端为当年 `01-01` 和 `12-31`，月份为一月和十二月；只看到输入文字或高亮不算成功 |
 | 管辖单位 | 打开单位下拉后精确选择“全部管辖单位(含派出所)”；鼠标点击没有展开时，聚焦该只读输入并按键盘确认键 | 下拉收起后输入框显示该完整文字 |
 | 执法单位 | 默认保持“请选择执法单位”，不触发选项点击；仅单大队任务才选择指定单位 | 输入框仍为未选择状态，或与指定大队一致 |
 | 文书类型 | 在法律文书类型下拉容器中翻到其**自身**第 2 页，再精确选择“消防产品监督检查记录” | 下拉收起后显示精确文书名称；不得接受“记录表”等相似名称 |
@@ -178,6 +178,10 @@
 ## 中断与恢复
 
 ### 可复用的页面采集与下载观察
+
+- 页面阶段优先用 `browser_source_capture.mjs` 导出的 `advanceSourceListPage`、`advanceSourceDetail`；导航、筛选和叶子全选可用通用 `advanceSourceStage`，提供一个组合只读回调和明确成功校验。每次最多提交一次动作，先用 `onCheckpoint` 原子保存“动作已发出”，即使点击超时也只继续观察，不重新点击。使用 `saveSourceStageCheckpoint` 把白名单元数据写入本批次 `阶段_<阶段>_<绑定摘要>_<记录标识>.json`；同一阶段续看沿用同一 checkpoint，不同轮次保留不同记录。
+- 单次调用预算默认 45 秒、最高 55 秒；返回 WAITING 后用返回的 checkpoint 接续，所有浏览器读取均在本次调用内结束。累计等待仍执行既有 60/120 秒规则；BLOCKED 先按本文件的状态回读与至多一次恢复分支处理，不能丢弃 checkpoint 重放旧点击。PAUSED 表示登录过期或用户正在编辑，交给用户恢复；人工暂停时间单独计入，不混作识别或网络耗时。
+- 阶段助手不替代两轮完整清单、截图前后比对、案卷身份链、逐案下载基线或每案打包上限。它返回完成只表示该页面阶段稳定，不能当作 ZIP 已接收或系统已建档。`captureSourceListPage` 的 `expectedPageSize` 默认 50；隔离单案采集可明确为当前 20 条/页。
 
 - `scripts/browser_source_capture.mjs` 只读取当前法律文书表格和详情的业务字段白名单，对照可见主表行、分页、日期和项目身份后生成结构化证据。`captureSourceListPage` 连续两次读值一致且截图前后内容不变才落盘；同一轮/页证据不可覆盖，只允许内容及截图哈希完全相同的幂等复用。截图返回本地路径，不回传图片字节。完成态跳过仍以全局案卷水位的上传、飞牛均 `VERIFIED` 为准，不能把“跳过已完成卷”误报为当前年度抓取失败。
 - 需要诊断打包交付时使用 `scripts/browser_download_observer.mjs` 的 `observeSourceDownloadAction(cdp, { origin, action, timeoutMs })`。它在动作前清空旧事件并持续消费唯一来源下载接口的响应/完成事件，只收 URL、状态、MIME、长度等必要元数据，不读取请求头、Cookie、令牌或正文。

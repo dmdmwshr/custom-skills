@@ -17,6 +17,11 @@ from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
 
+if __package__:
+    from .workflow_reporting import describe_case, timing_projection
+else:
+    from workflow_reporting import describe_case, timing_projection
+
 WORKSPACE_SCHEMA = "CaseWaterlineV1"
 WORKSPACE_CONFIG_NAME = "workspace.toml"
 WATERLINE_JSON_NAME = "案卷水位记录.json"
@@ -1118,6 +1123,22 @@ def workspace_progress(layout: BusinessLayout, *, batch_id: str | None = None) -
             "legacyCasesOutsideBatch": True,
         },
         "issues": issues,
+        "cases": [
+            describe_case(
+                layout,
+                project_no,
+                record_by_project[project_no],
+                has_detail=project_no in formal_detail_projects,
+                has_package=project_no in package_projects,
+            )
+            for project_no in sorted(record_by_project)
+        ],
+        "timings": timing_projection(
+            batch_dir,
+            layout.root,
+            f"batch:{selected_id}",
+            browser_stages=True,
+        ),
     }
 
 

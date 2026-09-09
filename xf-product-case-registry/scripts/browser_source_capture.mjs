@@ -1,18 +1,27 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { advanceSourceStage } from "./browser_stage.mjs";
+export { advanceSourceStage, saveSourceStageCheckpoint } from "./browser_stage.mjs";
 
 /** Read only the current legal-document table. Never read session or request data. */
 function currentListObservation() {
+  const visible = (element) => !!element?.offsetWidth && !!element?.offsetHeight;
+  if (/login|signin/i.test(location.pathname + location.hash) ||
+      [...document.querySelectorAll('input[type="password"]')].some(visible)) {
+    return { ready: false, loginRequired: true, reason: "SOURCE_LOGIN_REQUIRED" };
+  }
   const route = location.hash.split("?")[0];
   if (route !== "#/xfjd/cpjd/cxtj/flwscx/flws") {
     return { ready: false, reason: "SOURCE_ROUTE_CHANGED" };
   }
-  const visible = (element) => !!element?.offsetWidth && !!element?.offsetHeight;
   const tables = [...document.querySelectorAll(".elx-table")].filter(
     (element) => visible(element) && element.querySelector("thead")?.innerText.includes("关联项目"),
   );
   const pagers = [...document.querySelectorAll(".el-pagination")].filter(visible);
+  if (tables.length === 0 || pagers.length === 0) {
+    return { ready: false, reason: "SOURCE_CONTAINER_NOT_READY" };
+  }
   if (tables.length !== 1 || pagers.length !== 1) {
     return { ready: false, reason: "SOURCE_CONTAINER_NOT_UNIQUE" };
   }
@@ -56,13 +65,17 @@ function currentListObservation() {
     (item) => renderedText(item.documentName) === renderedText(row.documentName) &&
       renderedText(item.caseName) === renderedText(row.caseName) && renderedText(item.createdAt) === renderedText(row.createdAt),
   ));
-  const allVisibleInputs = [...document.querySelectorAll("input")].filter(visible);
+  // The other date editor belongs to the approval-date form item. The creation
+  // range is the directly rendered column in this observed legacy search form.
+  const dateInputs = [...document.querySelectorAll(
+    ".avue-view form > .el-col > div > .el-date-editor.el-range-editor input",
+  )].filter(visible);
   return {
-    ready: !loading && visibleMatched,
+    ready: !loading && visibleMatched, busy: loading,
     reason: loading ? "SOURCE_LOADING" : visibleMatched ? null : "SOURCE_VISIBLE_ROWS_MISMATCH",
     pageNumber, pageSize, totalCount, totalPages: Math.ceil(totalCount / pageSize),
     visibleRows: visibleRows.length, items,
-    dateValues: allVisibleInputs.map((input) => input.value).filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)),
+    dateValues: dateInputs.map((input) => input.value),
     viewport: { width: innerWidth, height: innerHeight },
   };
 }
@@ -127,12 +140,12 @@ async function writeImmutable(destination, content) {
 }
 
 /** Capture two agreeing observations and one screenshot; returns paths, never image bytes. */
-export async function captureSourceListPage({ tab, cdp, evidenceDir, round, expectedPage, expectedTotal, previousRowsDigest }) {
+export async function captureSourceListPage({ tab, cdp, evidenceDir, round, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize = 50 }) {
   if (![1, 2, 3].includes(round) || !path.isAbsolute(evidenceDir)) throw new Error("SOURCE_CAPTURE_ARGUMENT_INVALID");
   const first = await readSourceListPage(cdp);
-  const firstReceipt = validateListObservation(first, expectedPage, expectedTotal, previousRowsDigest);
+  const firstReceipt = validateListObservation(first, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize);
   const second = await readSourceListPage(cdp);
-  const receipt = validateListObservation(second, expectedPage, expectedTotal, previousRowsDigest);
+  const receipt = validateListObservation(second, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize);
   if (firstReceipt.rowsDigest !== receipt.rowsDigest) throw new Error("SOURCE_PAGE_CHANGED_DURING_CAPTURE");
   await mkdir(evidenceDir, { recursive: true });
   const resolvedDir = await realpath(evidenceDir);
@@ -148,7 +161,7 @@ export async function captureSourceListPage({ tab, cdp, evidenceDir, round, expe
   if (existingPage === null) {
     const screenshot = await tab.screenshot({ fullPage: false });
     const after = await readSourceListPage(cdp);
-    const afterReceipt = validateListObservation(after, expectedPage, expectedTotal, previousRowsDigest);
+    const afterReceipt = validateListObservation(after, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize);
     if (afterReceipt.rowsDigest !== receipt.rowsDigest) throw new Error("SOURCE_PAGE_CHANGED_DURING_SCREENSHOT");
     const screenshotSha256 = createHash("sha256").update(screenshot).digest("hex");
     screenshotPath = path.join(evidenceDir, screenshotName(screenshotSha256));
@@ -169,10 +182,14 @@ export async function captureSourceListPage({ tab, cdp, evidenceDir, round, expe
 }
 
 function currentDetailObservation() {
+  const visible = (element) => !!element?.offsetWidth && !!element?.offsetHeight;
+  if (/login|signin/i.test(location.pathname + location.hash) ||
+      [...document.querySelectorAll('input[type="password"]')].some(visible)) {
+    return { ready: false, loginRequired: true, reason: "SOURCE_LOGIN_REQUIRED" };
+  }
   const [route, query] = location.hash.split("?");
   const rwid = new URLSearchParams(query ?? "").get("RWID");
   if (route !== "#/xfjd/projectDetail" || !rwid) return { ready: false, reason: "SOURCE_DETAIL_ROUTE_CHANGED" };
-  const visible = (element) => !!element?.offsetWidth && !!element?.offsetHeight;
   const mains = [...document.querySelectorAll("main.el-main")].filter(visible);
   const projectMatches = [...document.body.innerText.matchAll(/项目编号[：:]\s*([0-9]{8}[A-Z][0-9]{9})\b/g)];
   if (mains.length !== 1 || projectMatches.length !== 1) return { ready: false, reason: "SOURCE_DETAIL_IDENTITY_NOT_READY" };
@@ -214,7 +231,7 @@ function currentDetailObservation() {
     (el) => visible(el) && getComputedStyle(el).visibility !== "hidden",
   );
   return {
-    ready: !loading, reason: loading ? "SOURCE_LOADING" : null, rwid, fields,
+    ready: !loading, busy: loading, reason: loading ? "SOURCE_LOADING" : null, rwid, fields,
     sourceUrl: `${location.origin}${location.pathname}${route}?RWID=${encodeURIComponent(rwid)}`,
     viewport: { width: innerWidth, height: innerHeight },
   };
@@ -246,6 +263,7 @@ export function validateSourceDetail(value, target) {
   if (!value?.ready) throw new Error(value?.reason ?? "SOURCE_DETAIL_NOT_READY");
   const normalizeName = (name) => String(name ?? "").normalize("NFKC").replace(/\s+/g, "").replace(/\((?:个体工商户|个体户)\)$/, "");
   if (value.rwid !== target.rwid || !/^[A-Za-z0-9_-]{1,64}$/.test(value.rwid ?? "") || !/^[0-9]{8}[A-Z][0-9]{9}$/.test(value.fields?.项目编号 ?? "") ||
+      (target.projectNo && value.fields?.项目编号 !== target.projectNo) ||
       normalizeName(value.fields?.单位名称) !== normalizeName(target.caseName)) throw new Error("CASE_IDENTITY_CHAIN_MISMATCH");
   if (!value.fields?.文书目录?.length) throw new Error("SOURCE_DOCUMENT_DIRECTORY_NOT_READY");
   return {
@@ -299,4 +317,19 @@ export async function openSourceCase({ tab, cdp, target }) {
   await row.getByText(equivalent(target.caseName), { exact: true }).click();
   const detail = await readSourceDetail(cdp);
   return detail.ready ? validateSourceDetail(detail, target) : { ready: false, reason: detail.reason };
+}
+
+/** Bounded list transition: action is optional and is not repeated after a checkpoint. */
+export async function advanceSourceListPage(cdp, options) {
+  const { expectedPage, expectedTotal, previousRowsDigest, expectedPageSize = 50, ...runtime } = options;
+  return advanceSourceStage({ ...runtime, stage: "LIST",
+    identity: { expectedPage, expectedTotal, previousRowsDigest: previousRowsDigest ?? null, expectedPageSize },
+    read: () => readSourceListPage(cdp),
+    validate: (value) => validateListObservation(value, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize) });
+}
+
+export async function advanceSourceDetail(cdp, { target, ...runtime }) {
+  return advanceSourceStage({ ...runtime, stage: "DETAIL",
+    identity: { rwid: target.rwid, caseName: target.caseName, projectNo: target.projectNo ?? null },
+    read: () => readSourceDetail(cdp), validate: (value) => validateSourceDetail(value, target) });
 }

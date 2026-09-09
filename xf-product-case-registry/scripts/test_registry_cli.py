@@ -558,13 +558,22 @@ def test_mineru_uses_explicit_sources_and_records_mapping(
     monkeypatch.setattr(cli, "MINERU_SCRIPT", mineru)
     monkeypatch.setattr(cli, "SYSTEM_POWERSHELL", powershell)
 
-    def successful_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        destination = Path(command[command.index("-Output") + 1])
-        (destination / "result.md").write_text("识别结果", encoding="utf-8")
-        return subprocess.CompletedProcess(command, 0, "ok", "")
+    from scripts import ocr_runtime
+    from scripts.test_ocr_runtime import make_output
 
-    monkeypatch.setattr(cli.subprocess, "run", successful_run)
+    monkeypatch.setattr(
+        ocr_runtime,
+        "engine_profile",
+        lambda _wrapper: {"imageId": "sha256:" + "a" * 64},
+    )
+
+    def successful_run(command, timeout, poll, destination, image_id):
+        calls.append(command)
+        source_path = Path(command[command.index("-Path") + 1])
+        make_output(source_path, destination)
+        return 0
+
+    monkeypatch.setattr(ocr_runtime, "run_process", successful_run)
     ocr_command(
         argparse.Namespace(
             work_dir=str(work),
@@ -576,11 +585,11 @@ def test_mineru_uses_explicit_sources_and_records_mapping(
     assert len(calls) == 2 and all(command[-1] == "-NoBuild" for command in calls)
     assert len(read_json(work / "ocr-result.json")["mappings"]) == 2
     monkeypatch.setattr(
-        cli.subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "ok", ""),
+        ocr_runtime,
+        "run_process",
+        lambda *_args, **_kwargs: 0,
     )
-    with pytest.raises(RegistryError, match="未生成非空 Markdown"):
+    with pytest.raises(RegistryError, match="未完整"):
         ocr_command(
             argparse.Namespace(
                 work_dir=str(work),

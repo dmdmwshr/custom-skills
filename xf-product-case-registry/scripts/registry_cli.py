@@ -25,11 +25,15 @@ from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
 if __package__:
+    from .ocr_runtime import OcrError, run_ocr
     from .upload_transport import upload_request
+    from .workflow_reporting import ReportingError, record_timing, render_report, write_report
 else:
+    from ocr_runtime import OcrError, run_ocr
     from upload_transport import upload_request
+    from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
-VERSION = "1.6.7"
+VERSION = "1.7.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -475,78 +479,33 @@ def ocr_command(args: argparse.Namespace) -> None:
         read_json(Path(args.work_dir).resolve() / "inventory.json"),
     )
     enforce_local_workspace_preflight(args, work)
-    output = Path(args.output_dir).resolve()
-    if not inside(output, work):
-        raise RegistryError("OCR 输出必须位于 work-dir 内")
-    selected = args.relative_path or []
-    if not selected:
-        raise RegistryError("OCR 必须显式指定至少一个相对 PDF/图片路径")
-    by_rel = {
-        item["relativePath"]: item for item in inventory.get("files", []) if isinstance(item, dict)
-    }
-    mappings = []
-    if not MINERU_SCRIPT.is_file() or not SYSTEM_POWERSHELL.is_file():
-        raise RegistryError("MinerU 或 PowerShell 7 入口不存在")
-    for relative in selected:
-        safe = safe_relative(relative)
-        source = by_rel.get(safe)
-        if not source or source.get("mimeType") not in {
-            "application/pdf",
-            "image/png",
-            "image/jpeg",
-        }:
-            raise RegistryError(f"OCR 来源必须是 inventory 中的 PDF/PNG/JPEG：{relative}")
-        destination = (output / hashlib.sha256(safe.encode()).hexdigest()[:16]).resolve()
-        destination.mkdir(parents=True, exist_ok=True)
-        try:
-            completed = subprocess.run(
-                [
-                    str(SYSTEM_POWERSHELL),
-                    "-NoProfile",
-                    "-File",
-                    str(MINERU_SCRIPT),
-                    "-Path",
-                    source["absolutePath"],
-                    "-Output",
-                    str(destination),
-                    "-NoBuild",
-                ],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=args.timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as error:
-            raise RegistryError(f"MinerU 超时：{relative}") from error
-        if completed.returncode != 0:
-            raise RegistryError(
-                f"MinerU 处理失败：{relative}：{(completed.stderr or completed.stdout)[-1000:]}"
-            )
-        markdown_files = [
-            path for path in destination.rglob("*.md") if path.is_file() and path.stat().st_size > 0
-        ]
-        if not markdown_files:
-            raise RegistryError(f"MinerU 未生成非空 Markdown：{relative}")
-        mappings.append(
-            {
-                "sourceRelativePath": safe,
-                "sourceSha256": source["sha256"],
-                "outputDir": str(destination.relative_to(work)),
-                "stdout": completed.stdout[-1000:],
-            }
+    allowed_roots = None
+    if getattr(args, "workspace_required", False):
+        resolved = resolve_local_case_workspace(args, work)
+        assert resolved is not None
+        _workspace, layout, project = resolved
+        allowed_roots = [work / "source", layout.pending_case_dir(project)]
+    try:
+        result = run_ocr(
+            work=work,
+            inventory=inventory,
+            output=Path(args.output_dir),
+            selected=args.relative_path or [],
+            wrapper=MINERU_SCRIPT,
+            powershell=SYSTEM_POWERSHELL,
+            timeout=args.timeout,
+            batch=getattr(args, "batch", False),
+            allowed_roots=allowed_roots,
         )
-    write_json(
-        work / "ocr-result.json",
-        {"engine": "MinerU-Docker", "completedAt": utc_now(), "mappings": mappings},
-    )
+    except OcrError as error:
+        raise RegistryError(str(error)) from error
     update_local_case_waterline(
         args,
         work,
         state="ORGANIZING",
         local_status="ORGANIZING",
     )
+    print(json.dumps(result, ensure_ascii=False))
 
 
 def only_keys(value: Any, allowed: set[str], path: str, errors: list[str]) -> dict[str, Any]:
@@ -4644,6 +4603,26 @@ def ledger_status_command(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False))
 
 
+def ledger_report_command(args: argparse.Namespace) -> None:
+    workspace = workspace_api()
+    try:
+        _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        progress = workspace.workspace_progress(layout, batch_id=args.batch_id)
+        markdown = render_report(progress)
+        if args.output:
+            target = write_report(Path(args.output), layout, markdown)
+            result = {
+                "status": "exported",
+                "reportPath": str(target),
+                "caseCount": progress["waterline"]["caseCount"],
+            }
+        else:
+            result = {"status": "read_only", "markdown": markdown}
+    except (workspace.WorkspaceStateError, ReportingError) as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def source_result_summary(result: dict[str, Any]) -> dict[str, Any]:
     keys = {
         "schemaVersion",
@@ -4692,6 +4671,7 @@ def source_begin_command(args: argparse.Namespace) -> None:
             origin=args.origin,
             scope="acceptance" if getattr(args, "acceptance_sample", False) else "all",
         )
+        args.batch_id = result["batchId"]
     except (source.SourceIntakeError, workspace.WorkspaceStateError) as error:
         raise RegistryError(str(error)) from error
     print(json.dumps(source_result_summary(result), ensure_ascii=False))
@@ -4856,6 +4836,11 @@ def build_parser() -> argparse.ArgumentParser:
     ocr.add_argument("--output-dir", required=True)
     ocr.add_argument("--relative-path", action="append")
     ocr.add_argument("--timeout", type=int, default=3600)
+    ocr.add_argument(
+        "--batch",
+        action="store_true",
+        help="同案所选文件共用一次 MinerU；总期限为单文件期限乘待处理文件数",
+    )
     add_workspace_resolution_options(ocr)
     ocr.set_defaults(func=ocr_command, workspace_required=True)
     split = sub.add_parser("split")
@@ -5027,6 +5012,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="指定 scope=all 的正式批次；省略时选择更新时间最新的正式批次",
     )
     ledger_status.set_defaults(func=ledger_status_command)
+    ledger_report = ledger_sub.add_parser(
+        "report",
+        help="只读汇总事实源；可显式输出 Markdown 核验摘要",
+    )
+    add_workspace_resolution_options(ledger_report)
+    ledger_report.add_argument("--batch-id")
+    ledger_report.add_argument("--output", help="核验记录目录内的新 .md 文件；省略时只返回摘要")
+    ledger_report.set_defaults(func=ledger_report_command)
 
     for name, func in (("upload", upload_command), ("verify", verify_command)):
         command = sub.add_parser(name)
@@ -5170,17 +5163,91 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def record_command_timing(
+    args: argparse.Namespace, started_at: str, duration: float, outcome: str
+) -> None:
+    """Diagnostics only for commands that already mutate their explicit local scope.
+
+    Queries, offline validation/dry-runs and planning commands never write timing files.
+    Missing end-of-command workspaces (e.g. already archived) are not recreated.
+    """
+    command = args.command
+    if command not in {
+        "inventory",
+        "ocr",
+        "split",
+        "compose",
+        "source",
+        "upload",
+        "verify",
+        "supplement",
+    }:
+        return
+    if getattr(args, "dry_run", False) or getattr(args, "plan", False) is True:
+        return
+    category = "processing"
+    operation = command
+    if command == "source":
+        subcommand = args.source_command
+        if subcommand == "tail-cursor" or not getattr(args, "batch_id", None):
+            return
+        layout = resolve_source_layout(args)
+        directory = layout.batch_dir(args.batch_id)
+        if not (directory / "browser-capture.json").is_file():
+            return
+        scope_key = f"batch:{args.batch_id}"
+        operation += "/" + subcommand
+        category = "networkWait" if subcommand == "await-download" else "processing"
+    else:
+        raw_work = getattr(args, "work_dir", None)
+        if not raw_work:
+            manifest_path = getattr(args, "manifest", None)
+            if not manifest_path:
+                return
+            raw_work = str(Path(manifest_path).resolve().parent)
+        directory = Path(raw_work).resolve()
+        resolved = resolve_local_case_workspace(args, directory)
+        if resolved is None or not directory.is_dir():
+            return
+        _workspace, layout, project = resolved
+        scope_key = f"project:{project}"
+        if command in {"upload", "verify", "supplement"}:
+            category = "unclassified"  # Total duration cannot distinguish network from processing.
+    record_timing(
+        directory,
+        layout.root,
+        scope_key=scope_key,
+        operation=operation,
+        category=category,
+        started_at=started_at,
+        duration=duration,
+        outcome=outcome,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_utf8()
     args = build_parser().parse_args(argv)
+    started_at, started = utc_now(), time.monotonic()
+    outcome = "FAILED"
     try:
         args.func(args)
+        outcome = "COMPLETED"
     except RegistryError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
     except httpx.TransportError:
         print("ERROR: 网络传输失败，请检查连接后重试", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        outcome = "CANCELLED"
+        print("已中断；已确认的进度保留，未完成操作未自动重试", file=sys.stderr)
+        return 130
+    finally:
+        try:
+            record_command_timing(args, started_at, time.monotonic() - started, outcome)
+        except (RegistryError, ReportingError, OSError, ValueError):
+            print("计时记录未保存；业务结果未回滚，历史缺失耗时仍为未知", file=sys.stderr)
     return 0
 
 
