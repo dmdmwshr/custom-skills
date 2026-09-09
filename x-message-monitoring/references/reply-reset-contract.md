@@ -9,9 +9,9 @@
 ## 一次冻结前的步骤
 
 1. 主帖按快速路径完成 Latest 搜索与必要全文核验。回复直接 `page(tab,cycle,"search")`，准确查询 `from:<account> filter:replies`，核验 Latest、登录账号、目标作者，读取至 ID 与 UTC instant 同时命中的水位，不访问 with_replies。
-2. 回复候选 ID 序列送 observation-fingerprint，再调用 permalinkBatch，每次最多两条。唯一最小主会话区域的完整顶层链中，直接对象与回复必须相邻；对象可为主帖或别人的回复。外层主帖、回复、对象及上文均允许带引用卡，内嵌引用节点不能充当父或子。推荐、重复、身份/时间冲突、父子不相邻或正文不完整仍失败；明确广告也不能替代中间缺失成员。
+2. 完整冻结回复候选 ID 序列在同一 CUA 宿主经固定标准输入客户端送 observation-fingerprint，直接使用本轮机器回执的 fingerprint，再调用 permalinkBatch，每次最多两条。唯一最小主会话区域的完整顶层链中，直接对象与回复必须相邻；对象可为主帖或别人的回复。外层主帖、回复、对象及上文均允许带引用卡，内嵌引用节点不能充当父或子。推荐、重复、身份/时间冲突、父子不相邻或正文不完整仍失败；明确广告也不能替代中间缺失成员。
 3. 作者自己的截断标记只由固定驱动点击该卡唯一展开控件，在同一十五秒预算内重读。身份、UTC、预览前缀及完整性必须一致；外层作者正文与引用文字分别保存，不能取第一段或拼接。
-4. `draftStream(cycle,"main"|"reply")` 产生草稿；按快速路径无回显标准输入将 `{lease,payload:草稿}` 提交给统一 context-plan。它只读验证、去重，返回 XMonitorContextPlanV1 的 stream、new_status_ids、context_items、proof_only_count、max_ancestors=3、max_quotes=5。旧 reply-context-plan 仍为回复兼容别名。调用 `applyContextPlan(cycle,机器原样计划)`；历史锚点只核对核心事实，不补读、不分析。
+4. `draftStream(cycle,"main"|"reply")` 产生草稿；按快速路径客户端把宿主原内存对象 `{lease,payload:草稿}` 直接提交给统一 context-plan。它只读验证、去重，返回 XMonitorContextPlanV1 的 stream、new_status_ids、context_items、proof_only_count、max_ancestors=3、max_quotes=5。旧 reply-context-plan 仍为回复兼容别名。调用 `applyContextPlan(cycle,机器原样计划)`；历史锚点只核对核心事实，不补读、不分析。
 5. 新回复的直接对象和当前正文不足时，`contextBatch(tab,cycle,[至多两个新回复ID])` 每个 ID 沿可信父子边补一层，最多三层。足够时 `resolveContext(cycle,id,"sufficient")`；可信不可取得为 unavailable，三层用尽仍不足为 depth_limit。上文为 XReplyContextV2。不要把结构冲突或超时改成语义不足。
 6. 两流均执行 `quoteBatch(tab,cycle,"main"|"reply")` 至 ok=true、done=true；每次只补一个来源，最多涉及来源拥有帖和引用原帖两个永久链接，同一十五秒共享预算，工具上限四十秒。每个当前消息/直接对象/上文只补其直接一层引用，最多五个引用归属项；不追踪引用中的引用。后续补上文若增加引用，冻结前再完成 quoteBatch。同轮相同规范来源复用核验结果，依旧校验当前引用归属、预览、身份和时间。
 7. 引用卡不提供链接时，只点击当前唯一外层对象内已核验的引用块，读取实际跳转地址，不猜状态 ID。来源正文截断时只展开已核验原帖自己的唯一控件。明确删除/不可用按可见证据记录；没有这种正面证据的缺卡、超时、截断和身份冲突仍失败。

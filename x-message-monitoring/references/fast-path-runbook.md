@@ -1,6 +1,34 @@
-# 固定快速路径（分流协议 1 / 驱动 3.0.10）
+# 固定快速路径（分流协议 1 / 驱动 3.0.10 / 标准输入客户端 1.0.0）
 
-## 公开事实的内存传递（3.0.10，当前优先）
+## 2026-09-09：同入口标准输入直传（当前优先，用户已批准）
+
+公开事实、完整观察序列、机器指纹、草稿、上下文计划、最终 raw 和分析都保留在同一 CUA 宿主内存。五个指定动作直接向原固定 Python 入口的一次性 stdin 提交，不再经模型转抄到 functions。下方旧 packFacts/packFactsGzip/diffFacts、reply_base/reply_delta 和 write_stdin 正文搬运只作历史兼容，不是新周期默认步骤；小型控制动作仍可使用原工具 stdin。浏览器、固定任务、二十分钟上限及发送路由不变。
+
+1. 当前 CUA 已初始化后，通过公开 `node:fs`、`node:vm` 原样读取业务 `scripts/desktop_stdin_client.js`。用公开 `node:buffer.Buffer`、`node:util.TextDecoder`、`node:timers.setTimeout/clearTimeout` 注入该纯工厂；打印 version 与 sourceFingerprint()，必须与本地源读回一致。用公开 `node:child_process.spawn` 创建客户端。只复用普通 let 绑定，禁止内部模块、其他 Node REPL 或自行转写客户端。该有限 Python 子进程不控制浏览器。
+2. 首次启用、源码变更或控制会话重置后，在 acquire 前（当前 CUA 已可用时）执行客户端 `selfTest()`。它只运行固定 `scripts/desktop_stdin_fixture.py` 和预置合成数据，不访问账本/X/飞书。必须 ok=true、response.exact_match=true、61 项；只输出字节、哈希、耗时。模块可导入不算通过，失败时停止，不自行换进程通道。新 CUA 的第一条调用仍遵守工具的单一浏览器入口规则，不能为初始化客户端读取用户旧标签。
+3. 本轮 acquire/预检通过后，把机器原样 lease 只交给 CUA 宿主的 xMonLease；不放入驱动 cycle、页面求值或普通日志。每轮新建 cycle、清空旧计划/指纹/分析，不从历史恢复 lease。主帖与回复继续独立提交。
+4. 搜索冻结后，`send("observation-fingerprint",{lease:xMonLease,payload:完整冻结ID数组})`，先检查包装回执 ok，再将 response.fingerprint 直接给同轮 permalinkBatch。ID 数组和返回值均留在此宿主，不经模型重建。失败不沿用先前哈希。
+5. 草稿只生成一次，直接 `send("context-plan",{lease:xMonLease,payload:xMonReplyDraft})`。成功后将完整 response 交给 applyContextPlan，模型只按需读取其中 context_items 的新项事实。必要上文和一层引用完成后，一次 rawStream 得到最终 xMonRaw；不得用草稿冒充最终事实或重新读取历史项。
+6. `send("collect-stream",{lease:xMonLease,payload:xMonRaw})`；成功后 `send("analysis-plan",同一对象)`；只读 response.analysis_items 为这些新 ID 补齐分析。分析对象直接保存在此 CUA 宿主，最后 `send("scan-analysis",{lease:xMonLease,payload:{collected:xMonRaw,analyses:xMonAnalyses}})`，原入口机械转换 V3 并执行账本筛选。空 new_status_ids 对应空 analyses。所有步骤仍以原业务回执为准。
+7. 客户端内部先等待精确 `XMonitorInputReadyV1`、chunks 和 echo_disabled=true，再把 Array.from 分块帧一次写入同一 stdin；并不打开终端。只有固定五项动作，shell=false、windowsHide=true、路径和 cwd 固定，最多一个在途子进程、30 秒结果期限。禁止参数正文、正文文件、常驻服务、网络桥接和第二个扫描者。
+8. 包装回执的 input_frame_bytes/stdout_bytes/elapsed_ms 只描述本次传输，不等于整轮或页面耗时；ok=true 后仍须检查 response 的业务结果。ok=false 且 outcome_unknown=true 表示输入已交给程序而最终结果未知，不重试该动作；同 lease 用只读健康核验是否已提交，已提交流使用 cycle-failure 追加，其他按原失败入口收口。不要输出 stderr、异常原文或在捕获错误后静默。
+9. 发生观察指纹不一致时，在清理前只报告：本轮 ID 数量/唯一数、raw 序列与冻结序列逐项相等性、原机器 fingerprint、回复/排除上下文指纹的去重值，以及包装回执字节/耗时。不输出正文或完整 ID 列表，不修改序列/哈希再提交，不从已清理历史恢复。最终仍由 heartbeat-finish 给出两阶段结果，同 token 收口后才清理 lease 和事实。
+
+客户端加载的固定形态（变量首次使用才 let，已有则赋值）：
+
+```javascript
+let xMonStdinSource = await (await import('node:fs/promises')).readFile('C:/Users/12070/Desktop/项目开发/X监控/scripts/desktop_stdin_client.js','utf8');
+let xMonStdinFactory = (await import('node:vm')).runInNewContext(xMonStdinSource,{
+  Buffer:(await import('node:buffer')).Buffer, TextDecoder:(await import('node:util')).TextDecoder,
+  setTimeout:(await import('node:timers')).setTimeout, clearTimeout:(await import('node:timers')).clearTimeout
+});
+let xMonStdin = xMonStdinFactory.createFixedStdinClient({spawn:(await import('node:child_process')).spawn});
+nodeRepl.write({version:xMonStdinFactory.version,source_fingerprint:xMonStdinFactory.sourceFingerprint()});
+```
+
+上例不执行 selfTest 或业务动作；读回指纹一致后再单独执行 selfTest。不要重放已运行但赋值失败的动作。自检通过不代表生产扫描完成，正式验收仍须在原固定任务完成一轮双流和两次复扫。
+
+## 历史兼容：公开事实的跨工具内存传递（3.0.10）
 
 CUA 与 functions 不共享变量，这是已知接口边界，不是停止合法传递的理由。以下对象都是当前可验证公开帖子事实，允许进入模型工具上下文。开始 acquire 前读懂并准备本节；不等到二十分钟末尾才设计传递方式，不另建通道、正文文件或进程桥接。
 
@@ -23,7 +51,7 @@ CUA 与 functions 不共享变量，这是已知接口边界，不是停止合�
 - 命令工作目录：`C:\Users\12070\Desktop\项目开发\cc-connect-operations\projects\x-monitor\notifications`。
 - 业务目录：`C:\Users\12070\Desktop\项目开发\X监控`；解释器 `.venv\Scripts\python.exe`；入口 `scripts\fixed_session_entry.py`；数据仅在业务 `data`。
 - 全部命令通过 UTF-8 对象序列化后标准输入，禁止正文/凭据出现在进程参数、普通日志或临时脚本中。公开帖的结构化工具返回值是授权事实载荷，允许进入模型上下文与当前 functions 内存供验证/分析，不能把它误当凭据或禁止的普通日志。PowerShell 输入输出均设 `[Text.UTF8Encoding]::new($false)`；不要手拼 JSON。
-- CUA 状态只用 `let xMonDriver`、`let xMonTab`、`let xMonCycle`、`let xMonRaw`；各变量第一次使用必须声明，已经存在时只赋值，不能遗漏初始化或重复声明。本轮 lease 来自一次 acquire；不能复制旧值。工具会话重置时不接续旧浏览器句柄，登记失败并 finish。
+- CUA 状态使用普通 `let` 明确绑定驱动、标签、cycle、原始事实、客户端、lease、计划和本轮分析；各变量第一次使用必须声明，已经存在时只赋值，不能遗漏初始化或重复声明。本轮 lease 来自一次 acquire；不能复制旧值。工具会话重置时不接续旧浏览器句柄，登记失败并 finish。
 - 页面调用结果可直接用 `nodeRepl.write(await xMonDriver.page(...))` 输出，或赋给事先已声明的变量。给未声明变量赋值发生 ReferenceError 时，右侧 await 可能已经完成浏览器动作；不能因此说操作未执行或重放 page。先看本轮纯计数/已有回执，不能确认则失败收口，不通过第二次调用取得一个新结果。
 
 ## 按表执行，失败不探索
@@ -61,7 +89,7 @@ CUA 与 functions 不共享变量，这是已知接口边界，不是停止合�
 
 1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次 `page(...,"main",true)`。`action=main_permalink_details` 表示发现已冻结，后续同一 page 调用自动核验最多两条主帖全文，不再滚动搜索。驱动只对作者自己的可见“显示更多”补读规范原帖；必要时点击已核验目标唯一展开控件并在同一 15 秒预算内重读。身份、UTC、引用/媒体标志与预览前缀必须一致；仍截断不能分析或入账。done=true 后按上下文契约执行 draftStream(main) → 只读 context-plan → applyContextPlan → quoteBatch(main) 至 done=true，再一次 rawStream(main) 并原样提交。
 2. 新回复直接进入下一项 Latest 搜索，不访问 with_replies，不调用旧回复主页前置步骤。
-3. `page(...,"search")`，未到水位才 `page(...,"search",true)`。搜索冻结后 `observation-fingerprint` 输入 `{lease,payload:xMonCycle.search.map(i=>i.statusId)}`，取机器 fingerprint。
+3. `page(...,"search")`，未到水位才 `page(...,"search",true)`。搜索冻结后在同一 CUA 宿主把完整 ID 序列直接交给客户端 observation-fingerprint，输入 `{lease:xMonLease,payload:xMonCycle.search.map(i=>i.statusId)}`，检查成功后直接取 response.fingerprint；每轮重新取得，不转抄、不复用旧轮值。
 4. `await xMonDriver.permalinkBatch(xMonTab,xMonCycle,fingerprint)`，每次最多两条，仅 ok=true,done=false 继续下一批。完整唯一主会话链、相邻父帖和独立回复对象由驱动核验。文本加图片父帖可读，头像不是帖子媒体；纯媒体不编造文字。
 5. 两流开始前完整读取 [上下文、引用与额度契约](reply-reset-contract.md)。回复执行 draftStream(reply) → 只读 context-plan → applyContextPlan，仅新项必要时 contextBatch（至多三层，够用即停）；quoteBatch(reply) 补直接一层引用至 done=true，每条最多五个来源归属，同轮复用。最后一次 rawStream(reply)，原样 collect-stream。reply-context-plan 保留兼容；不更改冻结事实、不保存正文文件。
 
@@ -69,7 +97,7 @@ CUA 与 functions 不共享变量，这是已知接口边界，不是停止合�
 
 ## 本地载荷：程序机械组装
 
-### 浏览器到本地入口的固定交接（无需桥接）
+### 历史兼容：工具间固定交接（当前事实优先使用上节直传）
 
 1. `nodeRepl.write(xMonRaw)` 返回本流结构化公开事实。不是 HTML，也不写文件；模型此时只搬运事实，不翻译历史状态。将该原样对象与本轮 lease 放入 `functions.store("x-monitor-current", {lease,payload:<该对象>})`，只放一个账号的一条流。
 2. 准备好内存对象后，以 `exec_command` 的 `tty:true` 启动同一项目解释器和固定入口：`--input-framing chunks collect-stream --input -`；命令只有固定路径/动作，不含正文。先等到 `XMonitorInputReadyV1` 且 `echo_disabled=true`；没有这条回执不发送数据。不要使用默认无 TTY 管道，它会立即关闭 stdin。

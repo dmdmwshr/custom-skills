@@ -1,5 +1,11 @@
 # 分流 heartbeat 与投递边界
 
+## 2026-09-09 用户批准的同入口直传
+
+当前固定快速路径的标准输入客户端 1.0.0 优先于下方旧跨工具搬运步骤。允许原 CUA 宿主按固定源码启动原 Python 校验入口的有限子进程，仅 observation-fingerprint/context-plan/collect-stream/analysis-plan/scan-analysis；该子进程不控制浏览器，不是新增发送者或常驻服务。另有仅合成输入的固定 selfTest，首次启用/重置后必须取得 exact_match=true。
+
+正文只在 CUA 宿主内存与同入口无回显 chunks stdin 之间传递；不需要模型逐字转抄原始事实、字典或 gzip。lease 不进页面/cycle/普通日志。传入后结果未知不重试，同 lease 核验状态并完成原两阶段收口；保留二十分钟上限、原工具小型控制动作、既有投递幂等和唯一任务/浏览器/路由。此授权不允许任意进程、正文文件、内部模块、另一种浏览器控制或网络桥接。
+
 ## 2026-09-08 当前优先修订
 
 驱动 3.0.10、XReplyContextV2、XQuoteContextV1、ResetAnalysisV3 与 FrozenXMessageV5 以 [上下文、引用与额度契约](reply-reset-contract.md) 为准。两流均先草稿、context-plan 只读识别新项，补必要上下文和直接一层引用后一次冻结。回复最多三层上文和五个引用来源归属，同轮复用；作者自己的正文与引用正文分开，内嵌引用不能冒充直接父对象。正文、身份或关系不可信失败关闭；引用明确不可取得且其余内容不足才抑制为无法判断。保留每页共享十五秒预算和一次 AX 刷新，不增加失败后重试。对已证明关系的视口外截断父帖补读其已知原帖，permalinkBatch 和 contextBatch 严格限制每次最多两个永久链接；pending 仅表示同轮尚未完成，不能当作可冻结事实。3.0.10 用原标准输入中的 gzip 字典/差异缩减公开事实传递，原入口还原校验；每个 lease 新建周期，lease 保留至同轮 finish 成功或明确失败回执，不先清空、不延长整轮二十分钟上限。

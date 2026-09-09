@@ -30,6 +30,8 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn(step,fast)
         for step in ("packFacts","packFactsGzip","node:zlib","TextEncoder","diffFacts","XMonitorFactTransferV1","reply_base","reply_delta","context_items","heartbeat-finish"):
             self.assertIn(step,fast)
+        for step in ("desktop_stdin_client.js","node:child_process","selfTest","exact_match=true","outcome_unknown=true","input_frame_bytes","observation-fingerprint"):
+            self.assertIn(step,fast)
         driver=BUSINESS/"scripts/desktop_monitor_driver.js"
         if driver.is_file():
             version=re.search(r"const version = '([0-9.]+)'",driver.read_text(encoding="utf-8")).group(1)
@@ -43,14 +45,14 @@ class SkillContractTests(unittest.TestCase):
 
     def test_production_driver_behavior_not_just_document_phrases(self):
         node=shutil.which("node")
-        target=BUSINESS/"tests/test_desktop_driver.cjs"
-        if not node or not target.is_file():
+        targets=[BUSINESS/"tests/test_desktop_driver.cjs",BUSINESS/"tests/test_desktop_stdin_client.cjs"]
+        if not node or any(not target.is_file() for target in targets):
             self.skipTest("business driver or Node is unavailable on this host")
-        result=subprocess.run([node,"--test",str(target)],cwd=BUSINESS,capture_output=True,text=True,encoding="utf-8",timeout=30)
+        result=subprocess.run([node,"--test",*[str(target) for target in targets]],cwd=BUSINESS,capture_output=True,text=True,encoding="utf-8",timeout=30)
         self.assertEqual(0,result.returncode,result.stdout+result.stderr)
 
     def test_production_stream_transactions_and_receipts(self):
-        python=BUSINESS/".venv/Scripts/python.exe"
+        python=Path(os.environ.get("X_MONITOR_PYTHON",str(BUSINESS/".venv/Scripts/python.exe")))
         if not python.is_file():
             self.skipTest("business test environment unavailable")
         for pattern in ("test_independent_streams.py","test_receipt_sync.py","test_reply_reset_policy.py","test_reset_quote_policy.py","test_fact_transfer.py"):
