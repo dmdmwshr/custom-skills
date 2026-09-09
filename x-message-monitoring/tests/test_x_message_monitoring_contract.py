@@ -26,10 +26,12 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("partial_failed",fast)
         self.assertIn("-filter:replies -filter:retweets",fast)
         self.assertIn("media_only_not_inspected",fast)
+        legacy=(ROOT/"references/legacy-fact-transfer.md").read_text(encoding="utf-8")
+        self.assertIn("legacy-fact-transfer.md",fast)
         for step in ("--input-framing chunks","XMonitorInputReadyV1","echo_disabled=true","write_stdin","Array.from"):
-            self.assertIn(step,fast)
+            self.assertIn(step,legacy)
         for step in ("packFacts","packFactsGzip","node:zlib","TextEncoder","diffFacts","XMonitorFactTransferV1","reply_base","reply_delta","context_items","heartbeat-finish"):
-            self.assertIn(step,fast)
+            self.assertIn(step,legacy)
         for step in ("desktop_stdin_client.js","node:child_process","selfTest","exact_match=true","outcome_unknown=true","input_frame_bytes","observation-fingerprint"):
             self.assertIn(step,fast)
         driver=BUSINESS/"scripts/desktop_monitor_driver.js"

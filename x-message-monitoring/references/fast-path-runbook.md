@@ -1,12 +1,18 @@
-# 固定快速路径（分流协议 1 / 驱动 3.0.12 / 标准输入客户端 1.0.0）
+# 固定快速路径（分流协议 1 / 驱动 3.0.13 / 标准输入客户端 1.0.0）
 
-3.0.12 修复已实测的引用中心误点：固定 readPage 在唯一引用卡内按已观察几何核验最多九个点，只保留实际命中该卡且非图片、视频、链接、按钮、作者头部或输入框的点；readQuote 用已确认的 Tab 继承 Target.click([x,y]) 点击一次，再严格验证跳转来源。坐标仅本轮定位，不入冻结事实。无可信点失败，不使用未提供的 Locator.focus/click.position，也不假定 press 会自动聚焦。主列初始缺失时，在同一个十五秒预算内、单次等待之前刷新一次 AX；失败后仍不补读或重试。
+## 模型与上下文（2026-09-09 用户已批准）
 
-3.0.11 失败诊断只记录规范公开身份和计数：引用等待前的一次 probe_evidence 包含实际页面类型及匹配时间链接数，quote_evidence 唯一标明正在处理的外层来源；ordering_evidence 标明首个逆序对的 ID/UTC、首次页号和当前页位置。原等待、顺序和失败关闭规则不变。维护已明确授权时，原固定任务可 createDiagnosticCycle（参数同 createCycle），对最多两个已核验的外层 `{author,statusId,permalink}` 各调用一次 diagnoseQuote；返回身份、长度、耗时而无正文。不可重试同一来源，诊断周期不能 draft/raw 冻结、collect/scan 或发送。必要搜索定位仅按原 page(search) 分页至成功或首次失败，读取本次 ordering_evidence 后关闭自有标签；不改序、不把诊断事实传入正式轮。
+- 原固定任务使用 gpt-5.6-luna、最高思考 max；通过 Codex 产品设置并回读，写提示词不等于模型生效。其他任务和全局默认保持。
+- 每轮只读当前 health 和机器计划的新项；水位、去重、抑制及投递以 SQLite 为准。规则/驱动/分析契约版本未变则复用；不读取旧聊天、维护过程、兼容实现或历史正文来决定新一轮。
+- 同 lease 两阶段 finish 已返回、标签关闭且无在途提交后，清理本轮 lease/事实/计划/分析。只保留精简运行检查点：规则入口、版本、最终机器回执、未解决故障码与必要待办；不携带正文、payload、长诊断或 token。
+- 当前任务已提供原生 new_context 时，每个已收口周期最多重整一次上下文，记录已整理标记，随后只据保留的最终回执完成回复；不得重整循环或重跑扫描。持锁、待 finish 或仍有未知提交待处理时先收口。该操作保持同任务，不重置 CUA；驱动/客户端仍有效则继续复用。能力不可用就保留轻量结果并如实报告未执行主动重整，不另起控制进程。
+- 不删除聊天、正式账本或历史幂等证据，不以关闭 history.jsonl 保存声称输入消耗已减少。模型/上下文优化仍须实际双流与复扫验收，不改 DONT_NOTIFY 或故障报告条件。
 
-## 2026-09-09：同入口标准输入直传（当前优先，用户已批准）
+驱动 3.0.13 的 quote_match_evidence 只使用已有预览和来源字符串输出长度、差异类别及空白折叠比较；不输出正文、不放宽匹配、失败后不增加页面读取。3.0.12 的引用点击仍只用本轮唯一卡内命中测试确认的非交互落点，禁止默认中心、媒体/链接/按钮/作者头部；无可信位置失败。授权诊断最多两个已核验外层各一次，不能冻结或用于正式提交。
 
-公开事实、完整观察序列、机器指纹、草稿、上下文计划、最终 raw 和分析都保留在同一 CUA 宿主内存。五个指定动作直接向原固定 Python 入口的一次性 stdin 提交，不再经模型转抄到 functions。下方旧 packFacts/packFactsGzip/diffFacts、reply_base/reply_delta 和 write_stdin 正文搬运只作历史兼容，不是新周期默认步骤；小型控制动作仍可使用原工具 stdin。浏览器、固定任务、二十分钟上限及发送路由不变。
+## 同入口标准输入直传
+
+公开事实、完整观察序列、机器指纹、草稿、上下文计划、最终 raw 和分析都保留在同一 CUA 宿主内存。五个指定动作直接向原固定 Python 入口的一次性 stdin 提交，不再经模型转抄到 functions。[历史传递兼容](legacy-fact-transfer.md) 仅供维护按需读取，不是新周期默认流程；小型控制动作仍可使用原工具 stdin。浏览器、固定任务、二十分钟上限及发送路由不变。
 
 1. 当前 CUA 已初始化后，通过公开 `node:fs`、`node:vm` 原样读取业务 `scripts/desktop_stdin_client.js`。用公开 `node:buffer.Buffer`、`node:util.TextDecoder`、`node:timers.setTimeout/clearTimeout` 注入该纯工厂；打印 version 与 sourceFingerprint()，必须与本地源读回一致。用公开 `node:child_process.spawn` 创建客户端。只复用普通 let 绑定，禁止内部模块、其他 Node REPL 或自行转写客户端。该有限 Python 子进程不控制浏览器。
 2. 首次启用、源码变更或控制会话重置后，在 acquire 前（当前 CUA 已可用时）执行客户端 `selfTest()`。它只运行固定 `scripts/desktop_stdin_fixture.py` 和预置合成数据，不访问账本/X/飞书。必须 ok=true、response.exact_match=true、61 项；只输出字节、哈希、耗时。模块可导入不算通过，失败时停止，不自行换进程通道。新 CUA 的第一条调用仍遵守工具的单一浏览器入口规则，不能为初始化客户端读取用户旧标签。
@@ -31,24 +37,6 @@ nodeRepl.write({version:xMonStdinFactory.version,source_fingerprint:xMonStdinFac
 ```
 
 上例不执行 selfTest 或业务动作；读回指纹一致后再单独执行 selfTest。不要重放已运行但赋值失败的动作。自检通过不代表生产扫描完成，正式验收仍须在原固定任务完成一轮双流和两次复扫。
-
-## 历史兼容：公开事实的跨工具内存传递（3.0.10）
-
-CUA 与 functions 不共享变量，这是已知接口边界，不是停止合法传递的理由。以下对象都是当前可验证公开帖子事实，允许进入模型工具上下文。开始 acquire 前读懂并准备本节；不等到二十分钟末尾才设计传递方式，不另建通道、正文文件或进程桥接。
-
-预先在当前 CUA 通过公开 Node 标准库 `node:zlib` 取得 `gzipSync`，绑定已声明的 `xMonGzipSync`；原样工厂以 `vm.runInNewContext(source,{URL,TextEncoder})` 实例化。两项均为纯内存计算，不执行浏览器动作、进程或文件写入。该环境已实测 gzipSync 可用，不能改用未提供的 CompressionStream。工厂和压缩函数可跨轮复用；每次新 acquire 后必须重新 createCycle，并确认 mainDone/searchDone 为 false、mainPages/searchPages 为 0。
-
-1. 草稿仍只调用一次 `draftStream`，保留已声明的 `xMonReplyDraft`（主帖变量同理）。CUA 用原固定工厂 `xMonDriver.packFactsGzip(xMonReplyDraft,xMonGzipSync)` 导出 `XMonitorFactTransferV1` 的 `gzip_base64` 对象，工具回传该对象一次。functions 用 `store("reply_base", <刚返回的完整对象>)` 原样保存；不手工展开重复字段、改正文或推测引用。packFacts 的旧字典仍兼容小载荷；实际回复积压使用已准备好的 gzip 压缩，不能再次转抄约四万字符的旧字典。
-2. 立即经原 `--input-framing chunks`、InputReady/echo_disabled 与 write_stdin 提交 `{lease,payload:load("reply_base")}` 到 context-plan。固定入口限制解压大小，核对长度、压缩完整性、唯一 JSON 键和规范 JSON 校验码，再还原原 XCollectedStreamV1；仍走原严格水位、身份与事实检查。此校验码只检测传递差错，采集与冻结原有哈希继续生效。
-3. functions 可直接解析并保存固定入口返回的结构化计划。模型读取其中 context_items 判断必要上下文；传给 CUA applyContextPlan 的控制对象只需保留计划中的 schema_version、account、stream、draft_fingerprint、max_ancestors、max_quotes、new_status_ids，不重复传 context_items 正文。所有字段都取本次真实计划，不自己推断 new_status_ids。
-4. 按既有流程补必要上文/引用。最后仅一次 `rawStream` 得到 xMonReplyRaw；CUA 导出 `xMonDriver.packFactsGzip(xMonDriver.diffFacts(xMonReplyDraft,xMonReplyRaw),xMonGzipSync)`，functions 原样保存 reply_delta。后续同一内存 collected 对象为 `{schema_version:"XMonitorFactTransferV1",representation:"delta",base:load("reply_base"),patch:load("reply_delta")}`。collect-stream、analysis-plan 的 payload 直接用它；scan-analysis 的 collected 也用它，不重新转抄整条时间线。已核验正文、身份、直接父对象和观察序列在差异中不可变；只有新上文/引用、采集时间和耗时可补充。
-5. context-plan/analysis-plan 的可读新项事实是分析来源；相关/无关/无法判断按实际内容填写。批量分析可用 functions 的数组与公共字段机械组装严格对象，减少重复键名；不能以模板猜测结论或给已知项重新分析。空 new_status_ids 直接组装空 analyses，同一 functions 调用内可顺序完成标准入口调用，每一步仍检查成功回执。
-6. 只传递元数据时回报条数、压缩前后字符数、校验码与阶段耗时；正文只进授权工具上下文/无回显 stdin，不进普通日志。任何校验或原验证失败都报告，不把传输包装当作成功采集。
-7. 当前 lease 必须保留到同轮 heartbeat-finish 成功或明确失败回执之后才清理。时间到期、发布异常或浏览器关闭后也先用同 token 完成既有失败收口；不能先清空 lease 再声称无法 finish，不从历史取回 token、不用 renew 绕过整轮二十分钟上限。
-
-3.0.8 的父帖全文规则优先于下文旧父帖滚动步骤：父子关系已核验且截断父帖控件需要移位时，驱动直接读该父帖规范永久链接，以身份、UTC、标志和前缀绑定完整正文及独立引用事实。permalinkBatch 每次最多两个永久链接；pending_parent=true 是正常未完成进度，继续同一批次直到 done=true。contextBatch 返回 pending_status_ids 时只在下次续这些 ID，已返回 items 中的 ID 不重复调用；每页仍限 15 秒、整次工具限 40 秒，不在失败后补读或重试。
-
-这是操作清单，不是让模型重写采集器的伪代码。真实扫描仅在唯一固定任务完成；初始化和验收仍留在该任务。
 
 ## 入口与状态
 
@@ -83,14 +71,6 @@ CUA 与 functions 不共享变量，这是已知接口边界，不是停止合�
 
 ## 驱动调用
 
-每次加载前，在业务源码目录用 Node 的 fs 读取固定驱动文件，并用 vm.runInNewContext 仅实例化无浏览器副作用的原样工厂，打印 `{version,source_fingerprint:driver.sourceFingerprint()}` 作为预期值。这是离线源码核对，不建立浏览器或控制进程。CUA 原样加载后打印相同元数据并比较算法、长度、摘要；通过后才调用驱动采集。FNV 指纹仅检测意外转写变化，不是安全签名或页面证据。3.0.10 保留搜索或详情初次快照没有目标时的共享十五秒预算、一次 AX 刷新及就绪等待，并增加两流新项引用补读；失败之后不导航或采集重试，也不固定延长等待。
-
-展开和引用点击使用驱动刚核验的实际时间链接属性定位，避免规范化后的账号大小写或链接查询串造成零匹配；该属性仅留在本轮驱动内存，事实仍使用规范永久链接。源卡和控件均须唯一，来源身份、展开后的完整正文仍由固定驱动核验，不能现场改选择器或按位置点选。
-
-回复展开控件处于可视区域边缘时，固定驱动按已观察几何用当前 Tab.scroll 居中一次，重新核验同一父/目标与正文前缀；点击后等待自身展开控件消失再重读，全部共用原十五秒预算。位置未解决、身份变化或就绪失败仍关闭该流；不追加固定睡眠，不使用未定义的滚入视口方法，也不失败后补点。
-
-每个 ok=false 直接使用返回 failure_code 和 stage，不现场改代码修载荷。导航、主列、目标、成员、父帖、水位分开记录。当前 Unified CUA 使用 `Tab.scroll([x,y],"down",pages)`，坐标及页数由已读取的主列几何计算；导航/滚动后 `getAXState({emit:false})` 刷新观察，再读取 DOM。不要调用另一套旧接口的 `tab.dom_cua`。驱动已固化这些步骤，不在轮次中探索 API。
-
 1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次 `page(...,"main",true)`。`action=main_permalink_details` 表示发现已冻结，后续同一 page 调用自动核验最多两条主帖全文，不再滚动搜索。驱动只对作者自己的可见“显示更多”补读规范原帖；必要时点击已核验目标唯一展开控件并在同一 15 秒预算内重读。身份、UTC、引用/媒体标志与预览前缀必须一致；仍截断不能分析或入账。done=true 后按上下文契约执行 draftStream(main) → 只读 context-plan → applyContextPlan → quoteBatch(main) 至 done=true，再一次 rawStream(main) 并原样提交。
 2. 新回复直接进入下一项 Latest 搜索，不访问 with_replies，不调用旧回复主页前置步骤。
 3. `page(...,"search")`，未到水位才 `page(...,"search",true)`。搜索冻结后在同一 CUA 宿主把完整 ID 序列直接交给客户端 observation-fingerprint，输入 `{lease:xMonLease,payload:xMonCycle.search.map(i=>i.statusId)}`，检查成功后直接取 response.fingerprint；每轮重新取得，不转抄、不复用旧轮值。
@@ -100,16 +80,6 @@ CUA 与 functions 不共享变量，这是已知接口边界，不是停止合�
 驱动以独立 User-Name 加 tweetText 或真实帖子媒体的嵌入链接块识别引用；其文字不属于外层作者正文。顶层回复、直接对象和上文允许含引用，内嵌引用不能冒充直接对象。引用卡不含链接时只点击该外层对象内唯一已核验引用块，核对实际跳转；不猜 ID、不递归引用中的引用。明确删除/不可用记录事实；结构、身份、截断和超时仍失败关闭。
 
 ## 本地载荷：程序机械组装
-
-### 历史兼容：工具间固定交接（当前事实优先使用上节直传）
-
-1. `nodeRepl.write(xMonRaw)` 返回本流结构化公开事实。不是 HTML，也不写文件；模型此时只搬运事实，不翻译历史状态。将该原样对象与本轮 lease 放入 `functions.store("x-monitor-current", {lease,payload:<该对象>})`，只放一个账号的一条流。
-2. 准备好内存对象后，以 `exec_command` 的 `tty:true` 启动同一项目解释器和固定入口：`--input-framing chunks collect-stream --input -`；命令只有固定路径/动作，不含正文。先等到 `XMonitorInputReadyV1` 且 `echo_disabled=true`；没有这条回执不发送数据。不要使用默认无 TTY 管道，它会立即关闭 stdin。
-3. 在 functions 中以 `JSON.stringify(load("x-monitor-current"))` 得到帧内容，用 `Array.from` 按每 800 个字符分块；发送格式为第一行 `XMONITOR-JSON-CHUNKS/1`，随后每块一行、行首加 `+`，最后独立一行 `.`。通过原进程的 `write_stdin(session_id,chars)` 输入，一次发完。入口在读取前关闭输入回显，180 秒超时自动退出；输入正文不会回显到终端输出。
-4. 同一方式调用 `analysis-plan`，直接复用同一个 functions 内存对象。它返回机器验证后的 analysis_items；只分析这些新项。随后 `scan-analysis` 输入对象为 `{lease,payload:{collected:load("x-monitor-current").payload,analyses:<新项分析>}}`，不重复手工转写 raw。
-5. 每次入口读取一帧后就退出。只认最终业务回执；InputReady 不代表 collect 或 scan 成功。切换流/finish 后将 `x-monitor-current` 清空，不落盘，不另建常驻程序，不使用独立 Playwright 或内部浏览器接口。
-
-此通路使用现成终端工具的标准输入，不是新增网络桥接。正文禁入命令参数/日志的约束不禁止上述受控事实工具输出与 stdin；不得再以“没有无正文通路”为由跳过已通过浏览器验证的主帖。
 
 - `collect-stream`：`{lease,payload:xMonRaw}`。xMonRaw 为 XCollectedStreamV1：仅本流的 V2 可见事实和驱动耗时；不存在另一条流，不伪造空流。
 - `analysis-plan`：同一 `{lease,payload:xMonRaw}`。只分析 analysis_items，ID 恰好对应 new_status_ids；空列表直接提交空 analyses。不要翻译锚点或历史事件。
