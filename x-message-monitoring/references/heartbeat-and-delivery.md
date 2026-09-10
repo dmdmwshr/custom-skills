@@ -1,6 +1,6 @@
 # 分流 heartbeat 与投递边界
 
-当前驱动 3.0.21、客户端 1.0.0；执行步骤及 Luna/max 的准备与上下文整理见 [固定快速路径](fast-path-runbook.md)，新冻结格式与两流 Codex 额度筛选见 [当前契约](reply-reset-contract.md)。仅已授权维护读取 [有界诊断](diagnostics.md)。旧接口及历史记录保留原义，不用于新轮次降级。
+当前驱动 3.0.22、客户端 1.0.0；执行步骤及 Luna/max 的准备与上下文整理见 [固定快速路径](fast-path-runbook.md)，新冻结格式与两流 Codex 额度筛选见 [当前契约](reply-reset-contract.md)。仅已授权维护读取 [有界诊断](diagnostics.md)。旧接口及历史记录保留原义，不用于新轮次降级。
 
 ## 不变量
 
