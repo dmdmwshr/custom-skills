@@ -1,6 +1,6 @@
-# 固定快速路径（分流协议 1 / 驱动 3.0.28 / 标准输入客户端 1.0.0）
+# 固定快速路径（分流协议 1 / 驱动 3.0.29 / 标准输入客户端 1.1.0）
 
-步骤修订：2026-09-11.6（回复展开等待同一可见卡片已无自身展开控件，再严格回读；浏览器方法直接输出，避免未声明临时变量）。驱动版本未变也须在此步骤修订变化时刷新本页。
+步骤修订：2026-09-11.7（五项输入动作改用sendKept，工具返回前在客户端保存同轮原样载荷与回执；后续按lease/action读取，不依赖临时结果变量）。驱动版本未变也须在此步骤修订变化时刷新本页。
 
 本页只包含当前运行步骤。[维护诊断](diagnostics.md) 和 [历史传递](legacy-fact-transfer.md) 按需读取，普通轮次不加载。引用事实以 [当前契约](reply-reset-contract.md) 为准。
 
@@ -25,12 +25,13 @@
 1. 当前 CUA 已初始化后，通过公开 `node:fs`、`node:vm` 原样读取业务 `scripts/desktop_stdin_client.js`。用公开 `node:buffer.Buffer`、`node:util.TextDecoder`、`node:timers.setTimeout/clearTimeout` 注入该纯工厂；打印 version 与 sourceFingerprint()，必须与本地源读回一致。用公开 `node:child_process.spawn` 创建客户端。只复用普通 let 绑定，禁止内部模块、其他 Node REPL 或自行转写客户端。该有限 Python 子进程不控制浏览器。
 2. 首次启用、源码变更或控制会话重置后，在 acquire 前（当前 CUA 已可用时）执行客户端 `selfTest()`。它只运行固定 `scripts/desktop_stdin_fixture.py` 和预置合成数据，不访问账本/X/飞书。必须 ok=true、response.exact_match=true、61 项；只输出字节、哈希、耗时。模块可导入不算通过，失败时停止，不自行换进程通道。新 CUA 的第一条调用仍遵守工具的单一浏览器入口规则，不能为初始化客户端读取用户旧标签。
 3. 本轮 acquire/预检通过后，把机器原样 lease 只交给 CUA 宿主的 xMonLease；不放入驱动 cycle、页面求值或普通日志。每轮新建 cycle、清空旧计划/指纹/分析，不从历史恢复 lease。主帖与回复继续独立提交。
-4. 搜索冻结后，`send("observation-fingerprint",{lease:xMonLease,payload:完整冻结ID数组})`，先检查包装回执 ok，再将 response.fingerprint 直接给同轮 permalinkBurst。ID 数组和返回值均留在此宿主，不经模型重建。失败不沿用先前哈希。
-5. 草稿只生成一次，直接 `send("context-plan",{lease:xMonLease,payload:xMonReplyDraft})`。成功后将完整 response 交给 applyContextPlan，模型只按需读取其中 context_items 的新项事实。必要上文和一层引用完成后，一次 rawStream 得到最终 xMonRaw；不得用草稿冒充最终事实或重新读取历史项。
-6. `send("collect-stream",{lease:xMonLease,payload:xMonRaw})`；成功后 `send("analysis-plan",同一对象)`；只读 response.analysis_items 为这些新 ID 补齐分析。分析对象直接保存在此 CUA 宿主，最后 `send("scan-analysis",{lease:xMonLease,payload:{collected:xMonRaw,analyses:xMonAnalyses}})`，原入口机械转换 V3 并执行账本筛选。空 new_status_ids 对应空 analyses。所有步骤仍以原业务回执为准。
-7. 客户端内部先等待精确 `XMonitorInputReadyV1`、chunks 和 echo_disabled=true，再把 Array.from 分块帧一次写入同一 stdin；并不打开终端。只有固定五项动作，shell=false、windowsHide=true、路径和 cwd 固定，最多一个在途子进程、30 秒结果期限。禁止参数正文、正文文件、常驻服务、网络桥接和第二个扫描者。
-8. 包装回执的 input_frame_bytes/stdout_bytes/elapsed_ms 只描述本次传输，不等于整轮或页面耗时；ok=true 后仍须检查 response 的业务结果。ok=false 且 outcome_unknown=true 表示输入已交给程序而最终结果未知，不重试该动作；同 lease 用只读健康核验是否已提交，已提交流使用 cycle-failure 追加，其他按原失败入口收口。不要输出 stderr、异常原文或在捕获错误后静默。
-9. 发生观察指纹不一致时，在清理前只报告：本轮 ID 数量/唯一数、raw 序列与冻结序列逐项相等性、原机器 fingerprint、回复/排除上下文指纹的去重值，以及包装回执字节/耗时。不输出正文或完整 ID 列表，不修改序列/哈希再提交，不从已清理历史恢复。最终仍由 heartbeat-finish 给出两阶段结果，同 token 收口后才清理 lease 和事实。
+4. 所有五项调用采用 `nodeRepl.write(await xMonStdin.sendKept(action,{lease:xMonLease,payload:本次事实}))`，不赋给临时结果变量。客户端仅保存最近一次请求的精确序列化快照和真实回执，在工具返回前完成；回传仅元数据、retained_result_available和已知entry_error。仍须读取本轮`xMonStdin.kept(xMonLease,action).result`的业务结果，不能把传输成功当业务成功。kept按本轮lease与准确action核对，纯内存、不可改写，不重发请求。不要输出kept整体或payload；模型仅按需读取response中的本轮新项事实。
+5. 搜索冻结后，payload直接用`xMonCycle.search.map(i=>i.statusId)`调用observation-fingerprint。后续每个permalinkBurst直接传`xMonStdin.kept(xMonLease,"observation-fingerprint").result.response.fingerprint`；完成永久链接前不会有其他stdin动作替换它。每轮重新取得，不手抄或复用旧轮值。主帖无需此指纹步骤。
+6. 预检成功及本流发现/永久链接完成后，在context-plan的payload内直接调用一次`xMonDriver.draftStream(xMonCycle,"main")`（回复阶段字面量改为"reply"）。成功后直接`nodeRepl.write(xMonDriver.applyContextPlan(xMonCycle,xMonStdin.kept(xMonLease,"context-plan").result.response))`；仅按需读取该response的context_items新项。必要上文/引用完成后，在collect-stream的payload内直接调用一次rawStream，不另造草稿/冻结结果变量。
+7. collect-stream成功后，analysis-plan的payload直接取`xMonStdin.kept(xMonLease,"collect-stream").payload`；它与入口收到的最终事实逐值相同。读取最新kept(...,"analysis-plan").result.response中的新项并填入锁前已声明的xMonAnalyses。最后scan-analysis的payload为`{collected:xMonStdin.kept(xMonLease,"analysis-plan").payload,analyses:xMonAnalyses}`。空新项用空analyses。下一请求序列化后才替换上一保留项，不能重新rawStream来找回事实。
+8. 客户端内部先等待精确 `XMonitorInputReadyV1`、chunks 和 echo_disabled=true，再把 Array.from 分块帧一次写入同一 stdin；并不打开终端。只有固定五项动作，shell=false、windowsHide=true、路径和 cwd 固定，最多一个在途子进程、30 秒结果期限及原4MiB输入/输出上限。kept/clearKept纯内存，不是额外入口动作；旧send只作兼容。禁止参数正文、正文文件、常驻服务、网络桥接和第二个扫描者。
+9. 包装回执的 input_frame_bytes/stdout_bytes/elapsed_ms 只描述本次传输，不等于整轮或页面耗时。调用方意外ReferenceError后，只能用本轮准确lease/action读kept核对已保留的实际结果；不能重发、重新draft/raw或将已知拒绝说成未知。kept仍不存在、pending或结果outcome_unknown=true时按原未知收口规则处理，同lease只读核验已提交流；保留未知，不自动重试。
+10. 发生观察指纹不一致时，在清理前只报告：本轮 ID 数量/唯一数、raw 序列与冻结序列逐项相等性、原机器 fingerprint、回复/排除上下文指纹的去重值，以及包装回执字节/耗时。不输出正文或完整 ID 列表，不修改序列/哈希再提交，不从已清理历史恢复。同lease两阶段finish及标签关闭完成后，在清空xMonLease之前直接`nodeRepl.write(xMonStdin.clearKept(xMonLease))`清理客户端动态保留项；有在途进程不能清理，错误lease不能读取/清理。新lease在旧项未清理时拒绝开启；静态客户端可继续复用。
 
 客户端加载的固定形态（变量首次使用才 let，已有则赋值）：
 
@@ -53,7 +54,7 @@ nodeRepl.write({version:xMonStdinFactory.version,source_fingerprint:xMonStdinFac
 - 全部命令通过 UTF-8 对象序列化后标准输入，禁止正文/凭据出现在进程参数、普通日志或临时脚本中。公开帖的结构化工具返回值是授权事实载荷，允许进入模型上下文与当前 functions 内存供验证/分析，不能把它误当凭据或禁止的普通日志。PowerShell 输入输出均设 `[Text.UTF8Encoding]::new($false)`；不要手拼 JSON。
 - CUA 状态使用普通 `let` 明确绑定驱动、标签、cycle、原始事实、客户端、lease、计划和本轮分析；各变量第一次使用必须声明，已经存在时只赋值，不能遗漏初始化或重复声明。本轮 lease 来自一次 acquire；不能复制旧值。工具会话重置时不接续旧浏览器句柄，登记失败并 finish。
 - 新建标签的准确 ID、浏览器和本轮归属须作为轻量元数据保留至关闭确认，可放本轮 functions 内存，不保存正文、HTML 或存储。CUA reset 后不接续扫描；只在创建回执已证明准确 ID 归属时，按工具首次入口规则新取一个仅用于关闭该自有标签的句柄，并核对该 ID 不存在。不得浏览补读、猜 ID 或碰其他标签；无法证明归属/关闭失败则报告清理未确认。重新开展新周期前仍需重新加载固定工厂、核对指纹并执行客户端 selfTest，不能把旧成功标记沿用到重置后。
-- 所有浏览器采集回执直接用 `nodeRepl.write(await xMonDriver.method(...))` 输出，进度由cycle保留，不另造临时结果变量。需要后续使用的客户端响应必须先声明绑定，或在本次调用的块内const接收后写入已声明状态。未声明变量赋值出现ReferenceError时，右侧await可能已经完成动作；不能重放，先核对本轮纯计数/已有回执，不能确认则失败收口。
+- 所有浏览器采集回执直接用 `nodeRepl.write(await xMonDriver.method(...))` 输出，进度由cycle保留，不另造临时结果变量。客户端五项动作改用sendKept并按本轮lease/action读保留结果，无需临时响应变量；浏览器ReferenceError仍不能重放，先核对本轮纯计数/已有回执，不能确认则失败收口。正文分析使用锁前已声明的xMonAnalyses，当前流开始时赋空对象，不能遗留上一流的分析。
 
 ## 本轮租约：一次领取、立即保存、同源引用
 
@@ -102,7 +103,7 @@ nodeRepl.write({version:xMonStdinFactory.version,source_fingerprint:xMonStdinFac
 ```javascript
 nodeRepl.write(await xMonDriver.page(xMonTab,xMonCycle,"main"));
 nodeRepl.write(await xMonDriver.page(xMonTab,xMonCycle,"search"));
-nodeRepl.write(await xMonDriver.permalinkBurst(xMonTab,xMonCycle,fingerprint));
+nodeRepl.write(await xMonDriver.permalinkBurst(xMonTab,xMonCycle,xMonStdin.kept(xMonLease,"observation-fingerprint").result.response.fingerprint));
 nodeRepl.write(await xMonDriver.contextBatch(xMonTab,xMonCycle,statusIds));
 nodeRepl.write(await xMonDriver.quoteBatch(xMonTab,xMonCycle,stream));
 ```
@@ -112,7 +113,7 @@ nodeRepl.write(await xMonDriver.quoteBatch(xMonTab,xMonCycle,stream));
 1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次仍调用相同方法，省略第四参数。驱动按 mainPages 自动判断首屏/续页；不手工写 true/false。`action=main_permalink_details` 表示发现已冻结，后续同一 page 调用自动核验最多两条主帖全文，不再滚动搜索。驱动只对作者自己的可见“显示更多”补读规范原帖；必要时点击已核验目标唯一展开控件并在同一 15 秒预算内重读。身份、UTC、引用/媒体标志与预览前缀必须一致；仍截断不能分析或入账。done=true 后按上下文契约执行 draftStream(main) → 只读 context-plan → applyContextPlan → quoteBatch(main) 至 done=true，再一次 rawStream(main) 并原样提交。
 2. 新回复直接进入下一项 Latest 搜索，不访问 with_replies，不调用旧回复主页前置步骤。
 3. `page(...,"search")`，仅 ok=true,done=false 时在下一次调用继续相同方法，省略第四参数。驱动只看 searchPages，主帖已翻页不代表回复搜索进入续页。兼容显式参数与本流状态不符时在浏览前失败，失败流不重读。搜索冻结后在同一 CUA 宿主把完整 ID 序列直接交给客户端 observation-fingerprint，输入 `{lease:xMonLease,payload:xMonCycle.search.map(i=>i.statusId)}`，检查成功后直接取 response.fingerprint；每轮重新取得，不转抄、不复用旧轮值。
-4. `await xMonDriver.permalinkBurst(xMonTab,xMonCycle,fingerprint)`，每次最多八导航；仅 ok=true,done=false 在同 lease 的下一次调用续未完成项，失败不续批。只调用一次固定方法，不在宿主加循环。回执包含 navigation_count、elapsed_ms、total_verified、pending_parent 与 stop_reason；预算预留导致未完成是续批状态，不代表失败。兼容 permalinkBatch 默认仍两导航。完整唯一主会话链、相邻父帖和独立回复对象由驱动核验。文本加图片父帖可读，头像不是帖子媒体；纯媒体不编造文字。
+4. 按上方完整直接输出形态调用permalinkBurst，指纹从本轮observation-fingerprint保留回执取值，每次最多八导航；仅ok=true,done=false在同lease下一次调用续未完成项，失败不续批。不在宿主加循环。回执包含navigation_count、elapsed_ms、total_verified、pending_parent与stop_reason；预算预留导致未完成是续批状态。兼容permalinkBatch默认仍两导航。完整唯一主会话链、相邻父帖和独立回复对象由驱动核验；文本加图片父帖可读，头像不是帖子媒体，纯媒体不编造文字。
 5. 两流开始前完整读取 [上下文、引用与额度契约](reply-reset-contract.md)。回复执行 draftStream(reply) → 只读 context-plan → applyContextPlan，仅新项必要时 contextBatch（至多三层，够用即停）；quoteBatch(reply) 补直接一层引用至 done=true，每条最多五个来源归属，同轮复用。最后一次 rawStream(reply)，原样 collect-stream。reply-context-plan 保留兼容；不更改冻结事实、不保存正文文件。
 
 驱动以独立 User-Name 加 tweetText 或真实帖子媒体的嵌入链接块识别引用；其文字不属于外层作者正文。顶层回复、直接对象和上文允许含引用，内嵌引用不能冒充直接对象。引用卡不含链接时只点击该外层对象内唯一已核验引用块，核对实际跳转；不猜 ID、不递归引用中的引用。明确删除/不可用记录事实；结构、身份、截断和超时仍失败关闭。
