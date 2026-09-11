@@ -21,7 +21,7 @@ BEA 与 Census 的结构化实际值不在浏览器回退路由中：普通发�
 
 ## 获取步骤
 
-1. 调用浏览器前完整读取并遵循当前可用的 `control-in-app-browser` skill。没有该能力时返回 `browser_unavailable`。
+1. 调用浏览器前完整读取并遵循当前目标桌面任务提供的 Linux Chrome CUA/浏览器控制说明。没有可用的 CUA 浏览器控制能力时返回 `browser_unavailable`。
 2. 只打开上表对应的官方页面。确认最终 URL 未重定向、页面标题或正文标记与来源一致；不要读取 Cookie、浏览器存储、账户或其他标签页。
 3. 不把浏览器翻译、阅读模式或扩展改写后的 DOM 当作原文。BLS 年度页读取固定官方页面的原始 DOM；其他路由先读取该标签页的 `cdp` 能力说明，再从同源页面上下文取得固定 URL 的原始网络响应。日历、声明和 JSON 使用 `GET`，DOL 实际值使用固定 `POST`；使用 `credentials: "omit"` 和 `cache: "no-store"`。
 4. DOL 实际值 `POST` 正文固定为 `level=us&strtdate=<上一年>&enddate=<当前年>&filetype=xml&submit=Submit`，媒体类型为 `application/x-www-form-urlencoded`；不得扩大到州级枚举、任意年份或其他输出格式。
@@ -44,10 +44,10 @@ BEA 与 Census 的结构化实际值不在浏览器回退路由中：普通发�
 }
 ```
 
-8. 使用浏览器控制会话中的受控子进程能力启动固定解释器和模块，`windowsHide=true`、`shell=false`，并把封套作为 UTF-8 标准输入传入：
-   - 解释器：`C:\Users\12070\Desktop\项目开发\OKXnew\.venv\Scripts\python.exe`
+8. 使用浏览器控制会话中的受控子进程能力启动固定 Linux 解释器和模块，`shell=false`，不使用 Windows 专属的 `windowsHide` 参数，并把封套作为 UTF-8 标准输入传入：
+   - 解释器：`/root/workspaces/OKXnew/.venv/bin/python`
    - 参数：`-B -m okxnew.data.browser_capture`
-   - 工作目录：`C:\Users\12070\Desktop\项目开发\OKXnew`
+   - 工作目录：`/root/workspaces/OKXnew`
 9. 只读取脱敏回执：路由、来源、事件或观测数、插入数、当前数、对齐数、未对齐数、采集时间和正文哈希。退出码非零时标记 `import_rejected`，不得打印正文或换域名绕过。
 10. BLS 就业页回执必须为 `corroboration_only=true`。BLS 年度页回执必须为 `corroboration_only=false`；既有事件须唯一锚定稳定身份并以只追加版本写入，明确晚于覆盖尾部的新事件才可创建新身份。历史未匹配、一对多或歧义标记 `identity_anchor_rejected`，不得猜测或创建重复事件。
 11. 从本地 API 回读 `/api/v1/data/macro/status`、`/api/v1/data/macro/calendar`、`/api/v1/data/macro/observations` 和 `/api/v1/data/monitoring`。确认对应来源状态、事件数、观测数、哈希、最近成功和失败计数与回执一致。

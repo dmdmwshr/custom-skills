@@ -1,13 +1,18 @@
 ---
 name: okxnew-backtest-operations
 description: 运维和审计 OKXnew 的官方历史数据回测与可复现研究任务：在用户明确要求冻结计划、历史下载、断点续跑、覆盖或预热核验、无前视审计、研究验证未见数据评估、回测报告或回测故障诊断时使用。固定原计划、原 job、唯一 runner、锁租约、检查点、Retry-After、来源证明和失败关闭边界；不用于真实交易、账户、凭据或正式下单。
+metadata:
+  x-custom-skill: true
+  x-source-repo: dmdmwshr/custom-skills
 ---
 
 # OKXnew 回测运维
 
 ## 适用范围与禁区
 
-本 Skill 只处理 `C:\Users\12070\Desktop\项目开发\OKXnew` 中的官方公开历史数据、离线回测和研究验证。它可以在用户明确授权后恢复原历史任务、运行离线模拟或修复其数据链，但不读取账户、仓位、委托、密钥、Cookie 或凭据，不调用真实交易路径，也不形成真实交易授权。
+本 Skill 只处理当前 WSL 原生项目 `/root/workspaces/OKXnew` 中的官方公开历史数据、离线回测和研究验证；运行根固定为 `/root/.local/share/OKXnew`。先核对唯一计划和 `docs/WSL_RUNTIME.md` 的切换验收；候选副本尚未激活时不得启动 runner。它可以在用户明确授权后恢复原历史任务、运行离线模拟或修复其数据链，但不读取账户、仓位、委托、密钥、Cookie 或凭据，不调用真实交易路径，也不形成真实交易授权。
+
+本副本由 Windows 受管源仓迁入项目 `.agents/skills`，不改写其他项目的共享安装。参考资料中的 Windows 路径和进程承载示例仅作历史说明；Linux 使用项目 `.venv/bin/python` 和原生独立回执入口。Windows PID 与 Linux PID 不同域，不能仅凭 PID 不存在或数值相同接管旧锁；必须有原 Windows runner 已终止的迁移回执、相同冻结计划和原 job 清单，才能进行受控原位接续。历史检查点、重试时点和 ICP 模拟进度冲突不因迁移重置。
 
 不要把当前市场健康、模拟结果、网页截图或上一轮会话的口头结论当成回测证据。宏观和常规数据水位先由 `$okxnew-data-operations` 回读；需要历史 runner、冻结计划或回测分段时，转入本 Skill。
 

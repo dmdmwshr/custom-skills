@@ -1,20 +1,25 @@
 ---
 name: okxnew-data-operations
 description: 巡检 OKXnew 数据模块的官方公开数据、分层运行水位和证据状态，并通过受控浏览器维护或补采 BLS、BEA、Federal Reserve、Census、DOL 已登记来源。用于数据缺口、监控、重试或定时采集；历史回测和冻结 runner 转交 okxnew-backtest-operations，不用于真实交易、账户或凭据。
+metadata:
+  x-custom-skill: true
+  x-source-repo: dmdmwshr/custom-skills
 ---
 
 # OKXnew 数据模块运维
 
 ## 范围
 
-只处理 `C:\Users\12070\Desktop\项目开发\OKXnew`。优先使用项目常驻数据链；BLS 发布日历固定由浏览器读取官方年度页，其他已登记宏观页面按产品状态作为备用采集面。浏览器不替代 OKX K 线后台，也不成为交易授权来源。历史下载、冻结计划和回测 runner 只做状态核验并转交 `$okxnew-backtest-operations`。
+只处理当前 WSL 原生项目 `/root/workspaces/OKXnew`；运行数据固定使用 `/root/.local/share/OKXnew`，不能回退到 `/mnt/c` 下的旧 Windows 运行库。先读取项目 `AGENTS.md`、唯一 `PROJECT_PLAN.md` 和 `docs/WSL_RUNTIME.md`，核对迁移状态；尚未验收切换时不启动采集、导入或模拟写入。优先使用项目常驻数据链；BLS 发布日历固定由浏览器读取官方年度页，其他已登记宏观页面按产品状态作为备用采集面。浏览器不替代 OKX K 线后台，也不成为交易授权来源。历史下载、冻结计划和回测 runner 只做状态核验并转交 `$okxnew-backtest-operations`。
+
+本副本由 Windows 受管源仓的同名 Skill 迁入项目 `.agents/skills`，供 WSL 本项目独立发现和版本管理；不改写其他项目共用的 Windows Skill。参考资料中的旧 Windows 路径仅作历史示例：Linux 解释器使用项目 `.venv/bin/python`，开发长任务使用项目原生独立回执入口；不得调用 `.exe`、Windows 任务或旧宿主运行数据。浏览器能力不可用时保持 `browser_unavailable`，不以无头脚本替代原浏览器契约。
 
 始终保持以下边界：
 
 - 全部 live 线性 USDT 永续只维护 K 线和必要官方合约元数据；只有当前收藏进入附加市场数据、信息面、策略、计划、授权和模拟执行。
 - 只访问 OKX、BLS、BEA、Federal Reserve、Census、DOL 等计划已登记的官方公开来源；不读取 `.env`、密钥、Cookie、浏览器存储、账户、仓位或委托。
 - 不抓取 CME 经济日历，不采集 OPEC 报告正文，不调用正式盘或真实下单路径。
-- 自动巡检不修改源码、`PROJECT_PLAN.md`、Windows 任务或服务，不重启进程。需要工程修复时只报告证据和建议。
+- 自动巡检不修改源码、`PROJECT_PLAN.md`、systemd 单元、定时器或服务，不重启进程。需要工程修复时只报告证据和建议。
 - 不把空响应、翻译后的页面文本或第三方镜像写成成功数据。
 
 ## 分层健康回读

@@ -16,7 +16,8 @@ SOURCE = Path(__file__).resolve().parents[1]
 INSTALL = Path('/root/.codex/skills')
 RECORDS = Path('/root/Documents/work/host-baseline/skill-releases')
 SKILLS = ('cc-connect-collaboration', 'x-message-monitoring', 'codex-project-task-handoff',
-          'codex-archive-retrospective', 'codex-local-state-diagnostics')
+          'codex-archive-retrospective', 'codex-local-state-diagnostics',
+          'okxnew-backtest-operations', 'okxnew-data-operations')
 
 
 def files(path: Path) -> dict[str, str]:
