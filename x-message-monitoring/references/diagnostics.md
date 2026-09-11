@@ -1,5 +1,7 @@
 # 授权维护诊断（普通 heartbeat 不加载）
 
+3.0.25仅在DiagnosticCycle的同次空正文失败中附standalone_emoji_evidence：固定failure_gate、容器/图片/正文树render_stage、box_visible/visibility_api_available/css_visible布尔值及最多33的tree_nodes_checked（第33即超限）。这复用独立表情原接受检查，普通周期没有该对象；不返回alt、正文、实际currentSrc、任意节点名、HTML或存储，不额外读页或放宽接受条件。原固定任务仅一次全新最多四页search诊断，首错停止，关闭自有标签和清理动态事实；无lease/冻结/入账/发送，不接续3.0.24失败流。正式验收另起新周期。
+
 3.0.24依据新诊断核验的abs.twimg.com来源，增加独立作者表情的严格读取；具体接受条件见快速路径，既有非空正文和历史冻结不变。这是对单次DOM中真实Unicode表示的读取，不以计数或资源路径单独接受正文。原失败诊断仍只回传有界元数据，不补读失败页。[Twemoji上游说明](https://github.com/twitter/twemoji)记录了用图片替换Unicode表情、alt保留原Unicode以及SVG文件名使用码点的表示方式；实际X域名取自本次受限诊断。
 
 驱动3.0.23仅在全新DiagnosticCycle的同次空正文失败中增加inline_image_sources，最多四项：src属性存在/长度、解析结果、公开HTTP协议/主机、最多160字符且去除查询/片段/用户信息的路径，以及截短/查询/片段/用户信息存在标志。不返回alt、正文、完整地址、数据URL或存储。普通周期不返回这些资源字段，32张内嵌图片计数上限与失败条件保持；只用于确认未匹配的资源格式，不能据元数据接受作者内容。
