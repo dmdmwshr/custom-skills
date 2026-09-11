@@ -1,6 +1,6 @@
-# 固定快速路径（分流协议 1 / 驱动 3.0.29 / 标准输入客户端 1.1.0）
+# 固定快速路径（分流协议 1 / 驱动 3.0.30 / 标准输入客户端 1.1.0）
 
-步骤修订：2026-09-11.8（统一运行入口与上下文契约，五项输入仅使用sendKept，draft/raw只在对应payload内各调用一次）。驱动3.0.29和客户端1.1.0不变；已读步骤修订与工厂版本/指纹分别记录，不能根据工厂已加载推定规则已读。步骤变化、已读标记缺失或只读诊断后的首次正式运行，acquire前完整读取本页和reply-reset-contract.md；读取完成才更新已读步骤，有效静态工厂继续复用。
+步骤修订：2026-09-11.9（驱动3.0.30将会话成员等待接入已有分段就绪，客户端1.1.0不变）。五项输入仅使用sendKept，draft/raw只在对应payload内各调用一次。已读步骤修订与工厂版本/指纹分别记录，不能根据工厂已加载推定规则已读。步骤变化、已读标记缺失或只读诊断后的首次正式运行，acquire前完整读取本页和reply-reset-contract.md；读取完成才更新已读步骤，有效静态工厂继续复用。
 
 本页只包含当前运行步骤。[维护诊断](diagnostics.md) 和 [历史传递](legacy-fact-transfer.md) 按需读取，普通轮次不加载。引用事实以 [当前契约](reply-reset-contract.md) 为准。
 
@@ -110,6 +110,8 @@ nodeRepl.write(await xMonDriver.quoteBatch(xMonTab,xMonCycle,"reply"));
 ```
 
 3.0.28回复与父帖展开点击后，在原十五秒预算内等待同一已验证时间链接对应的可见顶层卡片已无自身展开控件；引用内控件排除。不等待已移除的按钮节点，不追加导航或重试；之后原probe继续严格核验身份、UTC、关系及正文完整性/前缀，等待成功不等于采集成功。
+
+3.0.30会话第二个顶层成员的就绪也使用已有bounded_segments_v1，共用本页原始十五秒截止时刻，最多五段、每段三秒；短段未就绪刷新当前状态，失败后不继续该页。single_v1兼容保持单次等待。就绪后仍执行完整父子相邻链和正文校验；失败的readiness_evidence.presence为conversation_members_presence，仅有阶段/计数/预算元数据。它不扩充每次调用的导航数或整轮期限。
 
 1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次仍调用相同方法，省略第四参数。驱动按 mainPages 自动判断首屏/续页；不手工写 true/false。`action=main_permalink_details` 表示发现已冻结，后续同一 page 调用自动核验最多两条主帖全文，不再滚动搜索。驱动只对作者自己的可见“显示更多”补读规范原帖；必要时点击已核验目标唯一展开控件并在同一 15 秒预算内重读。身份、UTC、引用/媒体标志与预览前缀必须一致；仍截断不能分析或入账。done=true 后按上下文契约执行 draftStream(main) → 只读 context-plan → applyContextPlan → quoteBatch(main) 至 done=true，再一次 rawStream(main) 并原样提交。
 2. 新回复直接进入下一项 Latest 搜索，不访问 with_replies，不调用旧回复主页前置步骤。
