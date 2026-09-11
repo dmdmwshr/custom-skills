@@ -51,7 +51,7 @@ BEA 与 Census 的结构化实际值不在浏览器回退路由中：普通发�
 9. 只读取脱敏回执：路由、来源、事件或观测数、插入数、当前数、对齐数、未对齐数、采集时间和正文哈希。退出码非零时标记 `import_rejected`，不得打印正文或换域名绕过。
 10. BLS 就业页回执必须为 `corroboration_only=true`。BLS 年度页回执必须为 `corroboration_only=false`；既有事件须唯一锚定稳定身份并以只追加版本写入，明确晚于覆盖尾部的新事件才可创建新身份。历史未匹配、一对多或歧义标记 `identity_anchor_rejected`，不得猜测或创建重复事件。
 11. 从本地 API 回读 `/api/v1/data/macro/status`、`/api/v1/data/macro/calendar`、`/api/v1/data/macro/observations` 和 `/api/v1/data/monitoring`。确认对应来源状态、事件数、观测数、哈希、最近成功和失败计数与回执一致。
-12. 按 Browser skill 清理研究、错误和中间标签页，不保留页面作为交付物。
+12. 按当前 Linux Chrome CUA/浏览器控制说明清理研究、错误和中间标签页，不保留页面作为交付物。
 
 ## 安全停止条件
 
