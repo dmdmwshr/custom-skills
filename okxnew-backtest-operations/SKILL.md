@@ -10,7 +10,9 @@ metadata:
 
 ## 适用范围与禁区
 
-本 Skill 只处理当前 WSL 原生项目 `/root/workspaces/OKXnew` 中的官方公开历史数据、离线回测和研究验证；运行根固定为 `/root/.local/share/OKXnew`。先核对唯一计划和 `docs/WSL_RUNTIME.md` 的切换验收；候选副本尚未激活时不得启动 runner。它可以在用户明确授权后恢复原历史任务、运行离线模拟或修复其数据链，但不读取账户、仓位、委托、密钥、Cookie 或凭据，不调用真实交易路径，也不形成真实交易授权。
+本 Skill 只处理当前 WSL 原生项目 `/root/workspaces/OKXnew` 中的官方公开历史数据、离线回测和研究验证；正式业务运行根固定为 `/var/lib/okxnew`。`/root/.local/share/OKXnew` 仅作为现有预复制、历史资料和开发回执入口，不是正式运行根；正式服务、runner、采集、导入和模拟写入不得使用它。先核对唯一计划和 `docs/WSL_RUNTIME.md` 的切换验收；候选副本尚未激活时不得启动 runner。它可以在用户明确授权后恢复原历史任务、运行离线模拟或修复其数据链，但不读取账户、仓位、委托、密钥、Cookie 或凭据，不调用真实交易路径，也不形成真实交易授权。
+
+每次执行前以项目 runtime 配置和 `/var/lib/okxnew/runtime-activation.json` 为唯一激活事实源，并用项目 `scripts/verify_linux_activation.py` 按正式运行根验证。激活回执缺失、`runtime_root` 不等于 `/var/lib/okxnew`、`activated` 不为 `true`，或停写/最终数据证据及哈希门禁未通过时，保持 `migration_not_activated`，fail closed，不启动 runner、不写入正式运行根。
 
 本副本由 Windows 受管源仓迁入项目 `.agents/skills`，不改写其他项目的共享安装。参考资料中的 Windows 路径和进程承载示例仅作历史说明；Linux 使用项目 `.venv/bin/python` 和原生独立回执入口。Windows PID 与 Linux PID 不同域，不能仅凭 PID 不存在或数值相同接管旧锁；必须有原 Windows runner 已终止的迁移回执、相同冻结计划和原 job 清单，才能进行受控原位接续。历史检查点、重试时点和 ICP 模拟进度冲突不因迁移重置。
 
@@ -18,7 +20,7 @@ metadata:
 
 ## 开始前的事实源
 
-按顺序读取项目 `AGENTS.md`、唯一 `PROJECT_PLAN.md`，以及存在时的唯一 `PROJECT_HANDOFF.md`。交接文件只是当前快照，必须与工作区、计划和运行态重新核对；不要新建第二份交接文件、复制旧 job 或根据任务标题猜测计划。
+按顺序读取项目 `AGENTS.md`、唯一 `PROJECT_PLAN.md`，以及存在时的唯一 `PROJECT_HANDOFF.md` 和 runtime 配置。交接文件只是当前快照，必须与工作区、计划、正式运行根和激活回执重新核对；不要新建第二份交接文件、复制旧 job 或根据任务标题猜测计划。
 
 然后只读回读：
 

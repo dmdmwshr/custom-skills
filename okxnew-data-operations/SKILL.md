@@ -10,7 +10,9 @@ metadata:
 
 ## 范围
 
-只处理当前 WSL 原生项目 `/root/workspaces/OKXnew`；运行数据固定使用 `/root/.local/share/OKXnew`，不能回退到 `/mnt/c` 下的旧 Windows 运行库。先读取项目 `AGENTS.md`、唯一 `PROJECT_PLAN.md` 和 `docs/WSL_RUNTIME.md`，核对迁移状态；尚未验收切换时不启动采集、导入或模拟写入。优先使用项目常驻数据链；BLS 发布日历固定由浏览器读取官方年度页，其他已登记宏观页面按产品状态作为备用采集面。浏览器不替代 OKX K 线后台，也不成为交易授权来源。历史下载、冻结计划和回测 runner 只做状态核验并转交 `$okxnew-backtest-operations`。
+只处理当前 WSL 原生项目 `/root/workspaces/OKXnew`；正式业务运行根固定使用 `/var/lib/okxnew`，不能回退到 `/mnt/c` 下的旧 Windows 运行库。`/root/.local/share/OKXnew` 仅作为现有预复制、历史资料和开发回执入口，不是正式运行根；正式服务、采集、导入和模拟写入不得使用它。先读取项目 `AGENTS.md`、唯一 `PROJECT_PLAN.md`、`docs/WSL_RUNTIME.md` 和 runtime 配置，核对正式激活状态；尚未验收切换时不启动采集、导入或模拟写入。优先使用项目常驻数据链；BLS 发布日历固定由浏览器读取官方年度页，其他已登记宏观页面按产品状态作为备用采集面。浏览器不替代 OKX K 线后台，也不成为交易授权来源。历史下载、冻结计划和回测 runner 只做状态核验并转交 `$okxnew-backtest-operations`。
+
+每次巡检前以 `/var/lib/okxnew/runtime-activation.json` 和项目 runtime 配置为唯一激活事实源，并用项目 `scripts/verify_linux_activation.py` 按正式运行根验证。激活回执缺失、`runtime_root` 不等于 `/var/lib/okxnew`、`activated` 不为 `true`，或停写/最终数据证据及哈希门禁未通过时，返回 `migration_not_activated` 并 fail closed；不得启动服务、采集、导入或模拟写入。
 
 本副本由 Windows 受管源仓的同名 Skill 迁入项目 `.agents/skills`，供 WSL 本项目独立发现和版本管理；不改写其他项目共用的 Windows Skill。参考资料中的旧 Windows 路径仅作历史示例：Linux 解释器使用项目 `.venv/bin/python`，开发长任务使用项目原生独立回执入口；不得调用 `.exe`、Windows 任务或旧宿主运行数据。浏览器能力不可用时保持 `browser_unavailable`，不以无头脚本替代原浏览器契约。
 
@@ -64,6 +66,7 @@ metadata:
 ## 失败分类
 
 - `healthy`：接口可回读且产品最近成功。
+- `migration_not_activated`：正式运行根或激活证据缺失/不匹配；保持关闭，不启动或写入。
 - `network_path_blocked`：某一官方固定页面或同源请求被明确拒绝；不换域名。
 - `browser_unavailable`：当前 Codex 环境没有可用浏览器能力；不改用独立浏览器脚本绕过。
 - `import_rejected`：路由、来源、状态、类型、哈希、时区或正文结构校验失败；不写数据库。
