@@ -1,9 +1,14 @@
 ---
 name: cc-connect-collaboration
 description: 统一管理本机 cc-connect 的多项目移动协作，包括代码触发的业务自动通知、宏观快速决策卡、独立固定会话、业务项目消费者接入、交易授权固定会话、移动通道、飞书应用显示维护、投递意图、固定会话绑定代次、双向验证、消息推送、Windows 中文乱码、Codex 固定会话运行时与 SYSTEM 任务可见性排障、定时唤醒、跨项目衔接反馈和受控会话职责核验。仅在请求明确涉及 cc-connect、移动端协作、固定会话路由、飞书或微信、跨项目通知、代码触发直接投递、宏观通知可读性或修订门禁、跨项目衔接反馈、控制目录、路由重绑、飞书应用改名发布、固定会话运行错误、任务 Missing 误报或固定会话换代时使用；普通 Codex 开发任务因上下文过长而新建同项目任务、初始化、重命名及归档旧任务时改用 `codex-project-task-handoff`。
+metadata:
+  x-custom-skill: true
+  x-source-repo: dmdmwshr/custom-skills
 ---
 
 # CC-Connect 移动协作
+
+在 WSL 部署、迁移或维护时，先读取 [WSL 原生部署](references/wsl-deployment.md)。该环境约定替代下文 Windows 专属路径与发布入口；投递、凭据及唯一会话边界保持。
 
 将 `cc-connect-operations` 作为移动协作中枢，而不是业务代码仓，并严格拆分两种能力：业务自动通知由业务仓产生不可变事实和无正文投递意图，中枢校验后直接调用受限飞书传输；移动双向协作则为每个“业务项目 + 职责”维护独立控制目录、Hook、绑定和固定桌面会话。自动通知不创建或唤醒 Codex 桌面任务；桌面端与外部 CLI 的单写入者冲突只约束会话注入，不阻断已经独立验证的直接飞书出口。
 
@@ -34,7 +39,7 @@ description: 统一管理本机 cc-connect 的多项目移动协作，包括代�
 - 项目归属只用于整理，不能改变既有任务身份、实际 `work_dir`、受审 Hook 或自动化目标。把既有任务加入项目后，必须回读任务身份、完整实际 `work_dir`、Hook 与定时器目标；界面只显示目录末级名称不能代替完整目录回读。
 - 依赖已登录 Chrome、浏览器扩展或可见桌面 UI 的能力，只能由拥有该环境的目标 Desktop 任务执行。cc-connect CLI、cron、Bridge、无头运行器或其他任务不得模拟、复用或绕过这些能力。
 - OKXnew 的两个用户显示角色固定为“OKXnew 交易授权助手”和“OKXnew 消息推送”；两者分别使用独立控制目录、路由和私有会话映射，不使用“数据运营”“策略研究”等泛化名称替代。稳定技术路由名可保留，用户显示职责和公开 `role` 必须与实际 Hook 一致。
-- `C:\\Users\\12070\\.codex` 是唯一共享 Codex 状态目录。不得复制、迁移、合并或改写其认证、数据库、索引或会话文件。
+- Codex 状态按主机独立：当前 Windows 用户通常为 `C:\\Users\\12070\\.codex`，本机 WSL 为 `/root/.codex`，实际以目标进程配置为准。不得跨主机共享活动目录，或复制、迁移、合并、改写其认证、数据库、索引和会话文件。
 - 私有通道凭据、会话键、Cookie、令牌和账户信息永不进入业务仓、公共登记表、Skill、日志或回复。会话正文默认不读取；当前用户明确授权核对指定会话或路由职责时，才可按“最小必要职责核验”读取所需局部证据，且不得复制原文、写入任何持久位置或扩大为全量历史浏览。
 - 移动消息不扩大业务仓已有权限。OKXnew 的指定交易授权固定会话可以在当前用户本条普通消息明确要求、现有授权意图有效且可唯一识别时，按业务仓规则批准、拒绝或撤销 `simulation` / `okx_demo` 授权；这不允许创建或修改计划、切换模式、触发执行、访问账户/凭据或启用 `live`。其他路由的移动消息不得形成交易授权。
 - 每条路由必须有独立控制目录、固定 prompt hook 和明确职责；通知 hook 只允许读取已登记的不透明引用，授权助手 hook 不得被写成通知发布 hook。
@@ -86,13 +91,13 @@ description: 统一管理本机 cc-connect 的多项目移动协作，包括代�
 1. 先读取台账、当前中枢 `AGENTS.md` 和唯一计划，做只读分诊：确认关联项目/路由、类别、预期与实际、影响、最小复现和可公开的证据是否完整。当前用户明确授权路由职责核对时，可按“最小必要职责核验”读取指定会话的实际目录、Hook、启动职责说明及最少相关对话；不得读取凭据、令牌、Cookie、账户、完整私有配置或无关历史，也不得把会话原文写入台账。
 2. 需要登记新问题时，只能按台账模板追加 `CCOPS-<报告方>-<时间>` 事实记录；处理既有记录时，只能追加处理记录并按 `new → triaged → planned → resolved | blocked | rejected` 更新，绝不重写报告方原始事实或建立第二个反馈入口。
 3. 分诊不构成实施授权。完成分诊后等待当前用户明确授权，才可修复中枢、路由、Hook、网关、桌面项目或业务仓中的对应事项；不得因反馈自动重绑、发送、创建定时器、启停运行任务或改写私有配置、会话数据和 Codex 状态文件。
-4. 只有经验证可复用的衔接流程变化才回写本受管 Skill，并按 CC Switch 的源仓发布流程同步。固定会话换代仍须当前用户单独明确要求并继续遵循本 Skill 的换代协议；普通 Codex 任务交接仍改用 `codex-project-task-handoff`；业务事实处理和业务修复仍遵循所属业务仓规则。
+4. 只有经验证可复用的衔接流程变化才回写本受管 Skill，并按目标主机发布流程同步：Windows 使用本机 CC Switch，WSL 使用原生发布脚本。固定会话换代仍须当前用户单独明确要求并继续遵循本 Skill 的换代协议；普通 Codex 任务交接仍改用 `codex-project-task-handoff`；业务事实处理和业务修复仍遵循所属业务仓规则。
 
 需要路由字段、状态转换和验收口径时，读取 [固定会话路由契约](references/fixed-session-contract.md)。
 
 业务项目需要接入中枢投递、查询路由或确认绑定代次时，读取 [业务消费者接入契约](references/business-consumer-integration-contract.md)；代码触发自动通知或自动消息乱码排障还必须读取 [代码触发直接投递契约](references/code-triggered-direct-delivery-contract.md)。涉及 OKXnew 宏观消息可读性、V2 信封、核心修订门禁、PCE/核心 PCE 或无外发手机预览时，还必须读取 [宏观快速决策卡 V2](references/macro-quick-decision-card-v2.md)。移动回复出现固定会话运行包、模型缓存、代理、空响应或原始内部错误时，同时读取 [固定会话路由契约](references/fixed-session-contract.md)。路由使用 `desktop_owner_outbound_only` 时，必须读取 [桌面专属会话与出站直送模式](references/desktop-owner-outbound-only.md)；只有用户明确选择停用兼容的固定会话代发实验时，才读取 [会话代发契约](references/session-mediated-delivery-contract.md)。
 
-自动消息乱码、移动回复报错、SYSTEM 任务显示 Missing 或修复后需要做完整双向验收时，必须读取 [Windows 双链路故障恢复与验收](references/windows-dual-path-recovery-and-acceptance.md)，按“分流诊断 → 本机无外发验证 → 精确部署 → 唯一真实投递 → 用户普通回复 → 台账收口”的顺序执行。
+目标为 Windows 且出现自动消息乱码、移动回复报错、SYSTEM 任务显示 Missing 或需要完整双向验收时，读取 [Windows 双链路故障恢复与验收](references/windows-dual-path-recovery-and-acceptance.md)，按“分流诊断 → 本机无外发验证 → 精确部署 → 唯一真实投递 → 用户普通回复 → 台账收口”的顺序执行。WSL 对照原生部署参考与实际项目运行契约，不运行 Windows 任务修复命令；真实发送仍须既有专项授权。
 
 ## 创建或绑定一条固定会话
 

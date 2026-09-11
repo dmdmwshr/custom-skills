@@ -109,7 +109,8 @@ class SessionModeContractTests(unittest.TestCase):
     def test_generic_contract_does_not_embed_one_business_monitor(self) -> None:
         combined = "\n".join(
             (
-                self.skill,
+                # Repository provenance is not a monitored business account.
+                self.skill.replace("  x-source-repo: dmdmwshr/custom-skills\n", "", 1),
                 self.fixed,
                 self.scheduling,
                 self.rollover,

@@ -7,7 +7,7 @@ import subprocess
 import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
-BUSINESS=Path(os.environ.get("X_MONITOR_PROJECT_ROOT",r"C:\Users\12070\Desktop\项目开发\X监控"))
+BUSINESS=Path(os.environ.get("X_MONITOR_PROJECT_ROOT", r"C:\Users\12070\Desktop\项目开发\X监控" if os.name == "nt" else "/root/workspaces/X-monitor"))
 
 
 class SkillContractTests(unittest.TestCase):
@@ -54,7 +54,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertEqual(0,result.returncode,result.stdout+result.stderr)
 
     def test_production_stream_transactions_and_receipts(self):
-        python=Path(os.environ.get("X_MONITOR_PYTHON",str(BUSINESS/".venv/Scripts/python.exe")))
+        python=Path(os.environ.get("X_MONITOR_PYTHON",str(BUSINESS / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))))
         if not python.is_file():
             self.skipTest("business test environment unavailable")
         for pattern in ("test_independent_streams.py","test_receipt_sync.py","test_reply_reset_policy.py","test_reset_quote_policy.py","test_fact_transfer.py"):

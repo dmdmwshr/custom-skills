@@ -1,6 +1,9 @@
 ---
 name: codex-local-state-diagnostics
-description: 分层诊断 Windows 本机 Codex 的浏览器控制、扩展连接、会话加载、索引与 SQLite、rollout 路径、app-server、MCP/进程、网络和归档问题。默认只读；用户明确要求修复时，对已定位的目标保留可恢复副本后执行范围内的修复与实际验收。用于浏览器不可控、启动错配置、登录态复用核验、工具预热失败、反复重连或会话故障。
+description: 分层诊断 Linux/WSL 或 Windows 本机 Codex 的会话加载、索引、SQLite、rollout 路径、app-server、MCP/进程、网络及浏览器控制问题。默认只读；用户要求修复时保留恢复点并验证目标。用于工具预热失败、反复重连、会话故障、启动错配置或浏览器连接问题。
+metadata:
+  x-custom-skill: true
+  x-source-repo: dmdmwshr/custom-skills
 ---
 
 # Codex 本地状态诊断
@@ -9,8 +12,10 @@ description: 分层诊断 Windows 本机 Codex 的浏览器控制、扩展连接
 
 本 skill 只处理 Codex 桌面端、原生 CLI 及其本机运行链的证据分层。默认只读，不因诊断请求而重启、退出、结束进程、安装、更新、重试、归档、改配置或改内部状态。
 
+先读 [Linux/WSL 与 Windows 运行环境](references/platform-runtime.md)，区分执行主机、目标进程和状态目录。先检查症状对应层，不要求一次扫描全部七层。版本号、工具未暴露和 API 实测失败分别记录，不能互相替代。
+
 - openai-docs 负责当前官方产品能力、支持范围、模型和配置文档；本 skill 不用本机异常推断官方事实。
-- windows-task-scheduler 负责计划任务的创建、更新、启停、删除和生命周期验收；本 skill 只在需要时只读确认任务是否触发了目标进程。
+- Windows 计划任务由目标机已安装的 `windows-task-scheduler` 处理；Linux 服务按项目 systemd 或实际启动方式处理，Codex 自动化用产品工具。本 skill 只按需核对触发与进程证据，不自动迁移调度器。
 - codex-project-task-handoff 负责项目内唯一交接文档、同项目后继任务及旧任务改名归档；本 skill 只诊断其读写结果，不创建第二份交接文档或后继任务。
 - cc-connect-collaboration 负责固定会话、移动通道、绑定代次和路由换代；固定会话问题不得被本 skill 当作普通项目接力处理。
 
@@ -20,7 +25,7 @@ description: 分层诊断 Windows 本机 Codex 的浏览器控制、扩展连接
 
 1. 先记录精确目标、主机、时区和症状时间窗。短 ID 前缀、显示标题、侧栏位置和目录末级名称都不能唯一识别任务。
 2. 只读取完成判断所需的元数据、计数、状态、错误类别和小范围证据。不读取或输出密码、令牌、Cookie、账号、订阅链接、代理凭据、会话正文、访问正文、完整命令行或完整私有配置。
-3. 当前活动的共享 Codex 状态根目录通常是 `%USERPROFILE%\.codex`；先回读实际配置，不创建替代的活动 `CODEX_HOME`，不手工编辑 `session_index.jsonl`、`state_*.sqlite`、rollout JSONL、认证、索引或会话文件。
+3. 先核对目标进程活动 `CODEX_HOME`：本机 WSL 为 `/root/.codex`，Windows 通常为 `%USERPROFILE%\.codex`。二者独立，不创建替代活动目录，不手工编辑 `session_index.jsonl`、`state_*.sqlite`、rollout JSONL、认证、索引或会话文件。
 4. 默认不执行重启、退出、杀进程、停用 MCP、切换代理、改路由、安装依赖、改计划任务、改配置、发送消息、恢复/归档任务或重试不确定动作。只有当前用户已明确指定精确对象和动作时才执行相应项，一条消息可同时授权多个清晰对象。
 5. 修复若获授权，先做可恢复备份并记录范围；只改授权对象。修复后重新读取实际目标，不以命令返回成功、进程仍存在或界面最后一行文字代替验收。
 6. 发现多个可能对象、父子任务、主机或路径时先通过直接元数据区分；仍有实质歧义才报告缺口，不猜测。浏览器同名连接视图不自动等于多个用户配置，按浏览器恢复参考核对稳定连接标识和本次自有标签。
@@ -71,7 +76,7 @@ description: 分层诊断 Windows 本机 Codex 的浏览器控制、扩展连接
 
 ### 6. WebSocket、TLS 和代理层
 
-将网络证据拆成：本机代理监听与系统代理设置、代理到出口的 TCP/DNS/路由、TLS 握手与证书/SNI、WebSocket/HTTP 应用层、请求体传输与服务端读取。WinINET、WinHTTP、应用自有代理和 TUN 路径分开核对。
+将网络证据拆成：本机代理监听与系统代理设置、代理到出口的 TCP/DNS/路由、TLS 握手与证书/SNI、WebSocket/HTTP 应用层、请求体传输与服务端读取。Windows 分开核对 WinINET、WinHTTP、应用代理和 TUN；Linux 分开核对目标进程代理配置、监听、路由和应用传输，不自动继承宿主机代理。
 
 - Request body read timed out 先按请求体过大、上传过慢或服务端未及时读取排查；分别记录会话累计记录规模和最近一次请求实际回传规模。
 - TLS EOF、证书主机名不匹配、代理拒绝和 WebSocket prewarm 超时必须按时间顺序对应，不能用界面“正在重新连接”单独定性。
