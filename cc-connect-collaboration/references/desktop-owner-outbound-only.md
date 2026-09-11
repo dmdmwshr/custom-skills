@@ -21,6 +21,8 @@
 
 ## 计时器与换代边界
 
+本节默认不自动换代。用户明确授权跨主机唯一 Linux 新会话接替时，改用 [WSL 原生部署](wsl-deployment.md) 的接替分支；旧会话仅保留历史，旧扫描者须退出，新 heartbeat 先暂停，不允许新旧同时扫描。原飞书出站目标与新 Desktop 所有者分别核验，不伪造 p2p 会话迁移或要求两个线程 ID 相等。
+
 同一路由的 Desktop heartbeat 与 cc-connect cron 强制互斥。需要周期执行时，只保留 Desktop heartbeat；cc-connect cron 必须不存在或停用。发现两者同时存在、触发源无法唯一证明或已有执行冲突时，记为 `timer_conflict` 并失败关闭：不扫描、不发送、不补跑，也不通过新建定时器修复。
 
 本模式不得调用 Bridge 创建候选会话、重绑会话、发送“激活新会话”提示、建议 `/new`，或以任何方式创建、唤醒、转移、恢复第二个任务。固定会话换代协议只适用于 `cc_connect_fixed_session`。
