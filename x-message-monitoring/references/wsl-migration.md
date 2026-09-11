@@ -1,24 +1,38 @@
-# WSL 迁移边界
+# WSL 唯一固定会话与运行接口
 
-WSL 维护时源码位于 `/root/workspaces/X-monitor`，使用项目 Linux `.venv/bin/python`；固定入口、标准输入客户端和数据目录必须一起核验，不能把 Windows 路径机械当成本机路径。业务持久数据迁入 `/var/lib/x-monitor`，不复制 Windows Python 环境或 Codex 状态。
+## Linux 接替授权（步骤 WSL-2026-09-11.3，当前优先）
 
-维护任务可适配源码和运行离线测试，但不能代替唯一 Desktop 固定任务浏览或扫描。原固定任务及 heartbeat 只能经受支持产品入口迁移并回读；没有该能力时停止在准备态，不建第二任务、cron、独立 Playwright 扫描器或浏览器桥接。旧任务暂停、双锁空闲及一致备份须在实际切换时重新证明。
+用户已批准一次 Linux 固定会话接替：保留原业务账本、每小时计划、Luna/max、飞书目标及规则，Windows 旧聊天归档保留。通过正常产品工具创建并初始化唯一 Linux 固定会话，随后绑定暂停的 heartbeat；不伪造 MCP 调用元数据或修改 Codex 数据库。旧宿主的同 ID 转移、禁止新会话和 CUA-only 限制不再适用于这次已授权接替。迁移后仍只有一个活动固定会话及一个扫描计划；维护任务不代替它扫描。
 
-Windows 环境参考只适用于旧宿主。WSL 的 Skill 更新以 `/root/workspaces/custom-skills` 为源，使用仓库 `scripts/publish_wsl_skills.py` 校验发布；来源版本、文件哈希和新会话发现证据保留在本机治理目录。发布 Skill 不代表已迁移浏览器登录态或扫描恢复。
+实际归属和当前准备/激活状态读取业务仓 `/root/workspaces/X-monitor/LINUX_FIXED_SESSION.md` 与受限迁移回执；不得从标题推定已上线。源仓 `/root/workspaces/custom-skills`，受管发布须已提交、与实时远端一致、按发布器安装并在新进程验证发现。安装不能代替业务验收。
 
+## 固定接口
 
-## X 业务发布接口（客户端 1.2.0 / 步骤 WSL-2026-09-11.1）
+- 工作目录 `/root/workspaces/X-monitor`；代码不可变发布 `/srv/x-monitor/current`；正式账本始终 `/var/lib/x-monitor/x-monitor.sqlite3`，不存在时停止，不能建立空库代替迁移。中枢只读解析器使用同一 data-dir。
+- 驱动 `scripts/desktop_monitor_driver.js` 3.0.31；标准输入客户端 `scripts/desktop_stdin_client.js` 1.2.0；Python `/srv/x-monitor/current/.venv/bin/python`，固定控制入口同发布的 `scripts/fixed_session_entry.py`。均从同一发布原样加载并核对版本与指纹。
+- Linux 浏览器适配 `scripts/linux_browser_runtime.js` 1.0.0，后端 `playwright_linux`，真实来源标记 `desktop_chrome_playwright_linux`，不得冒称扩展。配置 `/etc/x-monitor/browser.json`，专用持久配置 `/var/lib/x-monitor-browser/profile`，锁 `/var/lib/x-monitor-browser/owner.lock`。仅 owning Node 宿主调用已有 Linux Playwright 组件；无独立扫描进程、CDP listener 或新定时器。已批准 root Chrome 运行配置沿用本机浏览器基线。
+- 固定后端在 acquire 前读取并加载；轮内不切换。保留本页15秒、单次40秒、回复八导航、20分钟租约和双流独立提交。原驱动所有严格身份、UTC、正文、引用和停止条件保持；页面适配只转换 API/timeout。只允许原驱动两个已审 DOM reader；AX 刷新文本不输出，超时未知关闭自有运行时，不重放失败页。
 
-WSL 运行读取 `/srv/x-monitor/current/scripts/desktop_monitor_driver.js`（驱动 3.0.30）和同目录 `desktop_stdin_client.js`（客户端 1.2.0），固定子进程为 `/srv/x-monitor/current/.venv/bin/python`。客户端与驱动必须从同一发布目录原样加载，先比对指纹；原宿主 selfTest 61 项成功后才可 acquire。Linux 命令行 fixture 的成功不能代替 CUA 宿主自检。
+## 静态准备与浏览器控制
 
-固定控制入口为 `/srv/x-monitor/current/scripts/fixed_session_entry.py`。无论调用 cwd 为业务目录或中枢控制目录，正式账本固定 `/var/lib/x-monitor/x-monitor.sqlite3`。不存在账本时如实失败，不能初始化空库当作迁移成功；不从 cwd/data 或 Windows 活动目录回退。中枢只读解析器也必须显式使用同一 data-dir。
+Linux 原生组件在执行器正常提供的持久 `node_repl` 中使用公开 Node 标准库加载。在同一宿主保留 `xMonDriver`、`xMonStdinFactory`、`xMonStdin`、`xMonBrowser`、本轮自有 `xMonTab`。驱动和客户端仍为原样工厂，不转写函数。使用 `node:module` 的 createRequire 加载固定发布的 linux_browser_runtime.js；用该模块 `launch()` 获得 runtime，再 `newTab()`。适配层返回与原驱动兼容的 tab，所有固定浏览器方法调用签名保持。每次工具仍只调用一个固定浏览器采集方法或一次 sendKept；不写现场循环合并多个页面。
 
-Linux 原生浏览器检查使用 `/srv/x-monitor/current/.venv/bin/python /srv/x-monitor/current/scripts/start_managed_browser.py --browser chrome`，该命令不读取浏览器配置内容或标签。不使用本技能 Windows 历史参考中的 PowerShell 启动器。在原固定任务已明确观察 browser_not_running 后才允许加 `--start` 一次；root 缺少浏览器实例时返回 start_requires_interactive_user，由用户处理交互式启动，不增加禁用沙箱参数。主用 Chrome；Edge 必须实际安装、原生可控且取得原机器备用授权，不能回退到 Windows 浏览器。
+首次或宿主重置后，在实际 owning Node 宿主执行客户端无参数 selfTest，61项 exact_match=true，才可 acquire；独立命令行 fixture 不是这项证据。模块来自同一 `/srv/x-monitor/current`，公开 Node 的 spawn/Buffer/TextDecoder/计时器注入遵循客户端原工厂签名。
 
-快速路径中的业务步骤、五项 sendKept、草稿/冻结各一次、两阶段 finish 及所有页面和整轮预算保持；其中 Windows 绝对路径与客户端 1.1.0 只属于旧宿主，WSL 以上述入口和 1.2.0 为准。正式激活前必须有旧任务已暂停、数据一致备份、原任务受支持转移与回读证明；仅安装发布目录、skill 或本地 selfTest 不构成激活。
+专用 profile 需要人工登录时，只能在 `launch({manualLogin:true})` 后 `showLogin()` 打开本机 GNOME 窗口。`loginStatus()` 只回传已登录导航是否可见，不读取账号凭据或 Cookie；不复制日常 Chrome 登录资料。人工登录后 `close()` 释放 profile 锁，正式 owning 宿主再 `launch()`。并发占用返回 browser_profile_busy，不能强抢锁或关闭日常 Chrome。
 
-## WSL 浏览器检查修订（2026-09-11.2）
+扩展控制恢复可单独维护，但实例、扩展连接和页面控制分别验收。`start_managed_browser.py --browser chrome` 只证明 Linux 实例元数据，不能当作扩展成功；不得回退 Windows 或在失败轮切浏览器。
 
-启动检查通过父子关系排除 Chrome 子进程；默认目录以 SingletonLock 与主进程打开文件路径元数据交叉核验。没有读取配置、Cookie、正文或标签内容。无法证明目录时失败关闭，不因空参数当作未运行；already_running 只证明实例/数据根，extensionControlVerified 始终为 false，实际控制另行验收。
+## 每轮业务与清理
 
-产品有原任务 handoff 能力不等于当前执行器已提供可调用工具或已连接 Windows 源任务。只能使用执行器正常提供的任务身份和受支持工具；不伪造 MCP 元数据，不改 Codex 数据库，不新建替代固定会话。Chrome 选择返回绑定不等于创建、控制、关闭标签成功，失败须逐项保留未知状态。
+acquire 前完整读取当前快速路径和上下文契约的业务部分；其中 Windows 路径、CUA 宿主和扩展 source 在本 Linux 分支分别使用上述发布路径、原生 Node 宿主和真实 Linux source。五项 sendKept、内存载荷、语义筛选、fingerprint、草稿/冻结各一次、预检顺序与两阶段 finish 全部保持。
+
+lease 仍只在 functions 与 owning Node 内存中传递，acquire 同次保存原回执，后续控制从该对象取值；不输出凭证。浏览前证明两侧本轮值相等。公开事实不进入文件、临时正文、浏览器存储或普通日志。共同故障停两流，局部失败保留另一流处理；真实 unknown 不重试。失败可用固定入口 browser-failure 的 browser=linux-playwright，采集遥测使用真实来源和驱动版本。
+
+两阶段 finish、关闭自有 tab/runtime、无在途子进程后，clearKept 再清理 lease 与其他动态事实；静态工厂可复用。自有 runtime 关闭释放专用 profile 锁；不能触碰用户其他 profile/标签。只有真实完整成功且机器允许才输出 DONT_NOTIFY，手动不计四轮摘要。
+
+## 切换验收
+
+旧 Windows X heartbeat 精确暂停、无额外旧扫描入口、双锁空闲、无待收口/在途提交后，制作并完整迁入一致备份。中枢另一个任务复用既有密钥/原连接，保留 X 幂等并绑定 Linux 新 owner，仅开 X 路由。未知投递保留不重发。旧数据不删。
+
+回读新 owner 主机、模型、heartbeat 暂停、旧任务停止、数据库完整性/记录数/水位/状态及路由证明后，才授权唯一固定会话真实宿主自检和人工双流验收。首轮成功后两次全新复扫，全部通过才启用每小时 heartbeat。传输接受与送达分别记录；无新合格通知时不制造消息，送达保持待验证。Linux 写入后回退先停写对账，不能直接恢复旧快照。
