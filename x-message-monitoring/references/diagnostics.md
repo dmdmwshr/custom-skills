@@ -1,5 +1,19 @@
 # 授权维护诊断（普通 heartbeat 不加载）
 
+步骤2026-09-11.8的正式手动维护验收，首次context-plan提交可直接使用下列形态（主帖改用字面量"main"）。这是一个输入请求及其同次纯内存诊断，响应变量在块内先声明；已知HTML拒绝时立即回传有界标记对象，再按原规则登记本流失败。不会再次生成草稿、提交或读页面。普通定时轮保持诊断关闭。
+
+```javascript
+{
+  const response = await xMonStdin.sendKept("context-plan",{lease:xMonLease,payload:xMonDriver.draftStream(xMonCycle,"reply")});
+  nodeRepl.write(response);
+  if (response.entry_error === "raw_html_rejected") {
+    nodeRepl.write(xMonDriver.diagnosePayloadText(xMonStdin.kept(xMonLease,"context-plan").payload));
+  }
+}
+```
+
+一次诊断输出已经得到后不重复调用；清理前向维护任务转达该有界对象，不只概括拒绝码。新运行必须先读当前快速路径与上下文契约；诊断工厂加载成功不等于已读正式步骤。收口后先clearKept再清理lease，不从已清理周期恢复输入。
+
 3.0.29在原有最多16个可见链接的同次抽取中，只增加title/aria-label两个公开提示属性的安全元数据：存在/长度，以及值本身为完整HTTP(S)网址时去除查询、片段、用户信息后的最多256字符路径和截短/查询/片段标记。不回传非网址标签原文、不读取data-*或其他隐藏数据，不解析短链、不访问外站。仅用于全新诊断确认来源是否公开提供完整路径，普通周期与引用接受条件不变；一对象一次、最多两导航，清理前完整回传这些有界元数据。
 
 客户端1.1.0的sendKept会在返回前保存真实结果。若元数据entry_error=raw_html_rejected，仅对xMonStdin.kept(xMonLease,"context-plan").payload（或本次实际失败动作对应payload）调用一次diagnosePayloadText；该快照来自实际序列化输入，不重新draft/raw或重投。主帖/回复分别按本次action核对，清理后不可取回。当前诊断回执中的允许差异片段及网址显示字段应在清理前一并回传，而不只概括为“截短网址”；保持既有48/64/96字符上限，不输出完整正文、HTML或原异常。

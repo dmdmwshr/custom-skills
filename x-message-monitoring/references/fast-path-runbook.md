@@ -1,6 +1,6 @@
 # 固定快速路径（分流协议 1 / 驱动 3.0.29 / 标准输入客户端 1.1.0）
 
-步骤修订：2026-09-11.7（五项输入动作改用sendKept，工具返回前在客户端保存同轮原样载荷与回执；后续按lease/action读取，不依赖临时结果变量）。驱动版本未变也须在此步骤修订变化时刷新本页。
+步骤修订：2026-09-11.8（统一运行入口与上下文契约，五项输入仅使用sendKept，draft/raw只在对应payload内各调用一次）。驱动3.0.29和客户端1.1.0不变；已读步骤修订与工厂版本/指纹分别记录，不能根据工厂已加载推定规则已读。步骤变化、已读标记缺失或只读诊断后的首次正式运行，acquire前完整读取本页和reply-reset-contract.md；读取完成才更新已读步骤，有效静态工厂继续复用。
 
 本页只包含当前运行步骤。[维护诊断](diagnostics.md) 和 [历史传递](legacy-fact-transfer.md) 按需读取，普通轮次不加载。引用事实以 [当前契约](reply-reset-contract.md) 为准。
 
@@ -98,14 +98,15 @@ nodeRepl.write({version:xMonStdinFactory.version,source_fingerprint:xMonStdinFac
 
 纯内存方法的完整签名是 `draftStream(xMonCycle,stream)`、`applyContextPlan(xMonCycle,plan)`、`rawStream(xMonCycle,stream)`。`stream` 为 main 或 reply；`plan` 必须是 context-plan 包装回执成功后的完整 `response`，流由 plan.stream 指定。浏览器补读签名是 `contextBatch(xMonTab,xMonCycle,statusIds)` 和 `quoteBatch(xMonTab,xMonCycle,stream)`；前者一次只传本轮计划允许且仍待补充的最多两个回复 ID。所需签名与本页步骤在 acquire 前准备，不从旧周期恢复对象或 lease。每次工具调用仍只执行一个固定浏览器方法或一次标准输入请求。
 
-每次CUA从下列形态中只执行一行，变量均引用本轮既有状态，不把多行放进一次调用：
+每次CUA从下列形态中只执行一行，不把多行放进一次调用。contextBatch的ID数组只填本轮计划允许且尚未完成的1～2个准确ID；quoteBatch使用当前流字面量，不引用未声明的statusIds或stream变量：
 
 ```javascript
 nodeRepl.write(await xMonDriver.page(xMonTab,xMonCycle,"main"));
 nodeRepl.write(await xMonDriver.page(xMonTab,xMonCycle,"search"));
 nodeRepl.write(await xMonDriver.permalinkBurst(xMonTab,xMonCycle,xMonStdin.kept(xMonLease,"observation-fingerprint").result.response.fingerprint));
-nodeRepl.write(await xMonDriver.contextBatch(xMonTab,xMonCycle,statusIds));
-nodeRepl.write(await xMonDriver.quoteBatch(xMonTab,xMonCycle,stream));
+nodeRepl.write(await xMonDriver.contextBatch(xMonTab,xMonCycle,["本轮机器计划中的待补充ID"]));
+nodeRepl.write(await xMonDriver.quoteBatch(xMonTab,xMonCycle,"main"));
+nodeRepl.write(await xMonDriver.quoteBatch(xMonTab,xMonCycle,"reply"));
 ```
 
 3.0.28回复与父帖展开点击后，在原十五秒预算内等待同一已验证时间链接对应的可见顶层卡片已无自身展开控件；引用内控件排除。不等待已移除的按钮节点，不追加导航或重试；之后原probe继续严格核验身份、UTC、关系及正文完整性/前缀，等待成功不等于采集成功。
@@ -124,9 +125,11 @@ nodeRepl.write(await xMonDriver.quoteBatch(xMonTab,xMonCycle,stream));
 
 ## 本地载荷：程序机械组装
 
-- `collect-stream`：`{lease,payload:xMonRaw}`。xMonRaw 为 XCollectedStreamV1：仅本流的 V2 可见事实和驱动耗时；不存在另一条流，不伪造空流。
-- `analysis-plan`：同一 `{lease,payload:xMonRaw}`。只分析 analysis_items，ID 恰好对应 new_status_ids；空列表直接提交空 analyses。不要翻译锚点或历史事件。
-- `scan-analysis`：`{lease,payload:{collected:xMonRaw,analyses:{<新状态ID>:<分析对象>}}}`。程序转换 raw 字段、父帖上下文、索引及指纹，形成严格 XMonitorScanInputV3 并调用 scan-stream；模型不生成映射代码。
+- 新周期仅用sendKept，不调用兼容send；draftStream/rawStream只在下列对应payload内各执行一次，不独立调用或赋给临时变量。每次CUA只执行其中一条输入请求，主帖/回复使用准确字面量。
+- `context-plan`：主帖为 `nodeRepl.write(await xMonStdin.sendKept("context-plan",{lease:xMonLease,payload:xMonDriver.draftStream(xMonCycle,"main")}))`；回复把"main"改为"reply"。核对元数据及kept中的实际业务成功后，再applyContextPlan及必要补读。
+- `collect-stream`：主帖为 `nodeRepl.write(await xMonStdin.sendKept("collect-stream",{lease:xMonLease,payload:xMonDriver.rawStream(xMonCycle,"main")}))`；回复把"main"改为"reply"。载荷仅含本流事实与耗时，不伪造另一流。
+- `analysis-plan`：`nodeRepl.write(await xMonStdin.sendKept("analysis-plan",{lease:xMonLease,payload:xMonStdin.kept(xMonLease,"collect-stream").payload}))`。只分析response.analysis_items，ID恰好对应new_status_ids；锁前声明的xMonAnalyses在当前流开始时清空，空新项保持空对象，不分析历史。
+- `scan-analysis`：`nodeRepl.write(await xMonStdin.sendKept("scan-analysis",{lease:xMonLease,payload:{collected:xMonStdin.kept(xMonLease,"analysis-plan").payload,analyses:xMonAnalyses}}))`。程序转换raw字段、父帖上下文、索引及指纹，形成严格XMonitorScanInputV3并调用scan-stream；模型不生成映射代码。
 - 分析对象必需 chinese_translation、chinese_summary、full_analysis、reset_analysis。两流新项统一 ResetAnalysisV3，subject_product=codex/other/unknown，相关/无关/无法判断及 evidence_status_ids 按上下文契约提交。只有 Codex 额度重置相关内容通知；回复 AI 判断只作辅助，候选需父翻译，采用上文/引用需对应翻译，不覆盖可见事实。
 - 两流共同支持 exact/range_only/no_time。时间锚指向确实包含时间表达的采用来源；引用原文独立标注作者、翻译、发布时间和链接，不变成外层作者承诺。相关但无时间明确“未提供可推算时间”。仅讨论 Grok 等产品的重置不通知；公开帖子不是本账户已经重置的证据。
 - isMediaOnly=true 时不猜媒体内容：两流 ResetAnalysisV3 的 related=null、unassessed_reason=media_only_not_inspected，并携带其余共同字段。翻译、摘要、完整分析都包含“未读取媒体内容”；回复 AI 也为 null。引用不可读取按契约判断其余可信内容，不能用语义不足掩盖结构失败。
