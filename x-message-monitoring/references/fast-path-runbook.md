@@ -1,6 +1,6 @@
-# 固定快速路径（分流协议 1 / 驱动 3.0.27 / 标准输入客户端 1.0.0）
+# 固定快速路径（分流协议 1 / 驱动 3.0.28 / 标准输入客户端 1.0.0）
 
-步骤修订：2026-09-11.5（本轮预检成功后才生成草稿；维护可定位同次被拒绝载荷的标记，原接受条件保持）。驱动版本未变也须在此步骤修订变化时刷新本页。
+步骤修订：2026-09-11.6（回复展开等待同一可见卡片已无自身展开控件，再严格回读；浏览器方法直接输出，避免未声明临时变量）。驱动版本未变也须在此步骤修订变化时刷新本页。
 
 本页只包含当前运行步骤。[维护诊断](diagnostics.md) 和 [历史传递](legacy-fact-transfer.md) 按需读取，普通轮次不加载。引用事实以 [当前契约](reply-reset-contract.md) 为准。
 
@@ -53,7 +53,7 @@ nodeRepl.write({version:xMonStdinFactory.version,source_fingerprint:xMonStdinFac
 - 全部命令通过 UTF-8 对象序列化后标准输入，禁止正文/凭据出现在进程参数、普通日志或临时脚本中。公开帖的结构化工具返回值是授权事实载荷，允许进入模型上下文与当前 functions 内存供验证/分析，不能把它误当凭据或禁止的普通日志。PowerShell 输入输出均设 `[Text.UTF8Encoding]::new($false)`；不要手拼 JSON。
 - CUA 状态使用普通 `let` 明确绑定驱动、标签、cycle、原始事实、客户端、lease、计划和本轮分析；各变量第一次使用必须声明，已经存在时只赋值，不能遗漏初始化或重复声明。本轮 lease 来自一次 acquire；不能复制旧值。工具会话重置时不接续旧浏览器句柄，登记失败并 finish。
 - 新建标签的准确 ID、浏览器和本轮归属须作为轻量元数据保留至关闭确认，可放本轮 functions 内存，不保存正文、HTML 或存储。CUA reset 后不接续扫描；只在创建回执已证明准确 ID 归属时，按工具首次入口规则新取一个仅用于关闭该自有标签的句柄，并核对该 ID 不存在。不得浏览补读、猜 ID 或碰其他标签；无法证明归属/关闭失败则报告清理未确认。重新开展新周期前仍需重新加载固定工厂、核对指纹并执行客户端 selfTest，不能把旧成功标记沿用到重置后。
-- 页面调用结果可直接用 `nodeRepl.write(await xMonDriver.page(...))` 输出，或赋给事先已声明的变量。给未声明变量赋值发生 ReferenceError 时，右侧 await 可能已经完成浏览器动作；不能因此说操作未执行或重放 page。先看本轮纯计数/已有回执，不能确认则失败收口，不通过第二次调用取得一个新结果。
+- 所有浏览器采集回执直接用 `nodeRepl.write(await xMonDriver.method(...))` 输出，进度由cycle保留，不另造临时结果变量。需要后续使用的客户端响应必须先声明绑定，或在本次调用的块内const接收后写入已声明状态。未声明变量赋值出现ReferenceError时，右侧await可能已经完成动作；不能重放，先核对本轮纯计数/已有回执，不能确认则失败收口。
 
 ## 本轮租约：一次领取、立即保存、同源引用
 
@@ -96,6 +96,18 @@ nodeRepl.write({version:xMonStdinFactory.version,source_fingerprint:xMonStdinFac
 ## 驱动调用
 
 纯内存方法的完整签名是 `draftStream(xMonCycle,stream)`、`applyContextPlan(xMonCycle,plan)`、`rawStream(xMonCycle,stream)`。`stream` 为 main 或 reply；`plan` 必须是 context-plan 包装回执成功后的完整 `response`，流由 plan.stream 指定。浏览器补读签名是 `contextBatch(xMonTab,xMonCycle,statusIds)` 和 `quoteBatch(xMonTab,xMonCycle,stream)`；前者一次只传本轮计划允许且仍待补充的最多两个回复 ID。所需签名与本页步骤在 acquire 前准备，不从旧周期恢复对象或 lease。每次工具调用仍只执行一个固定浏览器方法或一次标准输入请求。
+
+每次CUA从下列形态中只执行一行，变量均引用本轮既有状态，不把多行放进一次调用：
+
+```javascript
+nodeRepl.write(await xMonDriver.page(xMonTab,xMonCycle,"main"));
+nodeRepl.write(await xMonDriver.page(xMonTab,xMonCycle,"search"));
+nodeRepl.write(await xMonDriver.permalinkBurst(xMonTab,xMonCycle,fingerprint));
+nodeRepl.write(await xMonDriver.contextBatch(xMonTab,xMonCycle,statusIds));
+nodeRepl.write(await xMonDriver.quoteBatch(xMonTab,xMonCycle,stream));
+```
+
+3.0.28回复与父帖展开点击后，在原十五秒预算内等待同一已验证时间链接对应的可见顶层卡片已无自身展开控件；引用内控件排除。不等待已移除的按钮节点，不追加导航或重试；之后原probe继续严格核验身份、UTC、关系及正文完整性/前缀，等待成功不等于采集成功。
 
 1. `await xMonDriver.page(xMonTab,xMonCycle,"main")`；仅 ok=true,done=false 时下一次仍调用相同方法，省略第四参数。驱动按 mainPages 自动判断首屏/续页；不手工写 true/false。`action=main_permalink_details` 表示发现已冻结，后续同一 page 调用自动核验最多两条主帖全文，不再滚动搜索。驱动只对作者自己的可见“显示更多”补读规范原帖；必要时点击已核验目标唯一展开控件并在同一 15 秒预算内重读。身份、UTC、引用/媒体标志与预览前缀必须一致；仍截断不能分析或入账。done=true 后按上下文契约执行 draftStream(main) → 只读 context-plan → applyContextPlan → quoteBatch(main) 至 done=true，再一次 rawStream(main) 并原样提交。
 2. 新回复直接进入下一项 Latest 搜索，不访问 with_replies，不调用旧回复主页前置步骤。

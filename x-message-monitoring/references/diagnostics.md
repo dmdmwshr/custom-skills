@@ -1,5 +1,7 @@
 # 授权维护诊断（普通 heartbeat 不加载）
 
+3.0.27真实展开失败已回传唯一父帖、单控件、可用视口内几何，以及click和snapshot_refresh之后的expanded_text_readiness/detached。3.0.28只更换该等待的定位对象，正文/身份接受条件不变。后续失败在清理前回传本次方法已有的有界expander_evidence、probe_evidence等对象，不追加DOM读取、不恢复失败页。所有浏览器方法直接输出回执，避免动作完成后未声明变量遮蔽结果；首次HTML拒绝仍按下一段仅检查本次实际提交对象。
+
 3.0.27维护验收仅在首次入口raw_html_rejected后，对本次实际提交且仍在内存的XCollectedStreamV1信封调用一次diagnosePayloadText(rejectedEnvelope)。它只检查原对象内存，不再次读取DOM、调用入口、draft/raw或改写正文。使用入口同一标记正则，最多4096节点、200万字符、四个命中；只返回已验证身份、固定字段类别、长度/位置、标记类别、最多32字符标签名及属性存在等布尔值。不返回括号片段、属性值、正文、HTML、存储或任意字段名；原拒绝与冻结条件保持，元数据不进入失败payload/timings，清理后不恢复失败对象。未命中或截短如实回报，不据此判定原错误不存在。
 
 3.0.25实际首个拒绝为container_not_rendered、box_visible=true、visibility_api_available=false，说明新增原生接口未被控制层提供，不能据css_visible=false判定实际隐藏。3.0.26使用快速路径中的有界祖先样式兼容；同次维护诊断可附固定visibility_protocol、最多32的style_nodes_checked和容器nodeType/tagName/childNodes、图片complete/naturalWidth/currentSrc类型存在布尔值，不含实际属性内容/任意样式/异常原文。仍只用全新最多四页搜索定位，首错停止；普通周期不含该对象，正式业务另起周期。
