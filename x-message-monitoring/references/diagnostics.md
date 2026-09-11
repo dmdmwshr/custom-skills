@@ -1,5 +1,7 @@
 # 授权维护诊断（普通 heartbeat 不加载）
 
+3.0.27维护验收仅在首次入口raw_html_rejected后，对本次实际提交且仍在内存的XCollectedStreamV1信封调用一次diagnosePayloadText(rejectedEnvelope)。它只检查原对象内存，不再次读取DOM、调用入口、draft/raw或改写正文。使用入口同一标记正则，最多4096节点、200万字符、四个命中；只返回已验证身份、固定字段类别、长度/位置、标记类别、最多32字符标签名及属性存在等布尔值。不返回括号片段、属性值、正文、HTML、存储或任意字段名；原拒绝与冻结条件保持，元数据不进入失败payload/timings，清理后不恢复失败对象。未命中或截短如实回报，不据此判定原错误不存在。
+
 3.0.25实际首个拒绝为container_not_rendered、box_visible=true、visibility_api_available=false，说明新增原生接口未被控制层提供，不能据css_visible=false判定实际隐藏。3.0.26使用快速路径中的有界祖先样式兼容；同次维护诊断可附固定visibility_protocol、最多32的style_nodes_checked和容器nodeType/tagName/childNodes、图片complete/naturalWidth/currentSrc类型存在布尔值，不含实际属性内容/任意样式/异常原文。仍只用全新最多四页搜索定位，首错停止；普通周期不含该对象，正式业务另起周期。
 
 3.0.25仅在DiagnosticCycle的同次空正文失败中附standalone_emoji_evidence：固定failure_gate、容器/图片/正文树render_stage、box_visible/visibility_api_available/css_visible布尔值及最多33的tree_nodes_checked（第33即超限）。这复用独立表情原接受检查，普通周期没有该对象；不返回alt、正文、实际currentSrc、任意节点名、HTML或存储，不额外读页或放宽接受条件。原固定任务仅一次全新最多四页search诊断，首错停止，关闭自有标签和清理动态事实；无lease/冻结/入账/发送，不接续3.0.24失败流。正式验收另起新周期。
