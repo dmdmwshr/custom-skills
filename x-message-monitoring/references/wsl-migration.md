@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## Linux 接替授权（步骤 WSL-2026-09-11.4，当前优先）
+## Linux 接替授权（步骤 WSL-2026-09-11.5，当前优先）
 
 用户已批准一次 Linux 固定会话接替：保留原业务账本、每小时计划、Luna/max、飞书目标及规则，Windows 旧聊天归档保留。通过正常产品工具创建并初始化唯一 Linux 固定会话，随后绑定暂停的 heartbeat；不伪造 MCP 调用元数据或修改 Codex 数据库。旧宿主的同 ID 转移、禁止新会话和 CUA-only 限制不再适用于这次已授权接替。迁移后仍只有一个活动固定会话及一个扫描计划；维护任务不代替它扫描。
 
@@ -25,6 +25,14 @@ Chrome 扩展在唯一固定任务的 CUA 宿主运行；按当前工具文档�
 扩展控制恢复可单独维护，但实例、扩展连接和页面控制分别验收。`start_managed_browser.py --browser chrome` 只证明 Linux 实例元数据，不能当作扩展成功；不得回退 Windows 或在失败轮切浏览器。
 
 若工具日志证明产品会话浏览器路由缺失，可通过正常产品入口打开精确固定任务并回读路由登记；不伪造路由元数据或修改Codex内部数据库。只有环境实际变更后才做一次新的恢复验收。超时没有标签ID时不能猜归属或宣称已关闭，保持未确认状态并停止扫描。
+
+## 配对导入全生命周期门禁
+
+生产 driver 必须从同发布 `scripts/linux_guarded_runtime.js` 1.0.0 的 `launch({spawn,createDriver,createClient})` 返回对象绑定为 xMonDriver/xMonStdin。原样源码可提前读取；工厂回调同步实例化，不提前保留裸实例、不启动浏览器或执行业务。先取得官方 paired-import 共享锁才创建驱动/客户端，锁连续覆盖准备、CUA动作、空闲间隔、两阶段finish、标签/在途及kept清理；不能只包一次启动检查或每个Python动作。固定CLI也在打开正式库前持同一共享锁到close，五项sendKept保持。
+
+持锁子进程不扫描、不接收正文/lease、不打开SQLite。它在 `/var/lib/cc-connect-operations/migration/x-driver-active.json` 写入无业务内容的运行标记；EOF/异常/坏帧留下标记，中枢导入/回滚必须拒绝，不能自动过期、删除或重开。只有真实两阶段finish、自有标签关闭、在途零、clearKept均已确认，才调用 runtime.close({twoPhaseFinished:true,ownedTabsClosed:true,inflightZero:true,keptCleared:true})；不得猜这些布尔值。运行时包装器另拒绝进行中关闭，正常握手才删除本轮原样标记并等待释放；关闭后driver/client全部失效。异常锁丢失立即停止，新运行前由主控核验静止，不用TTL当收口。
+
+具体候选选择与已验收范围见业务仓 `LINUX_STARTUP_GUARD.md` 和总台账。未完成迁库时，仅可按主控明确授权独立做无生产driver的空白连接/纯合成selfTest；不能借诊断绕过生产门禁。双方current须由主控切换到含守卫和未收口拒绝的候选，代码测试通过不等于正式owner已持锁。
 
 ## 每轮业务与清理
 
