@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## Linux 接替授权（步骤 WSL-2026-09-12.2，当前优先）
+## Linux 接替授权（步骤 WSL-2026-09-12.3，当前优先）
 
 用户已批准一次 Linux 固定会话接替：保留原业务账本、每小时计划、Luna/max、飞书目标及规则，Windows 旧聊天归档保留。通过正常产品工具创建并初始化唯一 Linux 固定会话，随后绑定暂停的 heartbeat；不伪造 MCP 调用元数据或修改 Codex 数据库。旧宿主的同 ID 转移、禁止新会话和 CUA-only 限制不再适用于这次已授权接替。迁移后仍只有一个活动固定会话及一个扫描计划；维护任务不代替它扫描。
 
@@ -49,6 +49,8 @@ Chrome 扩展在唯一固定任务的 CUA 宿主运行；按当前工具文档�
 两个源文件都是 IIFE 表达式，执行 driver 源码直接返回 API **对象**；执行 stdin 源码返回带 `createFixedStdinClient` 的对象，不能把结果再次当函数调用。锁前仅读取原样文本或编译 `vm.Script`；`createDriver` 回调内才执行 driver Script 并直接返回对象，`createClient` 回调内执行 client Script 后调用其 `createFixedStdinClient({spawn})`。只绑定 runtime 返回的包装实例，版本/指纹在持锁后核验；精确公开 Node 注入与模板见业务仓 `LINUX_STARTUP_GUARD.md` 的“原样源码的确切加载形态”，不得从变量名推断接口或复用锁前的裸 driver。
 
 运行回执一旦发送路径/哈希即保留原文件；发现漏报只读 health 等事实时，写独立更正回执说明字段变化、原哈希与新证据，不覆盖已发送文件。当前状态索引可更新，但不能用索引的新时间刷新原控制/selfTest成功或隐藏失败。
+
+正式账本的常规诊断使用原 fixed health；需要扩展只读核验时沿用官方 startup_guard，并复用原 `SQLiteStore(read_only=True)` 已通过静止签名检查的连接，不自行用裸 `mode=ro` 打开 WAL 库。只读连接也可能在退出后留下空 WAL/SHM，不能据此放宽原 health 或把它误报为浏览器故障。已经出现且独立确认无连接、owner idle、heartbeat 暂停及无运行 marker 时，可按明确维护授权使用业务仓已审计 `close_empty_wal_reader.py` 的空 WAL 正常关闭方法；它拒绝非空 WAL/活动锁/待收口，原生 rw/query_only 正常 close 后比对全表摘要并要求原 health 通过，无可写 Store 初始化、显式 checkpoint、手删旁车或业务行写入。此入口不是定时 health 的自动回退或重试，候选维护不切换生产 current。
 
 ## 每轮业务与清理
 
