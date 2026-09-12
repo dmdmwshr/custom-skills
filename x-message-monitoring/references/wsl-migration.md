@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## Linux 接替授权（步骤 WSL-2026-09-12.3，当前优先）
+## Linux 接替授权（步骤 WSL-2026-09-12.4，当前优先）
 
 用户已批准一次 Linux 固定会话接替：保留原业务账本、每小时计划、Luna/max、飞书目标及规则，Windows 旧聊天归档保留。通过正常产品工具创建并初始化唯一 Linux 固定会话，随后绑定暂停的 heartbeat；不伪造 MCP 调用元数据或修改 Codex 数据库。旧宿主的同 ID 转移、禁止新会话和 CUA-only 限制不再适用于这次已授权接替。迁移后仍只有一个活动固定会话及一个扫描计划；维护任务不代替它扫描。
 
@@ -21,6 +21,12 @@
 - 用户现已选择 Linux 日常 Chrome 现有 Default 个人资料；当前配置 `/etc/x-monitor/browser.json` 的后端为 `chrome_extension`，browser=chrome、user_data_dir=/root/.config/google-chrome、profile_directory=Default。配置选择器 `scripts/linux_browser_config.js` 1.0.0 在 acquire 前只读加载并冻结；不启动浏览器、不读取个人资料内容。使用原扩展来源 `desktop_chrome_extension`，不能冒称原生 Playwright 来源。
 - 旧 `playwright_linux` 专用配置及 `/var/lib/x-monitor-browser/profile` 保留停用。当前不调用其 launch，不复制 Cookie，不将 Playwright 指向日常 Chrome 目录，不因扩展故障自动恢复备用后端。原生启动器明确拒绝扩展配置和日常目录；两种后端都不新增独立扫描者。
 - 固定后端在 acquire 前读取并加载；轮内不切换。保留本页15秒、单次40秒、回复八导航、20分钟租约和双流独立提交。原驱动所有严格身份、UTC、正文、引用和停止条件保持；页面适配只转换 API/timeout。只允许原驱动两个已审 DOM reader；AX 刷新文本不输出，超时未知关闭自有运行时，不重放失败页。
+
+## 三种身份不可互换
+
+Chrome 的 Google 资料身份 `dmdmwshr@gmail.com` 只用于选定已授权的 Default；本机已用可见账号切换按钮及个人资料链接核验的 **X 登录 handle 为 `dmdmws`**，即 `createCycle.authenticatedAccount`。被监控作者则来自本轮 acquire/health 的账号（当前 `thsottiaux`），即 `createCycle.account`。不要将 `dmdmwshr`、Google 邮箱或被监控作者填进 authenticatedAccount；Windows 快速路径中原有 `dmdmws` 并未因选择 Linux Google 资料而改名。初始化 cycle 前在纯内存核对三者用途，保持严格身份校验；真正的可见登录身份变化需要新证据，不猜值绕过。
+
+heartbeat 为 PAUSED 只停止定时调度，不撤销主控已经明确放行的人工双流/合格新通知。依据唯一 handoff 顶部的最新授权及实际回执判断阶段，不能把历史初始化“禁止扫描”重新当作当前停止指令；已收口的失败轮另起新 lease/cycle，不重开原轮。
 
 ## 静态准备与浏览器控制
 
