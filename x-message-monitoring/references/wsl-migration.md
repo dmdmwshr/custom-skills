@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## Linux 接替授权（步骤 WSL-2026-09-12.1，当前优先）
+## Linux 接替授权（步骤 WSL-2026-09-12.2，当前优先）
 
 用户已批准一次 Linux 固定会话接替：保留原业务账本、每小时计划、Luna/max、飞书目标及规则，Windows 旧聊天归档保留。通过正常产品工具创建并初始化唯一 Linux 固定会话，随后绑定暂停的 heartbeat；不伪造 MCP 调用元数据或修改 Codex 数据库。旧宿主的同 ID 转移、禁止新会话和 CUA-only 限制不再适用于这次已授权接替。迁移后仍只有一个活动固定会话及一个扫描计划；维护任务不代替它扫描。
 
@@ -45,6 +45,10 @@ Chrome 扩展在唯一固定任务的 CUA 宿主运行；按当前工具文档�
 持锁子进程不扫描、不接收正文/lease、不打开SQLite。它在 `/var/lib/cc-connect-operations/migration/x-driver-active.json` 写入无业务内容的运行标记；EOF/异常/坏帧留下标记，中枢导入/回滚必须拒绝，不能自动过期、删除或重开。只有真实两阶段finish、自有标签关闭、在途零、clearKept均已确认，才调用 runtime.close({twoPhaseFinished:true,ownedTabsClosed:true,inflightZero:true,keptCleared:true})；不得猜这些布尔值。运行时包装器另拒绝进行中关闭，正常握手才删除本轮原样标记并等待释放；关闭后driver/client全部失效。异常锁丢失立即停止，新运行前由主控核验静止，不用TTL当收口。
 
 具体候选选择与已验收范围见业务仓 `LINUX_STARTUP_GUARD.md` 和总台账。未完成迁库时，仅可按主控明确授权独立做无生产driver的空白连接/纯合成selfTest；不能借诊断绕过生产门禁。双方current须由主控切换到含守卫和未收口拒绝的候选，代码测试通过不等于正式owner已持锁。
+
+两个源文件都是 IIFE 表达式，执行 driver 源码直接返回 API **对象**；执行 stdin 源码返回带 `createFixedStdinClient` 的对象，不能把结果再次当函数调用。锁前仅读取原样文本或编译 `vm.Script`；`createDriver` 回调内才执行 driver Script 并直接返回对象，`createClient` 回调内执行 client Script 后调用其 `createFixedStdinClient({spawn})`。只绑定 runtime 返回的包装实例，版本/指纹在持锁后核验；精确公开 Node 注入与模板见业务仓 `LINUX_STARTUP_GUARD.md` 的“原样源码的确切加载形态”，不得从变量名推断接口或复用锁前的裸 driver。
+
+运行回执一旦发送路径/哈希即保留原文件；发现漏报只读 health 等事实时，写独立更正回执说明字段变化、原哈希与新证据，不覆盖已发送文件。当前状态索引可更新，但不能用索引的新时间刷新原控制/selfTest成功或隐藏失败。
 
 ## 每轮业务与清理
 
