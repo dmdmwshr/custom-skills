@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## Linux 接替授权（步骤 WSL-2026-09-12.9，当前优先）
+## Linux 接替授权（步骤 WSL-2026-09-12.10，当前优先）
 
 用户已批准一次 Linux 固定会话接替：保留原业务账本、每小时计划、Luna/max、飞书目标及规则，Windows 旧聊天归档保留。通过正常产品工具创建并初始化唯一 Linux 固定会话，随后绑定暂停的 heartbeat；不伪造 MCP 调用元数据或修改 Codex 数据库。旧宿主的同 ID 转移、禁止新会话和 CUA-only 限制不再适用于这次已授权接替。迁移后仍只有一个活动固定会话及一个扫描计划；维护任务不代替它扫描。
 
@@ -52,7 +52,7 @@ Linux socket 不可见或侧栏报 `Native transport disconnected` 时，按诊�
 
 ## 配对导入全生命周期门禁
 
-生产 driver 必须从同发布 `scripts/linux_guarded_runtime.js` 的 `launch({spawn,createDriver,createClient})` 返回对象绑定为 xMonDriver/xMonStdin。原样源码可提前读取；工厂回调同步实例化，不提前保留裸实例、不启动浏览器或执行业务。先取得官方 paired-import 共享锁才创建驱动/客户端，锁连续覆盖准备、CUA动作、空闲间隔、两阶段finish、标签/在途及kept清理；不能只包一次启动检查或每个Python动作。固定CLI也在打开正式库前持同一共享锁到close，五项sendKept保持。
+生产 driver 必须从同发布 `scripts/linux_guarded_runtime.js` 返回对象绑定为 xMonDriver/xMonStdin。含同宿主控制的新发布另传 `createControl` 并只使用返回的 `runtime.control`，精确模板见业务仓 `LINUX_STARTUP_GUARD.md`；候选须经原中枢升级通道接受后才能启用。原样源码可提前读取；工厂回调同步实例化，不提前保留裸实例、不启动浏览器或执行业务。先取得官方 paired-import 共享锁才创建驱动/客户端，锁连续覆盖准备、CUA动作、空闲间隔、两阶段finish、标签/在途及kept清理；不能只包一次启动检查或每个Python动作。固定CLI也在打开正式库前持同一共享锁到close，五项sendKept保持。
 
 持锁子进程不扫描、不接收正文/lease、不打开SQLite。它在 `/var/lib/cc-connect-operations/migration/x-driver-active.json` 写入无业务内容的运行标记；EOF/异常/坏帧留下标记，中枢导入/回滚必须拒绝，不能自动过期、删除或重开。只有真实两阶段finish、自有标签关闭、在途零、clearKept均已确认，才调用 runtime.close({twoPhaseFinished:true,ownedTabsClosed:true,inflightZero:true,keptCleared:true})；不得猜这些布尔值。运行时包装器另拒绝进行中关闭，正常握手才删除本轮原样标记并等待释放；关闭后driver/client全部失效。异常锁丢失立即停止，新运行前由主控核验静止，不用TTL当收口。
 
@@ -70,9 +70,13 @@ CUA 的 Node 全局不保证包含计时器。按该模板显式 `import('node:t
 
 acquire 前完整读取当前快速路径和上下文契约的业务部分；Windows路径替换为上述Linux发布入口，当前扩展仍在CUA宿主以真实desktop_chrome_extension来源运行。五项sendKept、内存载荷、语义筛选、fingerprint、草稿/冻结各一次、预检顺序与两阶段finish全部保持。
 
-lease仍只在functions与当前CUA宿主内存中传递，acquire同次保存原回执，后续控制从该对象取值；不输出凭证。浏览前证明两侧本轮值相等。公开事实不进入文件、临时正文、浏览器存储或普通日志。共同故障停两流，局部失败保留另一流处理；真实unknown不重试。当前扩展失败登记browser=chrome，采集遥测使用实际来源和驱动版本。
+当前直接CUA工具无法嵌入functions，不能假定存在跨宿主opaque传递，也不把lease写临时文件。已批准的新同宿主分支使用 `desktop_control_client.js`，只封装原固定Python的health/acquire/预检/失败/对账/finish等有限小型控制；五项业务sendKept与Python入口不变。候选未正式接受时不得先用旧functions acquire等待搬运凭证；旧轮只按其已有原lease收口，不能迁入新实例。
 
-两阶段finish、自有标签关闭、无在途子进程后，clearKept再清理lease与其他动态事实；静态工厂可复用。不关闭日常Chrome整体实例或其他profile/标签。只有真实完整成功且机器允许才输出DONT_NOTIFY，手动不计四轮摘要。
+新分支在当前CUA闭包执行唯一acquire并在返回前保存原回执，默认只输出元数据；用 `runtime.control.leaseReceipt()` 在同一VM初始化xMonLease，后续小型控制由闭包注入原lease，不接受调用者覆盖。这取代Linux旧快速路径“functions与CUA两侧保存/比对”的步骤；相等证明在同一VM核对xMonLease与该原回执，functions不再持有新轮凭证。首次health/acquire之前完成实际浏览器控制、登录和固定控制模块准备；每次仍只执行一个固定请求，预检明确成功后才生成draft/raw。原始控制结果通过kept(action)纯内存读取，未知不重试，finish仅一次并由原Python完成内部两阶段。
+
+公开事实与lease不进入文件、临时正文、浏览器存储或普通日志。共同故障停两流，局部失败保留另一流处理；真实unknown不重试。当前扩展失败登记browser=chrome，采集遥测使用实际来源和驱动版本。
+
+两阶段finish及本轮原health终态/双锁空闲/finish_pending=0核验后，自有标签关闭、无在途子进程，先clearKept再按真实证据clear控制闭包，最后清理外部lease/动态事实并正常close guard；control未清理时守卫拒绝关闭。没有有效lease的未知acquire只能经独立终态对账收口，不能以TTL代替。静态工厂可复用，已closed实例不复用。不关闭日常Chrome整体实例或其他profile/标签。只有真实完整成功且机器允许才输出DONT_NOTIFY，手动不计四轮摘要。
 
 ## 切换验收
 
