@@ -33,6 +33,8 @@
 5. 运行次数和等待上限沿用具体项目约定，不把某个项目的 8 秒或单次重取值写成所有浏览器的通用定律。结果不确定先回读自己启动的目标，不盲目再启动。
 6. 复用已有综合桌面恢复器前，核对它还可能启动哪些应用及本轮预期动作。dry-run/退出码不能证明目标已恢复；实际回读 restored 状态、逐应用 started/reused、真实显示会话、profile 和窗口。旁支仍运行时保持复用，不让 Chrome 维修隐式重启其他业务。
 
+Linux 原生宿主进程存在但 socket 路径不可见，或重新启用扩展后报 `Native transport disconnected` 时，对比浏览器与 Codex 的 `/proc/<pid>/ns/mnt`、`mountinfo`、经各自 `/proc/<pid>/root` 看到的临时目录及实际启动服务的 `PrivateTmp`。同名路径不保证是同一目录；短命恢复服务拉起长期 GUI 后退出，可能留下指向已删除私有 `/tmp` 的浏览器。此时从普通 shell 看不到 socket 不能直接归因为手动删除、插件损坏或未登录。修复负责启动 GUI 的服务契约；正常恢复原资料必须从正确桌面环境和命名空间启动，单纯 `chrome://restart` 可能继承原错误。现存用户窗口的退出与恢复按精确授权协调，不通过手建 socket 或修改浏览器存储掩盖问题；服务隔离调整只针对已证实不适用的启动器。
+
 本机 X 项目已有 `scripts/start_managed_browser.ps1 -Browser chrome|edge -CheckOnly`，输出正确根目录是否存在、其他根目录进程数和可读性结论；这是只读入口。正常启动仍受 X 项目的 Chrome 首选及 Edge 授权规则约束。该项目的 `tests/test_managed_browser_start_script.py` 已通过真实 Windows 子进程验证含空格参数完整传递、错误根目录不算成功、CheckOnly 不启动和信息不可读不冒充未运行。其他项目复用这一验证方法，不另复制一个漂移的启动器。
 
 依据：[Microsoft Start-Process 文档](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process?view=powershell-7.5)。
