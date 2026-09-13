@@ -1,0 +1,4 @@
+interface:
+  display_name: "WSL 备份巡检"
+  short_description: "只读核对 Ubuntu 周备份、固定任务、空间及中断恢复状态"
+  default_prompt: "使用 $wsl-backup-audit 只读检查 Ubuntu 周备份状态，并说明实际异常和需要处理的事项。"
