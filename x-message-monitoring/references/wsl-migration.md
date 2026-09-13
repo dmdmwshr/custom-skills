@@ -16,7 +16,7 @@
 
 ## 固定接口
 
-- 工作目录 `$HOME/workspaces/X-monitor`；代码不可变发布 `/srv/x-monitor/current`；正式账本始终 `/var/lib/x-monitor/x-monitor.sqlite3`，不存在时停止，不能建立空库代替迁移。中枢只读解析器使用同一 data-dir。
+- 新开发任务目录按 `$HOME/workspaces/X-monitor` 定位；既有固定 owner 保留其已登记 cwd，旧目录通过兼容链接解析到新目录，不能仅为统一显示改写固定会话或投递证明。代码不可变发布 `/srv/x-monitor/current`；正式账本始终 `/var/lib/x-monitor/x-monitor.sqlite3`，不存在时停止，不能建立空库代替迁移。中枢只读解析器使用同一 data-dir。
 - 驱动 `scripts/desktop_monitor_driver.js` 3.0.31；标准输入客户端 `scripts/desktop_stdin_client.js` 1.2.0；Python `/srv/x-monitor/current/.venv/bin/python`，固定控制入口同发布的 `scripts/fixed_session_entry.py`。均从同一发布原样加载并核对版本与指纹。
 - 用户现已选择 Linux 日常 Chrome 现有 Default 个人资料；当前配置 `/etc/x-monitor/browser.json` 的后端为 `chrome_extension`，browser=chrome、profile_directory=Default；user_data_dir 必须从该配置与实际 owning Chrome 用户核对，不从 root 等旧用户名推断或自动迁移个人资料。配置选择器 `scripts/linux_browser_config.js` 1.0.0 在 acquire 前只读加载并冻结；不启动浏览器、不读取个人资料内容。使用原扩展来源 `desktop_chrome_extension`，不能冒称原生 Playwright 来源。
 - 旧 `playwright_linux` 专用配置及 `/var/lib/x-monitor-browser/profile` 保留停用。当前不调用其 launch，不复制 Cookie，不将 Playwright 指向日常 Chrome 目录，不因扩展故障自动恢复备用后端。原生启动器明确拒绝扩展配置和日常目录；两种后端都不新增独立扫描者。
