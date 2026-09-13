@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,13 +15,24 @@ import threading
 import time
 
 sys.dont_write_bytecode = True
-from publish_wsl_skills import SKILLS, SOURCE
+from publish_wsl_skills import INSTALL, SKILLS, SOURCE
+
+
+def codex_executable() -> str:
+    local = Path.home() / '.local/bin/codex'
+    if local.is_file() and os.access(local, os.X_OK):
+        return str(local)
+    found = shutil.which('codex')
+    if found is None:
+        raise FileNotFoundError('native_codex_cli_not_found')
+    return found
 
 
 def verify(names: list[str], cwds: list[str]) -> dict:
     with tempfile.TemporaryFile() as stderr:
         process = subprocess.Popen(
-            ['/root/.local/bin/codex', 'app-server', '--stdio'], cwd=SOURCE,
+            [codex_executable(), 'app-server', '--stdio'], cwd=SOURCE,
+            env={**os.environ, 'CODEX_HOME': str(INSTALL.parent)},
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
             text=True, encoding='utf-8')
         inbox: queue.Queue = queue.Queue()
@@ -65,7 +78,7 @@ def verify(names: list[str], cwds: list[str]) -> dict:
                 found = []
                 for name in names:
                     matches = [s for s in entry['skills'] if s['name'] == name]
-                    expected = f'/root/.codex/skills/{name}/SKILL.md'
+                    expected = str(INSTALL / name / 'SKILL.md')
                     if len(matches) != 1 or matches[0].get('path') != expected or matches[0].get('enabled') is not True:
                         raise ValueError('skill_not_uniquely_enabled:' + name)
                     found.append({'name': name, 'path': expected, 'enabled': True})

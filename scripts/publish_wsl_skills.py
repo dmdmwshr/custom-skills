@@ -13,8 +13,15 @@ import subprocess
 import tempfile
 
 SOURCE = Path(__file__).resolve().parents[1]
-INSTALL = Path('/root/.codex/skills')
-RECORDS = Path('/root/Documents/work/host-baseline/skill-releases')
+
+
+def runtime_paths() -> tuple[Path, Path]:
+    """Resolve the current user's state; an explicit CODEX_HOME takes precedence."""
+    codex_home = Path(os.environ.get('CODEX_HOME') or str(Path.home() / '.codex')).expanduser().resolve()
+    return codex_home / 'skills', Path.home() / 'Documents/work/host-baseline/skill-releases'
+
+
+INSTALL, RECORDS = runtime_paths()
 SKILLS = ('cc-connect-collaboration', 'x-message-monitoring', 'codex-project-task-handoff',
           'codex-archive-retrospective', 'codex-local-state-diagnostics',
           'okxnew-backtest-operations', 'okxnew-data-operations')
@@ -75,7 +82,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.apply and args.verify:
         parser.error('choose apply or verify')
-    if SOURCE != Path('/root/workspaces/custom-skills') or INSTALL.resolve() != INSTALL:
+    if INSTALL.resolve() != INSTALL or SOURCE == INSTALL or SOURCE in INSTALL.parents or INSTALL in SOURCE.parents:
         raise ValueError('source_or_install_path_invalid')
     remote = subprocess.check_output(['git', '-C', str(SOURCE), 'remote', 'get-url', 'origin'], text=True, encoding='utf-8').strip()
     if remote not in {'https://github.com/dmdmwshr/custom-skills.git', 'git@github.com:dmdmwshr/custom-skills.git'}:

@@ -1,13 +1,34 @@
 """Exercise release gates against isolated real Git repositories and remotes."""
 from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from publish_wsl_skills import files, require_published_source, require_tracked_tree
+from publish_wsl_skills import files, require_published_source, require_tracked_tree, runtime_paths
+
+
+class RuntimePathTests(unittest.TestCase):
+    def test_current_home_is_used_when_codex_home_is_unset(self):
+        with tempfile.TemporaryDirectory(prefix='skill-home.', dir='/tmp') as directory:
+            with patch.dict(os.environ, {'HOME': directory}, clear=True):
+                install, records = runtime_paths()
+            self.assertEqual(install, Path(directory) / '.codex/skills')
+            self.assertEqual(records, Path(directory) / 'Documents/work/host-baseline/skill-releases')
+
+    def test_explicit_state_and_legacy_alias_resolve_to_one_installation(self):
+        with tempfile.TemporaryDirectory(prefix='skill-home.', dir='/tmp') as directory:
+            root = Path(directory)
+            (root / 'active').mkdir()
+            (root / 'legacy').symlink_to(root / 'active', target_is_directory=True)
+            with patch.dict(os.environ, {'HOME': directory, 'CODEX_HOME': str(root / 'legacy')}, clear=True):
+                install, records = runtime_paths()
+            self.assertEqual(install, root / 'active/skills')
+            self.assertEqual(records, root / 'Documents/work/host-baseline/skill-releases')
 
 
 class PublishedSourceTests(unittest.TestCase):

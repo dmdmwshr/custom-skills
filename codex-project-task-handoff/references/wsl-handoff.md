@@ -1,19 +1,19 @@
 # WSL 项目接力
 
-适用于 Ubuntu-24.04 WSL。先遵循当前全局及项目规则；以下路径约定不改变其他主机的工作方式。
+适用于 Ubuntu-24.04 WSL。先遵循当前全局及项目规则；以下路径先用目标进程 HOME、CODEX_HOME 与 realpath 解析，不能从旧用户名推断；兼容链接不代表另一个项目。路径约定不改变其他主机的工作方式。
 
 ## 路径、工具与编码
 
-- 本机活动状态为 `/root/.codex`，规则入口为 `/root/.codex/AGENTS.md`；存在 override 时核对覆盖。不得链接或覆盖 Windows 的认证、配置、数据库和会话历史。
-- 代码根为 `/root/workspaces/<project>`；保留已有层级，用 `realpath` 和 `git rev-parse --show-toplevel` 确认实际根。交接文件使用项目规则指定的唯一入口，未指定才使用 `PROJECT_HANDOFF.md`。不因非 Git 资料目录而初始化 Git。
+- 本机活动状态为 `${CODEX_HOME:-$HOME/.codex}`，规则入口为 `${CODEX_HOME:-$HOME/.codex}/AGENTS.md`；存在 override 时核对覆盖。不得链接或覆盖 Windows 的认证、配置、数据库和会话历史。
+- 代码根为 `$HOME/workspaces/<project>`；保留已有层级，用 `realpath` 和 `git rev-parse --show-toplevel` 确认实际根。交接文件使用项目规则指定的唯一入口，未指定才使用 `PROJECT_HANDOFF.md`。不因非 Git 资料目录而初始化 Git。
 - 写入前核对目标用途及真实路径。Windows 挂载盘 `/mnt/*` 仅按任务范围只读引用，接力不得自动迁移项目、改宿主机配置或重绑远程主机。
-- 使用本机 Git；纯标准库验证器用 `python3 /root/.codex/skills/codex-project-task-handoff/scripts/validate_handoff_state.py ...`。它不安装依赖。项目测试仍遵循项目已声明的 uv、虚拟环境及锁文件。
+- 使用本机 Git；纯标准库验证器用 `python3 ${CODEX_HOME:-$HOME/.codex}/skills/codex-project-task-handoff/scripts/validate_handoff_state.py ...`。它不安装依赖。项目测试仍遵循项目已声明的 uv、虚拟环境及锁文件。
 - 文档显式按 UTF-8 读写。后继检出使用精确字节 SHA-256，CRLF/LF 辅助指纹不能替代它。
 - 提交前回读 Git 生效身份、暂存差异及忽略状态；推送前核对既有远端和分支。接力不授权修改 Git/SSH 全局配置、强推或提交用户未知改动。
 
 ## 项目外冻结回执
 
-项目内长期只保留唯一交接文档。每次运行的冻结回执放在 `/root/Documents/work/tasks/<YYYY-MM-DD>-项目接力-<项目名>/work/`；重名任务目录追加短编号。回执只包含定位、哈希、核验结果和精确关闭必需的任务身份，不复制交接正文，不成为第二份活动交接文档。目录权限设为 0700，含完整任务身份的回执设为 0600。
+项目内长期只保留唯一交接文档。每次运行的冻结回执放在 `$HOME/Documents/work/tasks/<YYYY-MM-DD>-项目接力-<项目名>/work/`；重名任务目录追加短编号。回执只包含定位、哈希、核验结果和精确关闭必需的任务身份，不复制交接正文，不成为第二份活动交接文档。目录权限设为 0700，含完整任务身份的回执设为 0600。
 
 在创建后继任务前确认它能在同一 WSL 主机读取回执路径；否则仅通过受支持的任务初始提示传递精简启动包。项目外回执不进入 Git、公开输出或普通日志。冻结后如发现原任务或后台写入导致漂移，保留源任务并报告阻塞。
 
