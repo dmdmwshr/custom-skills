@@ -1,10 +1,16 @@
 # WSL 唯一固定会话与运行接口
 
-## Linux 接替授权（步骤 WSL-2026-09-12.10，当前优先）
+## 当前目录与恢复边界（步骤 WSL-2026-09-14.1）
+
+本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
+
+新鲜状态只读业务仓的 `PROJECT_HANDOFF.md` 与 `LINUX_FIXED_SESSION.md`；已接受的运行版本/指纹以实际current及其manifest为准。本页历史迁移授权不允许再次创建接替者、导入账本或恢复旧后端。源码与离线维护归开发任务，真实浏览器与周期归原owner，cc仅direct_feishu出站且入站silent_drop。
+
+## 历史：一次 Linux 接替授权（2026-09-12）
 
 用户已批准一次 Linux 固定会话接替：保留原业务账本、每小时计划、Luna/max、飞书目标及规则，Windows 旧聊天归档保留。通过正常产品工具创建并初始化唯一 Linux 固定会话，随后绑定暂停的 heartbeat；不伪造 MCP 调用元数据或修改 Codex 数据库。旧宿主的同 ID 转移、禁止新会话和 CUA-only 限制不再适用于这次已授权接替。迁移后仍只有一个活动固定会话及一个扫描计划；维护任务不代替它扫描。
 
-实际归属和当前准备/激活状态读取业务仓 `${CODEX_PROJECTS_ROOT:-$HOME/workspaces}/X-monitor/LINUX_FIXED_SESSION.md` 与受限迁移回执；不得从标题推定已上线。源仓 `${CODEX_PROJECTS_ROOT:-$HOME/workspaces}/custom-skills`，受管发布须已提交、与实时远端一致、按发布器安装并在新进程验证发现。安装不能代替业务验收。
+历史归属读取当时受限迁移回执；当前业务仓和custom-skills源仓按公共路径配置解析，不沿用旧HOME猜测。受管发布须已提交、与实时远端一致、按发布器安装并在新进程验证发现；安装不能代替业务验收。
 
 ## 主动维护与恢复推进
 
@@ -16,9 +22,9 @@
 
 ## 固定接口
 
-- 新开发任务目录按 `${CODEX_PROJECTS_ROOT:-$HOME/workspaces}/X-monitor` 定位；既有固定 owner 保留其已登记 cwd，旧目录通过兼容链接解析到新目录，不能仅为统一显示改写固定会话或投递证明。代码不可变发布 `/srv/x-monitor/current`；正式账本始终 `/var/lib/x-monitor/x-monitor.sqlite3`，不存在时停止，不能建立空库代替迁移。中枢只读解析器使用同一 data-dir。
+- 开发任务按公共配置定位X源码；原owner的持久cwd与中枢受审Desktop登记分别回读，不依赖旧目录链接。代码不可变发布 `/srv/x-monitor/current`；正式账本始终 `/var/lib/x-monitor/x-monitor.sqlite3`，不存在时停止，不能建立空库代替迁移。中枢只读解析器使用同一 data-dir。
 - 驱动 `scripts/desktop_monitor_driver.js` 3.0.31；标准输入客户端 `scripts/desktop_stdin_client.js` 1.2.0；Python `/srv/x-monitor/current/.venv/bin/python`，固定控制入口同发布的 `scripts/fixed_session_entry.py`。均从同一发布原样加载并核对版本与指纹。
-- 用户现已选择 Linux 日常 Chrome 现有 Default 个人资料；当前配置 `/etc/x-monitor/browser.json` 的后端为 `chrome_extension`，browser=chrome、profile_directory=Default；user_data_dir 必须从该配置与实际 owning Chrome 用户核对，不从 root 等旧用户名推断或自动迁移个人资料。配置选择器 `scripts/linux_browser_config.js` 1.0.0 在 acquire 前只读加载并冻结；不启动浏览器、不读取个人资料内容。使用原扩展来源 `desktop_chrome_extension`，不能冒称原生 Playwright 来源。
+- 用户现已选择 Linux 日常 Chrome 现有 Default 个人资料；当前配置 `/etc/x-monitor/browser.json` 的后端为 `chrome_extension`，browser=chrome、profile_directory=Default；user_data_dir 必须从该配置与实际 owning Chrome 用户核对，不从 root 等旧用户名推断或自动迁移个人资料。配置选择器 `scripts/linux_browser_config.js` 在 acquire 前按当前发布版本只读加载并冻结；不启动浏览器、不读取个人资料内容。使用原扩展来源 `desktop_chrome_extension`，不能冒称原生 Playwright 来源。
 - 旧 `playwright_linux` 专用配置及 `/var/lib/x-monitor-browser/profile` 保留停用。当前不调用其 launch，不复制 Cookie，不将 Playwright 指向日常 Chrome 目录，不因扩展故障自动恢复备用后端。原生启动器明确拒绝扩展配置和日常目录；两种后端都不新增独立扫描者。
 - 固定后端在 acquire 前读取并加载；轮内不切换。保留本页15秒、单次40秒、回复八导航、20分钟租约和双流独立提交。原驱动所有严格身份、UTC、正文、引用和停止条件保持；页面适配只转换 API/timeout。只允许原驱动两个已审 DOM reader；AX 刷新文本不输出，超时未知关闭自有运行时，不重放失败页。
 
@@ -56,7 +62,7 @@ Linux socket 不可见或侧栏报 `Native transport disconnected` 时，按诊�
 
 持锁子进程不扫描、不接收正文/lease、不打开SQLite。它在 `/var/lib/cc-connect-operations/migration/x-driver-active.json` 写入无业务内容的运行标记；EOF/异常/坏帧留下标记，中枢导入/回滚必须拒绝，不能自动过期、删除或重开。只有真实两阶段finish、自有标签关闭、在途零、clearKept均已确认，才调用 runtime.close({twoPhaseFinished:true,ownedTabsClosed:true,inflightZero:true,keptCleared:true})；不得猜这些布尔值。运行时包装器另拒绝进行中关闭，正常握手才删除本轮原样标记并等待释放；关闭后driver/client全部失效。异常锁丢失立即停止，新运行前由主控核验静止，不用TTL当收口。
 
-具体候选选择与已验收范围见业务仓 `LINUX_STARTUP_GUARD.md` 和总台账。未完成迁库时，仅可按主控明确授权独立做无生产driver的空白连接/纯合成selfTest；不能借诊断绕过生产门禁。双方current须由主控切换到含守卫和未收口拒绝的候选，代码测试通过不等于正式owner已持锁。
+具体发布选择与已验收范围见业务仓 `LINUX_STARTUP_GUARD.md` 和唯一交接。已接受guard1.0.3的 preparationOnly 关闭仅适用于从未尝试业务方法的静态准备窗口；按该文档核验同CUA自检、原health、control.clear、无在途与真实清理证据，再正常关闭。不能为收口而acquire或伪造twoPhaseFinished，未知自检和已开始业务不适用；不在Skill复制另一套关闭参数。未完成迁库的历史阶段仅可按明确授权独立做空白控制/合成自检，不能据此绕过当前配对门禁。
 
 两个源文件都是 IIFE 表达式，执行 driver 源码直接返回 API **对象**；执行 stdin 源码返回带 `createFixedStdinClient` 的对象，不能把结果再次当函数调用。锁前仅读取原样文本或编译 `vm.Script`；`createDriver` 回调内才执行 driver Script 并直接返回对象，`createClient` 回调内执行 client Script 后调用其 `createFixedStdinClient({spawn})`。只绑定 runtime 返回的包装实例，版本/指纹在持锁后核验；精确公开 Node 注入与模板见业务仓 `LINUX_STARTUP_GUARD.md` 的“原样源码的确切加载形态”，不得从变量名推断接口或复用锁前的裸 driver。
 
@@ -86,7 +92,9 @@ acquire 前完整读取当前快速路径和上下文契约的业务部分；Win
 
 回读新 owner 主机、模型、heartbeat 暂停、旧任务停止、数据库完整性/记录数/水位/状态及路由证明后，才授权唯一固定会话真实宿主自检和人工双流验收。首轮成功后两次全新复扫，全部通过才启用每小时 heartbeat，随后验收四个真实定时周期；四周期不能倒置为首次启用的前提，手动轮次不充数。传输接受与送达分别记录；无新合格通知时不制造消息，送达保持待验证。Linux 写入后回退先停写对账，不能直接恢复旧快照。
 
-飞书投递修复复用中枢既有 `direct_feishu` 连接、私有目标和幂等关系。中枢负责凭据/权限/发布状态及精确 X 路由激活，X 负责新事实和投递回执；浏览器故障不阻断中枢只读准备，但不因此提前派发 X。只有 API 与受限配置不能提供必需信息时，才让唯一 owner 按已授权的精确飞书管理页面核验必要字段或完成配置操作；不读取聊天历史、Cookie 或登录令牌来构造旁路。网页已登录、平台接受发送和确认送达各自验收，未知投递仍只对账、不重发。
+飞书投递修复复用中枢既有 `direct_feishu` 连接、私有目标和幂等关系。中枢负责凭据/权限/发布状态及精确 X 路由激活，X 负责新事实和投递回执；浏览器故障不阻断中枢只读准备，但不因此提前派发 X。平台通用操作按已安装的feishu-operations规范，X唯一owner和本次外发授权仍优先；只有API与受限配置不能提供必需信息时，才让原owner核验已授权的精确管理页面，不扩展为其他聊天或应用操作。
+
+用户专项授权的X通知可由原owner在本次自有飞书标签只读核对唯一原目标、时间和内容，不要求先有transport_accepted，不要求用户手动确认收件。目标不唯一则停止，不通过UI发送/重发，不读Cookie/令牌或无关历史。网页已登录、机器平台消息回读、网页可见与用户本人已读分别记录；观察结果不伪写机器送达。维护通知不计X采集/水位/周期；过期验收是否可替换严格按本次项目授权和受审维护入口，不把条件替换推广到普通业务或历史未知消息。
 
 
 投递解析故障先区分中枢注册、解析子进程、平台发送和可见回执。`pre_send_source_resolver_failed` 本身不证明权限错误或已经发送；用原key/route/代次仅GET对账，并核对实际服务namespace的文件系统与发布入口，不能因root账号就假设可写。修复后的X `resolve-delivery` 使用专用只读快照，保持原成功schema/正文哈希和5秒中枢子进程上限；空闲库原静止签名、有WAL原生只读事务，缺库/缺迁移标记继续拒绝。resolver不得初始化/恢复业务行或要求扩大中枢X目录写权限。Linux读者与writer关闭在现有DB inode上协调，保持原health/关闭期限；遗留旁车仍是失败门禁，不能自动维护、删除或重发dead-letter。实际是否已部署须回读current，不能把候选或Skill更新当上线证据。
