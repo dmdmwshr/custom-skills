@@ -66,8 +66,12 @@ def resolve(explicit_url: str | None = None, explicit_config: str | None = None)
     archive_root = Path(os.environ.get("MEMORY_ARCHIVE_ROOT") or config.get("archive_root") or codex_home / "archived_sessions").expanduser()
     if not project_root.is_absolute() or not archive_root.is_absolute() or archive_root.name != "archived_sessions":
         raise ValueError("项目根与归档根须为绝对路径，归档根须为 archived_sessions；不读取活跃会话。")
+    try:
+        local_service = ipaddress.ip_address(parts.hostname).is_loopback
+    except ValueError:
+        local_service = parts.hostname.lower() == "localhost"
     return {"api_url": urlunsplit((parts.scheme, parts.netloc, api_path, "", "")),
-        "platform": host, "source_id": os.environ.get("MEMORY_SOURCE_ID") or config.get("source_id") or ("windows-local" if host == "windows" else None),
+        "platform": host, "source_id": os.environ.get("MEMORY_SOURCE_ID") or config.get("source_id") or ("windows-local" if host == "windows" and local_service else None),
         "project_root": str(project_root), "archive_root": str(archive_root),
         "instance_id": config.get("instance_id"), "use_proxy": bool(config.get("use_proxy", False)),
         "config_file": str(path)}

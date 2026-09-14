@@ -52,6 +52,17 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(query.method, "GET")
         self.assertEqual(query.query["source_id"], "wsl-fixture")
 
+    def test_remote_windows_service_requires_callers_source_identity(self):
+        self.config.write_text("{}", encoding="utf-8")
+        with patch.dict(os.environ, {}, clear=True), patch.object(memory_config, "execution_platform", return_value="windows"):
+            local = memory_config.resolve("http://127.0.0.1:5175", str(self.config))
+            self.assertEqual(memory_config.select_source(None, local, mutation=True), "windows-local")
+            for url in ("http://192.168.1.2:5175", "https://memory.example"):
+                remote = memory_config.resolve(url, str(self.config))
+                self.assertIsNone(memory_config.select_source(None, remote))
+                with self.assertRaises(ValueError):
+                    memory_config.select_source(None, remote, mutation=True)
+
     def test_explicit_platform_mismatch_and_credentials_are_rejected(self):
         self.config.write_text(json.dumps({"platform": "wsl"}), encoding="utf-8")
         with patch.object(memory_config, "execution_platform", return_value="windows"):
