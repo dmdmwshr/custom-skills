@@ -14,7 +14,7 @@ metadata:
 
 ## 固定入口
 
-项目位于 `%USERPROFILE%\Desktop\项目开发\wsl-backup`。使用项目解释器 `.venv\Scripts\python.exe`，加 `-X utf8 -B` 运行 `scripts\audit.py`，工作目录为该项目。该检查器只读取 Windows 任务、文件及小型运行记录，输出精简检查结果；不调用 WSL、不写入日志、不完整读取大磁盘。
+项目位于 `%USERPROFILE%\Desktop\项目开发\wsl维护\backup`。统一维护入口为上级 `wsl维护` 项目，网络维护位于其 `wifi` 子目录。使用备份项目解释器 `.venv\Scripts\python.exe`，加 `-X utf8 -B` 运行 `scripts\audit.py`，工作目录为备份项目。该检查器只读取 Windows 任务、文件及小型运行记录，输出精简检查结果；不调用 WSL、不写入日志、不完整读取大磁盘。
 
 首先确认固定入口存在。缺失、报错或输出无法解析时报告检查失败，不自行安装依赖、替换脚本或根据历史记录推测健康。
 
