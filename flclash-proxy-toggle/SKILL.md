@@ -5,6 +5,8 @@ description: 在 Windows 上只读诊断和按当前用户明确要求维护 FlC
 
 # FlClash 安全配置与代理控制
 
+执行平台：本技能当前交付流程为 Windows。先核对实际目标主机、原生依赖及用户配置；Linux/WSL 不安装或执行 Windows 分支。平台名称指执行端，不因被管理对象是 WSL 而改变。独立远程载荷须另核对目标系统。本次 Windows 分支未实机验收。
+
 先确认用户要处理的是哪一层，再执行最小动作并回读。配置维护不等于允许改变代理运行状态。
 
 执行配置诊断或变更前，完整读取 [references/configuration-layers.md](references/configuration-layers.md)。

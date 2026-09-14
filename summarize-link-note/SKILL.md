@@ -5,6 +5,8 @@ description: 把普通网页或文章 URL 通过本机 summarize CLI 转为 Mark
 
 # Summarize Link Note
 
+执行平台：本技能当前交付流程为 Windows。先核对实际目标主机、原生依赖及用户配置；Linux/WSL 不安装或执行 Windows 分支。平台名称指执行端，不因被管理对象是 WSL 而改变。独立远程载荷须另核对目标系统。本次 Windows 分支未实机验收。
+
 这个 skill 负责把普通网页链接整理成 Markdown 笔记草稿，默认走总结模式。
 
 ## 适用范围

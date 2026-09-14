@@ -12,19 +12,20 @@ import shutil
 import subprocess
 import tempfile
 
+from host_platform import detect_platform, host_paths, require_skill_platform
+
 SOURCE = Path(__file__).resolve().parents[1]
 
 
-def runtime_paths() -> tuple[Path, Path]:
+def runtime_paths(config_file: Path | None = None) -> tuple[Path, Path]:
     """Resolve the current user's state; an explicit CODEX_HOME takes precedence."""
     codex_home = Path(os.environ.get('CODEX_HOME') or str(Path.home() / '.codex')).expanduser().resolve()
-    return codex_home / 'skills', Path.home() / 'Documents/work/host-baseline/skill-releases'
+    return codex_home / 'skills', host_paths(config_file)['work_root'] / 'host-baseline/skill-releases'
 
 
 INSTALL, RECORDS = runtime_paths()
-SKILLS = ('cc-connect-collaboration', 'x-message-monitoring', 'codex-project-task-handoff',
-          'codex-archive-retrospective', 'codex-local-state-diagnostics',
-          'okxnew-backtest-operations', 'okxnew-data-operations')
+PLATFORM_MANIFEST = json.loads((SOURCE / 'platforms.json').read_text(encoding='utf-8'))
+SKILLS = tuple(PLATFORM_MANIFEST['managed_wsl_order'])
 
 
 def files(path: Path) -> dict[str, str]:
@@ -77,9 +78,16 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--verify', action='store_true')
-    parser.add_argument('--skill', choices=SKILLS, action='append',
+    parser.add_argument('--skill', choices=tuple(PLATFORM_MANIFEST['skills']), action='append',
                         help='select a reviewed skill; repeat to select several (default: all)')
     args = parser.parse_args()
+    actual_platform = detect_platform()
+    if actual_platform not in {'linux', 'wsl'}:
+        raise ValueError('native_linux_publisher_required:' + actual_platform)
+    for name in args.skill or SKILLS:
+        entry = require_skill_platform(name, PLATFORM_MANIFEST, actual_platform)
+        if not entry['managed_wsl']:
+            raise ValueError('skill_not_in_managed_installation:' + name)
     if args.apply and args.verify:
         parser.error('choose apply or verify')
     if INSTALL.resolve() != INSTALL or SOURCE == INSTALL or SOURCE in INSTALL.parents or INSTALL in SOURCE.parents:
@@ -152,6 +160,8 @@ def main() -> None:
         record = {'schema': 'WslSkillReleaseV1', 'source_repository': 'dmdmwshr/custom-skills',
                   'source_commit': revision, 'source_dirty': False,
                   'remote_verified_commit': revision,
+                  'execution_platform': actual_platform,
+                  'platform_manifest_sha256': hashlib.sha256((SOURCE / 'platforms.json').read_bytes()).hexdigest(),
                   'files': tree, 'tree_sha256': hashlib.sha256(json.dumps(tree, sort_keys=True).encode('utf-8')).hexdigest()}
         encoded = json.dumps(record, ensure_ascii=False, indent=2) + '\n'
         (run / (name + '.json')).write_text(encoded, encoding='utf-8')

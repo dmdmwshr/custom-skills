@@ -7,7 +7,7 @@ import subprocess
 import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
-BUSINESS=Path(os.environ.get("X_MONITOR_PROJECT_ROOT", r"C:\Users\12070\Desktop\项目开发\X监控" if os.name == "nt" else "/root/workspaces/X-monitor"))
+BUSINESS=Path(os.environ.get("X_MONITOR_PROJECT_ROOT", str(Path.home()/"Desktop/项目开发/X监控") if os.name == "nt" else str(Path(os.environ.get("CODEX_PROJECTS_ROOT", str(Path.home()/"workspaces")))/"X-monitor")))
 
 
 class SkillContractTests(unittest.TestCase):
@@ -37,7 +37,14 @@ class SkillContractTests(unittest.TestCase):
         driver=BUSINESS/"scripts/desktop_monitor_driver.js"
         if driver.is_file():
             version=re.search(r"const version = '([0-9.]+)'",driver.read_text(encoding="utf-8")).group(1)
-            self.assertIn("驱动 "+version,fast)
+            if os.name == "nt":
+                self.assertIn("驱动 "+version,fast)
+            else:
+                # Windows pins are not the Linux runtime contract.
+                self.assertIn("references/wsl-migration.md", skill)
+                linux = (ROOT/"references/wsl-migration.md").read_text(encoding="utf-8")
+                self.assertIn("实际", linux)
+                self.assertRegex(version, r"^[0-9]+\.[0-9]+\.[0-9]+$")
         self.assertIn("15 秒",fast)
         self.assertIn("40 秒",fast)
         contract=(ROOT/"references/reply-reset-contract.md").read_text(encoding="utf-8")

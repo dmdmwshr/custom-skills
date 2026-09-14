@@ -1,0 +1,397 @@
+{
+  "schema_version": 1,
+  "managed_wsl_order": [
+    "cc-connect-collaboration",
+    "x-message-monitoring",
+    "codex-project-task-handoff",
+    "codex-archive-retrospective",
+    "codex-local-state-diagnostics",
+    "okxnew-backtest-operations",
+    "okxnew-data-operations"
+  ],
+  "notes": "This is enforced by the managed publisher, not a native Codex frontmatter filter. Support declarations do not prove business dependencies or real-host validation. Windows-only entries describe current delivered workflows, not portability of every helper.",
+  "skills": {
+    "applio-rvc-manager": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "bilinote-video-note": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "browser-tamer": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "cc-connect-collaboration": {
+      "category": "business_specific",
+      "execution_platforms": [
+        "windows",
+        "linux",
+        "wsl"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "source_and_discovery_previously_verified",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "cc-switch": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "codex-archive-retrospective": {
+      "category": "cross_platform",
+      "execution_platforms": [
+        "windows",
+        "linux",
+        "wsl"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "source_and_discovery_previously_verified",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "codex-local-state-diagnostics": {
+      "category": "cross_platform",
+      "execution_platforms": [
+        "windows",
+        "linux",
+        "wsl"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "source_and_discovery_previously_verified",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "codex-project-task-handoff": {
+      "category": "cross_platform",
+      "execution_platforms": [
+        "windows",
+        "linux",
+        "wsl"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "source_and_discovery_previously_verified",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "comfyui-on-demand": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "comfyui-production-manager": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "drawio-local": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "flclash-proxy-toggle": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "localvault-credentials": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "meifu-resumable-download": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution.",
+      "remote_payload_platforms": [
+        "linux"
+      ]
+    },
+    "mineru-local": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "obsidian-notes": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "okxnew-backtest-operations": {
+      "category": "business_specific",
+      "execution_platforms": [
+        "windows",
+        "linux",
+        "wsl"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "source_and_discovery_previously_verified",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "okxnew-data-operations": {
+      "category": "business_specific",
+      "execution_platforms": [
+        "windows",
+        "linux",
+        "wsl"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "source_and_discovery_previously_verified",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "personal-memory-on-demand": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "summarize-link-note": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "windows-task-scheduler": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "wsl-backup-audit": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution.",
+      "note": "Runs on Windows against its scheduled tasks; WSL is the backup subject, not the execution host."
+    },
+    "wx-cli": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "x-message-monitoring": {
+      "category": "business_specific",
+      "execution_platforms": [
+        "windows",
+        "linux",
+        "wsl"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "source_and_discovery_previously_verified",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "xf-product-case-filler": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "xf-product-case-registry": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "xf-report-filler": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "zerox-local": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    }
+  }
+}

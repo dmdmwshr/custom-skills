@@ -8,9 +8,11 @@ metadata:
 
 # OKXnew 数据模块运维
 
+先按 [执行系统与公共路径](references/host-platform.md) 核对目标主机；只读取匹配系统的说明，平台不匹配时不执行该分支。
+
 ## 范围
 
-只处理当前 WSL 原生项目 `$HOME/workspaces/OKXnew`；正式业务运行根固定使用 `/var/lib/okxnew`，不能回退到 `/mnt/c` 下的旧 Windows 运行库。`/root/.local/share/OKXnew` 仅作为现有预复制、历史资料和开发回执入口，不是正式运行根；正式服务、采集、导入和模拟写入不得使用它。先读取项目 `AGENTS.md`、唯一 `PROJECT_PLAN.md`、`docs/WSL_RUNTIME.md` 和 runtime 配置，核对正式激活状态；尚未验收切换时不启动采集、导入或模拟写入。优先使用项目常驻数据链；BLS 发布日历固定由浏览器读取官方年度页，其他已登记宏观页面按产品状态作为备用采集面。浏览器不替代 OKX K 线后台，也不成为交易授权来源。历史下载、冻结计划和回测 runner 只做状态核验并转交 `$okxnew-backtest-operations`。
+只处理当前 WSL 原生项目 `${CODEX_PROJECTS_ROOT:-$HOME/workspaces}/OKXnew`；正式业务运行根固定使用 `/var/lib/okxnew`，不能回退到 `/mnt/c` 下的旧 Windows 运行库。`/root/.local/share/OKXnew` 仅作为现有预复制、历史资料和开发回执入口，不是正式运行根；正式服务、采集、导入和模拟写入不得使用它。先读取项目 `AGENTS.md`、唯一 `PROJECT_PLAN.md`、`docs/WSL_RUNTIME.md` 和 runtime 配置，核对正式激活状态；尚未验收切换时不启动采集、导入或模拟写入。优先使用项目常驻数据链；BLS 发布日历固定由浏览器读取官方年度页，其他已登记宏观页面按产品状态作为备用采集面。浏览器不替代 OKX K 线后台，也不成为交易授权来源。历史下载、冻结计划和回测 runner 只做状态核验并转交 `$okxnew-backtest-operations`。
 
 每次巡检前以 `/var/lib/okxnew/runtime-activation.json` 和项目 runtime 配置为唯一激活事实源，并用项目 `scripts/verify_linux_activation.py` 按正式运行根验证。激活回执缺失、`runtime_root` 不等于 `/var/lib/okxnew`、`activated` 不为 `true`，或停写/最终数据证据及哈希门禁未通过时，返回 `migration_not_activated` 并 fail closed；不得启动服务、采集、导入或模拟写入。
 

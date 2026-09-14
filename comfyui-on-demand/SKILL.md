@@ -5,6 +5,8 @@ description: 按需调用本机 ComfyUI 的官方 HTTP 接口，检查健康、�
 
 # ComfyUI 按需控制
 
+执行平台：本技能当前交付流程为 Windows。先核对实际目标主机、原生依赖及用户配置；Linux/WSL 不安装或执行 Windows 分支。平台名称指执行端，不因被管理对象是 WSL 而改变。独立远程载荷须另核对目标系统。本次 Windows 分支未实机验收。
+
 仅在当前用户明确需要本机 ComfyUI 运行能力时使用。本 Skill 直接访问固定的本机回环地址，不启动 comfyui-mcp、不启动或修复 ComfyUI 服务，也不连接远程地址。
 
 ## 基本边界

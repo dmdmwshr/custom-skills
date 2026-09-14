@@ -16,7 +16,7 @@ class RuntimePathTests(unittest.TestCase):
     def test_current_home_is_used_when_codex_home_is_unset(self):
         with tempfile.TemporaryDirectory(prefix='skill-home.', dir='/tmp') as directory:
             with patch.dict(os.environ, {'HOME': directory}, clear=True):
-                install, records = runtime_paths()
+                install, records = runtime_paths(Path(directory) / 'absent-config.json')
             self.assertEqual(install, Path(directory) / '.codex/skills')
             self.assertEqual(records, Path(directory) / 'Documents/work/host-baseline/skill-releases')
 
@@ -26,7 +26,7 @@ class RuntimePathTests(unittest.TestCase):
             (root / 'active').mkdir()
             (root / 'legacy').symlink_to(root / 'active', target_is_directory=True)
             with patch.dict(os.environ, {'HOME': directory, 'CODEX_HOME': str(root / 'legacy')}, clear=True):
-                install, records = runtime_paths()
+                install, records = runtime_paths(Path(directory) / 'absent-config.json')
             self.assertEqual(install, root / 'active/skills')
             self.assertEqual(records, root / 'Documents/work/host-baseline/skill-releases')
 

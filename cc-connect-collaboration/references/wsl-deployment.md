@@ -4,7 +4,7 @@
 
 用户目录迁移时，区分开发目录的真实路径与固定会话、投递证明已冻结的逻辑路径。旧入口保留兼容链接后，不把已签名配置中的 `work_dir`、`control_root`、`codex_home` 或 owner cwd 直接替换为新 HOME；先用现有只读校验器核对原值，保持配置字节、目标和绑定代次。服务环境可指向活动 CODEX_HOME，已冻结的控制目录参数仍使用原兼容路径。确需改这些字段时须走项目受控迁移，不能更新证明哈希来绕过失败。
 
-- 源码位于 `$HOME/workspaces/cc-connect-operations`。本机 `CODEX_HOME=${CODEX_HOME:-$HOME/.codex}`；Windows 与 WSL 状态隔离，不复制认证、数据库、索引或会话历史。
+- 源码位于 `${CODEX_PROJECTS_ROOT:-$HOME/workspaces}/cc-connect-operations`。本机 `CODEX_HOME=${CODEX_HOME:-$HOME/.codex}`；Windows 与 WSL 状态隔离，不复制认证、数据库、索引或会话历史。
 - 复用已有 `codex-cc-connect.service` 与原生 cc-connect；网关使用 `cc-connect-operations.service`，只监听 `127.0.0.1:8765`。两个服务不创建扫描定时器，不调用 Windows 可执行文件。
 - 配置分属 `/etc/codex-cc-connect` 与 `/etc/cc-connect-operations`；运行数据分属 `/var/lib/codex-cc-connect` 与 `/var/lib/cc-connect-operations`；版本化网关发布位于 `/srv/cc-connect-operations/releases`。私有文件权限 0600、目录 0700，日志只含脱敏状态。
 - `--staging` 使用独立 staging 账本，强制无令牌、无来源解析、无派发。其新 epoch 不能冒充生产账本。生产入口必须先存在一致迁入的账本，不自动建空生产库。

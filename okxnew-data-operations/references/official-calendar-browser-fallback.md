@@ -45,9 +45,9 @@ BEA 与 Census 的结构化实际值不在浏览器回退路由中：普通发�
 ```
 
 8. 使用浏览器控制会话中的受控子进程能力启动固定 Linux 解释器和模块，`shell=false`，不使用 Windows 专属的 `windowsHide` 参数，并把封套作为 UTF-8 标准输入传入：
-   - 解释器：`$HOME/workspaces/OKXnew/.venv/bin/python`
+   - 解释器：`${CODEX_PROJECTS_ROOT:-$HOME/workspaces}/OKXnew/.venv/bin/python`
    - 参数：`-B -m okxnew.data.browser_capture`
-   - 工作目录：`$HOME/workspaces/OKXnew`
+   - 工作目录：`${CODEX_PROJECTS_ROOT:-$HOME/workspaces}/OKXnew`
    - 运行环境必须按已验证的项目 runtime 配置显式指向正式运行根 `/var/lib/okxnew`；不能依赖 XDG 默认值或读写 `/root/.local/share/OKXnew`。
 9. 只读取脱敏回执：路由、来源、事件或观测数、插入数、当前数、对齐数、未对齐数、采集时间和正文哈希。退出码非零时标记 `import_rejected`，不得打印正文或换域名绕过。
 10. BLS 就业页回执必须为 `corroboration_only=true`。BLS 年度页回执必须为 `corroboration_only=false`；既有事件须唯一锚定稳定身份并以只追加版本写入，明确晚于覆盖尾部的新事件才可创建新身份。历史未匹配、一对多或歧义标记 `identity_anchor_rejected`，不得猜测或创建重复事件。

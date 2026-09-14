@@ -8,9 +8,11 @@ metadata:
 
 # OKXnew 回测运维
 
+先按 [执行系统与公共路径](references/host-platform.md) 核对目标主机；只读取匹配系统的说明，平台不匹配时不执行该分支。
+
 ## 适用范围与禁区
 
-本 Skill 只处理当前 WSL 原生项目 `$HOME/workspaces/OKXnew` 中的官方公开历史数据、离线回测和研究验证；正式业务运行根固定为 `/var/lib/okxnew`。`/root/.local/share/OKXnew` 仅作为现有预复制、历史资料和开发回执入口，不是正式运行根；正式服务、runner、采集、导入和模拟写入不得使用它。先核对唯一计划和 `docs/WSL_RUNTIME.md` 的切换验收；候选副本尚未激活时不得启动 runner。它可以在用户明确授权后恢复原历史任务、运行离线模拟或修复其数据链，但不读取账户、仓位、委托、密钥、Cookie 或凭据，不调用真实交易路径，也不形成真实交易授权。
+本 Skill 只处理当前 WSL 原生项目 `${CODEX_PROJECTS_ROOT:-$HOME/workspaces}/OKXnew` 中的官方公开历史数据、离线回测和研究验证；正式业务运行根固定为 `/var/lib/okxnew`。`/root/.local/share/OKXnew` 仅作为现有预复制、历史资料和开发回执入口，不是正式运行根；正式服务、runner、采集、导入和模拟写入不得使用它。先核对唯一计划和 `docs/WSL_RUNTIME.md` 的切换验收；候选副本尚未激活时不得启动 runner。它可以在用户明确授权后恢复原历史任务、运行离线模拟或修复其数据链，但不读取账户、仓位、委托、密钥、Cookie 或凭据，不调用真实交易路径，也不形成真实交易授权。
 
 每次执行前以项目 runtime 配置和 `/var/lib/okxnew/runtime-activation.json` 为唯一激活事实源，并用项目 `scripts/verify_linux_activation.py` 按正式运行根验证。激活回执缺失、`runtime_root` 不等于 `/var/lib/okxnew`、`activated` 不为 `true`，或停写/最终数据证据及哈希门禁未通过时，保持 `migration_not_activated`，fail closed，不启动 runner、不写入正式运行根。
 

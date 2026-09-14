@@ -5,6 +5,8 @@ description: 管理由 Codex 或本机开发项目创建的 Windows 计划任务
 
 # Windows 计划任务管理
 
+执行平台：本技能当前交付流程为 Windows。先核对实际目标主机、原生依赖及用户配置；Linux/WSL 不安装或执行 Windows 分支。平台名称指执行端，不因被管理对象是 WSL 而改变。独立远程载荷须另核对目标系统。本次 Windows 分支未实机验收。
+
 ## 适用范围
 
 使用本 skill 处理以下请求：
