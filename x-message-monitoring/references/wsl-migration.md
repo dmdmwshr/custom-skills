@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-14.1）
+## 当前目录与恢复边界（步骤 WSL-2026-09-14.2）
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
@@ -39,6 +39,8 @@ heartbeat 为 PAUSED 只停止定时调度，不撤销主控已经明确放行�
 Chrome 扩展在唯一固定任务的 CUA 宿主运行；按当前工具文档选择已有 Chrome，在同一宿主保留 `xMonDriver`、`xMonStdinFactory`、`xMonStdin`、`xMonBrowser` 和本轮自有 `xMonTab`。驱动和客户端从同一Linux发布原样加载，公开Node标准库注入保持原契约；之前在独立Node宿主完成的selfTest不代替当前CUA宿主验证。每次工具仍只调用一个固定浏览器采集方法或一次sendKept，不写现场循环合并多个页面。
 
 准备新 runtime 前，先确认当前直接工具表中的真实 CUA 入口，并按其首调用约束取得文档；`functions.ALL_TOOLS` 没有该入口不等于未暴露。普通 `node_repl` 的 `js` 或 `nodeRepl` 不是 CUA 身份证明，不能在那里先 launch 再跨宿主使用浏览器。既有 runtime 持有期间若入口确实消失，保留真实持有态、停止依赖操作并按原上下文收口；不通过 reset、再次 launch 或重复 selfTest 寻找入口。已有效的同宿主静态实例继续复用。
+
+创建自有Chrome标签按当前工具的Chrome选项调用，例如 `createBrowserTab('chrome', url, {sessionName})`；`visible` 是 IAB 选项，不能传给Chrome。若返回 `Capability is not available: visibility`，先核对当前官方实现的执行顺序；只有确认在tabs.new之前明确拒绝，才可判定未创建标签并纠正参数。超时或执行阶段不明仍属未知，不能套用该结论。参数修正后的实际创建、登录、关闭均由原owner独立验收，不重装扩展或重建profile。
 
 首次或宿主重置后，在实际 owning Node 宿主执行客户端无参数 selfTest，61项 exact_match=true，才可 acquire；独立命令行 fixture 不是这项证据。模块来自同一 `/srv/x-monitor/current`，公开 Node 的 spawn/Buffer/TextDecoder/计时器注入遵循客户端原工厂签名。
 

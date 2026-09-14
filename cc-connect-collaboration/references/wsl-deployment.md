@@ -2,7 +2,7 @@
 
 仅当实际目标是 WSL 时采用本节；Windows 专属路径、CC Switch 发布和任务计划示例不作为 WSL 默认入口。
 
-用户目录迁移时，区分开发目录的真实路径与固定会话、投递证明已冻结的逻辑路径。旧入口保留兼容链接后，不把已签名配置中的 `work_dir`、`control_root`、`codex_home` 或 owner cwd 直接替换为新 HOME；先用现有只读校验器核对原值，保持配置字节、目标和绑定代次。服务环境可指向活动 CODEX_HOME，已冻结的控制目录参数仍使用原兼容路径。确需改这些字段时须走项目受控迁移，不能更新证明哈希来绕过失败。
+用户目录迁移时，区分开发目录的真实路径与固定会话、投递证明已冻结的逻辑路径。公共目录以当前主机paths.json为准；已清理的旧入口不重建。先用现有只读校验器核对受签名的 `work_dir`、`control_root`、`codex_home` 与owner cwd及其来源，确需纠正时采用项目受审的精确路径事务：原字节备份、完整前后pin、单一停服窗口、提交标记最后发布、未知只对账和精确回滚。不能仅更新证明哈希绕过失败，也不能把历史runtime/readiness证据改成当前成功。Desktop owner目录与中枢出站控制目录分别登记。
 
 - 源码位于 `${CODEX_PROJECTS_ROOT:-$HOME/workspaces}/cc-connect-operations`。本机 `CODEX_HOME=${CODEX_HOME:-$HOME/.codex}`；Windows 与 WSL 状态隔离，不复制认证、数据库、索引或会话历史。
 - 复用已有 `codex-cc-connect.service` 与原生 cc-connect；网关使用 `cc-connect-operations.service`，只监听 `127.0.0.1:8765`。两个服务不创建扫描定时器，不调用 Windows 可执行文件。
@@ -24,6 +24,16 @@
 - Hook 信任约束各自交互会话；X-only 出站不要求为通过验收而启用其他五路交互业务。自然投递的传输接受、用户可见与业务处理分别验收；离线测试、进程运行和准备态发布不能写作真实送达。Linux heartbeat 由负责 X 业务验收的原任务在门禁满足后恢复，中枢不得提前启动。
 
 需要跨主机协作时优先使用当前产品任务消息工具。未暴露该工具时，可核对目标主机已安装 CLI 是否支持 `codex queue`，用官方任务元数据唯一定位精确 ID 后入队；不得猜 ID 或以任务标题的模糊匹配发送。CLI 成功仅表示入队，必须等待原协调任务的实际回执，不能靠新建平行任务或改内部状态强制执行。
+
+### 原任务官方续接与独立静止回读
+
+已授权协调原任务且消息仅排队时，先读当前官方schema、原线程状态及精确队列。明确返回要求先resume，或原任务确为notLoaded时，可用官方thread/resume仅传原threadId及excludeTurns；不传新的cwd/model/effort/service tier，不启动CLI执行器。resume可能自动消费已排队输入，返回后先回读队列和最新回合，不能再无条件queue/start或重发消息。未知返回先回读，保留原身份、模型与历史。
+
+没有wait_threads工具时，采用项目受审的官方只读capture：thread/read→thread/turns/list（不加载items正文）→thread/queue/list→thread/read，核对前后同一任务真实idle、最近completed/error为空、队列为空及回执新鲜度。notLoaded不等于idle；原owner已确认维护hold且队列为空时，可仅通过官方resume加载原线程、不提供输入或启动回合，并在该官方连接仍存活时完成capture。连接关闭可能再次卸载，不能伪造状态或刷新旧回执时间。产品idle与原owner实际runtime/lease/标签收口、heartbeat暂停、进程和配对锁分别验证，不互相替代。
+
+### 含提权委派的测试隔离
+
+客户端新增sudo/root helper、自委派或生产runtime解析后，先核对调用链再执行既有子进程测试；不能假定LOCALAPPDATA等临时环境会穿过会清理环境的helper。合成runner应拒绝execve及正式runtime，HTTP仅允许精确夹具端口；全量回归可在独立network namespace运行。需要root的权限夹具仍只使用临时库/锁，网络隔离不能替代文件目标核对。测试意外触及正式状态时立即停止，原维护者回读精确新增行及claim/attempt/回执；恢复服务前按受审事故处置保留并隔离，不能删除历史或重放未知。测试通过与正式事故已处置分开记录。
 
 ## 主控统一多项目切换
 
