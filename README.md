@@ -10,6 +10,7 @@ This repository is the source of truth for self-built skills. Windows installati
 - cc-switch
 - drawio-local
 - flclash-proxy-toggle
+- feishu-operations
 - mineru-local
 - obsidian-notes
 - summarize-link-note
@@ -27,7 +28,7 @@ This repository is the source of truth for self-built skills. Windows installati
 
 ## WSL 原生发布
 
-WSL 源仓为 `${CODEX_PROJECTS_ROOT:-$HOME/workspaces}/custom-skills`，与 Windows 工作树分离。技能修改默认在同一任务完成源文件验证、精确提交及推送，再用 `python3 scripts/publish_wsl_skills.py` 预演、`--apply` 安装、`--verify` 回读，并运行 `python3 scripts/verify_wsl_skills.py` 验证新进程发现；`--skill <name>` 可限定本次对象。当前管理 cc-connect-collaboration、x-message-monitoring、codex-project-task-handoff、codex-archive-retrospective 与 codex-local-state-diagnostics；安装目录为 `/root/.codex/skills`，版本与哈希记录归本机 host-baseline/skill-releases。Windows 的 CC Switch 管理方式保持其本机职责，WSL 不依赖其数据库、进程或安装副本。
+WSL 源仓按本机公共路径配置定位，与 Windows 工作树分离。技能修改默认在同一任务完成源文件验证、精确提交及推送，再用 `python3 scripts/publish_wsl_skills.py` 预演、`--apply` 安装、`--verify` 回读，并运行 `python3 scripts/verify_wsl_skills.py` 验证新进程发现；`--skill <name>` 可重复指定以限定本次对象。受管名单以 platforms.json 为准；安装目录为当前用户活动 CODEX_HOME 下的 skills，版本与哈希记录归本机 host-baseline/skill-releases。Windows 的 CC Switch 管理方式保持其本机职责，WSL 不依赖其数据库、进程或安装副本。
 
 ## 双系统适配
 
@@ -37,4 +38,4 @@ WSL 源仓为 `${CODEX_PROJECTS_ROOT:-$HOME/workspaces}/custom-skills`，与 Win
 
 ## 平台发现与按需加载
 
-platforms.json 是受管平台清单；scripts/skill_platforms.py 提供只读执行主机预检。原生发布器拒绝 Windows 专用技能，不自动安装源仓全部技能。当前管理 7 个 WSL 技能，其他流程保留其 Windows 依赖，Windows 实机验证本次未执行。公共路径读取 /etc/codex-dev/paths.json（若目标机存在）或实际环境；不会从 Linux 共享用户认证到 Windows。
+platforms.json 是受管平台清单；scripts/skill_platforms.py 提供只读执行主机预检。原生发布器拒绝 Windows 专用技能，不自动安装源仓全部技能。当前管理 8 个 WSL 技能，包含独立的 feishu-operations；其他流程保留其 Windows 依赖，Windows 实机验证本次未执行。公共路径读取 /etc/codex-dev/paths.json（若目标机存在）或实际环境；不会从 Linux 共享用户认证到 Windows。

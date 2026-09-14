@@ -2,6 +2,7 @@
   "schema_version": 1,
   "managed_wsl_order": [
     "cc-connect-collaboration",
+    "feishu-operations",
     "x-message-monitoring",
     "codex-project-task-handoff",
     "codex-archive-retrospective",
@@ -64,6 +65,17 @@
         "windows": "runtime_unverified_this_change"
       },
       "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "feishu-operations": {
+      "category": "business_specific",
+      "execution_platforms": ["windows", "linux", "wsl"],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "runtime_unverified",
+        "linux": "runtime_unverified",
+        "windows": "runtime_unverified_this_change"
+      },
+      "dependencies": "Use an authorized Feishu connector, official API or browser entry; cc-connect bindings remain owned by cc-connect-collaboration."
     },
     "cc-switch": {
       "category": "platform_specific",
