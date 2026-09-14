@@ -117,12 +117,12 @@ def build_request(args: argparse.Namespace) -> RequestSpec:
         return RequestSpec(operation, "GET", "/entities", _compact(query))
     if operation == "entity-context":
         path = f"/memory/entities/{quote(_required(args.entity_id, '实体 ID'), safe='')}"
-        return RequestSpec(operation, "GET", path, _compact({"at": args.at}))
+        return RequestSpec(operation, "GET", path, _compact({"at": args.at, "source_id": source}))
     if operation == "list-projects":
         return RequestSpec(operation, "GET", "/projects", _compact({"source_id": source}))
     if operation == "project-context":
         path = f"/memory/projects/{quote(_required(args.entity_id, '项目实体 ID'), safe='')}/context"
-        return RequestSpec(operation, "GET", path, _compact({"at": args.at}))
+        return RequestSpec(operation, "GET", path, _compact({"at": args.at, "source_id": source}))
     if operation == "groups":
         return RequestSpec(operation, "GET", "/groups")
     if operation == "ontology":

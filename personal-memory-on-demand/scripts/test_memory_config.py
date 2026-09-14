@@ -51,6 +51,9 @@ class ConfigurationTests(unittest.TestCase):
         query = memory_api.build_request(memory_api.parse_args(["list-entities", "--source", "wsl-fixture"]))
         self.assertEqual(query.method, "GET")
         self.assertEqual(query.query["source_id"], "wsl-fixture")
+        for operation in ("entity-context", "project-context"):
+            detail = memory_api.build_request(memory_api.parse_args([operation, "--entity-id", "fixture", "--source", "wsl-fixture"]))
+            self.assertEqual(detail.query["source_id"], "wsl-fixture")
 
     def test_remote_windows_service_requires_callers_source_identity(self):
         self.config.write_text("{}", encoding="utf-8")
