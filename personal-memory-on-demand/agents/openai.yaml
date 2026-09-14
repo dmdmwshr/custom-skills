@@ -1,4 +1,4 @@
 interface:
   display_name: "个人记忆按需管理"
   short_description: "按需查询 Graphiti 事实，并登记新软件或新项目的确定性盘点结果"
-  default_prompt: "使用 $personal-memory-on-demand 查询本机个人记忆，或在完成新软件安装、新项目创建后执行登记回读。"
+  default_prompt: "使用 $personal-memory-on-demand 按当前平台配置查询个人记忆，或在完成软件安装、新项目创建后盘点当前设备并回读登记。"

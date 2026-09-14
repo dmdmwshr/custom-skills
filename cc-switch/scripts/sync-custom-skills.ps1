@@ -9,6 +9,7 @@ param(
     [string]$Branch = 'main',
     [string]$Owner = 'dmdmwshr',
     [string]$Repository = 'custom-skills',
+    [string[]]$Skill = @(),
     [switch]$SkipRemotePull,
     [switch]$SkipCodexClientSync
 )
@@ -380,6 +381,15 @@ if (-not [System.StringComparer]::Ordinal.Equals($head, $remoteHead)) {
 }
 
 $skillDirectories = @(Get-SourceSkillDirectories $SourceRoot)
+if ($Skill.Count -gt 0) {
+    foreach ($name in $Skill) {
+        if ($name -notmatch '^[a-z0-9][a-z0-9-]*$' -or $name -notin @($skillDirectories | ForEach-Object { $_.Name })) {
+            throw "指定的 skill 不在当前受管源仓中：$name"
+        }
+    }
+    $skillDirectories = @($skillDirectories | Where-Object { $_.Name -in $Skill })
+}
+$selectedSkills = ($skillDirectories | ForEach-Object { $_.Name }) -join ','
 foreach ($skillDirectory in $skillDirectories) {
     $targetDirectory = Resolve-FullPath (Join-Path $InstallRoot $skillDirectory.Name)
     Assert-PathUnder $targetDirectory $InstallRoot
@@ -407,7 +417,8 @@ try:
 except Exception as exc:
     raise SystemExit(f"PyYAML 不可用：{exc}")
 
-mode, source_root_text, database_text, owner, repository, branch = sys.argv[1:]
+mode, source_root_text, database_text, owner, repository, branch, selected_text = sys.argv[1:]
+selected = set(selected_text.split(','))
 source_root = Path(source_root_text).resolve()
 database_path = Path(database_text).resolve()
 frontmatter_pattern = re.compile(
@@ -417,6 +428,8 @@ frontmatter_pattern = re.compile(
 
 skills = []
 for skill_path in sorted(source_root.iterdir(), key=lambda item: item.name.lower()):
+    if skill_path.name not in selected:
+        continue
     if not skill_path.is_dir() or skill_path.is_symlink():
         continue
 
@@ -556,7 +569,9 @@ from pathlib import Path
     backup_root_text,
     owner,
     repository,
+    selected_text,
 ) = sys.argv[1:]
+selected = set(selected_text.split(','))
 
 content_root = Path(content_root_text).resolve()
 install_root = Path(install_root_text).resolve()
@@ -635,7 +650,7 @@ if not codex_root.is_dir() or is_reparse(codex_root):
 expected_names = sorted(
     path.name
     for path in content_root.iterdir()
-    if path.is_dir() and not path.is_symlink() and (path / "SKILL.md").is_file()
+    if path.name in selected and path.is_dir() and not path.is_symlink() and (path / "SKILL.md").is_file()
 )
 if not expected_names:
     raise SystemExit(f"没有找到待同步的 skill：{content_root}")
@@ -787,7 +802,7 @@ print(
 )
 '@
 
-Invoke-PythonCode -Code $registrationCode -Arguments @('validate', $SourceRoot, $DatabasePath, $Owner, $Repository, $Branch) | Out-Null
+Invoke-PythonCode -Code $registrationCode -Arguments @('validate', $SourceRoot, $DatabasePath, $Owner, $Repository, $Branch, $selectedSkills) | Out-Null
 if (-not $SkipCodexClientSync) {
     $codexValidation = Invoke-PythonCode -Code $codexSyncCode -Arguments @(
         'validate',
@@ -797,7 +812,8 @@ if (-not $SkipCodexClientSync) {
         $DatabasePath,
         '-',
         $Owner,
-        $Repository
+        $Repository,
+        $selectedSkills
     )
     $codexValidation | ForEach-Object { Write-Output $_ }
 }
@@ -886,7 +902,7 @@ try {
         Assert-NoReparsePoints $targetDirectory
     }
 
-    Invoke-PythonCode -Code $registrationCode -Arguments @('register', $SourceRoot, $DatabasePath, $Owner, $Repository, $Branch) | Out-Null
+    Invoke-PythonCode -Code $registrationCode -Arguments @('register', $SourceRoot, $DatabasePath, $Owner, $Repository, $Branch, $selectedSkills) | Out-Null
 
     if (-not $SkipCodexClientSync) {
         $codexSyncResult = @(
@@ -898,7 +914,8 @@ try {
                 $DatabasePath,
                 $backupRoot,
                 $Owner,
-                $Repository
+                $Repository,
+                $selectedSkills
             )
         )
     }

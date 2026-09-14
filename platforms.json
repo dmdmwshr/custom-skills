@@ -8,7 +8,8 @@
     "codex-archive-retrospective",
     "codex-local-state-diagnostics",
     "okxnew-backtest-operations",
-    "okxnew-data-operations"
+    "okxnew-data-operations",
+    "personal-memory-on-demand"
   ],
   "notes": "This is enforced by the managed publisher, not a native Codex frontmatter filter. Support declarations do not prove business dependencies or real-host validation. Windows-only entries describe current delivered workflows, not portability of every helper.",
   "skills": {
@@ -68,7 +69,11 @@
     },
     "feishu-operations": {
       "category": "business_specific",
-      "execution_platforms": ["windows", "linux", "wsl"],
+      "execution_platforms": [
+        "windows",
+        "linux",
+        "wsl"
+      ],
       "managed_wsl": true,
       "validation": {
         "wsl": "runtime_unverified",
@@ -273,17 +278,19 @@
       "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
     },
     "personal-memory-on-demand": {
-      "category": "platform_specific",
+      "category": "business_workflow",
       "execution_platforms": [
-        "windows"
+        "windows",
+        "wsl",
+        "linux"
       ],
-      "managed_wsl": false,
+      "managed_wsl": true,
       "validation": {
-        "wsl": "not_supported_by_current_workflow",
-        "linux": "runtime_unverified",
-        "windows": "runtime_unverified_this_change"
+        "windows": "native_http_query_and_offline_tests_verified",
+        "wsl": "native_collector_lan_and_offline_tests_verified",
+        "linux": "offline_configuration_tests_verified_native_host_unverified"
       },
-      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+      "dependencies": "Python 3 standard library for Skill queries; configured memory service; registered user collector for Linux/WSL inventory and archived user-message sync."
     },
     "summarize-link-note": {
       "category": "platform_specific",

@@ -37,6 +37,13 @@ class FakeOpener:
 
 
 class MemoryApiMappingTests(unittest.TestCase):
+    def setUp(self):
+        # Test behavior independently of the host's installed device configuration.
+        resolver = patch.object(memory_api, "resolve", return_value={"api_url": memory_api.API_ROOT,
+            "source_id": "windows-local", "instance_id": None, "use_proxy": False})
+        resolver.start()
+        self.addCleanup(resolver.stop)
+
     def assert_mapping(
         self,
         argv: list[str],
