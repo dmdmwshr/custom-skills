@@ -17,6 +17,7 @@ metadata:
 - 服务地址依次使用 `--api-url`、`MEMORY_API_URL`、本机采集配置、平台默认值。内网直连，HTTPS 校验证书；连接失败不自动切换服务，不读取或输出凭据。
 - 查询默认可查看全部来源；用 `--source self` 或设备编号限定来源。管理操作默认当前执行端的持久来源，禁止在 WSL 安装软件后代替 Windows 盘点；未配置来源时报告待接入。
 - 每次实际查询前先检查 API 就绪与健康状态。若服务、Graphiti/Neo4j 或固定向量模型不可用，如实报告，不擅自重启服务、切换模型或伪造结果。
+- 记忆处理使用当前服务端配置的主模型、备用模型和向量模型，所有来源共用。WSL/Linux 采集端无需部署模型；设备模型资产盘点的未配置或失败不能直接解释为记忆处理模型故障，后者以服务端 `model-settings` 和健康状态分别核验。
 - 普通查询绝不触发写入。手动盘点、归档扫描或归档重建只在用户当前明确授权时执行；唯一例外是符合“软件与项目完成后登记”条件时，可以按全局常驻授权执行一次确定性环境盘点。
 - Windows 计划任务可按既定授权范围自动盘点和扫描；计划任务授权本身不能扩展为交互式手动写入，交互式例外仅限本 Skill 明确列出的“完成后登记”。
 - 不提供无来源的直接写入入口，不读取活跃会话，不把助手回答、系统提示、工具结果或终端输出当成用户事实。
@@ -55,7 +56,7 @@ metadata:
 | 查看自动任务、队列和失败重试 | `python scripts/memory_api.py automation-status` |
 | 查看最近盘点记录 | `python scripts/memory_api.py inventory-status` |
 | 查看归档扫描状态 | `python scripts/memory_api.py archive-status` |
-| 查看模型配置 | `python scripts/memory_api.py model-settings` |
+| 查看全部来源共用的服务端模型配置 | `python scripts/memory_api.py model-settings` |
 | 查看设备列表与连接配置 | `python scripts/memory_api.py sources` 或 `connection-info` |
 | 查看本设备同步进度 | `python scripts/memory_api.py source-status --source self` |
 

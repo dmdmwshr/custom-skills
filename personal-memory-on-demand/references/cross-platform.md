@@ -18,6 +18,12 @@ Linux/WSL 由记忆系统项目提供轻量采集包和用户服务 `personal-me
 
 完成后登记针对调用端的来源编号。按设备查询的软件属性包含该设备的版本和路径；全部来源视图保留各设备记录。批次已接收、模型处理中、图谱已写入和过滤未形成事实是不同状态。
 
+## 模型配置与设备资产
+
+`model-settings` 查询的是所有来源共用的记忆服务端配置，不随 `--source` 改成采集设备上的模型。设备的 `inventory_collectors.skipped.models=not_configured` 表示未配置可选的模型资产盘点，不是记忆处理失败。已配置盘点但连接失败仍保留在 `failed`，不能据此判断服务端主模型、备用模型或向量模型不可用。
+
+采集端确实安装了自己的 Ollama 并需要登记其模型时，在该设备的 `client.json` 中设置 `model_inventory_url`，例如 `http://127.0.0.1:11434`。仅接受本机回环地址；这是设备资产采集配置，不改变服务端的记忆处理模型。未配置、连接失败时均保留原有资产记录，只有完整成功的盘点才使该来源缺席的旧记录失效。
+
 ## 发布与平台验收
 
 - Windows：在源仓完成提交推送后运行 `cc-switch/scripts/sync-custom-skills.ps1 -Skill personal-memory-on-demand -WhatIf`，通过后去掉 `-WhatIf`；核对源、安装副本、Codex 入口及数据库登记。
