@@ -10,7 +10,7 @@ metadata:
 
 先按 [执行系统与公共路径](references/host-platform.md) 核对目标主机；只读取匹配系统的说明，平台不匹配时不执行该分支。
 
-在 Linux/WSL 执行或维护时，先完整读取 [WSL 唯一固定会话与运行接口](references/wsl-migration.md)，采用该分支的接替授权、原生浏览器适配、宿主和发布入口。下方 Windows 配置的 CUA-only、Edge 回退和禁止替代会话不覆盖已授权的 Linux 一次接替；业务筛选、唯一运行者、预算与收口规则继续共用。
+在 Linux/WSL 执行或维护时，先完整读取 [WSL 唯一固定会话与运行接口](references/wsl-migration.md)，采用该分支的隐藏绑定、短租约、宿主和发布入口；候选准备不能当作已上线。下方 Windows 配置的 CUA-only、Edge 回退和历史一次接替规则不覆盖当前Linux唯一owner及已选择的隐藏Chrome；业务筛选、唯一运行者、预算与收口规则继续共用。
 
 本技能共用采集与投递契约，但运行配置按目标主机选择：下段版本及 Windows 快速路径属于 Windows 配置；WSL 的客户端版本、原生入口和发布目录以 WSL 参考为准。两侧配置不能交叉拼接，版本变化还须回读实际发布文件与指纹；安装技能不改变固定任务归属。
 

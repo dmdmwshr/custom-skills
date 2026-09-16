@@ -1,10 +1,12 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-14.2）
+## 当前目录与恢复边界（步骤 WSL-2026-09-16.1）
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
 新鲜状态只读业务仓的 `PROJECT_HANDOFF.md` 与 `LINUX_FIXED_SESSION.md`；已接受的运行版本/指纹以实际current及其manifest为准。本页历史迁移授权不允许再次创建接替者、导入账本或恢复旧后端。源码与离线维护归开发任务，真实浏览器与周期归原owner，cc仅direct_feishu出站且入站silent_drop。
+
+用户已批准迁入现有隐藏 Chrome，具体接口以业务仓 `HIDDEN_CHROME_NATIVE.md` 为准。配置、短租约及固定方法适配层已通过隔离回归；原owner已实测隐藏身份、空白页DOM读取、X登录与自有测试页关闭，以及公开createRequire/spawn加载候选lease客户端和一次正常结算。上述准备不代表候选已切换、当前CUA61或业务已恢复；实时阶段只认唯一handoff，不以本技能安装启用后端或heartbeat。
 
 ## 历史：一次 Linux 接替授权（2026-09-12）
 
@@ -24,9 +26,9 @@
 
 - 开发任务按公共配置定位X源码；原owner的持久cwd与中枢受审Desktop登记分别回读，不依赖旧目录链接。代码不可变发布 `/srv/x-monitor/current`；正式账本始终 `/var/lib/x-monitor/x-monitor.sqlite3`，不存在时停止，不能建立空库代替迁移。中枢只读解析器使用同一 data-dir。
 - 驱动 `scripts/desktop_monitor_driver.js` 3.0.31；标准输入客户端 `scripts/desktop_stdin_client.js` 1.2.0；Python `/srv/x-monitor/current/.venv/bin/python`，固定控制入口同发布的 `scripts/fixed_session_entry.py`。均从同一发布原样加载并核对版本与指纹。
-- 用户现已选择 Linux 日常 Chrome 现有 Default 个人资料；当前配置 `/etc/x-monitor/browser.json` 的后端为 `chrome_extension`，browser=chrome、profile_directory=Default；user_data_dir 必须从该配置与实际 owning Chrome 用户核对，不从 root 等旧用户名推断或自动迁移个人资料。配置选择器 `scripts/linux_browser_config.js` 在 acquire 前按当前发布版本只读加载并冻结；不启动浏览器、不读取个人资料内容。使用原扩展来源 `desktop_chrome_extension`，不能冒称原生 Playwright 来源。
+- 本次授权选择 `/etc/x-monitor/browser.json` 的 `hidden_chrome_native` 后端，六字段与精确路径按业务仓上述说明校验：隐藏Chrome的 `/var/lib/codex-browser-automation/chrome/Default`、实际UID1000、目录归属、精确主进程/PID/start_ticks、沙箱和原生扩展绑定。允许其他独立Chrome共存，不扫描全机排他或自动迁移资料。选择器在acquire前从已接受发布加载冻结；正式配置尚未切换时不能拿旧 `chrome_extension` 日常配置启动新隐藏业务。事实来源仍为 `desktop_chrome_extension`，后端/短租约元数据只在运行回执，不改账本格式。
 - 旧 `playwright_linux` 专用配置及 `/var/lib/x-monitor-browser/profile` 保留停用。当前不调用其 launch，不复制 Cookie，不将 Playwright 指向日常 Chrome 目录，不因扩展故障自动恢复备用后端。原生启动器明确拒绝扩展配置和日常目录；两种后端都不新增独立扫描者。
-- 固定后端在 acquire 前读取并加载；轮内不切换。保留本页15秒、单次40秒、回复八导航、20分钟租约和双流独立提交。原驱动所有严格身份、UTC、正文、引用和停止条件保持；页面适配只转换 API/timeout。只允许原驱动两个已审 DOM reader；AX 刷新文本不输出，超时未知关闭自有运行时，不重放失败页。
+- 固定后端在 acquire 前读取并加载；轮内不切换。本次采用隐藏GPT原生，是因为隐藏Playwright开放接口缺少原两个DOM reader所需能力，不扩大其白名单或恢复旧启动器。保留本页15秒、单次40秒、回复八导航、20分钟租约和双流独立提交。原驱动所有严格身份、UTC、正文、引用和停止条件保持；只允许原驱动两个已审DOM reader，AX刷新文本不输出。真正未知时停止后续浏览器操作，不能为了清理再发关闭，也不重放失败页。
 
 ## 三种身份不可互换
 
@@ -36,17 +38,21 @@ heartbeat 为 PAUSED 只停止定时调度，不撤销主控已经明确放行�
 
 ## 静态准备与浏览器控制
 
-Chrome 扩展在唯一固定任务的 CUA 宿主运行；按当前工具文档选择已有 Chrome，在同一宿主保留 `xMonDriver`、`xMonStdinFactory`、`xMonStdin`、`xMonBrowser` 和本轮自有 `xMonTab`。驱动和客户端从同一Linux发布原样加载，公开Node标准库注入保持原契约；之前在独立Node宿主完成的selfTest不代替当前CUA宿主验证。每次工具仍只调用一个固定浏览器采集方法或一次sendKept，不写现场循环合并多个页面。
+Chrome 扩展在唯一固定任务的 CUA 宿主运行；按当前工具文档和受管入口返回的稳定 `extensionInstanceId` 精确选择隐藏实例，不凭名称或历史数字ID。实际 `CODEX_THREAD_ID`、事实、业务lease、短lease闭包和回执均保留在同一CUA宿主；公开Node标准库注入保持原契约。隐藏适配层以原受管runtime创建，只暴露原固定方法和自有不透明标签句柄，不能把裸tab、任意evaluate、CDP或存储接口交给调用方。之前独立Node的selfTest不代替当前CUA61。每次工具仍只调用一个固定浏览器采集方法或一次sendKept，不写现场循环合并多个页面。
+
+每个固定浏览器方法使用一份短租约：固定元数据核验 → 一次 `native-begin` → 扩展精确匹配与新鲜自有标签绑定 → 一个固定方法 → 唯一 `native-end`。CLI只通过当前CUA公开 `node:module.createRequire` / `node:child_process.spawn` 加载固定本地模块，不加载内部浏览器实现或跨宿主传凭证。总40秒中前35秒含准备和工作、末5秒留给结算，单页仍15秒、整轮仍20分钟；broker90秒不是可延长的工作预算。租约不跨研究、长思考或下一条消息。
+
+业务结果与控制结果分开：正常返回的空DOM、未找到唯一目标或业务校验失败，不等于浏览器动作结果未知；可以业务失败且正常known结算，但不能据此放宽目标核验。只有真实超时、连接/动作结果或结算未知才走unknown。人工接管/其他客户端明确拒绝时不调用CUA、不循环申请；在途未返回时不提前known结算。未知、过期、关闭失败保留真实现场，不重end、不begin、不自动resume/restart或清状态；只经受支持且有新证据的独立对账恢复。关闭后的lease客户端、adapter及runtime均不复用。
 
 准备新 runtime 前，先确认当前直接工具表中的真实 CUA 入口，并按其首调用约束取得文档；`functions.ALL_TOOLS` 没有该入口不等于未暴露。普通 `node_repl` 的 `js` 或 `nodeRepl` 不是 CUA 身份证明，不能在那里先 launch 再跨宿主使用浏览器。既有 runtime 持有期间若入口确实消失，保留真实持有态、停止依赖操作并按原上下文收口；不通过 reset、再次 launch 或重复 selfTest 寻找入口。已有效的同宿主静态实例继续复用。
 
-创建自有Chrome标签按当前工具的Chrome选项调用，例如 `createBrowserTab('chrome', url, {sessionName})`；`visible` 是 IAB 选项，不能传给Chrome。若返回 `Capability is not available: visibility`，先核对当前官方实现的执行顺序；只有确认在tabs.new之前明确拒绝，才可判定未创建标签并纠正参数。超时或执行阶段不明仍属未知，不能套用该结论。参数修正后的实际创建、登录、关闭均由原owner独立验收，不重装扩展或重建profile。
+业务标签只用 `xMonHidden.newTab()` / `closeTab(handle)`，每次仍经短租约；原 `xMonDriver` 来自 `xMonHidden.driver`，不保留可旁路的裸driver。独立准备或专项飞书只读维护按当前CUA文档使用精确匹配的browserId和 `{sessionName}`；`visible` 是IAB选项，不能传给Chrome。元数据匹配与页面管理均须位于本次有效短租约内，不能猜数字ID。明确在tabs.new前拒绝的参数错误可以修正后另验；超时或阶段不明不能套用该结论。
 
 首次或宿主重置后，在实际 owning Node 宿主执行客户端无参数 selfTest，61项 exact_match=true，才可 acquire；独立命令行 fixture 不是这项证据。模块来自同一 `/srv/x-monitor/current`，公开 Node 的 spawn/Buffer/TextDecoder/计时器注入遵循客户端原工厂签名。
 
 先验证本次自有空白标签创建、操作、关闭，以及实际Profile Path对应既有Default；随后独立验证X登录和新标签复用。Chrome的Google身份不等于X登录证明；需要认证时人工完成，不读取密码/Cookie。只关闭创建回执证明归属的标签，不关闭整个日常浏览器或用户旧标签。旧专用人工登录窗口已结束，不再要求用户登录旧专用profile。
 
-扩展控制恢复可单独维护，但实例、扩展连接和页面控制分别验收。`start_managed_browser.py --browser chrome` 只证明 Linux 实例元数据，不能当作扩展成功；不得回退 Windows 或在失败轮切浏览器。
+扩展控制恢复可单独维护，但实例、扩展连接和页面控制分别验收。隐藏后端使用固定元数据检查器，不调用旧日常 `start_managed_browser.py` 或旧Playwright启动器；元数据通过不能当扩展可控。不得回退Windows或在失败轮切浏览器。
 
 若工具日志证明产品会话浏览器路由缺失，可通过正常产品入口打开精确固定任务并回读路由登记；不伪造路由元数据或修改Codex内部数据库。只有环境实际变更后才做一次新的恢复验收。超时没有标签ID时不能猜归属或宣称已关闭，保持未确认状态并停止扫描。
 
@@ -60,7 +66,7 @@ Linux socket 不可见或侧栏报 `Native transport disconnected` 时，按诊�
 
 ## 配对导入全生命周期门禁
 
-生产 driver 必须从同发布 `scripts/linux_guarded_runtime.js` 返回对象绑定为 xMonDriver/xMonStdin。含同宿主控制的新发布另传 `createControl` 并只使用返回的 `runtime.control`，精确模板见业务仓 `LINUX_STARTUP_GUARD.md`；候选须经原中枢升级通道接受后才能启用。原样源码可提前读取；工厂回调同步实例化，不提前保留裸实例、不启动浏览器或执行业务。先取得官方 paired-import 共享锁才创建驱动/客户端，锁连续覆盖准备、CUA动作、空闲间隔、两阶段finish、标签/在途及kept清理；不能只包一次启动检查或每个Python动作。固定CLI也在打开正式库前持同一共享锁到close，五项sendKept保持。
+生产 driver/client 必须由同发布 `scripts/linux_guarded_runtime.js` 创建；隐藏适配层再包装该受管runtime，不能传伪造runtime或锁前裸实例。含同宿主控制的发布另传 `createControl` 并只用 `runtime.control`；精确模板见业务仓 `LINUX_STARTUP_GUARD.md` 与 `HIDDEN_CHROME_NATIVE.md`。候选须经原中枢升级通道接受后才能启用。整轮paired-import共享锁与浏览器短租约分别管理：共享锁连续覆盖准备、CUA动作、空闲间隔、两阶段finish、标签/在途及kept清理，不能在短租约之间释放。固定CLI也在打开正式库前持同一共享锁到close，五项sendKept保持。
 
 持锁子进程不扫描、不接收正文/lease、不打开SQLite。它在 `/var/lib/cc-connect-operations/migration/x-driver-active.json` 写入无业务内容的运行标记；EOF/异常/坏帧留下标记，中枢导入/回滚必须拒绝，不能自动过期、删除或重开。只有真实两阶段finish、自有标签关闭、在途零、clearKept均已确认，才调用 runtime.close({twoPhaseFinished:true,ownedTabsClosed:true,inflightZero:true,keptCleared:true})；不得猜这些布尔值。运行时包装器另拒绝进行中关闭，正常握手才删除本轮原样标记并等待释放；关闭后driver/client全部失效。异常锁丢失立即停止，新运行前由主控核验静止，不用TTL当收口。
 
@@ -86,7 +92,13 @@ acquire 前完整读取当前快速路径和上下文契约的业务部分；Win
 
 两阶段finish及本轮原health终态/双锁空闲/finish_pending=0核验后，自有标签关闭、无在途子进程，先clearKept再按真实证据clear控制闭包，最后清理外部lease/动态事实并正常close guard；control未清理时守卫拒绝关闭。没有有效lease的未知acquire只能经独立终态对账收口，不能以TTL代替。静态工厂可复用，已closed实例不复用。不关闭日常Chrome整体实例或其他profile/标签。只有真实完整成功且机器允许才输出DONT_NOTIFY，手动不计四轮摘要。
 
-## 切换验收
+## 当前隐藏后端切换验收
+
+开发构建不可变X候选；原中枢在原owner已知收口、heartbeat PAUSED、无marker/在途的新鲜静止窗口备份并精确切换。升级前维护备份不能伪填业务验收完成；沿已审 `pre_upgrade_maintenance` 目的绑定完整候选与plan，保留原路由、代次、epoch和配对关系。browser.json六字段独立精确事务保留before/after/hash/权限。失败仅回退本次代码与配置，不覆盖新增业务数据。
+
+新发布由原owner完成实际CUA61、正式health和原路由预检，再做一轮双流及两次全新复扫；局部失败保留成功流，真实收口后另起新轮，不重开失败流。只读核验原唯一已发送维护通知的目标、时间及内容，不新增验收键或再次发送。三轮与飞书网页核验均通过才由原owner通过产品工具恢复同一个整点heartbeat，再验四个连续真实定时周期；失败暂停修复，人工轮不计数。旧日常未知标签保持不动，仅清理明确自有且已知可关闭的临时页。
+
+## 历史：首次Linux迁移验收
 
 旧 Windows X heartbeat 精确暂停、无额外旧扫描入口、双锁空闲、无待收口/在途提交后，制作并完整迁入一致备份。中枢另一个任务复用既有密钥/原连接，保留 X 幂等并绑定 Linux 新 owner，仅开 X 路由。未知投递保留不重发。旧数据不删。
 
