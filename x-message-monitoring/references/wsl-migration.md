@@ -1,12 +1,12 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-16.1）
+## 当前目录与恢复边界（步骤 WSL-2026-09-19.1）
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
 新鲜状态只读业务仓的 `PROJECT_HANDOFF.md` 与 `LINUX_FIXED_SESSION.md`；已接受的运行版本/指纹以实际current及其manifest为准。本页历史迁移授权不允许再次创建接替者、导入账本或恢复旧后端。源码与离线维护归开发任务，真实浏览器与周期归原owner，cc仅direct_feishu出站且入站silent_drop。
 
-用户已批准迁入现有隐藏 Chrome，具体接口以业务仓 `HIDDEN_CHROME_NATIVE.md` 为准。配置、短租约及固定方法适配层已通过隔离回归；原owner已实测隐藏身份、空白页DOM读取、X登录与自有测试页关闭，以及公开createRequire/spawn加载候选lease客户端和一次正常结算。上述准备不代表候选已切换、当前CUA61或业务已恢复；实时阶段只认唯一handoff，不以本技能安装启用后端或heartbeat。
+用户已批准官方Playwright CLI接入现有隐藏Chrome，当前接口以业务仓 `HIDDEN_CHROME_CLI.md` 为准，覆盖旧native选择。原owner已实测CLI隐藏绑定、X登录、自有页关闭、release及临时工件清理；正式代码/配置已受控切换，但这些不代替当前CUA61、三人工轮及四真实周期。实时阶段只认唯一handoff，不以技能安装启用后端或heartbeat。用户授权直接接管时，先核对原维护任务已静止，开发可串行完成共享修复/发布，不反复微派发；原owner身份和业务内存仍不迁移或伪造。
 
 ## 历史：一次 Linux 接替授权（2026-09-12）
 
@@ -25,10 +25,10 @@
 ## 固定接口
 
 - 开发任务按公共配置定位X源码；原owner的持久cwd与中枢受审Desktop登记分别回读，不依赖旧目录链接。代码不可变发布 `/srv/x-monitor/current`；正式账本始终 `/var/lib/x-monitor/x-monitor.sqlite3`，不存在时停止，不能建立空库代替迁移。中枢只读解析器使用同一 data-dir。
-- 驱动 `scripts/desktop_monitor_driver.js` 3.0.31；标准输入客户端 `scripts/desktop_stdin_client.js` 1.2.0；Python `/srv/x-monitor/current/.venv/bin/python`，固定控制入口同发布的 `scripts/fixed_session_entry.py`。均从同一发布原样加载并核对版本与指纹。
-- 本次授权选择 `/etc/x-monitor/browser.json` 的 `hidden_chrome_native` 后端，六字段与精确路径按业务仓上述说明校验：隐藏Chrome的 `/var/lib/codex-browser-automation/chrome/Default`、实际UID1000、目录归属、精确主进程/PID/start_ticks、沙箱和原生扩展绑定。允许其他独立Chrome共存，不扫描全机排他或自动迁移资料。选择器在acquire前从已接受发布加载冻结；正式配置尚未切换时不能拿旧 `chrome_extension` 日常配置启动新隐藏业务。事实来源仍为 `desktop_chrome_extension`，后端/短租约元数据只在运行回执，不改账本格式。
+- 驱动 `scripts/desktop_monitor_driver.js` 3.0.32；标准输入客户端 `scripts/desktop_stdin_client.js` 1.2.0；Python `/srv/x-monitor/current/.venv/bin/python`，固定控制入口同发布的 `scripts/fixed_session_entry.py`。均从同一发布原样加载并核对版本与指纹。
+- 本次选择 `/etc/x-monitor/browser.json` 的 `hidden_chrome_cli` 后端，六字段及精确路径按业务仓说明校验：隐藏Chrome `/var/lib/codex-browser-automation/chrome/Default`、UID1000、目录归属、主进程/PID/start_ticks、沙箱、显式代理和官方Playwright扩展/session。允许其他独立Chrome共存；不使用GPT的extensionInstanceId冒充CLI身份。选择器在acquire前冻结，来源固定为已有 `desktop_chrome_playwright_linux`；CLI版本/隐藏绑定仅入运行回执，不改历史账本。
 - 旧 `playwright_linux` 专用配置及 `/var/lib/x-monitor-browser/profile` 保留停用。当前不调用其 launch，不复制 Cookie，不将 Playwright 指向日常 Chrome 目录，不因扩展故障自动恢复备用后端。原生启动器明确拒绝扩展配置和日常目录；两种后端都不新增独立扫描者。
-- 固定后端在 acquire 前读取并加载；轮内不切换。本次采用隐藏GPT原生，是因为隐藏Playwright开放接口缺少原两个DOM reader所需能力，不扩大其白名单或恢复旧启动器。保留本页15秒、单次40秒、回复八导航、20分钟租约和双流独立提交。原驱动所有严格身份、UTC、正文、引用和停止条件保持；只允许原驱动两个已审DOM reader，AX刷新文本不输出。真正未知时停止后续浏览器操作，不能为了清理再发关闭，也不重放失败页。
+- 固定后端在acquire前加载，轮内不切换。官方CLI仅为受管浏览器子进程，不新增扫描者或扩大旧MCP白名单；模型不直接构造CLI argv/eval/CDP。保留15秒、单次40秒、回复八导航、20分钟租约与双流独立提交；身份、UTC、正文、引用、水位不放宽。两个已审DOM reader以原函数身份映射固定ID，禁止自选脚本/路径/hash，AX刷新文本不输出。真正未知停止后续浏览器操作，不为清理再发关闭、不重放失败页。
 
 ## 三种身份不可互换
 
@@ -38,15 +38,15 @@ heartbeat 为 PAUSED 只停止定时调度，不撤销主控已经明确放行�
 
 ## 静态准备与浏览器控制
 
-Chrome 扩展在唯一固定任务的 CUA 宿主运行；按当前工具文档和受管入口返回的稳定 `extensionInstanceId` 精确选择隐藏实例，不凭名称或历史数字ID。实际 `CODEX_THREAD_ID`、事实、业务lease、短lease闭包和回执均保留在同一CUA宿主；公开Node标准库注入保持原契约。隐藏适配层以原受管runtime创建，只暴露原固定方法和自有不透明标签句柄，不能把裸tab、任意evaluate、CDP或存储接口交给调用方。之前独立Node的selfTest不代替当前CUA61。每次工具仍只调用一个固定浏览器采集方法或一次sendKept，不写现场循环合并多个页面。
+唯一固定任务的实际CUA宿主保留真实CODEX_THREAD_ID、事实、业务lease、五sendKept及回执。通过公开Node createRequire连接受管CLI客户端，固定真实任务/session/资料身份；公开标准库注入保持原契约。隐藏adapter包装受管runtime，只暴露固定方法与自有不透明handle，不提供裸tab、任意evaluate、CDP或存储。独立Node控制验收/selfTest不能代替当前CUA61；每次工具只调用一个固定浏览器方法或一次sendKept，不现场循环合并多页。
 
-每个固定浏览器方法使用一份短租约：固定元数据核验 → 一次 `native-begin` → 扩展精确匹配与新鲜自有标签绑定 → 一个固定方法 → 唯一 `native-end`。CLI只通过当前CUA公开 `node:module.createRequire` / `node:child_process.spawn` 加载固定本地模块，不加载内部浏览器实现或跨宿主传凭证。总40秒中前35秒含准备和工作、末5秒留给结算，单页仍15秒、整轮仍20分钟；broker90秒不是可延长的工作预算。租约不跨研究、长思考或下一条消息。
+每个固定方法由ManagedHiddenCLI.v1的withOperation取得短租约，固定primitive串行执行后共享客户端按真实回执结算，调用方不能自报known/unknown。只从当前CUA公开Node加载已接受固定模块，不加载内部浏览器实现或跨宿主传凭证。总40秒前35秒含准备/工作、末5秒留结算，单页15秒、整轮20分钟；超时不证明进程已取消，真实在途保持不允许清理/重开。短租约不跨研究、长思考或下一消息。
 
 业务结果与控制结果分开：正常返回的空DOM、未找到唯一目标或业务校验失败，不等于浏览器动作结果未知；可以业务失败且正常known结算，但不能据此放宽目标核验。只有真实超时、连接/动作结果或结算未知才走unknown。人工接管/其他客户端明确拒绝时不调用CUA、不循环申请；在途未返回时不提前known结算。未知、过期、关闭失败保留真实现场，不重end、不begin、不自动resume/restart或清状态；只经受支持且有新证据的独立对账恢复。关闭后的lease客户端、adapter及runtime均不复用。
 
 准备新 runtime 前，先确认当前直接工具表中的真实 CUA 入口，并按其首调用约束取得文档；`functions.ALL_TOOLS` 没有该入口不等于未暴露。普通 `node_repl` 的 `js` 或 `nodeRepl` 不是 CUA 身份证明，不能在那里先 launch 再跨宿主使用浏览器。既有 runtime 持有期间若入口确实消失，保留真实持有态、停止依赖操作并按原上下文收口；不通过 reset、再次 launch 或重复 selfTest 寻找入口。已有效的同宿主静态实例继续复用。
 
-业务标签只用 `xMonHidden.newTab()` / `closeTab(handle)`，每次仍经短租约；原 `xMonDriver` 来自 `xMonHidden.driver`，不保留可旁路的裸driver。独立准备或专项飞书只读维护按当前CUA文档使用精确匹配的browserId和 `{sessionName}`；`visible` 是IAB选项，不能传给Chrome。元数据匹配与页面管理均须位于本次有效短租约内，不能猜数字ID。明确在tabs.new前拒绝的参数错误可以修正后另验；超时或阶段不明不能套用该结论。
+业务标签只用 `xMonHidden.newTab()` / `closeTab(handle)`，每次经短租约；xMonDriver来自xMonHidden.driver，不保留旁路裸driver。专项飞书只读遵守用户本次指定入口，可按明确授权使用现有可见浏览器，但不因此改X绑定。原生入口另按其文档精确browserId/sessionName；visible仅IAB可用。参数在创建前明确拒绝与真实创建未知分开，不能猜标签ID。
 
 首次或宿主重置后，在实际 owning Node 宿主执行客户端无参数 selfTest，61项 exact_match=true，才可 acquire；独立命令行 fixture 不是这项证据。模块来自同一 `/srv/x-monitor/current`，公开 Node 的 spawn/Buffer/TextDecoder/计时器注入遵循客户端原工厂签名。
 
@@ -66,7 +66,7 @@ Linux socket 不可见或侧栏报 `Native transport disconnected` 时，按诊�
 
 ## 配对导入全生命周期门禁
 
-生产 driver/client 必须由同发布 `scripts/linux_guarded_runtime.js` 创建；隐藏适配层再包装该受管runtime，不能传伪造runtime或锁前裸实例。含同宿主控制的发布另传 `createControl` 并只用 `runtime.control`；精确模板见业务仓 `LINUX_STARTUP_GUARD.md` 与 `HIDDEN_CHROME_NATIVE.md`。候选须经原中枢升级通道接受后才能启用。整轮paired-import共享锁与浏览器短租约分别管理：共享锁连续覆盖准备、CUA动作、空闲间隔、两阶段finish、标签/在途及kept清理，不能在短租约之间释放。固定CLI也在打开正式库前持同一共享锁到close，五项sendKept保持。
+生产driver/client必须由同发布scripts/linux_guarded_runtime.js创建；隐藏adapter再包装runtime，不能传伪造runtime或锁前裸实例。含同宿主控制的发布另传createControl并只用runtime.control；精确模板见业务仓LINUX_STARTUP_GUARD.md与HIDDEN_CHROME_CLI.md。候选须经原受管升级通道接受。整轮配对共享锁连续覆盖准备、浏览器动作、空闲间隔、两阶段finish、自有页/在途/kept清理，不在短租约之间释放。固定业务CLI打开正式库前至close亦持共享锁，五sendKept保持。
 
 持锁子进程不扫描、不接收正文/lease、不打开SQLite。它在 `/var/lib/cc-connect-operations/migration/x-driver-active.json` 写入无业务内容的运行标记；EOF/异常/坏帧留下标记，中枢导入/回滚必须拒绝，不能自动过期、删除或重开。只有真实两阶段finish、自有标签关闭、在途零、clearKept均已确认，才调用 runtime.close({twoPhaseFinished:true,ownedTabsClosed:true,inflightZero:true,keptCleared:true})；不得猜这些布尔值。运行时包装器另拒绝进行中关闭，正常握手才删除本轮原样标记并等待释放；关闭后driver/client全部失效。异常锁丢失立即停止，新运行前由主控核验静止，不用TTL当收口。
 
@@ -82,15 +82,17 @@ CUA 的 Node 全局不保证包含计时器。按该模板显式 `import('node:t
 
 ## 每轮业务与清理
 
-acquire 前完整读取当前快速路径和上下文契约的业务部分；Windows路径替换为上述Linux发布入口，当前扩展仍在CUA宿主以真实desktop_chrome_extension来源运行。五项sendKept、内存载荷、语义筛选、fingerprint、草稿/冻结各一次、预检顺序与两阶段finish全部保持。
+acquire前完整读取当前快速路径和上下文契约的业务部分；Windows路径替换为上述Linux发布入口，CLI来源为desktop_chrome_playwright_linux。五sendKept、内存载荷、语义筛选、fingerprint、草稿/冻结各一次、预检顺序和两阶段finish保持。
 
 当前直接CUA工具无法嵌入functions，不能假定存在跨宿主opaque传递，也不把lease写临时文件。已批准的新同宿主分支使用 `desktop_control_client.js`，只封装原固定Python的health/acquire/预检/失败/对账/finish等有限小型控制；五项业务sendKept与Python入口不变。候选未正式接受时不得先用旧functions acquire等待搬运凭证；旧轮只按其已有原lease收口，不能迁入新实例。
 
 新分支在当前CUA闭包执行唯一acquire并在返回前保存原回执，默认只输出元数据；用 `runtime.control.leaseReceipt()` 在同一VM初始化xMonLease，后续小型控制由闭包注入原lease，不接受调用者覆盖。这取代Linux旧快速路径“functions与CUA两侧保存/比对”的步骤；相等证明在同一VM核对xMonLease与该原回执，functions不再持有新轮凭证。首次health/acquire之前完成实际浏览器控制、登录和固定控制模块准备；每次仍只执行一个固定请求，预检明确成功后才生成draft/raw。原始控制结果通过kept(action)纯内存读取，未知不重试，finish仅一次并由原Python完成内部两阶段。
 
-公开事实与lease不进入文件、临时正文、浏览器存储或普通日志。共同故障停两流，局部失败保留另一流处理；真实unknown不重试。当前扩展失败登记browser=chrome，采集遥测使用实际来源和驱动版本。
+正式事实对象与lease保持同轮内存，不从文件恢复。用户另已允许官方CLI临时快照/日志，仅本任务私有目录，非正式事实来源，不入Git/Skill/业务备份。共同故障停两流，局部失败保留另一流；真实unknown不重试，失败登记browser=chrome和实际来源/版本。
 
-两阶段finish及本轮原health终态/双锁空闲/finish_pending=0核验后，自有标签关闭、无在途子进程，先clearKept再按真实证据clear控制闭包，最后清理外部lease/动态事实并正常close guard；control未清理时守卫拒绝关闭。没有有效lease的未知acquire只能经独立终态对账收口，不能以TTL代替。静态工厂可复用，已closed实例不复用。不关闭日常Chrome整体实例或其他profile/标签。只有真实完整成功且机器允许才输出DONT_NOTIFY，手动不计四轮摘要。
+临时工件必须在/srv/work/tasks下本task/session专属0700目录，文件0600。仅umask077不足以抵消公共父目录default ACL，受管入口在新目录剥离继承ACL后再创建子目录，不改共享父目录。正常收口且无在途后，adapter1.0.1 close先确认release并撤销实例，再以同客户端audit的精确清单一次cleanup，保留不含正文回执。release成功后清理失败仍是浏览器known/closed，artifactCleanup=unverified，不重试close、不计完整验收。崩溃残留需新鲜归属/进程审计；24小时只标记，不按过期盲删或恢复旧事实。
+
+两阶段finish及原health终态/双锁空闲/finish_pending=0核验后，关闭自有标签、确认无在途，先clearKept、await adapter.close及工件清理，再按真实证据clear控制闭包，最后清动态事实并正常close guard。release已知而工件失败可按其他真实收口证据释放guard，但须报告未清理、不能计完整验收。无有效lease的未知acquire只能经独立终态对账收口，不能以TTL代替。静态工厂可复用，closed实例不可复用；日常浏览器及其他标签不动。只有完整成功且机器允许才DONT_NOTIFY，人工不计四轮摘要。
 
 ## 当前隐藏后端切换验收
 
