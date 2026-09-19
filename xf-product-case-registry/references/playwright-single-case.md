@@ -16,9 +16,9 @@
 
 ## 原生下载
 
-1. 进入打包模式，点击“全选”。当前页面存在主表和固定列的重复 DOM：只核对可见文书叶子，按其业务值去重，排除“附件”等非文书框，逐项全部已选；记录叶子数量。不要把 DOM 总数等同于文书数量。
-2. 点击前创建本案 `source snapshot-downloads` 基线。请求 JSON 只包含 `browser/session/origin/batchId/rwid/projectNo/unitName/expectedLeafCount/baselinePath/checkpointPath`，真实值只存在业务批次目录。checkpointPath 为本批次新的不可覆盖 JSON。
-3. 在连接所用同一工作目录运行固定 Node 的 `scripts/playwright_cli_download.cjs <请求JSON>`。它检查精确身份、叶子数量和全选状态、基线案卷绑定与未消费状态，创建排他动作意图记录，再调用现有官方 CLI，仅点击一次“开始打包”。已有 checkpoint 拒绝重放；不能删除或换名来掩盖未知结果。
+1. 进入打包模式，点击“全选”。当前页面存在主表和固定列的重复 DOM：只核对可见文书叶子，按其业务值去重，排除“附件”等非文书框，逐项全部已选；从已核实的目录记录文书标题/类型与对应 ID，再生成精确 `expectedLeafIds` 字符串数组及 `expectedLeafCount`。不能直接把所有数值型复选框反填为预期清单；DOM 总数不等于文书数量。
+2. 点击前创建本案 `source snapshot-downloads` 基线。请求 JSON 只包含 `browser/session/origin/batchId/rwid/projectNo/unitName/expectedLeafCount/expectedLeafIds/baselinePath/checkpointPath`，真实值只存在业务批次目录。checkpointPath 为本批次新的不可覆盖 JSON。
+3. 在连接所用同一工作目录运行固定 Node 的 `scripts/playwright_cli_download.cjs <请求JSON>`。它检查精确身份、文书 ID 集合、叶子数量和全选状态、基线案卷绑定与未消费状态，创建排他动作意图记录，再调用现有官方 CLI，仅点击一次“开始打包”。集合与已核实目录不符即停止，额外数值型父项或附件不能靠数量相同通过。已有 checkpoint 拒绝重放；不能删除或换名来掩盖未知结果。
 4. 3 秒内的 download 事件只是提示。`NATIVE_FILE_CHECK_REQUIRED`、`CLICK_OUTCOME_UNKNOWN` 或事件缺失都先执行同一基线的 `source await-download --attach`；不改用 saveAs、二次取包或再次点击。原生 Edge 可能先产生随机名 `.tmp` 再改为 `.zip`，不能把临时文件改名冒充完成。
 5. 唯一新 ZIP 必须连续稳定、能完整打开且通过路径/资源检查，工作根复制哈希一致后才允许清理下载临时副本。样本状态须为 ACCEPTANCE_COMPLETE，正式水位哈希保持一致。不得把验收样本继续整理、上传或归档。
 6. 保存轻量回执：范围、选择依据、项目编号、实际叶子数、文件数、字节数、SHA-256、仅一次点击、基线消费、正式水位未变。数字现场读取，不写死；不要把一个站点成功外推为所有站点稳定。

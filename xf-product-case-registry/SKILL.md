@@ -5,7 +5,7 @@ description: 从用户已登录的消防监督管理网页采集案卷，维护�
 
 # 消防产品案卷采集、整理与 V2 导入
 
-执行平台：本技能当前交付流程为 Windows。先核对实际目标主机、原生依赖及用户配置；Linux/WSL 不安装或执行 Windows 分支。平台名称指执行端，不因被管理对象是 WSL 而改变。独立远程载荷须另核对目标系统。本次 Windows 分支未实机验收。
+执行平台：本技能当前交付流程为 Windows。先核对实际目标主机、原生依赖及用户配置；Linux/WSL 不安装或执行 Windows 分支。平台名称指执行端，不因被管理对象是 WSL 而改变。独立远程载荷须另核对目标系统。验收按阶段区分：2026-09-19 的 Windows Edge 登录及单案 ZIP 下载已实测，年度筛选至正式批量入库仍须本轮端到端验证，不用一个下载样本代表全流程。
 
 只适配现有消防产品监督来源网页和登记系统 V2。来源网页负责查询下载，Skill 负责本地整理和调用现有接口；执行本 Skill 不授权修改网站、数据库、接口或部署。飞牛是正文长期存储库，Meifu 仅作临时接替或取回中转，不称为备份。
 
@@ -17,6 +17,7 @@ description: 从用户已登录的消防监督管理网页采集案卷，维护�
 | --- | --- |
 | 查询进度、续跑建议、生成报告 | [本地格式与查询口径](references/case-data-format.md)；先 `ledger status`，报告用 `ledger report` |
 | 浏览器查询、列表、详情、打包下载 | [浏览器采集](references/browser-acquisition.md)；优先使用现有阶段和采集助手 |
+| 本年全部不合格案卷、小批验证后放量 | [年度不合格案卷执行](references/annual-unqualified.md)，另按阶段读取采集、整理与 V2 契约 |
 | 清点、识别、拆分、字段整理 | [本地格式](references/case-data-format.md)、[文书分类](references/document-classification.md) |
 | 生成或验证上传清单 | 上述本地资料、[V2 Schema](references/CaseImportManifestV2.schema.json) 和 [空值示例](references/CaseImportManifestV2.example.json) |
 | 导入、缺失文件补录、核验、归档 | [V2 工作流](references/api-workflow.md)，并核对当前清单与 Schema |
@@ -38,6 +39,8 @@ description: 从用户已登录的消防监督管理网页采集案卷，维护�
 4. **本地整理。** 对完整 ZIP 运行 `inventory → ocr/split → compose → validate → upload --dry-run`。当前默认保留逐文件 `ocr`；`ocr --batch` 是显式批量选项，只有同类材料的关键字段一致性通过后才采用，不能因速度更快自动切换。两种模式都逐份保存校验断点，续跑只补未确认项。字段先用详情结构化值，同一文书电子版与扫描版矛盾时用完整电子版；实际裁决写入 `field-resolution.json`，原始版本完整保留。
 5. **按当前授权写入。** 新案单案用 `upload --finalize`，两案以上用 `upload-batch --finalize` 共用一次认证会话；不得循环调用单案命令重复登录。既有唯一案卷不重跑完整导入；仅满足服务器实时缺失与历史冲突契约时，才用 `supplement --plan` 后执行缺失补录。始终续用可对账的同一任务，不另建替代任务绕过失败。
 6. **核验、归档、交付。** 目录哈希、文件计数、飞牛 AVAILABLE 和落盘时间均确认后才记 VERIFIED；完整导入还须无冲突、无跳过且 created=true。补录按其专用计数和无替换规则判断。上传和飞牛均 VERIFIED 后才归档，归档成功才称完成；批量结束回读水位并生成报告。
+
+用户以“文书目录存在责令限期改正通知书”界定不合格时，按上述年度执行参考逐案记录实际文书类型/标题证据，复查合格仍纳入。全文关键词产生的 `合格/不合格` 标签不能决定入选；目录不完整记未知，不能当作无该文书。先完成 3 个正式案卷端到端验证，再按每批最多 10 案继续；这是执行流程约束，现有 CLI 不会自动代替执行者核验这道放量条件。单案 SAMPLE_ONLY 下载验收不能代替正式入库验收。
 
 ## 保持原件与可恢复性
 

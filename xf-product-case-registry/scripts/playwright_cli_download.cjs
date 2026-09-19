@@ -6,18 +6,22 @@ function buildDownloadCode(r) {
   if (!['edge','chrome'].includes(r.browser) || !/^[a-z0-9][a-z0-9-]{0,47}$/.test(r.session || '')) throw new Error('Invalid session');
   if (!/^\d+$/.test(r.rwid || '') || !/^\d{8}[A-Z]\d{9}$/.test(r.projectNo || '') || !r.unitName) throw new Error('Missing case identity');
   if (!Number.isInteger(r.expectedLeafCount) || r.expectedLeafCount < 1) throw new Error('Missing verified leaf count');
+  if (!Array.isArray(r.expectedLeafIds) || r.expectedLeafIds.length !== r.expectedLeafCount ||
+      r.expectedLeafIds.some(id => typeof id !== 'string' || !/^\d+$/.test(id)) ||
+      new Set(r.expectedLeafIds).size !== r.expectedLeafCount) throw new Error('Missing verified document leaf IDs');
   const origin = new URL(r.origin);
   if (!['http:','https:'].includes(origin.protocol) || origin.origin !== r.origin) throw new Error('Invalid origin');
   return `async (page) => {
-    const r=${JSON.stringify({origin:r.origin,rwid:r.rwid,projectNo:r.projectNo,unitName:r.unitName,expectedLeafCount:r.expectedLeafCount})};
+    const r=${JSON.stringify({origin:r.origin,rwid:r.rwid,projectNo:r.projectNo,unitName:r.unitName,expectedLeafCount:r.expectedLeafCount,expectedLeafIds:r.expectedLeafIds})};
     if(!page.url().startsWith(r.origin+'/#/xfjd/projectDetail?') || page.url().match(/[?&]RWID=([^&]+)/)?.[1]!==r.rwid) return {state:'IDENTITY_MISMATCH',submitted:false};
     const text=(await page.locator('.avue-view:visible').innerText()).replace(/\\s+/g,'');
     if(!text.includes('项目编号：'+r.projectNo) || !text.includes('单位名称'+r.unitName.replace(/\\s+/g,''))) return {state:'IDENTITY_MISMATCH',submitted:false};
     const leaves=await page.locator('input[type="checkbox"]').evaluateAll(es=>{
       const selected=es.filter(e=>/^\\d+$/.test(e.value)&&e.closest('label')?.getClientRects().length&&!e.disabled);
-      return {count:new Set(selected.map(e=>e.value)).size,all:selected.length>0&&selected.every(e=>e.checked)};
+      const ids=[...new Set(selected.map(e=>e.value))];
+      return {count:ids.length,ids,all:selected.length>0&&selected.every(e=>e.checked)};
     });
-    if(leaves.count!==r.expectedLeafCount||!leaves.all) return {state:'SELECTION_MISMATCH',submitted:false};
+    if(leaves.count!==r.expectedLeafCount||!leaves.all||!leaves.ids.every(id=>r.expectedLeafIds.includes(id))) return {state:'SELECTION_MISMATCH',submitted:false};
     const hint=page.waitForEvent('download',{timeout:3000}).then(()=>true).catch(()=>false);
     let state='NATIVE_FILE_CHECK_REQUIRED';
     try { await page.locator('button:visible').filter({hasText:/^开始打包$/}).click(); }
