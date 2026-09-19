@@ -1,0 +1,4 @@
+interface:
+  display_name: "Playwright 浏览器控制"
+  short_description: "通过官方命令行与扩展控制已登录浏览器，支持任务隔离和连接验收"
+  default_prompt: "使用 $playwright-browser-control 在指定浏览器中完成网页操作并回读结果。"
