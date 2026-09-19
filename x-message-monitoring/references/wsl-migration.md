@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-19.1）
+## 当前目录与恢复边界（步骤 WSL-2026-09-19.2）
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
@@ -38,7 +38,9 @@ heartbeat 为 PAUSED 只停止定时调度，不撤销主控已经明确放行�
 
 ## 静态准备与浏览器控制
 
-唯一固定任务的实际CUA宿主保留真实CODEX_THREAD_ID、事实、业务lease、五sendKept及回执。通过公开Node createRequire连接受管CLI客户端，固定真实任务/session/资料身份；公开标准库注入保持原契约。隐藏adapter包装受管runtime，只暴露固定方法与自有不透明handle，不提供裸tab、任意evaluate、CDP或存储。独立Node控制验收/selfTest不能代替当前CUA61；每次工具只调用一个固定浏览器方法或一次sendKept，不现场循环合并多页。
+唯一固定任务的实际CUA宿主保留事实、业务lease、五sendKept及回执。通过公开Node createRequire加载current的hidden_chrome_cli_adapter.js，连接受管客户端并绑定真实任务/session/资料身份；不得把内部shared client当adapter。CUA不暴露CODEX_THREAD_ID时不改env或绕过被拒绝的模块导入；仅使用已受审root进程证明分支，按当前业务接口读取本kernel证明的task_id字段，检查完整UUID，不手抄。证明独立绑定原owner工具回执、boot/进程链与仍打开的非秘密见证FD，错身份/重建/过期/损坏拒绝，不自动续期；参数不是身份证明。真实同CUA连接和正常清理已验，长期续期仍须单独验收。
+
+公开标准库注入保持原契约；版本在工厂核对，launch返回立即保存到预先声明的顶层runtime变量，再生成摘要。隐藏adapter只暴露固定方法与自有不透明handle，不提供裸tab、任意evaluate、CDP或存储；没有identity()方法，公开元数据用state()/receipt()，缺字段不猜值。独立Node控制验收/selfTest不能代替当前CUA61；每次工具只调用一个固定浏览器方法或一次sendKept，不现场循环合并多页。
 
 每个固定方法由ManagedHiddenCLI.v1的withOperation取得短租约，固定primitive串行执行后共享客户端按真实回执结算，调用方不能自报known/unknown。只从当前CUA公开Node加载已接受固定模块，不加载内部浏览器实现或跨宿主传凭证。总40秒前35秒含准备/工作、末5秒留结算，单页15秒、整轮20分钟；超时不证明进程已取消，真实在途保持不允许清理/重开。短租约不跨研究、长思考或下一消息。
 
@@ -47,6 +49,8 @@ heartbeat 为 PAUSED 只停止定时调度，不撤销主控已经明确放行�
 准备新 runtime 前，先确认当前直接工具表中的真实 CUA 入口，并按其首调用约束取得文档；`functions.ALL_TOOLS` 没有该入口不等于未暴露。普通 `node_repl` 的 `js` 或 `nodeRepl` 不是 CUA 身份证明，不能在那里先 launch 再跨宿主使用浏览器。既有 runtime 持有期间若入口确实消失，保留真实持有态、停止依赖操作并按原上下文收口；不通过 reset、再次 launch 或重复 selfTest 寻找入口。已有效的同宿主静态实例继续复用。
 
 业务标签只用 `xMonHidden.newTab()` / `closeTab(handle)`，每次经短租约；xMonDriver来自xMonHidden.driver，不保留旁路裸driver。专项飞书只读遵守用户本次指定入口，可按明确授权使用现有可见浏览器，但不因此改X绑定。原生入口另按其文档精确browserId/sessionName；visible仅IAB可用。参数在创建前明确拒绝与真实创建未知分开，不能猜标签ID。
+
+CLI标签创建为空白页，cycle由adapter.driver.createCycle生成后，ownTab和lastUrl保持原始null，导航计数不手改，直接逐次调用固定page(handle,cycle,"main"/"search")。adapter将外部handle映射为内部标签，原driver自行绑定并执行首次导航；快速路径的原生预导航及手动设置ownTab/lastUrl步骤不适用。真实调用已证明外部handle赋给ownTab会在页面primitive之前返回已知round_tab_mismatch，不是浏览器unknown。按原规则关闭失败轮，下一轮使用全新cycle；不通过改失败对象、移除归属检查或再次调用失败页修复。
 
 首次或宿主重置后，在实际 owning Node 宿主执行客户端无参数 selfTest，61项 exact_match=true，才可 acquire；独立命令行 fixture 不是这项证据。模块来自同一 `/srv/x-monitor/current`，公开 Node 的 spawn/Buffer/TextDecoder/计时器注入遵循客户端原工厂签名。
 
