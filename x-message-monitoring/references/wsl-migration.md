@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-20.3）
+## 当前目录与恢复边界（步骤 WSL-2026-09-20.4）
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
@@ -80,7 +80,9 @@ Linux socket 不可见或侧栏报 `Native transport disconnected` 时，按诊�
 
 CUA 的 Node 全局不保证包含计时器。按该模板显式 `import('node:timers')`，将模块的 `setTimeout`、`clearTimeout` 分别注入 guard 和 stdin 两个VM上下文；Buffer、TextDecoder、URL、spawn也从对应公开Node模块取得并在launch前验证。给客户端注入不代表守卫已注入。守卫1.0.1增加spawn前缺计时器拒绝，实际current/version/hash须经正常发布回读；旧1.0.0仍可能在缺计时器时留下初始化失败标记。任一launch已经失败且产生标记时，不因本地改正变量再次launch，由共享marker负责人独立核验、原owner正式收口与idle后恢复，随后才另起新runtime。
 
-运行回执一旦发送路径/哈希即保留原文件；发现漏报只读 health 等事实时，写独立更正回执说明字段变化、原哈希与新证据，不覆盖已发送文件。当前状态索引可更新，但不能用索引的新时间刷新原控制/selfTest成功或隐藏失败。
+执行前纯守卫拒绝、真实driver执行异常、浏览器未知与结果返回后的摘要错误分别处理。只有独立核对准确工具回执和调用路径、证明拒绝在adapter.run/短租约/计数之前，并由原owner新鲜核对runtime held/diagnostic_safe/preparation_safe均true、active/inflight为0、adapter无unknown和control无业务尝试/uncertain，才可沿既有diagnosticOnly分支正常关闭现存自有页及实例；不只凭错误码放行，不重试被拒绝的诊断、不删marker或重启。真实执行异常/未知仍停止。真实返回已存同CUA后才出现ReferenceError时，仅纯内存回读原结果及当前state，不把它重新归类为执行未知或重放操作；summary变量先声明，优先块内const，避免拼写错误遮蔽真实close回执。新增固定方法选项须有真实driver+guard+adapter的隔离跨层准入/拒绝/正常关闭回归，分层测试各自通过不能替代；仍不代替原owner实测。
+
+运行回执一旦发送路径/哈希即保留原文件；发现漏报只读 health 等事实时，写独立更正或收口回执说明字段变化、原哈希与新证据，不覆盖已发送文件。当前状态索引可更新，但不能用索引的新时间刷新原控制/selfTest成功或隐藏失败。
 
 正式账本的常规诊断使用原 fixed health；需要扩展只读核验时沿用官方 startup_guard，并复用原 `SQLiteStore(read_only=True)` 已通过静止签名检查的连接，不自行用裸 `mode=ro` 打开 WAL 库。只读连接也可能在退出后留下空 WAL/SHM，不能据此放宽原 health 或把它误报为浏览器故障。已经出现且独立确认无连接、owner idle、heartbeat 暂停及无运行 marker 时，可按明确维护授权使用业务仓已审计 `close_empty_wal_reader.py` 的空 WAL 正常关闭方法；它拒绝非空 WAL/活动锁/待收口，原生 rw/query_only 正常 close 后比对全表摘要并要求原 health 通过，无可写 Store 初始化、显式 checkpoint、手删旁车或业务行写入。此入口不是定时 health 的自动回退或重试，候选维护不切换生产 current。
 
