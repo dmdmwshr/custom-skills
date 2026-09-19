@@ -20,6 +20,26 @@ FIXED_NOW = "2099-08-21T10:00:00+08:00"
 SOURCE_URL = "https://source.example/cases?runId=ephemeral&name=fixture"
 
 
+def test_latest_closed_task_cannot_enter_formal_capture(layout):
+    filters = {"selectionMode": "LATEST_CLOSED_TASK", "acceptanceMode": "SINGLE_CASE_DOWNLOAD_PROOF",
+               "taskStatus": "已结案", "sortField": "结束日期", "sortDirection": "descending",
+               "queryRoute": "#/xfjd/cpjd/cxtj/jcwcx/rcjcrw", "jurisdiction": "全部管辖单位(含派出所)",
+               "brigadeScope": "ALL", "startDate": "2099-06-01", "endDate": "2099-08-21",
+               "liveTotalCount": 12, "sampleCount": 1}
+    with pytest.raises(source.SourceIntakeError, match="隔离单案验收"):
+        source.begin_capture(layout, filters, origin=SOURCE_URL, now=FIXED_NOW, batch_id="formal-rejected")
+    result = source.begin_capture(layout, filters, origin=SOURCE_URL, now=FIXED_NOW,
+                                  batch_id="latest-closed", scope="acceptance")
+    assert result["updatesGlobalWaterline"] is False
+    assert "documentType" not in result["filters"]
+    assert result["filters"]["startDate"] == "2099-06-01"
+    assert workspace.load_waterline(layout)["cases"] == {}
+    for changes in ({"taskStatus": "处理中"}, {"sortDirection": "ascending"},
+                    {"endDate": "2099-01-01"}, {"documentType": "消防产品监督检查记录"}):
+        with pytest.raises(source.SourceIntakeError):
+            source._default_filters(FIXED_NOW, {**filters, **changes}, acceptance=True)
+
+
 @pytest.fixture
 def layout(tmp_path: Path) -> workspace.BusinessLayout:
     value = workspace.BusinessLayout.from_root(tmp_path / "business-workspace")

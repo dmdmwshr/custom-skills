@@ -201,7 +201,27 @@ def _timestamp(value: datetime | str | None = None) -> str:
     return parsed.astimezone(SHANGHAI).isoformat(timespec="seconds")
 
 
-def _default_filters(value: datetime | str | None, explicit: dict[str, Any]) -> dict[str, Any]:
+def _default_filters(value: datetime | str | None, explicit: dict[str, Any], *, acceptance: bool = False) -> dict[str, Any]:
+    # A user-requested single completed task is a sample, never an annual list.
+    if explicit.get("selectionMode") == "LATEST_CLOSED_TASK":
+        if not acceptance or explicit.get("acceptanceMode") != "SINGLE_CASE_DOWNLOAD_PROOF":
+            raise SourceIntakeError("最近已结案任务仅允许隔离单案验收")
+        expected = {"taskStatus": "已结案", "sortField": "结束日期", "sortDirection": "descending",
+                    "queryRoute": "#/xfjd/cpjd/cxtj/jcwcx/rcjcrw",
+                    "jurisdiction": "全部管辖单位(含派出所)", "brigadeScope": "ALL"}
+        for key, target in expected.items():
+            if explicit.get(key) != target:
+                raise SourceIntakeError(f"单案验收筛选 {key} 未明确回读")
+        try:
+            start = datetime.strptime(str(explicit["startDate"]), "%Y-%m-%d")
+            end = datetime.strptime(str(explicit["endDate"]), "%Y-%m-%d")
+        except (KeyError, ValueError) as error:
+            raise SourceIntakeError("单案验收必须记录实际日期范围") from error
+        if start > end:
+            raise SourceIntakeError("单案验收日期范围倒置")
+        if explicit.get("documentType") or explicit.get("dateShortcut"):
+            raise SourceIntakeError("任务样本不能伪称法律文书筛选或日期快捷项")
+        return {**explicit, "timezone": "Asia/Shanghai"}
     current = datetime.fromisoformat(_timestamp(value))
     requested_year = explicit.get("year", current.year)
     if requested_year != current.year:
@@ -1248,7 +1268,7 @@ def begin_capture(
 
     layout = _layout(workspace)
     filter_value = _json_input(filter_json if filter_json is not None else filters, "筛选条件")
-    clean_filters = _default_filters(now, _clean_evidence(filter_value))
+    clean_filters = _default_filters(now, _clean_evidence(filter_value), acceptance=scope == "acceptance")
     if scope not in {"all", "acceptance"}:
         raise SourceIntakeError("采集范围只能是 all 或 acceptance")
     if scope == "acceptance":
