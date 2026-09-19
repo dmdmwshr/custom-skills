@@ -223,6 +223,15 @@ def _default_filters(value: datetime | str | None, explicit: dict[str, Any], *, 
             raise SourceIntakeError("任务样本不能伪称法律文书筛选或日期快捷项")
         return {**explicit, "timezone": "Asia/Shanghai"}
     current = datetime.fromisoformat(_timestamp(value))
+    notice_query = explicit.get("selectionMode") == "ANNUAL_RECTIFICATION_NOTICE"
+    if notice_query:
+        if explicit.get("documentType") != "责令限期改正通知书":
+            raise SourceIntakeError("通知书查询必须明确回读精确文书类型")
+        if type(explicit.get("documentTypePage")) is not int or explicit["documentTypePage"] < 1:
+            raise SourceIntakeError("通知书查询必须记录实际文书选择器页码")
+        for key in ("dateFieldLabel", "queryEvidencePath"):
+            if not isinstance(explicit.get(key), str) or not explicit[key].strip():
+                raise SourceIntakeError(f"通知书查询必须记录 {key}")
     requested_year = explicit.get("year", current.year)
     if requested_year != current.year:
         raise SourceIntakeError("当前采集只允许上海时间本年范围")
@@ -233,8 +242,8 @@ def _default_filters(value: datetime | str | None, explicit: dict[str, Any], *, 
         "dateShortcut": "本年",
         "jurisdiction": "全部管辖单位(含派出所)",
         "brigadeScope": "ALL",
-        "documentType": "消防产品监督检查记录",
-        "documentTypePage": 2,
+        "documentType": "责令限期改正通知书" if notice_query else "消防产品监督检查记录",
+        "documentTypePage": explicit["documentTypePage"] if notice_query else 2,
         "timezone": "Asia/Shanghai",
     }
     defaults.update(explicit)
@@ -267,8 +276,8 @@ def _default_filters(value: datetime | str | None, explicit: dict[str, Any], *, 
         "endDate": f"{current.year}-12-31",
         "dateShortcut": "本年",
         "jurisdiction": "全部管辖单位(含派出所)",
-        "documentType": "消防产品监督检查记录",
-        "documentTypePage": 2,
+        "documentType": "责令限期改正通知书" if notice_query else "消防产品监督检查记录",
+        "documentTypePage": explicit["documentTypePage"] if notice_query else 2,
         "timezone": "Asia/Shanghai",
     }
     for key, expected in fixed_contract.items():
@@ -1442,7 +1451,7 @@ def add_page(
     return state
 
 
-def _round_records(round_value: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], int, int]:
+def _round_records(round_value: dict[str, Any], *, inspection_query: bool = True) -> tuple[dict[str, dict[str, Any]], int, int]:
     pages = round_value.get("pages") or {}
     if not pages:
         raise SourceIntakeError("当前扫描轮次还没有分页数据")
@@ -1474,7 +1483,13 @@ def _round_records(round_value: dict[str, Any]) -> tuple[dict[str, dict[str, Any
                     conflicts.append(conflict)
             else:
                 records[record["rwid"]] = merged
-    round_value["anomalies"] = _annotate_inspection_stages(records)
+    if inspection_query:
+        round_value["anomalies"] = _annotate_inspection_stages(records)
+    else:
+        # Multiple notices cannot establish initial/recheck stages or inspection counts.
+        round_value["anomalies"] = []
+        for record in records.values():
+            record["inspectionStages"] = []
     return records, total, total_pages
 
 
@@ -1581,7 +1596,10 @@ def finalize_capture(
     if not isinstance(round_value, dict):
         raise SourceIntakeError("当前扫描轮次没有数据")
     try:
-        records, total, total_pages = _round_records(round_value)
+        records, total, total_pages = _round_records(
+            round_value,
+            inspection_query=state["filters"].get("selectionMode") != "ANNUAL_RECTIFICATION_NOTICE",
+        )
     except _RoundUnstable as error:
         round_value.update(
             {
@@ -2077,9 +2095,10 @@ def add_detail(
         screenshot_record = existing["screenshot"]
     else:
         raise SourceIntakeError("每个新处理案卷必须提供一张完整详情截图")
-    source_stages = list(record.get("inspectionStages") or ["INITIAL"])
+    notice_query = state["filters"].get("selectionMode") == "ANNUAL_RECTIFICATION_NOTICE"
+    source_stages = [] if notice_query else list(record.get("inspectionStages") or ["INITIAL"])
     project_stages = (
-        ["ANOMALY" if "ANOMALY" in source_stages else "RECHECK"] if alias_of else source_stages
+        ["ANOMALY" if "ANOMALY" in source_stages else "RECHECK"] if alias_of and not notice_query else source_stages
     )
     stage_label = {"INITIAL": "初查", "RECHECK": "复查", "ANOMALY": "检查记录次数异常"}
     stage_tags = {stage_label[item] for item in project_stages}

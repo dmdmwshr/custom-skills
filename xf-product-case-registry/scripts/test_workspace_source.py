@@ -874,6 +874,48 @@ def test_capture_defaults_follow_shanghai_new_year_boundary(
     assert before["workspaceRoot"] == after["workspaceRoot"] == str(layout.root)
 
 
+def _notice_filters():
+    return {"selectionMode": "ANNUAL_RECTIFICATION_NOTICE", "documentType": "责令限期改正通知书",
+            "documentTypePage": 3, "dateFieldLabel": "文书创建时间", "queryEvidencePath": "fixture-query.json"}
+
+
+@pytest.mark.parametrize("override", [
+    {"documentType": "责令改正通知书"}, {"documentTypePage": None}, {"documentTypePage": True},
+    {"documentTypePage": 0}, {"dateFieldLabel": ""}, {"queryEvidencePath": ""},
+])
+def test_notice_query_requires_exact_type_and_observed_query_fields(override):
+    with pytest.raises(source.SourceIntakeError):
+        source._default_filters(FIXED_NOW, {**_notice_filters(), **override})
+
+
+def test_notice_query_stabilizes_without_inventing_inspection_stages(layout):
+    batch = "notice-query"
+    state = source.begin_capture(layout, _notice_filters(), batch_id=batch, origin=SOURCE_URL, now=FIXED_NOW)
+    assert state["filters"]["documentTypePage"] == 3
+    assert state["filters"]["startDate"] == "2099-01-01"
+    items = [_record("notice-1", 文书名称=f"测试消限字第{i}号", 创建时间=f"2099-01-0{i}") for i in range(1, 4)]
+    items.append(_record("notice-2", 文书名称="同项目另一通知书", 创建时间="2099-01-04"))
+    for round_no in (1, 2):
+        source.add_page(layout, batch, 1, items, 4, 1, round_no=round_no, observed_at=FIXED_NOW)
+        state = source.finalize_capture(layout, batch, now=FIXED_NOW)
+    assert state["stableRounds"] == 2
+    assert len(state["records"]) == 2
+    assert state["records"]["notice-1"]["inspectionStages"] == []
+    assert state["rounds"]["2"]["anomalies"] == []
+    screenshot = layout.batch_dir(batch) / "fixture.png"
+    screenshot.write_bytes(b"fixture")
+    source.add_detail(layout, batch, "notice-1", {"项目编号": PROJECT_A, "单位名称": "测试单位"},
+                      "https://source.example/#/detail?RWID=notice-1", screenshot, captured_at=FIXED_NOW)
+    source.add_detail(layout, batch, "notice-2", {"项目编号": PROJECT_A, "单位名称": "测试单位"},
+                      "https://source.example/#/detail?RWID=notice-2", screenshot, captured_at=FIXED_NOW)
+    capture = _read_json(layout.batch_dir(batch) / "browser-capture.json")
+    for rwid in ("notice-1", "notice-2"):
+        detail = capture["records"][rwid]["detail"]
+        assert detail["sourceInspectionStages"] == []
+        assert detail["projectInspectionStages"] == []
+        assert not ({"初查", "复查", "检查记录次数异常"} & set(detail["tags"]))
+
+
 @pytest.mark.parametrize(
     "override",
     [
