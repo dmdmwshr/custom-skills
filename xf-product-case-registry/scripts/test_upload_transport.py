@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -65,6 +67,45 @@ def test_deadlines_cancel_inflight_request(monkeypatch, kind):
         )
     assert time.monotonic() - started < 1
     assert closed == [True]
+
+
+@pytest.mark.parametrize("size,expires", [(256 * 1024, False), (1024 * 1024, True)])
+def test_progressing_upload_can_pass_old_budget_but_stops_at_new_total(monkeypatch, size, expires):
+    clock = [0.0]
+    calls = []
+    closed = []
+    monkeypatch.setattr(transport, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    async def step_wait(tasks, timeout):
+        # Advance the sender one cooperative step, without waiting real minutes.
+        await asyncio.sleep(0)
+        return ({task for task in tasks if task.done()}, {task for task in tasks if not task.done()})
+
+    monkeypatch.setattr(transport.asyncio, "wait", step_wait)
+
+    class ProgressingTransport(httpx.MockTransport):
+        async def handle_async_request(self, request):
+            calls.append(True)
+            try:
+                async for _chunk in request.stream:
+                    clock[0] += 55.0  # Continuous progress remains below the 60 second idle limit.
+                    await asyncio.sleep(0)
+                return httpx.Response(200)
+            finally:
+                closed.append(True)
+
+    with httpx.Client(transport=ProgressingTransport(lambda _: httpx.Response(500))) as client:
+        def send():
+            return transport.upload_request(client, "POST", "https://registry.example/files",
+                files={"file": ("synthetic.pdf", io.BytesIO(b"x" * size), "application/pdf")})
+        if expires:
+            with pytest.raises(httpx.TimeoutException, match="总期限"):
+                send()
+            assert 630 <= clock[0] < 690
+        else:
+            assert send().status_code == 200
+            assert 210 < clock[0] < 630
+    assert calls == [True] and closed == [True]
 
 
 @pytest.mark.parametrize("status", ["CREATED", "UPLOADING", "MANIFEST_RECEIVED"])
