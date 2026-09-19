@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-20.1）
+## 当前目录与恢复边界（步骤 WSL-2026-09-20.2）
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
@@ -40,7 +40,7 @@ heartbeat 为 PAUSED 只停止定时调度，不撤销主控已经明确放行�
 
 唯一固定任务的实际CUA宿主保留事实、业务lease、五sendKept及回执。通过公开Node createRequire加载current的hidden_chrome_cli_adapter.js，连接受管客户端并绑定真实任务/session/资料身份；不得把内部shared client当adapter。CUA不暴露CODEX_THREAD_ID时不改env或绕过被拒绝的模块导入；仅使用已受审root进程证明分支，按当前业务接口读取本kernel证明的task_id字段，检查完整UUID，不手抄。证明独立绑定原owner工具回执、boot/进程链与仍打开的非秘密见证FD，错身份/重建/过期/损坏拒绝，不自动续期；参数不是身份证明。真实同CUA连接和正常清理已验，长期续期仍须单独验收。
 
-公开标准库注入保持原契约；版本在工厂核对，launch返回立即保存到预先声明的顶层runtime变量，再生成摘要。隐藏adapter只暴露固定方法与自有不透明handle，不提供裸tab、任意evaluate、CDP或存储；没有identity()方法，公开元数据用state()/receipt()，缺字段不猜值。独立Node控制验收/selfTest不能代替当前CUA61；每次工具只调用一个固定浏览器方法或一次sendKept，不现场循环合并多页。
+公开标准库注入保持原契约；版本在工厂核对，launch返回立即保存到预先声明的顶层runtime变量，再生成摘要。隐藏adapter只暴露固定方法与自有不透明handle，不提供裸tab、任意evaluate、CDP或存储；没有identity()方法，公开元数据用state()/receipt()，缺字段不猜值。独立Node控制验收/selfTest不能代替当前CUA61；每次工具只调用一个固定浏览器方法或一次sendKept，不现场循环合并多页。固定浏览器方法按快速路径直接nodeRepl.write(await ...)输出受审回执，不再手工摘取字段而遗漏同次probe/readiness/差异元数据；这是V7已证实的诊断信息缺失，不为补报重读失败页。
 
 每个固定方法由ManagedHiddenCLI.v1的withOperation取得短租约，固定primitive串行执行后共享客户端按真实回执结算，调用方不能自报known/unknown。只从当前CUA公开Node加载已接受固定模块，不加载内部浏览器实现或跨宿主传凭证。总40秒前35秒含准备/工作、末5秒留结算，单页15秒、整轮20分钟；超时不证明进程已取消，真实在途保持不允许清理/重开。短租约不跨研究、长思考或下一消息。
 
@@ -86,7 +86,7 @@ CUA 的 Node 全局不保证包含计时器。按该模板显式 `import('node:t
 
 ## 每轮业务与清理
 
-acquire前完整读取当前快速路径和上下文契约的业务部分；Windows路径替换为上述Linux发布入口，CLI来源为desktop_chrome_playwright_linux。五sendKept、内存载荷、语义筛选、fingerprint、草稿/冻结各一次、预检顺序和两阶段finish保持。
+acquire前完整读取当前快速路径和上下文契约的业务部分；Windows路径替换为上述Linux发布入口，CLI来源为desktop_chrome_playwright_linux。五sendKept、内存载荷、语义筛选、fingerprint、草稿/冻结各一次、预检顺序和两阶段finish保持。permalinkBurst第三参数只能取本轮xMonStdin.kept(xMonLease,"observation-fingerprint").result.response.fingerprint，不是流名或空串；永久链接完成前不能用另一stdin业务动作覆盖它。V7两次错误参数在导航前被拒绝且未设置流失败，不等于浏览器unknown；有cycle.failures.reply的真实失败仍禁止续批，不能以参数纠正恢复失败流。
 
 当前直接CUA工具无法嵌入functions，不能假定存在跨宿主opaque传递，也不把lease写临时文件。已批准的新同宿主分支使用 `desktop_control_client.js`，只封装原固定Python的health/acquire/预检/失败/对账/finish等有限小型控制；五项业务sendKept与Python入口不变。候选未正式接受时不得先用旧functions acquire等待搬运凭证；旧轮只按其已有原lease收口，不能迁入新实例。
 
@@ -96,7 +96,7 @@ acquire前完整读取当前快速路径和上下文契约的业务部分；Wind
 
 临时工件必须在/srv/work/tasks下本task/session专属0700目录，文件0600。仅umask077不足以抵消公共父目录default ACL，受管入口在新目录剥离继承ACL后再创建子目录，不改共享父目录。正常收口且无在途后，adapter1.0.1 close先确认release并撤销实例，再以同客户端audit的精确清单一次cleanup，保留不含正文回执。release成功后清理失败仍是浏览器known/closed，artifactCleanup=unverified，不重试close、不计完整验收。崩溃残留需新鲜归属/进程审计；24小时只标记，不按过期盲删或恢复旧事实。
 
-两阶段finish及原health终态/双锁空闲/finish_pending=0核验后，关闭自有标签、确认无在途，先clearKept、await adapter.close及工件清理，再按真实证据clear控制闭包，最后清动态事实并正常close guard。health方法属于control；finishPendingZero直接核对本轮health.last_heartbeat.finish_pending，不从锁空闲推导。五sendKept/clearKept使用leaseReceipt().lease字符串，不传整个回执。release已知而工件失败可按其他真实收口证据释放guard，但须报告未清理、不能计完整验收。无有效lease的未知acquire只能经独立终态对账收口，不能以TTL代替。静态工厂可复用，closed实例不可复用；日常浏览器及其他标签不动。只有完整成功且机器允许才DONT_NOTIFY，人工不计四轮摘要。
+两阶段finish及原health终态/双锁空闲/finish_pending=0核验后，关闭自有标签、确认无在途，先clearKept、await adapter.close及工件清理，再按真实证据clear控制闭包，最后清动态事实并正常close guard。health方法属于control；finishPendingZero直接核对本轮health.last_heartbeat.finish_pending，不从锁空闲推导。曾acquire的正式周期control.clear还要求terminalHealth:true及既有五项静止证明，须来自本轮实际finish/health/清理；不能照搬省略该项的preparationOnly范例或猜值。五sendKept/clearKept使用leaseReceipt().lease字符串，不传整个回执。release已知而工件失败可按其他真实收口证据释放guard，但须报告未清理、不能计完整验收。无有效lease的未知acquire只能经独立终态对账收口，不能以TTL代替。静态工厂可复用，closed实例不可复用；日常浏览器及其他标签不动。只有完整成功且机器允许才DONT_NOTIFY，人工不计四轮摘要。
 
 ## 当前隐藏后端切换验收
 
