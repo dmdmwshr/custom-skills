@@ -33,6 +33,8 @@
 5. 运行次数和等待上限沿用具体项目约定，不把某个项目的 8 秒或单次重取值写成所有浏览器的通用定律。结果不确定先回读自己启动的目标，不盲目再启动。
 6. 复用已有综合桌面恢复器前，核对它还可能启动哪些应用及本轮预期动作。dry-run/退出码不能证明目标已恢复；实际回读 restored 状态、逐应用 started/reused、真实显示会话、profile 和窗口。旁支仍运行时保持复用，不让 Chrome 维修隐式重启其他业务。
 
+启动器与身份校验器必须采用相同契约：若受管校验要求显式 `--profile-directory=Default`，则新启动和既有进程复用两条路径都须检查该参数。只用带正确参数的合成进程测试校验器，会漏掉真实启动器从未传参的问题；补覆盖实际启动 argv 的隔离回归。服务的 Requires/After/JoinsNamespaceOf 也须先核对，启动 broker 可能同时启动隐藏桌面与两个浏览器，不能描述成只影响 broker。
+
 Linux 原生宿主进程存在但 socket 路径不可见，或重新启用扩展后报 `Native transport disconnected` 时，对比浏览器与 Codex 的 `/proc/<pid>/ns/mnt`、`mountinfo`、经各自 `/proc/<pid>/root` 看到的临时目录及实际启动服务的 `PrivateTmp`。同名路径不保证是同一目录；短命恢复服务拉起长期 GUI 后退出，可能留下指向已删除私有 `/tmp` 的浏览器。此时从普通 shell 看不到 socket 不能直接归因为手动删除、插件损坏或未登录。修复负责启动 GUI 的服务契约；正常恢复原资料必须从正确桌面环境和命名空间启动，单纯 `chrome://restart` 可能继承原错误。现存用户窗口的退出与恢复按精确授权协调，不通过手建 socket 或修改浏览器存储掩盖问题；服务隔离调整只针对已证实不适用的启动器。
 
 独立隐藏 Chrome/Edge 的扩展包、原生宿主登记和传输发现要分别核验。自定义 `--user-data-dir` 下可能没有默认资料已有的 `NativeMessagingHosts`；按实际配置根和官方诊断器的显式 manifest 参数检查，不因为日常配置检查通过就跳过隐藏配置。用户明确授权建设/修复独立入口时，可在自有配置范围引用已校验的官方宿主及 origins；不导入安装器私有实现、不修改插件缓存或绕过策略初始化。
@@ -104,6 +106,8 @@ Linux 原生宿主进程存在但 socket 路径不可见，或重新启用扩展
 普通 unknown 仍不得清锁、重放或试错 resume。WSL 已验证的一次事故对账入口绑定该事故常量、完成原件和独立授权，且单次 journal 已消费；它不是可复用于其他事故的通用恢复命令。精确代码、授权、执行回执与结束时点按本机 browser-control 说明追溯，不把历史 paused 状态当成后续 owner 必须维持的状态。
 
 - 原件与转述分开：通过现有官方 daemon 精确读取 task/turn/call 的完成项，只留元数据及必要 JSON 摘要；不为找证明启动模型 runner、扫描全量聊天或输出 AX。固定原始调用、完成回执、源码和安装哈希，不能凭调用者布尔或任意旧收据认定已知。
+- 将真实执行、调用方变量错误、业务校验和结算/报告分开。先保留实际返回，再生成摘要；正常返回后的 `ReferenceError` 不能单凭外层 catch 结算为执行 unknown。安装器已持久 committed 后，额外报告失败也先只读核对正式提交及逐目标哈希，不重跑安装。没有可核验完成记录时仍保持未知，不凭“可能已成功”继续。
+- 跨重启时 `/run` 控制文件消失不是已知空闲；未知、在途及已准入请求须有受保护的持久记录，缺失/损坏/恢复不完整都失败关闭。旧事故 grant 若绑定旧 boot/PID/control，不能拿来恢复新实例，也不能造旧记录。确有已审历史完成证据且获精确修复授权时，另做绑定新实例的窄恢复，保留两事故各自审计；首次持久状态只由该入口独占建立。受控恢复成功不代表CLI握手、页面或业务验收通过。
 - 同值文件写入不等于页面操作。冻结实际代码，结合同一 PID/start_ticks/boot/epoch，检查 native 已移除、零在途/worker 后内存 unknown 是否锁存，以及 request/native-begin/human 和其他可达入口是否能准入。被拒 takeover/resume 或状态防漂移可能仍保存文件；来源未明须保留不确定，不能推定用户点击。查看器 `full_view→view_action→takeover` 要与实际启动、`schedule_fit` 的 human 条件和日志结合，不能只看调用链；当前 disabled 也不证明历史全程 disabled。合作门禁不排除同UID恶意写入或直接绕 gate CUA。
 - 若精确修复另获授权，先隔离测试、冻结变更 pin、独立审查，再分开安装与执行窗口。本次受审机制包括 root 身份校验、受保护父目录、短 grant 绑定完整 inspect target、首次 boot predecessor/零在途/无客户端查看器检查、请求前 O_EXCL 持久 reservation，以及匹配 committed 前禁止恢复。首启动窗口若会被旧查看器注册/轮询污染，须在已获准安装窗口核实精确 PID/start_ticks/安装归属后正常关闭该查看器并确认退出；不是关闭浏览器，也不授权重新启动以伪造 pristine。
 - 控制文件的 mtime_ns/ctime_ns 等可能超过 JavaScript 安全整数。用 Python 整数或其他无损解析逐字段核对，固定原始字节与哈希；不得 JSON.parse/JSON.stringify 经 JS Number roundtrip 后构造 grant、比较指纹或保存所谓原件。不同合法 JSON 编码可有不同哈希，应读正式文件而不是借用 stage 哈希。
