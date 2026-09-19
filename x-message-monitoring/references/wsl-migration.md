@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-20.2）
+## 当前目录与恢复边界（步骤 WSL-2026-09-20.3）
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
@@ -74,7 +74,7 @@ Linux socket 不可见或侧栏报 `Native transport disconnected` 时，按诊�
 
 持锁子进程不扫描、不接收正文/lease、不打开SQLite。它在 `/var/lib/cc-connect-operations/migration/x-driver-active.json` 写入无业务内容的运行标记；EOF/异常/坏帧留下标记，中枢导入/回滚必须拒绝，不能自动过期、删除或重开。只有真实两阶段finish、自有标签关闭、在途零、clearKept均已确认，才调用 runtime.close({twoPhaseFinished:true,ownedTabsClosed:true,inflightZero:true,keptCleared:true})；不得猜这些布尔值。运行时包装器另拒绝进行中关闭，正常握手才删除本轮原样标记并等待释放；关闭后driver/client全部失效。异常锁丢失立即停止，新运行前由主控核验静止，不用TTL当收口。
 
-具体发布选择与已验收范围见业务仓 `LINUX_STARTUP_GUARD.md` 和唯一交接。已接受guard1.0.3的 preparationOnly 关闭仅适用于从未尝试业务方法的静态准备窗口；按该文档核验同CUA自检、原health、control.clear、无在途与真实清理证据，再正常关闭。不能为收口而acquire或伪造twoPhaseFinished，未知自检和已开始业务不适用；不在Skill复制另一套关闭参数。未完成迁库的历史阶段仅可按明确授权独立做空白控制/合成自检，不能据此绕过当前配对门禁。
+具体发布选择与已验收范围见业务仓 `LINUX_STARTUP_GUARD.md` 和唯一交接。preparationOnly关闭只适用于从未调用cycle/页面等业务方法的静态准备，不能用于已进行的页面诊断。已接受guard1.0.4/adapter1.0.3另有显式launch mode=diagnostic，原owner已实际验证同CUA61、一次目标诊断已知失败、自有页关闭、health水位不变、release/工件清理、control.clear及diagnosticOnly关闭/marker撤销。诊断模式禁止acquire/sendKept/冻结/提交，不能为了关闭而取得业务lease、调用clearKept或伪造finish；首个失败停止，未知或在途仍不能正常关闭。参数及限额仅按业务仓当前模板，不在Skill复制另一套runner；原owner身份/同CUA/短租约和整轮共享守卫保持。页面地址匹配及目标时间链接计数为零，不能据此断言目标删除、登录失效或控制未知，也不能据诊断计入三人工/四定时验收。候选版本、新增诊断与实际业务分别留证。
 
 两个源文件都是 IIFE 表达式，执行 driver 源码直接返回 API **对象**；执行 stdin 源码返回带 `createFixedStdinClient` 的对象，不能把结果再次当函数调用。锁前仅读取原样文本或编译 `vm.Script`；`createDriver` 回调内才执行 driver Script 并直接返回对象，`createClient` 回调内执行 client Script 后调用其 `createFixedStdinClient({spawn})`。只绑定 runtime 返回的包装实例，版本/指纹在持锁后核验；精确公开 Node 注入与模板见业务仓 `LINUX_STARTUP_GUARD.md` 的“原样源码的确切加载形态”，不得从变量名推断接口或复用锁前的裸 driver。
 
