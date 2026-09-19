@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-20.4）
+## 当前目录与恢复边界（步骤 WSL-2026-09-20.5）
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
@@ -84,6 +84,8 @@ CUA 的 Node 全局不保证包含计时器。按该模板显式 `import('node:t
 
 运行回执一旦发送路径/哈希即保留原文件；发现漏报只读 health 等事实时，写独立更正或收口回执说明字段变化、原哈希与新证据，不覆盖已发送文件。当前状态索引可更新，但不能用索引的新时间刷新原控制/selfTest成功或隐藏失败。
 
+V8已验证的预租约拒绝不能套用正常关闭：即使control在spawn前拒绝，旧guard也可能已经记录业务尝试。先保留真实摘要、检查runtime/control/adapter实际状态，不仅凭process_started=false推断preparation_safe。原分支无法正常收口时保持标记，由已获授权的开发维护者按中枢独立受审入口处理；不能由owner杀守卫或伪造finish。本次无acquire/lease/业务执行且adapter已closed的窄事故已实测“两阶段维护退役→原owner同CUA撤销证明→独立保字节/inode归档”，不推广到业务已执行或unknown。证据须绑定本启动实例/进程/发布/原标记，信号intent后不重试；具体入口与一次性pin仅放项目交接。撤销后的control.state可能被guard明确拒绝，旧已clear状态只能标为pre_retirement_audit；空页证明读实际ownedTabIds数组，不用缺字段默认零。错误抄录的hash保留原件、独立重算并明确关联，不静默改原审计。
+
 正式账本的常规诊断使用原 fixed health；需要扩展只读核验时沿用官方 startup_guard，并复用原 `SQLiteStore(read_only=True)` 已通过静止签名检查的连接，不自行用裸 `mode=ro` 打开 WAL 库。只读连接也可能在退出后留下空 WAL/SHM，不能据此放宽原 health 或把它误报为浏览器故障。已经出现且独立确认无连接、owner idle、heartbeat 暂停及无运行 marker 时，可按明确维护授权使用业务仓已审计 `close_empty_wal_reader.py` 的空 WAL 正常关闭方法；它拒绝非空 WAL/活动锁/待收口，原生 rw/query_only 正常 close 后比对全表摘要并要求原 health 通过，无可写 Store 初始化、显式 checkpoint、手删旁车或业务行写入。此入口不是定时 health 的自动回退或重试，候选维护不切换生产 current。
 
 ## 每轮业务与清理
@@ -92,7 +94,7 @@ acquire前完整读取当前快速路径和上下文契约的业务部分；Wind
 
 当前直接CUA工具无法嵌入functions，不能假定存在跨宿主opaque传递，也不把lease写临时文件。已批准的新同宿主分支使用 `desktop_control_client.js`，只封装原固定Python的health/acquire/预检/失败/对账/finish等有限小型控制；五项业务sendKept与Python入口不变。候选未正式接受时不得先用旧functions acquire等待搬运凭证；旧轮只按其已有原lease收口，不能迁入新实例。
 
-新分支在当前CUA闭包执行唯一acquire并在返回前保存原回执，默认只输出元数据；用 `runtime.control.leaseReceipt()` 在同一VM初始化xMonLease，后续小型控制由闭包注入原lease，不接受调用者覆盖。这取代Linux旧快速路径“functions与CUA两侧保存/比对”的步骤；相等证明在同一VM核对xMonLease与该原回执，functions不再持有新轮凭证。首次health/acquire之前完成实际浏览器控制、登录和固定控制模块准备；每次仍只执行一个固定请求，预检明确成功后才生成draft/raw。原始控制结果通过kept(action)纯内存读取，未知不重试，finish仅一次并由原Python完成内部两阶段。
+新分支在当前CUA闭包执行唯一acquire并在返回前保存原回执，默认只输出元数据；用 `runtime.control.leaseReceipt()` 在同一VM初始化xMonLease，后续小型控制由闭包注入原lease，不接受调用者覆盖。这取代Linux旧快速路径“functions与CUA两侧保存/比对”的步骤；相等证明在同一VM核对xMonLease与该原回执，functions不再持有新轮凭证。首次health/acquire之前完成实际浏览器控制、登录和固定控制模块准备；每次仍只执行一个固定请求，预检明确成功后才生成draft/raw。`runKept('login-state')`是本轮lease内登录状态登记，不是只读登录探针，acquire前不能调用，也不为它提前acquire。每次先保存实际摘要，检查ok/code/process_started/outcome_unknown/retained_result_available，仅存在本次保留结果时再kept(action)；spawn前拒绝可能根本没有kept，后续control_result_missing不把已知拒绝变成执行unknown。guard1.0.6的事前准入已接受，实际新运行防护仍需原owner验收，不改旧对象。未知不重试，finish仅一次并由原Python完成内部两阶段。
 
 正式事实对象与lease保持同轮内存，不从文件恢复。用户另已允许官方CLI临时快照/日志，仅本任务私有目录，非正式事实来源，不入Git/Skill/业务备份。共同故障停两流，局部失败保留另一流；真实unknown不重试，失败登记browser=chrome和实际来源/版本。
 
