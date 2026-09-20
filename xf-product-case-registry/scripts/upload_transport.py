@@ -21,10 +21,35 @@ PROGRESS_INTERVAL_SECONDS = 2.0
 def upload_request(client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.Response:
     completed, count = kwargs.pop("upload_progress", (0, 1))
     filename = kwargs["files"]["file"][0]
+    return bounded_request(
+        client,
+        method,
+        url,
+        total_seconds=UPLOAD_TOTAL_SECONDS,
+        idle_seconds=UPLOAD_IDLE_SECONDS,
+        label=str(filename),
+        file_counts=(completed, count),
+        **kwargs,
+    )
+
+
+def bounded_request(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    total_seconds: float,
+    idle_seconds: float,
+    label: str,
+    file_counts: tuple[int, int] = (0, 1),
+    **kwargs: Any,
+) -> httpx.Response:
+    """One raw or multipart request; cancel on budget, never replay its body."""
+    completed, count = file_counts
     # Keep control characters out of terminal progress; never print headers or URLs.
-    label = "".join(c for c in str(filename) if c.isprintable())[:120]
+    label = "".join(c for c in label if c.isprintable())[:120]
     request = client.build_request(method, url, **kwargs)
-    request.extensions["timeout"] = httpx.Timeout(UPLOAD_IDLE_SECONDS).as_dict()
+    request.extensions["timeout"] = httpx.Timeout(idle_seconds).as_dict()
     chunks = iter(request.stream)
     total = int(request.headers.get("content-length", "0"))
     started = last_progress = time.monotonic()
@@ -64,14 +89,14 @@ def upload_request(client: httpx.Client, method: str, url: str, **kwargs: Any) -
             task = asyncio.create_task(sender.send(request))
             try:
                 while not task.done():
-                    await asyncio.wait({task}, timeout=min(1.0, UPLOAD_IDLE_SECONDS / 4))
+                    await asyncio.wait({task}, timeout=min(1.0, idle_seconds / 4))
                     report()
                     now = time.monotonic()
-                    if not task.done() and now - started >= UPLOAD_TOTAL_SECONDS:
+                    if not task.done() and now - started >= total_seconds:
                         raise httpx.TimeoutException(
                             "单文件上传达到总期限，已停止发送", request=request
                         )
-                    if not task.done() and now - last_progress >= UPLOAD_IDLE_SECONDS:
+                    if not task.done() and now - last_progress >= idle_seconds:
                         raise httpx.TimeoutException(
                             "单文件上传连续无进展，已停止发送", request=request
                         )

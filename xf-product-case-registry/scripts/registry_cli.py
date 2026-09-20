@@ -25,15 +25,17 @@ from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
 if __package__:
+    from . import chunk_upload
     from .ocr_runtime import OcrError, run_ocr
-    from .upload_transport import upload_request
+    from .upload_transport import bounded_request, upload_request
     from .workflow_reporting import ReportingError, record_timing, render_report, write_report
 else:
+    import chunk_upload
     from ocr_runtime import OcrError, run_ocr
-    from upload_transport import upload_request
+    from upload_transport import bounded_request, upload_request
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -1413,7 +1415,7 @@ def api_request(
 ) -> httpx.Response:
     """Apply the published API pacing and machine-readable 429 retry contract."""
 
-    if request_class not in {"general", "upload"}:
+    if request_class not in {"general", "upload", "chunk", "complete"}:
         raise RegistryError("未知 API 限流类别")
     if request_class == "upload":
         return upload_request(client, method.upper(), url, **kwargs)
@@ -1424,14 +1426,32 @@ def api_request(
     total_retry_wait = 0.0
     attempts = 0
     while True:
-        if request_class == "general" and pacing_enabled:
-            last_started = getattr(client, "_xfpcr_last_general_request_started", None)
+        if pacing_enabled:
+            pacing_key = (
+                "_xfpcr_last_chunk_request_started"
+                if request_class == "chunk"
+                else "_xfpcr_last_general_request_started"
+            )
+            interval = 0.12 if request_class == "chunk" else GENERAL_REQUEST_MIN_INTERVAL_SECONDS
+            last_started = getattr(client, pacing_key, None)
             now = time.monotonic()
             if isinstance(last_started, int | float):
-                pacing_wait = GENERAL_REQUEST_MIN_INTERVAL_SECONDS - (now - last_started)
+                pacing_wait = interval - (now - last_started)
                 if pacing_wait > 0:
                     time.sleep(pacing_wait)
-            client._xfpcr_last_general_request_started = time.monotonic()  # type: ignore[attr-defined]
+            setattr(client, pacing_key, time.monotonic())
+        if request_class in {"chunk", "complete"}:
+            # Complete has no request body; only its total deadline applies.
+            return bounded_request(
+                client,
+                method.upper(),
+                url,
+                total_seconds=150.0,
+                idle_seconds=60.0 if request_class == "chunk" else 150.0,
+                label=kwargs.pop("upload_label", "分块上传"),
+                file_counts=kwargs.pop("upload_progress", (0, 1)),
+                **kwargs,
+            )
         response = client.request(method.upper(), url, **kwargs)
         if response.status_code != 429 or not retry_on_429:
             return response
@@ -2411,6 +2431,132 @@ def upload_pdf_with_receipt(
             )
         except (httpx.HTTPError, RegistryError, OSError):
             print("上传已停止；接收清单暂未核对成功，保留原断点，未重复发送正文。", file=sys.stderr)
+        raise
+    state["uploadedFileRefs"] = sorted({*state["uploadedFileRefs"], item["clientRef"]})
+    write_json(state_path, state)
+
+
+def chunk_capabilities(
+    client: httpx.Client,
+    api_base: str,
+    mode: str,
+) -> dict[str, Any] | None:
+    if mode == "whole-file":
+        return None
+    if mode != "resumable":
+        raise RegistryError("上传方式无效")
+    cache = getattr(client, "_xfpcr_chunk_capabilities", {})
+    if api_base not in cache:
+        response = api_request(
+            client,
+            "GET",
+            f"{api_base}/api/v2/import-upload-capabilities",
+            retry_on_429=False,
+        )
+        if response.status_code == 404:
+            value = None
+        else:
+            try:
+                value = chunk_upload.parse_capabilities(response_json(response, "读取分块上传能力"))
+            except chunk_upload.ChunkProtocolError as error:
+                raise RegistryError(str(error)) from error
+        cache[api_base] = value
+        client._xfpcr_chunk_capabilities = cache  # type: ignore[attr-defined]
+    return cache[api_base]
+
+
+def declare_upload_plan(
+    client: httpx.Client,
+    api_base: str,
+    job_id: str,
+    write_headers: dict[str, str],
+    projection: list[dict[str, Any]],
+    capabilities: dict[str, Any],
+) -> None:
+    try:
+        plan = chunk_upload.make_upload_plan(projection, capabilities)
+        if capabilities["uploadPlanSupported"]:
+            receipt = response_json(
+                api_request(
+                    client,
+                    "PUT",
+                    f"{api_base}/api/v2/import-jobs/{job_id}/upload-plan",
+                    headers=write_headers,
+                    json=plan,
+                    retry_on_429=False,
+                ),
+                "声明完整上传清单",
+            )
+            chunk_upload.validate_plan_receipt(receipt, plan)
+    except chunk_upload.ChunkProtocolError as error:
+        raise RegistryError(str(error)) from error
+
+
+def upload_pdf_chunked_with_receipt(
+    client: httpx.Client,
+    api_base: str,
+    job_id: str,
+    write_headers: dict[str, str],
+    local_path: Path,
+    item: dict[str, Any],
+    state: dict[str, Any],
+    state_path: Path,
+    projection: list[dict[str, Any]],
+    read_job: Any,
+) -> None:
+    base = f"{api_base}/api/v2/import-jobs/{job_id}"
+
+    def control(method: str, suffix: str, **kwargs: Any) -> dict[str, Any]:
+        complete = kwargs.pop("bounded_complete", False)
+        return response_json(
+            api_request(
+                client,
+                method,
+                base + suffix,
+                headers=write_headers,
+                request_class="complete" if complete else "general",
+                retry_on_429=False,
+                **kwargs,
+            ),
+            "完成分块文件" if complete else "读取或初始化原任务分块会话",
+        )
+
+    def transfer(method: str, suffix: str, **kwargs: Any) -> dict[str, Any]:
+        headers = {**write_headers, **kwargs.pop("headers")}
+        return response_json(
+            api_request(
+                client,
+                method,
+                base + suffix,
+                headers=headers,
+                request_class="chunk",
+                retry_on_429=False,
+                upload_label=local_path.name,
+                upload_progress=(len(state["uploadedFileRefs"]), len(projection)),
+                **kwargs,
+            ),
+            "发送文件分块",
+        )
+
+    try:
+        chunk_upload.upload_file(local_path, item, control, transfer)
+    except (
+        httpx.HTTPError,
+        RegistryError,
+        chunk_upload.ChunkProtocolError,
+        OSError,
+        KeyboardInterrupt,
+    ) as error:
+        # Includes 410: reconcile, stop, and let the next explicit run init the
+        # same file under the same job. No technical session/job is auto-deleted.
+        try:
+            reconcile_uploaded_file_refs(state, read_job(), projection)
+            write_json(state_path, state)
+            print("分块上传已停止；已回读原任务完整文件清单，未重发正文。", file=sys.stderr)
+        except (httpx.HTTPError, RegistryError, OSError):
+            print("分块上传已停止；原任务暂未核对成功，保留原断点。", file=sys.stderr)
+        if isinstance(error, chunk_upload.ChunkProtocolError):
+            raise RegistryError(str(error)) from error
         raise
     state["uploadedFileRefs"] = sorted({*state["uploadedFileRefs"], item["clientRef"]})
     write_json(state_path, state)
@@ -3545,6 +3691,9 @@ def upload_command(args: argparse.Namespace) -> None:
             write_headers = shared_session["writeHeaders"]
             require_identity_scope(identity, manifest)
         require_same_state_identity(state, identity)
+        capabilities = chunk_capabilities(
+            client, api_base, getattr(args, "upload_mode", "whole-file")
+        )
         job_id: str
         job_status = "CREATED"
         if state:
@@ -3702,12 +3851,19 @@ def upload_command(args: argparse.Namespace) -> None:
         validate_upload_state(state)
         write_json(state_path, state)
         mark_uploading(args, path, manifest)
+        if capabilities is not None and job_status in {"CREATED", "UPLOADING"}:
+            declare_upload_plan(client, api_base, job_id, write_headers, projection, capabilities)
         projection_by_ref = {item["clientRef"]: item for item in projection}
         for item in manifest["files"]:
             if item["clientRef"] in state["uploadedFileRefs"]:
                 continue
             projection_item = projection_by_ref[item["clientRef"]]
-            upload_pdf_with_receipt(
+            send_pdf = (
+                upload_pdf_chunked_with_receipt
+                if capabilities is not None
+                else upload_pdf_with_receipt
+            )
+            send_pdf(
                 client,
                 api_base,
                 job_id,
@@ -5140,6 +5296,12 @@ def build_parser() -> argparse.ArgumentParser:
         )
         command.set_defaults(func=func)
         if name == "upload":
+            command.add_argument(
+                "--upload-mode",
+                choices=("whole-file", "resumable"),
+                default="whole-file",
+                help="默认整文件；resumable 显式探测已发布分块能力，404或关闭时使用整文件",
+            )
             command.add_argument("--dry-run", action="store_true")
             command.add_argument("--finalize", action="store_true")
             command.set_defaults(workspace_required=True)
@@ -5240,6 +5402,12 @@ def build_parser() -> argparse.ArgumentParser:
     upload_batch.add_argument("--timeout", type=float, default=60.0)
     upload_batch.add_argument("--dry-run", action="store_true")
     upload_batch.add_argument("--finalize", action="store_true")
+    upload_batch.add_argument(
+        "--upload-mode",
+        choices=("whole-file", "resumable"),
+        default="whole-file",
+        help="默认整文件；resumable 按批探测分块能力，保持原任务和V6断点",
+    )
     upload_batch.add_argument(
         "--deep-content-verify",
         action="store_true",

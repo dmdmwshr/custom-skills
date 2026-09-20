@@ -1436,11 +1436,13 @@ def test_uploading_state_with_existing_case_recovers_without_second_post(
         ("MANIFEST_RECEIVED", False),
     ],
 )
+@pytest.mark.parametrize("upload_mode", ["whole-file", "resumable"])
 def test_upload_resumes_all_active_states_with_case_null(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     job_status: str,
     uploaded_before: bool,
+    upload_mode: str,
 ) -> None:
     source = tmp_path / "one.pdf"
     pdf(source)
@@ -1514,6 +1516,24 @@ def test_upload_resumes_all_active_states_with_case_null(
         if auth_response is not None:
             return auth_response
         requests.append(request.url.path)
+        if request.url.path.endswith("/import-upload-capabilities"):
+            from scripts.test_chunk_upload import capabilities
+
+            return httpx.Response(200, json=capabilities())
+        if request.url.path.endswith("/upload-plan"):
+            plan = json.loads(request.content)
+            return httpx.Response(
+                200, json={**plan, "fileCount": 1, "totalSizeBytes": str(source.stat().st_size)}
+            )
+        if request.url.path.endswith("/uploads"):
+            from scripts.test_chunk_upload import session
+
+            receipt = session(projection[0], state="COMPLETED", upload_id=None)
+            receipt.update(
+                receivedFile=cli.chunk_upload.file_identity(projection[0]),
+                nextOffsetBytes=str(source.stat().st_size),
+            )
+            return httpx.Response(200, json=receipt)
         if request.url.path == "/api/ready":
             return httpx.Response(200, json={"status": "ready"})
         if request.method == "POST" and request.url.path.endswith("/files"):
@@ -1553,10 +1573,15 @@ def test_upload_resumes_all_active_states_with_case_null(
             timeout=10.0,
             dry_run=False,
             finalize=True,
+            upload_mode=upload_mode,
         )
     )
     assert "/api/v2/import-jobs" not in requests
     expected_file_replay = 0 if uploaded_before or job_status == "MANIFEST_RECEIVED" else 1
+    if upload_mode == "resumable":
+        assert requests.count("/api/v2/import-upload-capabilities") == 1
+        assert requests.count("/api/v2/import-jobs/job/uploads") == expected_file_replay
+        expected_file_replay = 0
     expected_manifest_replay = 0 if job_status == "MANIFEST_RECEIVED" else 1
     assert requests.count("/api/v2/import-jobs/job/files") == expected_file_replay
     assert requests.count("/api/v2/import-jobs/job/manifest") == expected_manifest_replay

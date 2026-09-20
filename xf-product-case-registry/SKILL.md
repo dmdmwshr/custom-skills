@@ -24,6 +24,7 @@ description: 从用户已登录的消防监督管理网页采集案卷，维护�
 | 清点、识别、拆分、字段整理 | [本地格式](references/case-data-format.md)、[文书分类](references/document-classification.md) |
 | 生成或验证上传清单 | 上述本地资料、[V2 Schema](references/CaseImportManifestV2.schema.json) 和 [空值示例](references/CaseImportManifestV2.example.json) |
 | 导入、缺失文件补录、核验、归档 | [V2 工作流](references/api-workflow.md)，并核对当前清单与 Schema |
+| 新协议分块续传、上传中断恢复 | [分块上传](references/chunk-upload.md)；默认仍整文件，先确认服务端已发布和隔离验收 |
 
 ## 共用边界
 
