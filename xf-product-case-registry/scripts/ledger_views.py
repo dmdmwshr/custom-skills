@@ -456,7 +456,7 @@ def ledger_view(layout: Any, *, view: str = "all", batch_id: str | None = None) 
     }
 
 
-def render_ledger_report(value: dict[str, Any]) -> str:
+def render_ledger_report(value: dict[str, Any], *, include_all: bool = False) -> str:
     counts = value["counts"]
     lines = [
         "# 案卷总水位",
@@ -476,7 +476,15 @@ def render_ledger_report(value: dict[str, Any]) -> str:
         "|项目编号|初查结果|初查日期|来源登记|材料采集|系统登记|正文核验|归档|当前处理|",
         "|---|---|---|---|---|---|---|---|---|",
     ]
-    for row in value["cases"]:
+    report_rows = (
+        value["cases"]
+        if include_all
+        else [row for row in value["cases"] if row["activePending"] or row["issues"]]
+    )
+    if not include_all:
+        lines.insert(-2, "以下仅列活动待办或明确异常；历史明细见总账，--all-cases 可显式展开。")
+        lines.insert(-2, "")
+    for row in report_rows:
         s = row["stages"]
         flags = [
             "是" if s[key] else "未确认"

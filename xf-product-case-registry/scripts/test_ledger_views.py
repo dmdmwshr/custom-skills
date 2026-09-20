@@ -504,3 +504,13 @@ def test_unchanged_current_file_identity_reuses_receipt(layout):
     assert row["stages"]["bodyVerified"] is True
     assert row["complete"] is True
     assert views.scan_plan(layout)["pending"] == []
+
+
+def test_daily_report_only_expands_pending_or_anomalous_cases(layout):
+    add_case(layout, A, archived=True, deep=True)
+    add_case(layout, B)
+    snapshot = views.ledger_view(layout)
+    daily = views.render_ledger_report(snapshot)
+    assert A not in daily and B in daily
+    assert "本视图 2 案" in daily
+    assert A in views.render_ledger_report(snapshot, include_all=True)

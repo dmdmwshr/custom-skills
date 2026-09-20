@@ -38,7 +38,7 @@ else:
     from upload_transport import bounded_request, upload_request
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
-VERSION = "1.9.2"
+VERSION = "1.9.3"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -5069,7 +5069,9 @@ def ledger_report_command(args: argparse.Namespace) -> None:
             progress = ledger_views.ledger_view(
                 layout, view=getattr(args, "view", "all"), batch_id=args.batch_id
             )
-            markdown = ledger_views.render_ledger_report(progress)
+            markdown = ledger_views.render_ledger_report(
+                progress, include_all=getattr(args, "all_cases", False)
+            )
             case_count = progress["counts"]["cases"]
         if args.output:
             target = write_report(Path(args.output), layout, markdown)
@@ -5510,7 +5512,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_workspace_resolution_options(ledger_status)
     ledger_status.add_argument(
         "--batch-id",
-        help="指定 scope=all 的正式批次；省略时选择更新时间最新的正式批次",
+        help="显式限定正式批次；scope=all 不指定时包含所有已知历史案卷",
     )
     ledger_status.add_argument("--scope", choices=("all", "batch"), default="all")
     ledger_status.add_argument(
@@ -5546,6 +5548,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--view", choices=("all", "unqualified", "unknown", "unfinished"), default="all"
     )
     ledger_report.add_argument("--output", help="核验记录目录内的新 .md 文件；省略时只返回摘要")
+    ledger_report.add_argument(
+        "--all-cases", action="store_true", help="显式展开所有案卷明细；默认只列活动待办及异常"
+    )
     ledger_report.set_defaults(func=ledger_report_command)
 
     for name, func in (("upload", upload_command), ("verify", verify_command)):
