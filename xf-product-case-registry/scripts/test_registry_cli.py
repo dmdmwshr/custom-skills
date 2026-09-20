@@ -1866,7 +1866,17 @@ def test_upload_batch_parser_requires_explicit_projects_and_finalize_mode() -> N
 
 @pytest.mark.parametrize(
     "outcome",
-    ["success", "finalized", "transport-finalized", "invalid", "wrong-target", "conflicts"],
+    [
+        "success",
+        "finalized",
+        "transport-finalized",
+        "invalid",
+        "wrong-target",
+        "conflicts",
+        "partial",
+        "interrupted",
+        "await-finalize",
+    ],
 )
 def test_upload_batch_authenticates_and_checks_ready_once_for_multiple_cases(
     tmp_path: Path,
@@ -1893,10 +1903,22 @@ def test_upload_batch_authenticates_and_checks_ready_once_for_multiple_cases(
         data = manifest(source_pdf)
         data["case"]["projectNo"] = project_no
         data["packageSha256"] = "sha256:" + str(index + 1) * 64
+        mapping = {"file:one": str(source_pdf)}
+        if outcome == "partial":
+            data["files"].append(
+                {**data["files"][0], "clientRef": "file:two", "relativePath": "files/two.pdf"}
+            )
+            data["otherAttachments"].append(
+                {
+                    **data["otherAttachments"][0],
+                    "clientRef": "attachment:two",
+                    "fileRef": "file:two",
+                    "title": "第二附件",
+                }
+            )
+            mapping["file:two"] = str(source_pdf)
         (case_dir / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
-        (case_dir / "upload-map.json").write_text(
-            json.dumps({"files": {"file:one": str(source_pdf)}}), encoding="utf-8"
-        )
+        (case_dir / "upload-map.json").write_text(json.dumps({"files": mapping}), encoding="utf-8")
 
     calls = {"auth": 0, "ready": 0, "upload": 0}
 
@@ -1956,6 +1978,10 @@ def test_upload_batch_authenticates_and_checks_ready_once_for_multiple_cases(
                     "skippedCount": 0,
                 },
             }
+            if outcome in {"partial", "interrupted", "await-finalize"}:
+                state = {key: value for key, value in state.items() if key in cli.STATE_BASE_KEYS}
+                state["status"] = "UPLOADING"
+                state["uploadedFileRefs"] = [] if outcome == "interrupted" else ["file:one"]
             cli.validate_upload_state(state)
             if outcome == "invalid":
                 state.pop("filesProjection")
@@ -1992,6 +2018,19 @@ def test_upload_batch_authenticates_and_checks_ready_once_for_multiple_cases(
     assert summary["awaitingNas"] == (1 if outcome in {"finalized", "transport-finalized"} else 0)
     assert summary["manualReview"] == (1 if outcome == "conflicts" else 0)
     assert summary["failed"] == (1 if outcome in {"invalid", "wrong-target"} else 0)
+    assert summary["uploadPending"] == (
+        1 if outcome in {"partial", "interrupted", "await-finalize"} else 0
+    )
+    if outcome in {"partial", "interrupted", "await-finalize"}:
+        assert summary["status"] == "batch-completed-with-attention"
+        assert (
+            summary["cases"][0]["status"]
+            == {
+                "partial": "PARTIAL_UPLOAD",
+                "interrupted": "UPLOAD_INTERRUPTED",
+                "await-finalize": "UPLOAD_PENDING_FINALIZE",
+            }[outcome]
+        )
 
 
 def test_real_upload_cli_requires_configured_case_workspace_before_network(
@@ -2167,6 +2206,106 @@ def test_verification_error_classification_distinguishes_waiting_from_real_fault
     message: str, waiting: bool
 ) -> None:
     assert cli.verification_error_is_waiting(RegistryError(message)) is waiting
+
+
+@pytest.mark.parametrize("header,seconds", [("120", 120), (None, None), ("invalid", None)])
+def test_verification_rate_limit_records_retry_hint_not_failed(
+    tmp_path, monkeypatch, header, seconds
+):
+    response = httpx.Response(
+        429, headers={"Retry-After": header} if header else {}, json={"secret": "must-not-leak"}
+    )
+    with pytest.raises(cli.RegistryWaitError) as caught:
+        cli.response_json(response, "读取案卷目录")
+    captured = {}
+    monkeypatch.setattr(cli, "update_case_waterline", lambda *a, **kw: captured.update(kw))
+    cli.mark_verification_error(
+        argparse.Namespace(),
+        tmp_path / "manifest.json",
+        {},
+        {"finalizedAt": "fixture"},
+        caught.value,
+    )
+    assert captured["state"] == "UPLOADED_AWAITING_NAS"
+    wait = captured["nas_verification"]
+    assert wait["status"] == "RATE_LIMITED"
+    assert wait["retryAfterSeconds"] == seconds
+    if seconds is not None:
+        assert (
+            cli.datetime.fromisoformat(wait["retryAt"])
+            - cli.datetime.fromisoformat(wait["observedAt"])
+        ).total_seconds() == seconds
+    else:
+        assert wait["retryAt"] is None
+    assert "must-not-leak" not in json.dumps(captured)
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        ("整卷正文取回等待超时；任务仍由服务端保留", "WAIT_TIMEOUT"),
+        ("文件取回等待超时；任务仍由服务端保留", "WAIT_TIMEOUT"),
+        ("飞牛落盘核验仍在进行，本次等待超时", "WAIT_TIMEOUT"),
+        ("读取文件取回进度时网络异常", "NETWORK_WAIT"),
+        ("目录 SHA-256 不一致：file:one", "FAILED"),
+        ("读取案卷目录 失败：HTTP 403", "FAILED"),
+    ],
+)
+def test_verification_waits_do_not_erase_real_faults(tmp_path, monkeypatch, message, expected):
+    captured = {}
+    monkeypatch.setattr(cli, "update_case_waterline", lambda *a, **kw: captured.update(kw))
+    cli.mark_verification_error(
+        argparse.Namespace(), tmp_path / "manifest.json", {}, {}, RegistryError(message)
+    )
+    assert captured["nas_verification"]["status"] == expected
+    assert captured["state"] == (
+        "NEEDS_MANUAL_REVIEW" if expected == "FAILED" else "UPLOADED_AWAITING_NAS"
+    )
+
+
+def test_verification_transport_failure_is_waiting_without_poll_replay(monkeypatch):
+    calls = []
+
+    def fail(*args):
+        calls.append(True)
+        raise httpx.ReadTimeout("sensitive transport details")
+
+    monkeypatch.setattr(cli, "verify_with_client", fail)
+    with httpx.Client() as client, pytest.raises(cli.RegistryWaitError) as caught:
+        cli.verify_with_poll(client, "https://registry.example", {}, {}, False, 60)
+    assert calls == [True]
+    assert cli.verification_wait_details(caught.value)["status"] == "NETWORK_WAIT"
+    assert "sensitive" not in str(caught.value)
+
+
+def test_success_clears_old_retry_metadata_without_changing_upload_state(tmp_path, monkeypatch):
+    layout = workspace.BusinessLayout.from_root(tmp_path)
+    workspace.upsert_case(
+        layout,
+        PROJECT,
+        state="UPLOADED_AWAITING_NAS",
+        nasVerification={
+            "status": "RATE_LIMITED",
+            "retryAfterSeconds": 120,
+            "retryAt": "2099-01-01T00:00:00+00:00",
+            "reasonCode": "RATE_LIMITED",
+        },
+    )
+    monkeypatch.setattr(cli, "resolve_manifest_workspace", lambda *a: (workspace, layout))
+    cli.update_case_waterline(
+        argparse.Namespace(),
+        tmp_path / "manifest.json",
+        {"case": {"projectNo": PROJECT}},
+        state="VERIFIED_PENDING_ARCHIVE",
+        upload={"status": "VERIFIED"},
+        nas_verification={"status": "VERIFIED"},
+    )
+    record = workspace.load_waterline(layout)["cases"][PROJECT]
+    assert record["nasVerification"]["status"] == "VERIFIED"
+    assert record["nasVerification"]["retryAt"] is None
+    assert record["nasVerification"]["retryAfterSeconds"] is None
+    assert record["nasVerification"]["reasonCode"] is None
+    assert not (tmp_path / "upload-state.json").exists()
 
 
 def test_verified_waterline_stops_at_pending_archive_until_archive_succeeds(

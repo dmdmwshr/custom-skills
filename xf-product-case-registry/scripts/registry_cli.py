@@ -15,7 +15,7 @@ import sys
 import time
 import tomllib
 from contextlib import nullcontext
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -42,6 +42,16 @@ AUTH_CONFIG_TEMPLATE = '[auth]\nusername = ""\npassword = ""\n'
 
 class RegistryError(RuntimeError):
     pass
+
+
+class RegistryWaitError(RegistryError):
+    """A bounded request stopped with a known transient reason, not content corruption."""
+
+    def __init__(self, message: str, reason: str, retry_after: int | None = None):
+        super().__init__(message)
+        self.reason = reason
+        self.retry_after = retry_after
+        self.observed_at = datetime.now(UTC)
 
 
 def default_auth_config_path() -> Path:
@@ -1417,7 +1427,7 @@ def api_request(
         if request_class == "general" and pacing_enabled:
             last_started = getattr(client, "_xfpcr_last_general_request_started", None)
             now = time.monotonic()
-            if isinstance(last_started, (int, float)):
+            if isinstance(last_started, int | float):
                 pacing_wait = GENERAL_REQUEST_MIN_INTERVAL_SECONDS - (now - last_started)
                 if pacing_wait > 0:
                     time.sleep(pacing_wait)
@@ -1451,9 +1461,10 @@ def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
                 "RECALL_USER_QUOTA_EXCEEDED",
                 "RECALL_CASE_QUOTA_EXCEEDED",
             }:
-                raise RegistryError(
+                raise RegistryWaitError(
                     f"{label} 的文件取回缓存配额不足；保留已完成导入和核验断点，"
-                    "等待缓存释放，或在范围闭合时使用现有整卷取回准备"
+                    "等待缓存释放，或在范围闭合时使用现有整卷取回准备",
+                    "RECALL_QUOTA",
                 )
             retry_after = response.headers.get("retry-after", "").strip()
             wait_hint = (
@@ -1461,9 +1472,11 @@ def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
                 if re.fullmatch(r"[1-9][0-9]{0,5}", retry_after)
                 else "，请按服务端提示稍后重试"
             )
-            raise RegistryError(
+            raise RegistryWaitError(
                 f"{label} 触发登记系统限流{wait_hint}；"
-                "多案上传必须使用 upload-batch 共用一次登录会话"
+                "多案上传必须使用 upload-batch 共用一次登录会话",
+                "RATE_LIMITED",
+                int(retry_after) if re.fullmatch(r"[1-9][0-9]{0,5}", retry_after) else None,
             )
         # Never echo a response body here. Authentication and validation responses
         # may contain data that must not be copied into terminals, logs, or task output.
@@ -3080,6 +3093,15 @@ def update_case_waterline(
     if resolved is None:
         return None
     workspace, layout = resolved
+    if nas_verification is not None:
+        # upsert deep-merges sections: clear stale wait hints after success/failure changes.
+        nas_verification = {
+            "reasonCode": None,
+            "retryAfterSeconds": None,
+            "retryAt": None,
+            "observedAt": None,
+            **nas_verification,
+        }
     try:
         return workspace.upsert_case(
             layout,
@@ -3145,6 +3167,7 @@ def mark_awaiting_nas(
     manifest: dict[str, Any],
     state: dict[str, Any],
     error_summary: str,
+    wait_details: dict[str, Any] | None = None,
 ) -> None:
     update_case_waterline(
         args,
@@ -3155,7 +3178,9 @@ def mark_awaiting_nas(
             "status": "FINALIZED_UNVERIFIED",
             "finalizedAt": state.get("finalizedAt"),
         },
-        nas_verification={"status": "PENDING"},
+        nas_verification=wait_details
+        or verification_wait_details(error_summary)
+        or {"status": "PENDING"},
         error_summary=error_summary,
     )
 
@@ -3181,22 +3206,62 @@ def mark_verification_failure(
     )
 
 
-def verification_error_is_waiting(error: RegistryError | str) -> bool:
+def verification_wait_details(error: RegistryError | str) -> dict[str, Any] | None:
     message = str(error)
-    if message.startswith(("飞牛落盘核验中：", "飞牛正式库不可用：", "飞牛正式库暂不可用：")):
-        return True
-    if message.startswith("文件取回未完成："):
-        return message.rsplit("：", 1)[-1] in {"PENDING", "PROCESSING", "OFFLINE"}
-    return message.startswith(
-        (
-            "发起文件取回时网络异常",
-            "读取文件取回进度时网络异常",
-            "文件取回等待超时",
-            "文件需要先从飞牛取回",
-            "文件取回后仍无法下载",
-            "下载文件时网络异常",
+    reason, retry_after = None, None
+    observed = datetime.now(UTC)
+    if isinstance(error, RegistryWaitError):
+        reason, retry_after, observed = error.reason, error.retry_after, error.observed_at
+    elif message.startswith(
+        ("文件取回等待超时", "整卷正文取回等待超时", "飞牛落盘核验仍在进行，本次等待超时")
+    ):
+        reason = "WAIT_TIMEOUT"
+    elif message.startswith(
+        ("发起文件取回时网络异常", "读取文件取回进度时网络异常", "下载文件时网络异常")
+    ):
+        reason = "NETWORK_WAIT"
+    elif (
+        message.startswith(
+            (
+                "飞牛落盘核验中：",
+                "飞牛正式库不可用：",
+                "飞牛正式库暂不可用：",
+                "文件需要先从飞牛取回",
+                "文件取回后仍无法下载",
+            )
         )
-    )
+        or message.startswith("文件取回未完成：")
+        and message.rsplit("：", 1)[-1]
+        in {
+            "PENDING",
+            "PROCESSING",
+            "OFFLINE",
+        }
+    ):
+        reason = "NAS_PENDING"
+    if reason not in {
+        "RATE_LIMITED",
+        "WAIT_TIMEOUT",
+        "NETWORK_WAIT",
+        "NAS_PENDING",
+        "RECALL_QUOTA",
+    }:
+        return None
+    return {
+        "status": reason
+        if reason in {"RATE_LIMITED", "WAIT_TIMEOUT", "NETWORK_WAIT"}
+        else "PENDING",
+        "reasonCode": reason,
+        "retryAfterSeconds": retry_after,
+        "retryAt": (observed + timedelta(seconds=retry_after)).isoformat()
+        if retry_after is not None
+        else None,
+        "observedAt": observed.isoformat(),
+    }
+
+
+def verification_error_is_waiting(error: RegistryError | str) -> bool:
+    return verification_wait_details(error) is not None
 
 
 def mark_verification_error(
@@ -3206,8 +3271,9 @@ def mark_verification_error(
     state: dict[str, Any],
     error: RegistryError,
 ) -> None:
-    if verification_error_is_waiting(error):
-        mark_awaiting_nas(args, manifest_path, manifest, state, str(error))
+    details = verification_wait_details(error)
+    if details is not None:
+        mark_awaiting_nas(args, manifest_path, manifest, state, str(error), details)
     else:
         mark_verification_failure(args, manifest_path, manifest, state, str(error))
 
@@ -3383,6 +3449,10 @@ def verify_with_poll(
             return verify_with_client(
                 client, api_base, manifest, write_headers, deep_content_verify
             )
+        except httpx.TransportError as error:
+            raise RegistryWaitError(
+                "核验请求网络异常；保留已建档结果和核验断点", "NETWORK_WAIT"
+            ) from error
         except RegistryError as error:
             if not str(error).startswith("飞牛落盘核验中："):
                 raise
@@ -4322,14 +4392,20 @@ def interrupted_batch_upload_status(
     origin: str,
     identity: dict[str, Any],
 ) -> str:
-    """Preserve proven finalize progress without counting failed verification as success."""
+    """Preserve validated upload/finalize checkpoints without counting them as success."""
     state_path = manifest_path.parent / "upload-state.json"
     try:
         if not state_path.exists():
             return "FAILED"
         state = read_json(state_path)
         validate_upload_state(state)
-        if state["status"] not in {"FINALIZED_UNVERIFIED", "FINALIZED_WITH_CONFLICTS"}:
+        if state["status"] not in {
+            "CREATED",
+            "UPLOADING",
+            "MANIFEST_RECEIVED",
+            "FINALIZED_UNVERIFIED",
+            "FINALIZED_WITH_CONFLICTS",
+        }:
             return "FAILED"
         projection = files_projection(manifest, read_json(upload_map_path)["files"])
         if (
@@ -4340,10 +4416,15 @@ def interrupted_batch_upload_status(
             or state["brigadeCode"] != manifest["case"]["brigadeCode"]
             or state["filesProjection"] != projection
             or state["immutableBindingDigest"] != immutable_manifest_binding(manifest, projection)
-            or set(state["uploadedFileRefs"]) != {item["clientRef"] for item in projection}
         ):
             return "FAILED"
         require_same_state_identity(state, identity)
+        if state["status"] in {"CREATED", "UPLOADING", "MANIFEST_RECEIVED"}:
+            if set(state["uploadedFileRefs"]) == {item["clientRef"] for item in projection}:
+                return "UPLOAD_PENDING_FINALIZE"
+            return "PARTIAL_UPLOAD" if state["uploadedFileRefs"] else "UPLOAD_INTERRUPTED"
+        if set(state["uploadedFileRefs"]) != {item["clientRef"] for item in projection}:
+            return "FAILED"
         summary = state["finalizeSummary"]
         if state["status"] == "FINALIZED_UNVERIFIED" and (
             not summary["created"] or summary["conflictCount"] or summary["skippedCount"]
@@ -4475,6 +4556,11 @@ def upload_batch_command(args: argparse.Namespace) -> None:
                             manifest_path, upload_map_path, _manifest, origin, identity
                         ),
                         "error": str(error),
+                        **(
+                            {"wait": verification_wait_details(error)}
+                            if isinstance(error, RegistryWaitError)
+                            else {}
+                        ),
                     }
                 )
             except httpx.TransportError:
@@ -4497,7 +4583,12 @@ def upload_batch_command(args: argparse.Namespace) -> None:
     verified = sum(1 for item in results if item["status"] in {"VERIFIED", "VERIFIED_ARCHIVED"})
     awaiting_nas = sum(1 for item in results if item["status"] == "FINALIZED_UNVERIFIED")
     manual_review = sum(1 for item in results if item["status"] == "FINALIZED_WITH_CONFLICTS")
-    needs_attention = failed + awaiting_nas + manual_review
+    upload_pending = sum(
+        1
+        for item in results
+        if item["status"] in {"PARTIAL_UPLOAD", "UPLOAD_INTERRUPTED", "UPLOAD_PENDING_FINALIZE"}
+    )
+    needs_attention = failed + awaiting_nas + manual_review + upload_pending
     print(
         json.dumps(
             {
@@ -4508,6 +4599,7 @@ def upload_batch_command(args: argparse.Namespace) -> None:
                 "verified": verified,
                 "awaitingNas": awaiting_nas,
                 "manualReview": manual_review,
+                "uploadPending": upload_pending,
                 "failed": failed,
                 "cases": results,
                 **({"warning": excel_warning} if excel_warning else {}),

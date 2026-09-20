@@ -10,7 +10,7 @@ import re
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 STAGE_LABELS = {
@@ -27,6 +27,7 @@ ACTIONS = {
     "NONE": ("已完成，无需重做", None, False),
     "MANUAL_REVIEW": ("核查本案异常，不自动重试", "存在未解决异常或身份冲突", False),
     "VERIFY": ("继续核验同一案卷", "已建档，核验尚未完成", True),
+    "WAIT_VERIFY": ("等待核验条件满足后继续核验", "核验尚未完成", True),
     "ARCHIVE": ("继续本地归档", "核验已通过，归档尚未完成", False),
     "RESUME_UPLOAD": ("回读同一任务后续传缺失文件", "已有上传断点，不新建替代任务", True),
     "COLLECT_DETAIL": ("采集并核对来源详情", "尚无正式详情证据", False),
@@ -39,6 +40,130 @@ ACTIONS = {
     "UPLOAD": ("按本次授权执行正式导入", "已具备本地上传条件", True),
     "INSPECT_STATE": ("核对本地状态证据", "状态文件缺失、损坏或归属不一致", False),
 }
+
+_NAS_WAIT_STATUSES = {"RATE_LIMITED", "WAIT_TIMEOUT", "NETWORK_WAIT", "PENDING"}
+_NAS_WAIT_LABELS = {
+    "WAIT_TIMEOUT": "等待超时",
+    "NETWORK_WAIT": "网络等待",
+    "PENDING": "待核验",
+}
+
+
+def _unknown_upload_receipt(reason: str | None = None) -> dict[str, Any]:
+    return {
+        "status": "UNKNOWN",
+        "totalFiles": None,
+        "receivedFiles": None,
+        "missingFiles": None,
+        "reason": reason,
+    }
+
+
+def _safe_pdf_relative_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or "\\" in value:
+        return False
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        return False
+    if ":" in value or value.startswith("/"):
+        return False
+    windows_path = PureWindowsPath(value)
+    if windows_path.is_absolute() or windows_path.drive:
+        return False
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
+    return value.casefold().endswith(".pdf")
+
+
+def _iso_with_timezone(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.isoformat()
+
+
+def _upload_receipt(upload_state: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Validate the V6 file projection before exposing per-file progress."""
+
+    projection = upload_state.get("filesProjection")
+    uploaded = upload_state.get("uploadedFileRefs")
+    if not isinstance(projection, list) or not isinstance(uploaded, list) or not projection:
+        return _unknown_upload_receipt("V6 文件投影或已上传引用缺失"), "UPLOAD_PROJECTION_INVALID"
+
+    projection_refs: set[str] = set()
+    projection_paths: set[str] = set()
+    projection_items: list[tuple[str, str]] = []
+    missing: list[str] = []
+    for item in projection:
+        if not isinstance(item, Mapping):
+            return _unknown_upload_receipt("V6 文件投影条目无效"), "UPLOAD_PROJECTION_INVALID"
+        client_ref = item.get("clientRef")
+        relative_path = item.get("relativePath")
+        if (
+            not isinstance(client_ref, str)
+            or not client_ref
+            or client_ref in projection_refs
+            or not isinstance(relative_path, str)
+            or not _safe_pdf_relative_path(relative_path)
+            or relative_path in projection_paths
+        ):
+            return _unknown_upload_receipt(
+                "V6 文件投影存在重复、无效引用或不安全 PDF 路径"
+            ), "UPLOAD_PROJECTION_INVALID"
+        projection_refs.add(client_ref)
+        projection_paths.add(relative_path)
+        projection_items.append((client_ref, relative_path))
+
+    uploaded_refs: set[str] = set()
+    for client_ref in uploaded:
+        if not isinstance(client_ref, str) or not client_ref or client_ref in uploaded_refs:
+            return _unknown_upload_receipt(
+                "V6 已上传引用存在重复或无效引用"
+            ), "UPLOAD_PROJECTION_INVALID"
+        uploaded_refs.add(client_ref)
+    if uploaded_refs - projection_refs:
+        return _unknown_upload_receipt("V6 已上传引用超出文件投影"), "UPLOAD_PROJECTION_INVALID"
+    if (
+        upload_state.get("status")
+        in {"FINALIZED_UNVERIFIED", "FINALIZED_WITH_CONFLICTS", "VERIFIED", "MANIFEST_RECEIVED"}
+        and uploaded_refs != projection_refs
+    ):
+        return _unknown_upload_receipt(
+            "已提交状态与文件接收断点不一致"
+        ), "UPLOAD_PROJECTION_INVALID"
+
+    for client_ref, relative_path in projection_items:
+        if client_ref not in uploaded_refs:
+            missing.append(relative_path)
+    return {
+        "status": "COMPLETE" if not missing else "PARTIAL_UPLOAD",
+        "totalFiles": len(projection),
+        "receivedFiles": len(uploaded_refs),
+        "missingFiles": missing,
+        "reason": None,
+    }, None
+
+
+def _nas_wait_reason(nas_value: Mapping[str, Any], *, finalized: bool = False) -> str:
+    status = str(nas_value.get("status") or "UNKNOWN")
+    retry_at = _iso_with_timezone(nas_value.get("retryAt")) or "未知"
+    observed_at = _iso_with_timezone(nas_value.get("observedAt")) or "未知"
+    if status == "RATE_LIMITED":
+        retry_after = nas_value.get("retryAfterSeconds")
+        if type(retry_after) is int and retry_after >= 0:
+            wait_text = f"服务端原等待 {retry_after} 秒"
+        else:
+            wait_text = "服务端等待时间未知"
+        reason = f"限流到期后再核验（{wait_text}；可重试时间：{retry_at}；观测时间：{observed_at}）"
+    else:
+        label = _NAS_WAIT_LABELS.get(status, "等待")
+        reason = f"核验未完成（{label}；观测时间：{observed_at}）"
+    return f"已建档，{reason}" if finalized else reason
 
 
 class ReportingError(RuntimeError):
@@ -173,7 +298,7 @@ def timing_projection(
             elif browser_stages and value.get("schemaVersion") == "SourceStageV1":
                 entries = {
                     key: value.get(field) / 1000
-                    if isinstance(value.get(field), (int, float))
+                    if isinstance(value.get(field), int | float)
                     and not isinstance(value.get(field), bool)
                     else None
                     for key, field in (
@@ -187,7 +312,7 @@ def timing_projection(
             if not value.get("recordId") or any(
                 key not in totals
                 or isinstance(number, bool)
-                or not isinstance(number, (int, float))
+                or not isinstance(number, int | float)
                 or not math.isfinite(number)
                 or number < 0
                 for key, number in entries.items()
@@ -273,6 +398,14 @@ def describe_case(
     )
     upload_state = inputs.get("upload-state") or {}
     job_status = upload_state.get("status", uploaded)
+    upload_receipt = _unknown_upload_receipt()
+    if upload_state:
+        upload_receipt, upload_receipt_issue = _upload_receipt(upload_state)
+        if upload_receipt_issue:
+            issues.append(upload_receipt_issue)
+    nas_value = record.get("nasVerification")
+    nas_value = nas_value if isinstance(nas_value, Mapping) else {}
+    nas_status = str(nas_value.get("status") or nas)
     if has_detail:
         stage_list.append("DETAIL")
     if has_package:
@@ -301,12 +434,23 @@ def describe_case(
     if state == "COMPLETED" and "NAS_VERIFIED" in stage_list:
         stage_list.append("ARCHIVED")
 
+    finalized_evidence = (
+        state == "UPLOADED_AWAITING_NAS"
+        or job_status in {"FINALIZED_UNVERIFIED", "VERIFIED"}
+        or "FINALIZED" in stage_list
+    )
     if issues:
         action = "INSPECT_STATE"
     elif "ARCHIVED" in stage_list:
         action = "NONE"
-    elif state == "NEEDS_MANUAL_REVIEW" or job_status in {"FAILED", "FINALIZED_WITH_CONFLICTS"}:
+    elif (
+        state == "NEEDS_MANUAL_REVIEW"
+        or job_status in {"FAILED", "FINALIZED_WITH_CONFLICTS"}
+        or nas_status == "FAILED"
+    ):
         action = "MANUAL_REVIEW"
+    elif nas_status in _NAS_WAIT_STATUSES and finalized_evidence:
+        action = "WAIT_VERIFY"
     elif state == "VERIFIED_PENDING_ARCHIVE" or (uploaded == "VERIFIED" and nas == "VERIFIED"):
         action = "ARCHIVE"
     elif state == "UPLOADED_AWAITING_NAS" or job_status == "FINALIZED_UNVERIFIED":
@@ -330,6 +474,11 @@ def describe_case(
     else:
         action = "VALIDATE"
     label, reason, authorization = ACTIONS[action]
+    if action == "WAIT_VERIFY":
+        reason = _nas_wait_reason(
+            nas_value,
+            finalized=finalized_evidence,
+        )
     try:
         timings = timing_projection(work, layout.root, f"project:{project}")
     except ReportingError:
@@ -364,6 +513,19 @@ def describe_case(
             "recordedMappings": len(mappings),
             "pendingFiles": len(pending),
         },
+        "uploadProgress": upload_receipt,
+        "nasVerification": {
+            "status": nas_status,
+            "reasonCode": nas_value.get("reasonCode")
+            if isinstance(nas_value.get("reasonCode"), str)
+            else None,
+            "retryAfterSeconds": nas_value.get("retryAfterSeconds")
+            if type(nas_value.get("retryAfterSeconds")) is int
+            and nas_value.get("retryAfterSeconds") >= 0
+            else None,
+            "retryAt": _iso_with_timezone(nas_value.get("retryAt")),
+            "observedAt": _iso_with_timezone(nas_value.get("observedAt")),
+        },
         "timings": timings,
         "verificationReceiptAvailable": receipt_available,
         "issues": issues,
@@ -390,8 +552,8 @@ def render_report(progress: dict[str, Any]) -> str:
         "",
         "## 逐案下一步",
         "",
-        "| 项目编号 | 单位 | 已确认阶段 | 下一步／等待原因 |",
-        "| --- | --- | --- | --- |",
+        "| 项目编号 | 单位 | 已确认阶段 | 上传接收 | 下一步／等待原因 |",
+        "| --- | --- | --- | --- | --- |",
     ]
     for case in progress.get("cases", []):
         stages_text = (
@@ -401,10 +563,30 @@ def render_report(progress: dict[str, Any]) -> str:
         action = next_action["label"] + (
             f"；{next_action['reason']}" if next_action["reason"] else ""
         )
+        receipt = case.get("uploadProgress") or {}
+        receipt_status = receipt.get("status")
+        if receipt_status == "PARTIAL_UPLOAD":
+            missing = receipt.get("missingFiles")
+            missing_text = "未知" if not isinstance(missing, list) else "、".join(map(str, missing))
+            upload_text = (
+                f"部分上传：{receipt.get('receivedFiles')}/{receipt.get('totalFiles')}；"
+                f"缺失文件：{missing_text}"
+            )
+        elif receipt_status == "COMPLETE":
+            upload_text = f"文件已接收：{receipt.get('receivedFiles')}/{receipt.get('totalFiles')}"
+        else:
+            upload_text = "未知"
         lines.append(
             "| "
             + " | ".join(
-                _cell(value) for value in (case["projectNo"], case["unitName"], stages_text, action)
+                _cell(value)
+                for value in (
+                    case["projectNo"],
+                    case["unitName"],
+                    stages_text,
+                    upload_text,
+                    action,
+                )
             )
             + " |"
         )

@@ -40,6 +40,19 @@ def describe(layout, record=None, *, detail=True, package=True):
     )
 
 
+def upload_state(*, status="UPLOADING", uploaded=None):
+    return {
+        "stateVersion": 6,
+        "projectNo": PROJECT,
+        "status": status,
+        "filesProjection": [
+            {"clientRef": "f-1", "relativePath": "文书/目录.pdf"},
+            {"clientRef": "f-2", "relativePath": "文书/通知书.pdf"},
+        ],
+        "uploadedFileRefs": ["f-1"] if uploaded is None else uploaded,
+    }
+
+
 @pytest.mark.parametrize(
     ("record", "expected"),
     [
@@ -61,6 +74,237 @@ def test_upload_next_action_is_derived_without_restarting_anything(layout, recor
     before = snapshot(layout.root)
     assert describe(layout, record)["nextAction"]["code"] == expected
     assert snapshot(layout.root) == before
+
+
+def test_upload_receipt_counts_projection_refs_and_report_lists_missing_files(layout):
+    put(layout.work_case_dir(PROJECT) / "upload-state.json", upload_state())
+    result = describe(layout, {"upload": {"status": "UPLOADING"}})
+    assert result["uploadProgress"] == {
+        "status": "PARTIAL_UPLOAD",
+        "totalFiles": 2,
+        "receivedFiles": 1,
+        "missingFiles": ["文书/通知书.pdf"],
+        "reason": None,
+    }
+    assert result["nextAction"]["code"] == "RESUME_UPLOAD"
+    markdown = report.render_report(
+        {
+            "generatedAt": "2099-01-01T00:00:00Z",
+            "batch": {},
+            "waterline": {"caseCount": 1},
+            "storage": {"packageProjects": 1},
+            "upload": {"successfulSystemCases": 0, "nasVerifiedCases": 0},
+            "cases": [result],
+            "timings": {},
+        }
+    )
+    assert "部分上传：1/2" in markdown
+    assert "文书/通知书.pdf" in markdown
+
+
+def test_report_distinguishes_complete_upload_from_archive_pending_verification(layout):
+    put(
+        layout.work_case_dir(PROJECT) / "upload-state.json",
+        upload_state(status="FINALIZED_UNVERIFIED", uploaded=["f-1", "f-2"])
+        | {"finalizeSummary": {"created": True}},
+    )
+    result = describe(
+        layout,
+        {
+            "upload": {"status": "FINALIZED_UNVERIFIED"},
+            "nasVerification": {"status": "PENDING"},
+        },
+    )
+    assert result["uploadProgress"]["status"] == "COMPLETE"
+    assert "已建档，核验未完成（待核验" in result["nextAction"]["reason"]
+    markdown = report.render_report(
+        {
+            "generatedAt": "2099-01-01T00:00:00Z",
+            "batch": {},
+            "waterline": {"caseCount": 1},
+            "storage": {"packageProjects": 1},
+            "upload": {"successfulSystemCases": 0, "nasVerifiedCases": 0},
+            "cases": [result],
+            "timings": {},
+        }
+    )
+    assert "文件已接收：2/2" in markdown
+    assert "已建档，核验未完成（待核验" in markdown
+
+
+@pytest.mark.parametrize(
+    "uploaded",
+    [["f-1", "f-1"], ["f-1", "unknown-ref"]],
+)
+def test_upload_receipt_rejects_duplicate_or_extra_refs(layout, uploaded):
+    put(
+        layout.work_case_dir(PROJECT) / "upload-state.json",
+        upload_state(uploaded=uploaded),
+    )
+    result = describe(layout, {"upload": {"status": "UPLOADING"}})
+    assert result["uploadProgress"]["status"] == "UNKNOWN"
+    assert result["uploadProgress"]["missingFiles"] is None
+    assert result["nextAction"]["code"] == "INSPECT_STATE"
+    assert "UPLOAD_PROJECTION_INVALID" in result["issues"]
+
+
+def test_upload_receipt_rejects_duplicate_projection_refs(layout):
+    value = upload_state()
+    value["filesProjection"][1]["clientRef"] = "f-1"
+    put(layout.work_case_dir(PROJECT) / "upload-state.json", value)
+    result = describe(layout, {"upload": {"status": "UPLOADING"}})
+    assert result["uploadProgress"]["status"] == "UNKNOWN"
+    assert result["nextAction"]["code"] == "INSPECT_STATE"
+
+
+def test_finalized_status_with_incomplete_file_receipt_requires_inspection(layout):
+    put(
+        layout.work_case_dir(PROJECT) / "upload-state.json",
+        upload_state(status="FINALIZED_UNVERIFIED", uploaded=["f-1"]),
+    )
+    result = describe(
+        layout,
+        {"upload": {"status": "FINALIZED_UNVERIFIED"}, "nasVerification": {"status": "PENDING"}},
+    )
+    assert result["uploadProgress"]["status"] == "UNKNOWN"
+    assert result["nextAction"]["code"] == "INSPECT_STATE"
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "/绝对/文件.pdf",
+        "../越界.pdf",
+        "目录/../越界.pdf",
+        "目录\\文件.pdf",
+        "目录/文件.txt",
+        "目录/含\n控制符.pdf",
+    ],
+)
+def test_upload_receipt_rejects_unsafe_non_pdf_paths(layout, relative_path):
+    value = upload_state()
+    value["filesProjection"][0]["relativePath"] = relative_path
+    put(layout.work_case_dir(PROJECT) / "upload-state.json", value)
+    result = describe(layout, {"upload": {"status": "UPLOADING"}})
+    assert result["uploadProgress"]["status"] == "UNKNOWN"
+    assert result["nextAction"]["code"] == "INSPECT_STATE"
+    assert "UPLOAD_PROJECTION_INVALID" in result["issues"]
+
+
+def test_completed_verified_case_with_invalid_local_evidence_requires_inspection(layout):
+    value = upload_state(status="VERIFIED", uploaded=["f-1", "extra-ref"])
+    put(layout.work_case_dir(PROJECT) / "upload-state.json", value)
+    result = describe(
+        layout,
+        {
+            "state": "COMPLETED",
+            "upload": {"status": "VERIFIED"},
+            "nasVerification": {"status": "VERIFIED"},
+        },
+    )
+    assert "ARCHIVED" in result["completedStages"]
+    assert result["nextAction"]["code"] == "INSPECT_STATE"
+
+
+def test_pending_nas_does_not_skip_upload_resume_without_finalized_evidence(layout):
+    result = describe(
+        layout,
+        {
+            "upload": {"status": "UPLOADING"},
+            "nasVerification": {"status": "PENDING"},
+        },
+    )
+    assert result["nextAction"]["code"] == "RESUME_UPLOAD"
+
+
+def test_rate_limit_report_keeps_server_wait_and_parsed_timestamps(layout):
+    result = describe(
+        layout,
+        {
+            "upload": {"status": "FINALIZED_UNVERIFIED"},
+            "nasVerification": {
+                "status": "RATE_LIMITED",
+                "retryAfterSeconds": 120,
+                "retryAt": "2099-01-01T12:00:00+08:00",
+                "observedAt": "2099-01-01T11:58:00Z",
+            },
+        },
+    )
+    assert "服务端原等待 120 秒" in result["nextAction"]["reason"]
+    assert "可重试时间：2099-01-01T12:00:00+08:00" in result["nextAction"]["reason"]
+    assert "观测时间：2099-01-01T11:58:00+00:00" in result["nextAction"]["reason"]
+    assert result["nasVerification"]["retryAt"] == "2099-01-01T12:00:00+08:00"
+    assert result["nasVerification"]["observedAt"] == "2099-01-01T11:58:00+00:00"
+
+
+def test_invalid_retry_timestamp_is_unknown_without_current_time_guess(layout):
+    result = describe(
+        layout,
+        {
+            "upload": {"status": "FINALIZED_UNVERIFIED"},
+            "nasVerification": {
+                "status": "RATE_LIMITED",
+                "retryAfterSeconds": 120,
+                "retryAt": "2099-01-01T12:00:00",
+                "observedAt": "not-an-iso-time",
+            },
+        },
+    )
+    assert "服务端原等待 120 秒" in result["nextAction"]["reason"]
+    assert "可重试时间：未知" in result["nextAction"]["reason"]
+    assert "观测时间：未知" in result["nextAction"]["reason"]
+    assert result["nasVerification"]["retryAt"] is None
+    assert result["nasVerification"]["observedAt"] is None
+
+
+@pytest.mark.parametrize("status", ["WAIT_TIMEOUT", "NETWORK_WAIT", "PENDING"])
+def test_nas_wait_statuses_are_visible_without_claiming_verification(layout, status):
+    result = describe(
+        layout,
+        {
+            "upload": {"status": "FINALIZED_UNVERIFIED"},
+            "nasVerification": {"status": status},
+        },
+    )
+    assert result["nextAction"]["code"] == "WAIT_VERIFY"
+    labels = {"WAIT_TIMEOUT": "等待超时", "NETWORK_WAIT": "网络等待", "PENDING": "待核验"}
+    assert result["nextAction"]["reason"] == (
+        f"已建档，核验未完成（{labels[status]}；观测时间：未知）"
+    )
+
+
+def test_rate_limit_wait_does_not_guess_missing_retry_header(layout):
+    result = describe(
+        layout,
+        {
+            "upload": {"status": "FINALIZED_UNVERIFIED"},
+            "nasVerification": {"status": "RATE_LIMITED", "retryAfterSeconds": None},
+        },
+    )
+    assert result["nextAction"]["code"] == "WAIT_VERIFY"
+    assert "服务端等待时间未知" in result["nextAction"]["reason"]
+    assert "可重试时间：未知" in result["nextAction"]["reason"]
+
+
+def test_rate_limit_wait_uses_explicit_retry_seconds_and_failed_wins(layout):
+    result = describe(
+        layout,
+        {
+            "upload": {"status": "FINALIZED_UNVERIFIED"},
+            "nasVerification": {"status": "RATE_LIMITED", "retryAfterSeconds": 30},
+        },
+    )
+    assert result["nextAction"]["reason"] == (
+        "已建档，限流到期后再核验（服务端原等待 30 秒；可重试时间：未知；观测时间：未知）"
+    )
+    failed = describe(
+        layout,
+        {
+            "upload": {"status": "VERIFIED"},
+            "nasVerification": {"status": "FAILED"},
+        },
+    )
+    assert failed["nextAction"]["code"] == "MANUAL_REVIEW"
 
 
 def test_local_stage_order_and_pending_ocr(layout):
