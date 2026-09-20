@@ -1218,7 +1218,7 @@ def archive_verified_case(
     package_sha256: str,
     verified_at: str | None = None,
 ) -> dict[str, Any]:
-    """Archive exactly one case after both upload state and FnOS evidence are VERIFIED."""
+    """Archive one verified formal case, preserving its original import identity."""
 
     project = _project_no(project_no)
     case_id = verification.get("caseId")
@@ -1249,6 +1249,11 @@ def archive_verified_case(
     history_target = layout.history_workspaces / f"{project}-{stamp}-{package_short}"
     evidence_target = layout.verification_records / f"{project}-{stamp}-{manifest_short}.json"
     with _waterline_lock(layout):
+        source_state = load_waterline(layout).get("cases", {}).get(project, {}).get("source") or {}
+        if source_state.get("materialGaps"):
+            raise WorkspaceStateError("来源材料仍有明确缺口，保留已核验断点，暂不归档")
+        if source_state.get("changePending"):
+            raise WorkspaceStateError("来源变化尚未收口，保留已核验断点，暂不归档")
         for source, label in (
             (pending_source, "待处理原始案卷"),
             (work_source, "活动项目工作区"),

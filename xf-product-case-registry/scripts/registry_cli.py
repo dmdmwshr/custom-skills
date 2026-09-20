@@ -26,19 +26,20 @@ from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
 if __package__:
-    from . import chunk_upload, content_receipts, ledger_views
+    from . import chunk_upload, content_leases, content_receipts, ledger_views
     from .ocr_runtime import OcrError, run_ocr
     from .upload_transport import bounded_request, upload_request
     from .workflow_reporting import ReportingError, record_timing, render_report, write_report
 else:
     import chunk_upload
+    import content_leases
     import content_receipts
     import ledger_views
     from ocr_runtime import OcrError, run_ocr
     from upload_transport import bounded_request, upload_request
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
-VERSION = "1.10.2"
+VERSION = "1.10.3"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -2698,6 +2699,8 @@ def download_verified_file(
     for _ in range(2):
         try:
             with client.stream("GET", f"{api_base}/api/v2/files/{remote_id}") as response:
+                if response.status_code == 429:
+                    response_json(response, "下载正文")
                 if (
                     response.status_code == 409
                     and response_error_code(response) == "RECALL_REQUIRED"
@@ -2747,6 +2750,9 @@ def prepare_case_content(
     expected_count: int,
     write_headers: dict[str, str],
     wait_seconds: float = CASE_RECALL_WAIT_SECONDS,
+    *,
+    existing_projection: dict[str, Any] | None = None,
+    checkpoint: Any = None,
 ) -> dict[str, Any]:
     """Use the existing bounded whole-case recall quota, without building a ZIP."""
     if (
@@ -2757,7 +2763,7 @@ def prepare_case_content(
         raise RegistryError("整卷正文等待秒数必须为30到7200之间的有限数值")
     started = time.monotonic()
     deadline = started + wait_seconds
-    projection = response_json(
+    projection = existing_projection or response_json(
         api_request(
             client,
             "POST",
@@ -2782,6 +2788,8 @@ def prepare_case_content(
             or counts[1] + counts[2] != counts[0]
         ):
             raise RegistryError("整卷正文准备范围或计数不一致，停止核验")
+        if checkpoint:
+            checkpoint(projection)
         status = projection.get("status")
         if status == "READY" and counts[2] == 0:
             return projection
@@ -3128,9 +3136,22 @@ def verify_with_client(
         pending_files = {
             ref: file_id for ref, file_id in remote_files.items() if ref not in receipt["files"]
         }
-        lease = None
+        lease_checkpoint = content_leases.Checkpoint(
+            sys.modules[__name__],
+            receipt_path.with_name("content-lease.json") if receipt_path else None,
+            {key: receipt[key] for key in ("projectNo", "caseId", "origin", "manifestSha256")}
+            | {"fileIdentities": content_identities},
+        )
+        lease = lease_checkpoint.restore(client, api_base)
+        if lease:
+            lease = prepare_case_content(
+                client, api_base, case_id, len(source_files), write_headers,
+                wait_seconds=recall_wait_seconds, existing_projection=lease,
+                checkpoint=lease_checkpoint.save,
+            )
         if (
             pending_files
+            and lease is None
             and len(pending_files) == len(source_files)
             and len(source_files) > 1
             and write_headers is not None
@@ -3145,6 +3166,7 @@ def verify_with_client(
                 len(source_files),
                 write_headers,
                 wait_seconds=recall_wait_seconds,
+                checkpoint=lease_checkpoint.save,
             )
         if receipt_path:
             write_json(receipt_path, receipt)
@@ -3188,16 +3210,9 @@ def verify_with_client(
                 raise RegistryError(str(error)) from error
             if fresh != {item["fileId"]: item for item in content_identities.values()}:
                 raise RegistryError("正文核验期间文件身份变化，保留逐份断点并重新对账")
-            receipt["completedAt"] = utc_now()
+            receipt.setdefault("completedAt", utc_now())
             write_json(receipt_path, receipt)
-        if lease and lease.get("leaseId"):
-            api_request(
-                client,
-                "DELETE",
-                f"{api_base}/api/v2/case-export-leases/{lease['leaseId']}",
-                headers=write_headers,
-                retry_on_429=False,
-            )
+        lease_checkpoint.release(client, api_base, write_headers)
     return {
         "caseId": case_id,
         "inspections": reported_inspection_count,
@@ -3638,6 +3653,16 @@ def enforce_local_workspace_preflight(
     _workspace, layout, project = resolved
     if source_path is not None and not inside(source_path, layout.pending_case_dir(project)):
         raise RegistryError("inventory 原始输入必须位于当前工作根的原始案卷/待处理案卷/<项目编号>")
+
+
+def verify_existing_command(args: argparse.Namespace) -> None:
+    module_name = f"{__package__}.existing_case" if __package__ else "existing_case"
+    module = importlib.import_module(module_name)
+    try:
+        result = module.verify(sys.modules[__name__], args)
+    except workspace_api().WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
 
 
 def verify_command(args: argparse.Namespace) -> None:
@@ -5659,6 +5684,18 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--dry-run", action="store_true")
             command.add_argument("--finalize", action="store_true")
             command.set_defaults(workspace_required=True)
+
+    existing = sub.add_parser(
+        "verify-existing", help="续核已有正式案卷；无本地上传任务时不伪造断点或重新导入"
+    )
+    existing.add_argument("--manifest", required=True)
+    existing.add_argument("--api-base", required=True)
+    existing.add_argument("--auth-config", default=str(DEFAULT_AUTH_CONFIG))
+    existing.add_argument("--timeout", type=float, default=60.0)
+    add_recall_wait_option(existing)
+    existing.add_argument("--archive", action="store_true", help="材料齐全且正文核验完成后归档")
+    add_workspace_resolution_options(existing)
+    existing.set_defaults(func=verify_existing_command)
 
     supplement = sub.add_parser(
         "supplement",

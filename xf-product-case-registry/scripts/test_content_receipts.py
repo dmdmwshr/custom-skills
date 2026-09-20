@@ -57,7 +57,7 @@ def test_interruption_resumes_only_missing_and_repeat_has_no_download_or_prepare
             return httpx.Response(
                 200, json={"rows": [{"slotKey": "OTHER_ATTACHMENT", "children": children}]}
             )
-        if route.endswith("/export-preparations"):
+        if route.endswith("/export-preparations") or "/case-export-preparations/" in route:
             return httpx.Response(
                 200,
                 json={
@@ -71,7 +71,7 @@ def test_interruption_resumes_only_missing_and_repeat_has_no_download_or_prepare
                 },
             )
         if route.endswith("/renew") or method == "DELETE":
-            return httpx.Response(200, json={"ok": True})
+            return httpx.Response(200, json={"ok": True, "released": True})
         if route.startswith("/api/v2/files/"):
             index = int(route[-1])
             if index == 1 and fail[0]:
@@ -90,6 +90,7 @@ def test_interruption_resumes_only_missing_and_repeat_has_no_download_or_prepare
             run()
         proof = cli.read_json(tmp_path / "content-verification.json")
         assert set(proof["files"]) == {"file:one"} and "completedAt" not in proof
+        assert cli.read_json(tmp_path / "content-lease.json")["status"] == "ACTIVE"
         fail[0] = False
         seen.clear()
         run()
@@ -97,9 +98,14 @@ def test_interruption_resumes_only_missing_and_repeat_has_no_download_or_prepare
             "/api/v2/files/file-1"
         ]
         assert not any(route.endswith("/export-preparations") for method, route in seen)
+        assert ("GET", f"/api/v2/case-export-preparations/{detail['id']}") in seen
+        assert ("DELETE", "/api/v2/case-export-leases/fixture-lease") in seen
+        assert cli.read_json(tmp_path / "content-lease.json")["status"] == "RELEASED"
         assert cli.read_json(tmp_path / "content-verification.json")["completedAt"]
+        completed_receipt = (tmp_path / "content-verification.json").read_bytes()
         seen.clear()
         run()
+        assert (tmp_path / "content-verification.json").read_bytes() == completed_receipt
         assert all(
             method == "GET" and not route.startswith("/api/v2/files/") for method, route in seen
         )

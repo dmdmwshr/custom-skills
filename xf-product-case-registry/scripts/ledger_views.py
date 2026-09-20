@@ -345,15 +345,34 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         archive.get("workspacePath")
         and archive.get("verificationRecord")
         and work.is_dir()
-        and state.get("status") == "VERIFIED"
+        and (state.get("status") == "VERIFIED" or (not state and body_verified))
     )
     if archived:
         try:
             receipt = _read(Path(archive["verificationRecord"]), layout.root)
+            receipt_binding = receipt.get("verification") or {}
+            if state:
+                archive_binding_valid = receipt.get("manifestSha256") == state.get("manifestSha256")
+            else:
+                archive_binding_valid = bool(
+                    body_verified
+                    and receipt.get("manifestSha256") == verification_binding.get("manifestSha256")
+                    and receipt_binding.get("mode") == "EXISTING_FORMAL_CASE"
+                    and receipt_binding.get("status") == "VERIFIED"
+                    and receipt_binding.get("caseId") == binding.get("caseId")
+                    and receipt_binding.get("origin") == binding.get("origin")
+                    and receipt_binding.get("contentReceiptSha256")
+                    == (
+                        "sha256:"
+                        + hashlib.sha256(
+                            (work / "content-verification.json").read_bytes()
+                        ).hexdigest()
+                    )
+                )
             archived = bool(
                 receipt.get("recordVersion") == 1
                 and receipt.get("projectNo") == project
-                and receipt.get("manifestSha256") == state.get("manifestSha256")
+                and archive_binding_valid
                 and receipt.get("archivedWorkspace") == str(work)
             )
         except (OSError, ws.WorkspaceStateError):
@@ -364,12 +383,18 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
     projection = state.get("filesProjection") or []
     projected = {f.get("clientRef") for f in projection if isinstance(f, dict)} - {None}
     received = set(state.get("uploadedFileRefs") or []) & projected
+    material_gaps = source.get("materialGaps") or []
+    if material_gaps:
+        issues.append("SOURCE_MATERIALS_INCOMPLETE")
     stages = {
         "sourceRegistered": bool(
             source.get("projectIdentitySource") == "DETAIL" or source.get("rwid")
         ),
-        "materialsCollected": source.get("status") in {"PACKAGE_READY", "PACKAGE_RECEIVED"}
-        or bool(manifest.get("packageSha256") and state),
+        "materialsCollected": not material_gaps
+        and (
+            source.get("status") in {"PACKAGE_READY", "PACKAGE_RECEIVED"}
+            or bool(manifest.get("packageSha256") and state)
+        ),
         "systemRegistered": registered,
         "bodyVerified": body_verified,
         "archived": archived,
@@ -425,6 +450,7 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         "complete": all(stages.values()) and not source.get("changePending") and not system_changed,
         "historicalComplete": historical_complete,
         "activePending": system_changed
+        or bool(material_gaps)
         or bool(source.get("changePending"))
         or (
             not historical_complete
@@ -443,7 +469,12 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         "sourceDocumentDate": source.get("latestDocumentCreatedAt"),
         "sourceDocumentCount": len(source_documents),
         "workflowUpdatedAt": record.get("workflowUpdatedAt"),
-        "files": {"expected": len(projected), "received": len(received)},
+        "files": {"expected": len(projected), "received": len(received)}
+        if state
+        else {
+            "expected": len(manifest.get("files") or []),
+            "received": len(binding.get("fileSnapshot") or {}) if registered else 0,
+        },
         "waiting": record.get("nasVerification", {}).get("status"),
         "issues": issues,
     }

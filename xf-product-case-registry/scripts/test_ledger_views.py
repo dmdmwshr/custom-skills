@@ -173,6 +173,39 @@ def test_body_proof_cannot_be_borrowed_from_another_project(layout):
     assert views.ledger_view(layout)["cases"][0]["stages"]["bodyVerified"] is False
 
 
+def test_source_material_gap_keeps_independent_verified_case_pending(layout):
+    add_case(layout, A, archived=True, deep=True)
+    ws.upsert_case(layout, A, source={"materialGaps": [{"document": "missing source PDF"}]})
+    row = views.ledger_view(layout)["cases"][0]
+    assert row["stages"]["materialsCollected"] is False
+    assert row["stages"]["systemRegistered"] is True
+    assert row["stages"]["bodyVerified"] is True
+    assert row["historicalComplete"] is True
+    assert row["activePending"] is True
+    assert row["complete"] is False
+    assert "SOURCE_MATERIALS_INCOMPLETE" in row["issues"]
+
+
+def test_source_material_gap_prevents_archive_even_after_body_verification(layout):
+    add_case(layout, A, deep=True)
+    pending = layout.pending_case_dir(A)
+    pending.mkdir()
+    (pending / "original.pdf").write_bytes(b"preserved")
+    ws.upsert_case(layout, A, source={"materialGaps": [{"document": "missing source PDF"}]})
+    before = (layout.work_case_dir(A) / "manifest.json").read_bytes()
+    with pytest.raises(ws.WorkspaceStateError, match="来源材料仍有明确缺口"):
+        ws.archive_verified_case(
+            layout,
+            A,
+            upload_status="VERIFIED",
+            verification={"status": "VERIFIED", "caseId": "fixture-case", "filesVerified": 1},
+            manifest_sha256="sha256:" + "a" * 64,
+            package_sha256="sha256:" + "b" * 64,
+        )
+    assert (pending / "original.pdf").read_bytes() == b"preserved"
+    assert (layout.work_case_dir(A) / "manifest.json").read_bytes() == before
+
+
 @pytest.mark.parametrize(
     "text,expected",
     [

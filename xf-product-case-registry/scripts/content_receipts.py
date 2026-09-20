@@ -48,7 +48,7 @@ def resume_receipt(
         and old_files[ref].get("verifiedAgainstManifestSha256")
         and all(old_files[ref].get(key) == value for key, value in identity.items())
     }
-    return {
+    receipt = {
         "schemaVersion": "ContentVerificationV1",
         "projectNo": project_no,
         "caseId": case_id,
@@ -56,6 +56,14 @@ def resume_receipt(
         "manifestSha256": manifest_sha,
         "files": reusable,
     }
+    if (
+        same_case
+        and previous.get("manifestSha256") == manifest_sha
+        and previous.get("completedAt")
+        and len(reusable) == len(identities) == len(old_files)
+    ):
+        receipt["completedAt"] = previous["completedAt"]
+    return receipt
 
 
 def identities_from_directory(value: Any, wanted: set[str]) -> dict[str, dict]:

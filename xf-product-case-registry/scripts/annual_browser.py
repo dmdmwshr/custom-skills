@@ -191,7 +191,7 @@ class Session:
         )
         self.run(
             "async page => {await page.getByPlaceholder('请选择管辖范围',{exact:true}).focus();"
-            "await page.keyboard.press('Enter');await page.locator('.el-select-dropdown:visible')"
+            "await page.keyboard.press('Enter');await page"
             ".getByText('全部管辖单位(含派出所)',{exact:true}).evaluate(e=>e.click());"
             "return {jurisdictionSelected:true};}"
         )

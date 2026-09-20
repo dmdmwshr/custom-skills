@@ -10,6 +10,27 @@ API_BASE = "https://registry.example"
 HEADERS = {"X-CSRF-Token": "fixture"}
 
 
+def test_body_download_rate_limit_preserves_wait_and_never_replays():
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(429, headers={"Retry-After": "60"}, json={"code": "RATE_LIMITED"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(cli.RegistryWaitError) as error,
+    ):
+        cli.download_verified_file(
+            client, API_BASE, "fixture-file", "sha256:" + "a" * 64, HEADERS, "file:one"
+        )
+    assert calls == ["/api/v2/files/fixture-file"]
+    wait = cli.verification_wait_details(error.value)
+    assert wait["status"] == "RATE_LIMITED"
+    assert wait["retryAfterSeconds"] == 60
+    assert wait["retryAt"]
+
+
 def prepare_response(
     *,
     preparation_id="case-1",
