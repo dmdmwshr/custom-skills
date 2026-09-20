@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib
 import json
+import math
 import mimetypes
 import os
 import random
@@ -35,7 +36,7 @@ else:
     from upload_transport import bounded_request, upload_request
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -89,6 +90,8 @@ VERSIONS = {"ELECTRONIC", "SCANNED"}
 RECALL_STATUSES = {"READY", "PENDING", "PROCESSING", "OFFLINE", "FAILED"}
 RECALL_POLL_INTERVAL_SECONDS = 2.0
 RECALL_MAX_POLLS = 30
+CASE_RECALL_WAIT_SECONDS = 1800.0
+CASE_RECALL_POLL_SECONDS = 10.0
 GENERAL_REQUEST_MIN_INTERVAL_SECONDS = 1.05
 RATE_LIMIT_MAX_RETRIES = 8
 RATE_LIMIT_MAX_AUTO_WAIT_SECONDS = 60.0
@@ -2741,15 +2744,25 @@ def prepare_case_content(
     case_id: str,
     expected_count: int,
     write_headers: dict[str, str],
+    wait_seconds: float = CASE_RECALL_WAIT_SECONDS,
 ) -> None:
     """Use the existing bounded whole-case recall quota, without building a ZIP."""
-    deadline = time.monotonic() + min(600, max(90, expected_count * 15 + 90))
+    if (
+        type(wait_seconds) not in {int, float}
+        or not math.isfinite(wait_seconds)
+        or not 30 <= wait_seconds <= 7200
+    ):
+        raise RegistryError("整卷正文等待秒数必须为30到7200之间的有限数值")
+    started = time.monotonic()
+    deadline = started + wait_seconds
     projection = response_json(
         api_request(
             client,
             "POST",
             f"{api_base}/api/v2/cases/{case_id}/export-preparations",
             headers=write_headers,
+            retry_on_429=False,
+            timeout=min(30.0, wait_seconds),
         ),
         "整卷正文取回准备",
     )
@@ -2775,16 +2788,27 @@ def prepare_case_content(
         now = time.monotonic()
         if now - last_report >= 10:
             print(
-                f"整卷正文核验准备：已取回 {counts[1]}/{counts[0]} 份，等待现有任务。",
+                f"整卷正文核验准备：后台已就绪 {counts[1]}/{counts[0]} 份，"
+                f"正文哈希尚未比对；已等待 {now - started:.0f} 秒，"
+                f"剩余 {max(0, deadline - now):.0f} 秒。",
                 file=sys.stderr,
                 flush=True,
             )
             last_report = now
         if now >= deadline:
-            raise RegistryError("整卷正文取回等待超时；任务仍由服务端保留")
-        time.sleep(min(RECALL_POLL_INTERVAL_SECONDS, deadline - now))
+            raise RegistryWaitError("整卷正文取回等待超时；任务仍由服务端保留", "WAIT_TIMEOUT")
+        time.sleep(min(CASE_RECALL_POLL_SECONDS, deadline - now))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RegistryWaitError("整卷正文取回等待超时；任务仍由服务端保留", "WAIT_TIMEOUT")
         projection = response_json(
-            api_request(client, "GET", f"{api_base}/api/v2/case-export-preparations/{case_id}"),
+            api_request(
+                client,
+                "GET",
+                f"{api_base}/api/v2/case-export-preparations/{case_id}",
+                retry_on_429=False,
+                timeout=min(30.0, remaining),
+            ),
             "读取整卷正文准备",
         )
 
@@ -2795,6 +2819,7 @@ def verify_with_client(
     manifest: dict[str, Any],
     write_headers: dict[str, str] | None = None,
     deep_content_verify: bool = False,
+    recall_wait_seconds: float = CASE_RECALL_WAIT_SECONDS,
 ) -> dict[str, Any]:
     listed = exact_case(client, api_base, manifest["case"]["projectNo"])
     if not listed:
@@ -3082,7 +3107,14 @@ def verify_with_client(
         ):
             # Only prepare a whole case when every remote file is in the
             # explicitly verified manifest. Never recall unrelated additions.
-            prepare_case_content(client, api_base, case_id, len(source_files), write_headers)
+            prepare_case_content(
+                client,
+                api_base,
+                case_id,
+                len(source_files),
+                write_headers,
+                wait_seconds=recall_wait_seconds,
+            )
         for file_ref, remote_id in remote_files.items():
             download_verified_file(
                 client,
@@ -3557,6 +3589,7 @@ def verify_command(args: argparse.Namespace) -> None:
                 write_headers,
                 getattr(args, "deep_content_verify", False),
                 min(max(float(args.timeout), 1.0), 60.0),
+                recall_wait_seconds=getattr(args, "recall_wait_seconds", CASE_RECALL_WAIT_SECONDS),
             )
         except RegistryError as error:
             if existing_state.get("status") == "FINALIZED_UNVERIFIED":
@@ -3599,12 +3632,18 @@ def verify_with_poll(
     write_headers: dict[str, str],
     deep_content_verify: bool,
     max_seconds: float,
+    recall_wait_seconds: float = CASE_RECALL_WAIT_SECONDS,
 ) -> dict[str, Any] | None:
     deadline = time.monotonic() + max_seconds
     while True:
         try:
             return verify_with_client(
-                client, api_base, manifest, write_headers, deep_content_verify
+                client,
+                api_base,
+                manifest,
+                write_headers,
+                deep_content_verify,
+                recall_wait_seconds=recall_wait_seconds,
             )
         except httpx.TransportError as error:
             raise RegistryWaitError(
@@ -3769,6 +3808,9 @@ def upload_command(args: argparse.Namespace) -> None:
                         write_headers,
                         getattr(args, "deep_content_verify", False),
                         min(max(float(args.timeout), 1.0), 60.0),
+                        recall_wait_seconds=getattr(
+                            args, "recall_wait_seconds", CASE_RECALL_WAIT_SECONDS
+                        ),
                     )
                 except RegistryError as error:
                     mark_verification_error(args, path, manifest, state, error)
@@ -3975,6 +4017,7 @@ def upload_command(args: argparse.Namespace) -> None:
                 write_headers,
                 getattr(args, "deep_content_verify", False),
                 min(max(float(args.timeout), 1.0), 60.0),
+                recall_wait_seconds=getattr(args, "recall_wait_seconds", CASE_RECALL_WAIT_SECONDS),
             )
         except RegistryError as error:
             mark_verification_error(args, path, manifest, state, error)
@@ -4159,6 +4202,9 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                         write_headers,
                         getattr(args, "deep_content_verify", False),
                         min(max(float(args.timeout), 1.0), 60.0),
+                        recall_wait_seconds=getattr(
+                            args, "recall_wait_seconds", CASE_RECALL_WAIT_SECONDS
+                        ),
                     )
                 except RegistryError as error:
                     mark_verification_error(args, manifest_path, full_manifest, main_state, error)
@@ -4356,6 +4402,7 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 write_headers,
                 getattr(args, "deep_content_verify", False),
                 min(max(float(args.timeout), 1.0), 60.0),
+                recall_wait_seconds=getattr(args, "recall_wait_seconds", CASE_RECALL_WAIT_SECONDS),
             )
         except RegistryError as error:
             mark_verification_error(args, manifest_path, full_manifest, supplement_state, error)
@@ -5081,6 +5128,25 @@ def add_workspace_resolution_options(command: argparse.ArgumentParser) -> None:
     )
 
 
+def parse_recall_wait_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("正文准备等待秒数必须为30到7200之间的有限数值") from error
+    if not math.isfinite(seconds) or not 30 <= seconds <= 7200:
+        raise argparse.ArgumentTypeError("正文准备等待秒数必须为30到7200之间的有限数值")
+    return seconds
+
+
+def add_recall_wait_option(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--recall-wait-seconds",
+        type=parse_recall_wait_seconds,
+        default=CASE_RECALL_WAIT_SECONDS,
+        help="深度核验前的整卷正文准备等待预算，默认1800秒，可设30到7200；不改变正文校验",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="消防产品案卷 CaseImportManifestV2 工具")
     parser.add_argument("--version", action="version", version=VERSION)
@@ -5294,6 +5360,7 @@ def build_parser() -> argparse.ArgumentParser:
             ),
         )
         command.add_argument("--timeout", type=float, default=60.0)
+        add_recall_wait_option(command)
         command.add_argument(
             "--deep-content-verify",
             action="store_true",
@@ -5333,6 +5400,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     supplement.add_argument("--timeout", type=float, default=60.0)
+    add_recall_wait_option(supplement)
     supplement.add_argument(
         "--deep-content-verify",
         action="store_true",
@@ -5372,6 +5440,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     supplement_batch.add_argument("--timeout", type=float, default=60.0)
+    add_recall_wait_option(supplement_batch)
     supplement_batch.add_argument(
         "--deep-content-verify",
         action="store_true",
@@ -5411,6 +5480,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     upload_batch.add_argument("--timeout", type=float, default=60.0)
+    add_recall_wait_option(upload_batch)
     upload_batch.add_argument("--dry-run", action="store_true")
     upload_batch.add_argument("--finalize", action="store_true")
     upload_batch.add_argument(

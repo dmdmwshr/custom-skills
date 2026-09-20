@@ -2291,7 +2291,7 @@ def test_verification_waits_do_not_erase_real_faults(tmp_path, monkeypatch, mess
 def test_verification_transport_failure_is_waiting_without_poll_replay(monkeypatch):
     calls = []
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         calls.append(True)
         raise httpx.ReadTimeout("sensitive transport details")
 
