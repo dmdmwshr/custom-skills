@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-20.13）
+## 当前目录与恢复边界（步骤 WSL-2026-09-21.1）
 
 用户最新内容标准是“完整一致，不必完全一样”。model_semantic_v1已完成受控发布，并由当前Astra在真实主帖及回复完整采集中接受同正文的链接卡展示差异、完成两流独立入账；扫描通过与投递闭环通过分别记录，实时版本/范围看项目handoff。支持此接口的已接受发布在rawStream前读取contentReview(cycle,stream)，模型对每组before/after按上下文作equivalent/different/uncertain判断并用resolveContentReview提交具体依据；不按关键词、字符比例或批量固定答案自动通过。正常采集不强制点显示原文或跟随外链；实际观察不改写，页面译文不冒充独立原文，必要判断依据进入full_analysis。新readPage发生变化时不能沿“reader未变”分支保留旧reader包。下文“正文不放宽”指含义与完整性，不是逐字匹配；身份、防重复和unknown结果仍独立核验。
 
@@ -108,7 +108,9 @@ V8已验证的预租约拒绝不能套用正常关闭：即使control在spawn前
 
 acquire前完整读取当前快速路径和上下文契约的业务部分；Windows路径替换为上述Linux发布入口，CLI来源为desktop_chrome_playwright_linux。五sendKept、内存载荷、语义筛选、fingerprint、草稿/冻结各一次、预检顺序和两阶段finish保持。permalinkBurst第三参数只能取本轮xMonStdin.kept(xMonLease,"observation-fingerprint").result.response.fingerprint，不是流名或空串；永久链接完成前不能用另一stdin业务动作覆盖它。V7两次错误参数在导航前被拒绝且未设置流失败，不等于浏览器unknown；有cycle.failures.reply的真实失败仍禁止续批，不能以参数纠正恢复失败流。
 
-纯内存resolveContext由受管runtime.driver提供，不在隐藏adapter facade；核对实际接口后使用，不能为调用方接口错误重复已完成浏览器动作。两流扫描通过但heartbeat_delivery_pending时，先核对同轮原投递及异步时间：首次GET可能仍held，随后才transport_accepted；不能据首次排队就认定发送失败。当前接口缺平台证据时，多等一次也不能把transport_accepted变delivered。按feishu-operations仅核对原目标、窄时间窗内唯一匹配内容/应用，再按消息ID精确读取；平台证据不等于用户已读，也不能直接改业务库或重写已经完成的周期终态，回执协议修复与新轮验收另行完成。未生成合格业务通知不代表没有故障/恢复提醒，按实际提交分别报告。
+纯内存resolveContext由受管runtime.driver提供，不在隐藏adapter facade；核对实际接口后使用，不能为调用方接口错误重复已完成浏览器动作。两流扫描通过但heartbeat_delivery_pending时，先核对同轮原投递及异步时间：首次GET可能仍held，随后才transport_accepted；不能据首次排队就认定发送失败。新XMonitorPlatformReceiptV1已完成联合受控发布与原恢复提醒实际结算：认证原意图GET核对route/epoch/gen/key/content，平台窄窗口唯一全文/应用/目标匹配并按同消息ID精确GET，只返回受限哈希证明；X仍通过原record_receipt转换，不手写delivered、不补发、不重写旧周期终态。平台存在与网页可见/用户已读分开，visible_verified不因此置1。已知业务通知须在provisional完成分类之前有界对账，再分类/核验本轮提醒；finish总截止和unknown停止保持。缺少此已安装协议的旧接口不能靠多等一次升级送达。未生成合格业务通知不代表没有故障/恢复提醒，按实际提交分别报告。
+
+平台回执发布后已实际完成三轮全新人工双流及完整finish，均零重复；同session/Page、不同generation及每轮park/clear/guard.close已验证。人工不计真实定时周期，也不把只含水位锚点的复扫说成重复执行所有历史新项/引用。健康总览可能仍含历史未验证投递而degraded，应同时报告当前周期终态与历史积压，不能为变绿重放旧意图。扩展标签库存可能保留失效条目；与隐藏窗口实拍冲突时先核验实际窗口，不按旧清单盲关。内部设置页不能claim时，已批准的隐藏窗口维护可用既有AWL受管CLI：先核验隐藏workspace/PID、权限及统一控制短租约，按新鲜截图操作并结算，不启动新工作区、CDP或日常浏览器。
 
 当前直接CUA工具无法嵌入functions，不能假定存在跨宿主opaque传递，也不把lease写临时文件。已批准的新同宿主分支使用 `desktop_control_client.js`，只封装原固定Python的health/acquire/预检/失败/对账/finish等有限小型控制；五项业务sendKept与Python入口不变。候选未正式接受时不得先用旧functions acquire等待搬运凭证；旧轮只按其已有原lease收口，不能迁入新实例。
 

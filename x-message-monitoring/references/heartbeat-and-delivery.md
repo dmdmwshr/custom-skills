@@ -35,7 +35,7 @@ Chrome dmdmwshr 首选，仅三种实测失败 browser_not_running / extension_u
 ## 投递与完成
 
 - 唯一原 direct_feishu 通道；scan 只创建幂等意图。开始时和 finish 内有限 GET 对账，不能无限轮询。
-- 已登记、transport_accepted、可见送达已核验是不同证据等级。状态接口没有可信可见凭据时，哪怕返回 delivered 字样也不能升格；保持未核实。
+- 已登记、transport_accepted、平台原消息存在、网页可见及用户已读是不同证据等级。已接受XMonitorPlatformReceiptV1可绑定原意图/应用/目标/正文/时间，经原认证GET和平台唯一列表匹配+同消息精确GET结算；没有此可信证明时，裸delivered不升格。平台存在不冒充用户已读，不补发或改写旧周期。
 - 旧 intent_registered 对账只追加可靠证据，绝不重新提交。历史未知单列；本轮关联意图未知则 REPORT、重置健康连续计数。
 - heartbeat-finish 是唯一完成/释放入口；分流协议必须两阶段。XMonitorHeartbeatFinalizeV2：全部双流成功且最终投递处理确定才 completed；部分扫描成功为 partial_failed；无可信完整流/共同预检故障为 failed_closed。只有 heartbeat_complete=true、completed、notification_decision=DONT_NOTIFY 可静默。
 - 首次、持续 24 小时、恢复提醒由 SQLite 去重，并显示受影响流；登录提醒不再叠加通用提醒。中枢不可用时保留安全意图，恢复合并一次，不补刷失败历史。
