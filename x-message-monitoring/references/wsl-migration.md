@@ -1,10 +1,12 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-20.9）
+## 当前目录与恢复边界（步骤 WSL-2026-09-20.10）
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
 新鲜状态只读业务仓的 `PROJECT_HANDOFF.md` 与 `LINUX_FIXED_SESSION.md`；已接受的运行版本/指纹以实际current及其manifest为准。本页历史迁移授权不允许再次创建接替者、导入账本或恢复旧后端。源码与离线维护归开发任务，真实浏览器与周期归原owner，cc仅direct_feishu出站且入站silent_drop。
+
+用户明确要求“当前会话测试好再交固定自动化”时，覆盖上述默认分工。先回读原owner idle/队列空及原heartbeat暂停，按受审准入只选择当前真实任务；新CUA独立身份见证，不手抄或伪装原任务ID、不搬运旧lease/事实。当前会话直接完成同CUA自检、真实诊断及人工验收，原固定任务不再接排障派发。正常收口后才受控交回原身份与同一heartbeat，不创建第二扫描者。模型与推理强度分别回读；机器正文不一致是采集证据，不等于负责测试的模型强度不足。
 
 当前MCP接口以业务仓 `HIDDEN_CHROME_MCP.md` 为准；`HIDDEN_CHROME_CLI.md`仅为旧后端及共用接口历史。用户选择MCP后不再启动CLI采集轮。已完成固定MCP适配、跨层合成回归和受控安装，不等于实际页面/同CUA/业务通过；原CLI隐藏绑定、登录、单页留存及清理的历史验收不自动迁算MCP。后端和验收范围只认唯一handoff及正式配置，不以普通MCP导航或技能安装替代两个reader、当前CUA61、三人工轮和四真实周期。用户授权直接接管时，先核对原维护任务静止，开发串行完成共享修复/发布；原owner身份和业务内存不迁移或伪造。
 
@@ -49,6 +51,8 @@ heartbeat 为 PAUSED 只停止定时调度，不撤销主控已经明确放行�
 每个固定方法由ManagedHiddenMCP.v1的withOperation取得短租约，固定primitive串行执行后共享客户端按真实回执结算，调用方不能自报known/unknown。物理worker与逻辑客户端分离，自己的常驻worker不能被误判为外来占用，但其他客户端仍拒绝；原方法锁与MCP调用不能重复取锁。只从当前CUA公开Node加载已接受固定模块，不跨宿主传凭证。总40秒前35秒含准备/工作、末5秒留结算，单页15秒、整轮20分钟；超时不证明进程已取消，真实在途保持不允许清理/重开。短租约不跨研究、长思考或下一消息。
 
 业务结果与控制结果分开：正常返回的空DOM、未找到唯一目标或业务校验失败，不等于浏览器动作结果未知；可以业务失败且正常known结算，但不能据此放宽目标核验。只有真实超时、连接/动作结果或结算未知才走unknown。人工接管/其他客户端明确拒绝时不调用CUA、不循环申请；在途未返回时不提前known结算。未知、过期、关闭失败保留真实现场，不重end、不begin、不自动resume/restart或清状态；只经受支持且有新证据的独立对账恢复。关闭后的lease客户端、adapter及runtime均不复用。
+
+仅比较逻辑/元数据诊断变化而两个DOM reader函数字节均不变时，可沿精确受审发布保留原root reader来源包与常驻MCP连接：同时核对其原始source pin、两个已登记函数pin以及新driver实际函数hash，不因整体driver版本不同重启broker。此路径已实测同session/Page跨发布保持；不适用于reader、共享控制或任务身份变化。不能改pin掩盖真正漂移，也不能把worker_count=1当作零连接静止状态。
 
 准备新 runtime 前，先确认当前直接工具表中的真实 CUA 入口，并按其首调用约束取得文档；`functions.ALL_TOOLS` 没有该入口不等于未暴露。普通 `node_repl` 的 `js` 或 `nodeRepl` 不是 CUA 身份证明，不能在那里先 launch 再跨宿主使用浏览器。既有 runtime 持有期间若入口确实消失，保留真实持有态、停止依赖操作并按原上下文收口；不通过 reset、再次 launch 或重复 selfTest 寻找入口。已有效的同宿主静态实例继续复用。
 
