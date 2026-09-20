@@ -1,8 +1,8 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-20.11）
+## 当前目录与恢复边界（步骤 WSL-2026-09-20.12）
 
-用户最新内容标准是“完整一致，不必完全一样”。已有源码隔离及真实适配链合成测试验证model_semantic_v1可将同身份正文差异交给模型，接受/拒绝后再冻结，正常采集不强制点显示原文或跟随外链；尚需按项目handoff完成受控发布和真实业务验证。支持此接口的已接受发布在rawStream前读取contentReview(cycle,stream)，模型对每组before/after按上下文作equivalent/different/uncertain判断并用resolveContentReview提交具体依据；不按关键词、字符比例或批量固定答案自动通过。实际观察不改写，页面译文不冒充独立原文，必要判断依据进入full_analysis。新readPage发生变化时不能沿“reader未变”分支保留旧reader包。下文“正文不放宽”指含义与完整性，不是逐字匹配；身份、防重复和unknown结果仍独立核验。
+用户最新内容标准是“完整一致，不必完全一样”。model_semantic_v1已完成受控发布，并在当前Astra真实主帖轮由模型接受同正文的链接卡展示差异、完成独立入账；回复页面就绪仍失败，不代表完整业务恢复，实时版本/范围看项目handoff。支持此接口的已接受发布在rawStream前读取contentReview(cycle,stream)，模型对每组before/after按上下文作equivalent/different/uncertain判断并用resolveContentReview提交具体依据；不按关键词、字符比例或批量固定答案自动通过。正常采集不强制点显示原文或跟随外链；实际观察不改写，页面译文不冒充独立原文，必要判断依据进入full_analysis。新readPage发生变化时不能沿“reader未变”分支保留旧reader包。下文“正文不放宽”指含义与完整性，不是逐字匹配；身份、防重复和unknown结果仍独立核验。
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
@@ -101,6 +101,8 @@ V8已验证的预租约拒绝不能套用正常关闭：即使control在spawn前
 真实CLI/MCP unknown且账本已failed_closed/finish时，业务锁空闲并不证明浏览器可控。本机已明确授权的两类维修均实际验证：按各自新鲜精确事件、原失败/finish工具回执、owner idle/空队列及进程起点，退役旧broker/专属执行器和已结束业务guard；原owner同CUA证明runtime撤销与control拒绝后，才保全旧unknown原件/请求日志并独立建立新paused代次，Chrome/桌面/CUA不重启。事故入口和intent不可重用，未知不补造完成，旧页面登记也不恢复为新连接认领权。安装修复后无正文盘点实际窗口/标签归属；CUA自有标签为空不代表整实例空，不能自动补页。新代次正常resume、页面归属及真实控制分别验收；按当前明确维修范围推进，不套用旧事件或反复询问已授权常规步骤。
 
 正式账本的常规诊断使用原 fixed health；需要扩展只读核验时沿用官方 startup_guard，并复用原 `SQLiteStore(read_only=True)` 已通过静止签名检查的连接，不自行用裸 `mode=ro` 打开 WAL 库。只读连接也可能在退出后留下空 WAL/SHM，不能据此放宽原 health 或把它误报为浏览器故障。已经出现且独立确认无连接、owner idle、heartbeat 暂停及无运行 marker 时，可按明确维护授权使用业务仓已审计 `close_empty_wal_reader.py` 的空 WAL 正常关闭方法；它拒绝非空 WAL/活动锁/待收口，原生 rw/query_only 正常 close 后比对全表摘要并要求原 health 通过，无可写 Store 初始化、显式 checkpoint、手删旁车或业务行写入。此入口不是定时 health 的自动回退或重试，候选维护不切换生产 current。
+
+用户明确要求“删除历史水位、从现在开始”时，不扩大为删除消息、去重、投递或审计。已验证维护方式是调度暂停/原执行者静止、原管理与配对排他锁、新鲜且全表核验的备份，在单事务仅删除活动watermarks并创建空bootstrap_pending，逐表确认其他历史不变，正常关闭后原fixed health回读。具体一次性窗口与新起点只记项目handoff；已提交后收尾命令非零应独立回读，不能重跑重置。特别注意：当前普通bootstrap可能处理并推送重置前的最新项，清空水位不等于“不补历史”已实现；按新起点的基线/过滤另行实现验收，之前保持业务暂停，不凭空构造帖子ID或恢复旧事实。
 
 ## 每轮业务与清理
 
