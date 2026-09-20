@@ -1,6 +1,6 @@
 interface:
-  display_name: "项目专家评审意见"
-  short_description: "依据项目最新材料生成三条专家意见，核对专家信息，保留最新表格模板及原有 Word 格式"
-  default_prompt: "使用 $xf-expert-review，查看指定项目的最新需求、专家原始意见和名册，复制对应阶段最新外部表格模板生成专家评审意见 Word，仅替换字段，保留原格式，保留待补的 X 并核验排版。"
+  display_name: "信息化项目专家评审材料"
+  short_description: "依据最新模板生成评审意见与专家劳务表，核验历史资料、专家库和金额，保留原格式"
+  default_prompt: "使用 $xf-expert-review，按指定项目文件梳理评审阶段和专家人选，参考最新模板与老项目并核验专家库，生成所需评审意见 Word 和专家劳务表，信息冲突时停止确认。"
 policy:
   allow_implicit_invocation: true
