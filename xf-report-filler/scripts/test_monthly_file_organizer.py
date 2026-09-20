@@ -84,7 +84,7 @@ class MonthlyFileOrganizerTests(unittest.TestCase):
                     for action in result["actions"]
                 )
             )
-            self.assertTrue(
+            self.assertFalse(
                 any(
                     action["kind"] == "archive_deprecated_root_file"
                     and Path(action["src"]) == deprecated_report
@@ -126,7 +126,7 @@ class MonthlyFileOrganizerTests(unittest.TestCase):
                 )
             )
 
-    def test_bulletin_dry_run_archives_root_template_copies(self):
+    def test_bulletin_dry_run_deletes_verified_root_template_copies(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             template_dir = base / "模板文件"
@@ -154,9 +154,8 @@ class MonthlyFileOrganizerTests(unittest.TestCase):
             self.assertTrue(result["ok"], result["blockers"])
             self.assertTrue(
                 any(
-                    action["kind"] == "archive_template_copy"
+                    action["kind"] == "delete_verified_template_copy"
                     and Path(action["src"]) == root_template_copy
-                    and Path(action["dst"]).parent.name == "_模板副本归档"
                     for action in result["actions"]
                 )
             )

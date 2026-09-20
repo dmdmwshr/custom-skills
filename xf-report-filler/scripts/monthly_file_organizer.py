@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import monthly_workflow as workflow
+from monthly_delivery_cleanup import clean_delivery
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -200,7 +201,6 @@ def organize_template_model(template_dir, actions, blockers, apply):
 
     ensure_dir(skeleton_dir, actions, apply, "ensure_bulletin_skeleton_dir")
     ensure_dir(score_dir, actions, apply, "ensure_bulletin_skeleton_patrol_dir")
-    archive_office_locks(template_dir, actions, blockers, apply)
 
     for item in workflow.templates(CONFIG):
         filename = item["file"]
@@ -282,6 +282,16 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
     score_dir = bulletin_dir / workflow.score_dir_name(score_month, CONFIG)
 
     ensure_dir(bulletin_dir, actions, apply, "ensure_bulletin_dir")
+    cleanup_actions, cleanup_blockers = clean_delivery(
+        bulletin_dir, bulletin_year, bulletin_month, score_year, score_month,
+        collect_known_template_hashes(template_dir),
+        {item['skeleton']: item['target'] for item in BULLETIN_ROOT_TEMPLATE_MAP},
+        apply=apply,
+    )
+    actions.extend(cleanup_actions)
+    blockers.extend(cleanup_blockers)
+    if cleanup_blockers:
+        return
     ensure_dir(score_dir, actions, apply, "ensure_score_patrol_dir")
     ensure_score_subdirs(score_dir, score_year, score_month, actions, apply)
 
@@ -311,8 +321,6 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
             existing_diff_status="skip_existing_manual_file",
         )
 
-    archive_template_copies(bulletin_dir, template_dir, actions, blockers, apply)
-    archive_deprecated_root_files(bulletin_dir, bulletin_year, bulletin_month, actions, blockers, apply)
 
     wrong_score_office = score_dir / f"{score_year}年{score_month}月科室月考核情况记录表.xlsx"
     delete_file_if_exists(
@@ -324,7 +332,6 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
         "delete_wrong_score_office_record",
     )
 
-    archive_template_copies(score_dir, template_dir, actions, blockers, apply)
     normalize_score_source_names(score_dir, score_year, score_month, actions, blockers, apply)
 
 
