@@ -98,9 +98,36 @@ def snapshot_qualification(snapshot: dict[str, Any]) -> dict[str, Any]:
 def source_qualification(fields: dict[str, Any], stages: list[str]) -> dict[str, Any] | None:
     if isinstance(fields.get("initialInspection"), dict):
         return qualification(fields)
+    products = fields.get("检查产品信息")
+    # The displayed stage, method, result icon and quality text must agree.
+    # SFHG alone is not a result: observed initial/recheck rows use it differently.
+    if isinstance(products, list):
+        onsite_failures = [
+            p
+            for p in products
+            if isinstance(p, dict)
+            and isinstance(p.get("页面记录"), dict)
+            and p["页面记录"].get("SFCPFC") == "0"
+            and p.get("检查结果") in ("", "不合格")
+            and p.get("检查结果标记") == ["el-icon-error"]
+            and (p.get("产品质量现场检查情况") == "不合格" or p.get("市场准入检查情况") == "不合格")
+        ]
+        if onsite_failures:
+            dates = {
+                p["页面记录"].get("JCRQ", "")[:10]
+                for p in onsite_failures
+                if isinstance(p["页面记录"].get("JCRQ"), str)
+            }
+            return qualification(
+                {
+                    "initialInspection": {
+                        "inspectionDate": next(iter(dates)) if len(dates) == 1 else None,
+                        "products": [{"method": "ONSITE", "result": "UNQUALIFIED"}],
+                    }
+                }
+            )
     # The source UI's exact initial-only, closed onsite checks are structured
     # evidence. Tags or a document title containing "合格" alone are not.
-    products = fields.get("检查产品信息")
     if stages != ["INITIAL"] or fields.get("检查情况") != "已结案[合格]":
         return None
     if (

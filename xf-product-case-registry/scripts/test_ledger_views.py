@@ -165,6 +165,62 @@ def test_reinspection_result_and_recheck_are_independent():
     assert views.qualification(manifest)["initialResult"] == "UNQUALIFIED"
 
 
+def test_source_initial_onsite_failure_survives_recheck_and_sampling():
+    products = [
+        {
+            "页面记录": {"SFCPFC": "0", "JCRQ": "2099-05-26 14:30:00", "SFHG": "1"},
+            "检查结果": "",
+            "检查结果标记": ["el-icon-error"],
+            "产品质量现场检查情况": "不合格",
+        },
+        {
+            "页面记录": {"SFCPFC": "0"},
+            "检查结果": "[检]",
+            "检查结果标记": ["el-icon-success"],
+            "产品质量现场检查情况": "未发现不合格现象",
+        },
+        {
+            "页面记录": {"SFCPFC": "1", "SFHG": "0"},
+            "检查结果": "[复查]",
+            "检查结果标记": ["el-icon-success"],
+            "产品质量现场检查情况": "未发现不合格现象",
+        },
+    ]
+    result = views.source_qualification({"检查产品信息": products}, [])
+    assert result["initialResult"] == "UNQUALIFIED"
+    assert result["statisticsYear"] == 2099
+    assert views.source_qualification({"检查产品信息": products[1:]}, []) is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"检查结果": "[检]"},
+        {"检查结果": "[复检]"},
+        {"检查结果": "[复查]"},
+        {"页面记录": {"SFCPFC": "1"}},
+        {"页面记录": {}},
+        {"检查结果标记": ["el-icon-success"]},
+        {"检查结果标记": []},
+        {"产品质量现场检查情况": "未发现不合格现象"},
+    ],
+)
+def test_source_notice_or_ambiguous_product_is_not_final_unqualified(change):
+    product = {
+        "页面记录": {"SFCPFC": "0", "SFHG": "1"},
+        "检查结果": "",
+        "检查结果标记": ["el-icon-error"],
+        "产品质量现场检查情况": "不合格",
+    }
+    product.update(change)
+    fields = {
+        "检查产品信息": [product],
+        "检查情况": "已结案[复查不合格]",
+        "文书目录": ["责令限期改正通知书"],
+    }
+    assert views.source_qualification(fields, []) is None
+
+
 def test_incremental_contract_all_types_and_old_pending_survives(layout):
     filters = {**views.scan_filters(date(2099, 2, 20)), "queryEvidencePath": "query.json"}
     clean = source._default_filters(NOW, filters)

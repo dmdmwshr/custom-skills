@@ -11,7 +11,7 @@ function fixture({wrong=false,leaves=2,all=true,clickFail=false,elements}={}){
   return {get clicks(){return clicks;},page:{
     url:()=>`https://example.test/#/xfjd/projectDetail?RWID=${wrong?'456':'123'}`,
     waitForEvent:async()=>{throw new Error('Native event unavailable');},
-    locator:(s)=>({innerText:async()=>`项目编号：${request.projectNo} 单位名称Fixture`,evaluateAll:async(fn)=>fn(elements||request.expectedLeafIds.slice(0,leaves).map(id=>element(id,{checked:all}))),filter:()=>({click:async()=>{clicks++;if(clickFail)throw new Error('timeout');}})})
+    locator:(s)=>({innerText:async()=>`项目编号：${request.projectNo} 单位名称Fixture`,evaluateAll:async(fn)=>fn(elements||request.expectedLeafIds.slice(0,leaves).map(id=>element(id,{checked:all}))),filter:()=>({press:async(key)=>{assert.equal(key,'Enter');clicks++;if(clickFail)throw new Error('timeout');}})})
   }};
 }
 async function run(f){return vm.runInNewContext('('+buildDownloadCode(request)+')')(f.page);}

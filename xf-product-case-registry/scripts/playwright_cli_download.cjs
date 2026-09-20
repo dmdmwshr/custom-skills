@@ -24,7 +24,7 @@ function buildDownloadCode(r) {
     if(leaves.count!==r.expectedLeafCount||!leaves.all||!leaves.ids.every(id=>r.expectedLeafIds.includes(id))) return {state:'SELECTION_MISMATCH',submitted:false};
     const hint=page.waitForEvent('download',{timeout:3000}).then(()=>true).catch(()=>false);
     let state='NATIVE_FILE_CHECK_REQUIRED';
-    try { await page.locator('button:visible').filter({hasText:/^开始打包$/}).click(); }
+    try { await page.locator('button:visible').filter({hasText:/^开始打包$/}).press('Enter'); }
     catch { state='CLICK_OUTCOME_UNKNOWN'; }
     return {state,submitted:true,downloadEvent:await hint,selectedLeaves:leaves.count};
   }`;
