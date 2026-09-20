@@ -1645,6 +1645,7 @@ def _prepare_incremental_queue(
                 incoming
                 and incoming <= seen
                 and not previous.get("source", {}).get("changePending")
+                and not describe(layout, project, previous)["systemChanged"]
                 and (
                     _verified_completed_waterline(layout, project)
                     or (

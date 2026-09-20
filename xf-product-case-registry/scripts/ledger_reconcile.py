@@ -66,6 +66,14 @@ def reconcile(
             }
             if snapshot:
                 observation["qualification"] = views.snapshot_qualification(snapshot)
+                observation["fileSnapshot"] = {
+                    item["id"]: {
+                        key: item.get(key) for key in ("sha256", "sizeBytes", "contentGeneration")
+                    }
+                    for group in [*snapshot["documentSlots"], *snapshot.get("attachments", [])]
+                    for item in group.get("files", [])
+                    if item.get("id")
+                }
             differences = []
             if bool(record.get("systemObservation", {}).get("exists")) != bool(snapshot):
                 differences.append("SYSTEM_REGISTRATION_OBSERVATION")
@@ -125,6 +133,11 @@ def reconcile(
                 differences.append("UNRESOLVED_CONFLICTS")
             if not snapshot and state.get("caseId"):
                 differences.append("SYSTEM_CASE_MISSING")
+            observed_row = views.describe(
+                layout, project, {**record, "systemObservation": observation}
+            )
+            if snapshot and observed_row["systemChanged"]:
+                differences.append("SYSTEM_CONTENT_CHANGED_SINCE_VERIFICATION")
             if apply:
                 if state and api.file_sha256(state_path) != before_sha:
                     raise api.RegistryError("本地断点已被其他操作更新，未覆盖")

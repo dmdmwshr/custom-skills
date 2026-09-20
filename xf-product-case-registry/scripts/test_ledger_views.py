@@ -81,6 +81,7 @@ def add_case(layout, project, result="UNQUALIFIED", archived=False, deep=False):
                         "verifiedAgainstManifestSha256": digest,
                         "verifiedAt": NOW,
                         "contentGeneration": 1,
+                        "sizeBytes": "1",
                     }
                 },
             },
@@ -421,3 +422,85 @@ def test_saved_source_classification_does_not_discard_ambiguous_or_foreign_evide
     proof["projectNo"] = B
     write(path, proof)
     assert views.classify_saved_details(layout, apply=True) == []
+
+
+def test_current_system_reinspection_overrides_old_manifest_result(layout):
+    add_case(layout, A, archived=True, deep=True)
+    ws.upsert_case(
+        layout,
+        A,
+        systemObservation={
+            "exists": True,
+            "caseId": "fixture-case",
+            "snapshotDigest": "sha256:" + "c" * 64,
+            "qualification": {
+                "initialResult": "QUALIFIED",
+                "initialInspectionDate": "2098-12-10",
+                "statisticsYear": 2098,
+                "reinspectionPending": False,
+            },
+        },
+    )
+    assert views.ledger_view(layout)["cases"][0]["initialResult"] == "QUALIFIED"
+    assert views.ledger_view(layout, view="unqualified")["counts"]["cases"] == 0
+
+
+def test_changed_system_generation_reopens_only_that_case_without_touching_archive(layout):
+    add_case(layout, A, archived=True, deep=True)
+    add_case(layout, B, archived=True, deep=True)
+    archive = ws.load_waterline(layout)["cases"][A]["archive"].copy()
+    ws.upsert_case(
+        layout,
+        A,
+        systemObservation={
+            "exists": True,
+            "caseId": "fixture-case",
+            "snapshotDigest": "sha256:" + "c" * 64,
+            "fileSnapshot": {
+                "fixture-file": {
+                    "sha256": "sha256:" + "b" * 64,
+                    "sizeBytes": 1,
+                    "contentGeneration": 2,
+                }
+            },
+        },
+    )
+    current = views.ledger_view(layout)
+    assert current["cases"][0]["systemChanged"] is True
+    assert current["cases"][0]["stages"]["bodyVerified"] is False
+    assert current["cases"][0]["historicalComplete"] is True
+    assert [item["projectNo"] for item in views.scan_plan(layout)["pending"]] == [A]
+    assert ws.load_waterline(layout)["cases"][A]["archive"] == archive
+
+
+def test_confirmed_missing_system_case_is_not_reported_registered_from_old_state(layout):
+    add_case(layout, A, archived=True, deep=True)
+    ws.upsert_case(layout, A, systemObservation={"exists": False, "observedAt": NOW})
+    row = views.ledger_view(layout)["cases"][0]
+    assert row["stages"]["systemRegistered"] is False
+    assert row["complete"] is False
+    assert row["activePending"] is True
+
+
+def test_unchanged_current_file_identity_reuses_receipt(layout):
+    add_case(layout, A, archived=True, deep=True)
+    ws.upsert_case(
+        layout,
+        A,
+        systemObservation={
+            "exists": True,
+            "caseId": "fixture-case",
+            "snapshotDigest": "sha256:" + "c" * 64,
+            "fileSnapshot": {
+                "fixture-file": {
+                    "sha256": "sha256:" + "b" * 64,
+                    "sizeBytes": "1",
+                    "contentGeneration": 1,
+                }
+            },
+        },
+    )
+    row = views.ledger_view(layout)["cases"][0]
+    assert row["stages"]["bodyVerified"] is True
+    assert row["complete"] is True
+    assert views.scan_plan(layout)["pending"] == []

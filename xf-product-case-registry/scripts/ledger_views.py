@@ -265,11 +265,30 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         and state.get("verification", {}).get("caseId") == state["caseId"]
     )
     registered = registered or bool(binding.get("exists") is True and binding.get("caseId"))
+    if binding.get("exists") is False and binding.get("observedAt"):
+        registered = False
     try:
         body_verified = _content_verified(work, layout, manifest, state) if manifest else False
     except (ws.WorkspaceStateError, OSError, KeyError, TypeError):
         body_verified = False
         issues.append("CONTENT_RECEIPT_UNTRUSTED")
+    system_changed = bool(state.get("caseId") and binding.get("exists") is False)
+    if system_changed:
+        body_verified = False
+    if body_verified and isinstance(binding.get("fileSnapshot"), dict):
+        proof = _read(work / "content-verification.json", layout.root)
+        observed = binding["fileSnapshot"]
+        verified = {item["fileId"]: item for item in proof["files"].values()}
+        body_current = set(observed) == set(verified) and all(
+            item.get("sha256") == verified[file_id].get("sha256")
+            and item.get("contentGeneration") == verified[file_id].get("contentGeneration")
+            and str(item.get("sizeBytes")) == str(verified[file_id].get("sizeBytes"))
+            for file_id, item in observed.items()
+        )
+        if not body_current:
+            body_verified = False
+            system_changed = True
+            issues.append("SYSTEM_CONTENT_CHANGED_SINCE_VERIFICATION")
     archived = bool(
         archive.get("workspacePath")
         and archive.get("verificationRecord")
@@ -305,13 +324,16 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
     }
     classification = qualification(manifest)
     if (
-        not manifest
-        and binding.get("exists")
+        binding.get("exists")
         and binding.get("snapshotDigest")
         and isinstance(binding.get("qualification"), dict)
     ):
         classification = {k: binding["qualification"].get(k) for k in classification}
-    if not manifest and source.get("classification"):
+    if (
+        not manifest
+        and classification["initialResult"] == "UNKNOWN"
+        and source.get("classification")
+    ):
         candidate = source["classification"]
         try:
             evidence_path = layout.root / candidate["evidencePath"]
@@ -348,9 +370,10 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         "unitName": record.get("unitName"),
         **classification,
         "stages": stages,
-        "complete": all(stages.values()) and not source.get("changePending"),
+        "complete": all(stages.values()) and not source.get("changePending") and not system_changed,
         "historicalComplete": historical_complete,
-        "activePending": bool(source.get("changePending"))
+        "activePending": system_changed
+        or bool(source.get("changePending"))
         or (
             not historical_complete
             and not (
@@ -363,6 +386,7 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         if historical_complete
         else "PENDING",
         "sourceChanged": bool(source.get("changePending")),
+        "systemChanged": system_changed,
         "sourceObservedAt": source.get("lastObservedAt") or source.get("capturedAt"),
         "sourceDocumentDate": source.get("latestDocumentCreatedAt"),
         "sourceDocumentCount": len(source_documents),
@@ -586,12 +610,7 @@ def scan_plan(layout: Any, batch_id: str | None = None) -> dict[str, Any]:
     pending = []
     for project, record in ledger["cases"].items():
         row = describe(layout, project, record)
-        if (
-            record.get("state") != "COMPLETED"
-            and not (
-                record.get("source", {}).get("indexOnly") and row["initialResult"] == "QUALIFIED"
-            )
-        ) or row["sourceChanged"]:
+        if row["activePending"]:
             pending.append(
                 {
                     "projectNo": project,
@@ -602,7 +621,7 @@ def scan_plan(layout: Any, batch_id: str | None = None) -> dict[str, Any]:
                     if row["sourceChanged"]
                     else [],
                     "action": "RECONCILE"
-                    if row["stages"]["systemRegistered"]
+                    if row["stages"]["systemRegistered"] or row["systemChanged"]
                     else "COLLECT"
                     if row["initialResult"] == "UNQUALIFIED"
                     else "CLASSIFY"
@@ -637,6 +656,7 @@ def scan_plan(layout: Any, batch_id: str | None = None) -> dict[str, Any]:
             unchanged_complete = (
                 same
                 and not source.get("changePending")
+                and not describe(layout, project, record)["systemChanged"]
                 and (
                     describe(layout, project, record)["historicalComplete"]
                     or (
