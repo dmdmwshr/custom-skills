@@ -100,6 +100,7 @@ def source_qualification(fields: dict[str, Any], stages: list[str]) -> dict[str,
     if isinstance(fields.get("initialInspection"), dict):
         return qualification(fields)
     products = fields.get("检查产品信息")
+    certificate = r"(?:认证证书编号[：:])?Z?[0-9]{16}"
     # The displayed stage, method, result icon and quality text must agree.
     # SFHG alone is not a result: observed initial/recheck rows use it differently.
     if isinstance(products, list):
@@ -114,7 +115,10 @@ def source_qualification(fields: dict[str, Any], stages: list[str]) -> dict[str,
             and any(
                 re.fullmatch(
                     r"(?:[1-9][0-9]*项)?不合格"
-                    + (r"(?:\([0-9]{16}\)|（[0-9]{16}）)?" if key == "市场准入检查情况" else ""),
+                    + (
+                        rf"(?:\({certificate}\)|（{certificate}）)?"
+                        if key == "市场准入检查情况" else ""
+                    ),
                     str(p.get(key, "")),
                 )
                 for key in ("产品质量现场检查情况", "市场准入检查情况")

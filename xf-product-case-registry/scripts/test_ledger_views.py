@@ -260,6 +260,11 @@ def test_counted_onsite_failures_require_positive_exact_display(text, expected):
     [
         ("1项不合格(2021081810000043)", "0", "", "el-icon-error", "UNQUALIFIED"),
         ("1项不合格（2021081810000043）", "0", "", "el-icon-error", "UNQUALIFIED"),
+        ("1项不合格(认证证书编号：Z2016081814000269)", "0", "", "el-icon-error", "UNQUALIFIED"),
+        ("1项不合格（认证证书编号:Z2016081814000269）", "0", "", "el-icon-error", "UNQUALIFIED"),
+        ("0项不合格(认证证书编号：Z2016081814000269)", "0", "", "el-icon-error", None),
+        ("1项不合格(参考：Z2016081814000269)", "0", "", "el-icon-error", None),
+        ("1项不合格(认证证书编号：待复检)", "0", "", "el-icon-error", None),
         ("0项不合格(2021081810000043)", "0", "", "el-icon-error", None),
         ("1项不合格(待复检)", "0", "", "el-icon-error", None),
         ("1项不合格(2021081810000043)待复检", "0", "", "el-icon-error", None),
