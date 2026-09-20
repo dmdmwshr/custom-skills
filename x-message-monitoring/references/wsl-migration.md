@@ -1,12 +1,12 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-20.7）
+## 当前目录与恢复边界（步骤 WSL-2026-09-20.8）
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
 新鲜状态只读业务仓的 `PROJECT_HANDOFF.md` 与 `LINUX_FIXED_SESSION.md`；已接受的运行版本/指纹以实际current及其manifest为准。本页历史迁移授权不允许再次创建接替者、导入账本或恢复旧后端。源码与离线维护归开发任务，真实浏览器与周期归原owner，cc仅direct_feishu出站且入站silent_drop。
 
-已接受的CLI接口以业务仓 `HIDDEN_CHROME_CLI.md` 为准；用户后续允许重新评估Linux隐藏MCP时，旧CLI选择不成为禁止使用MCP的永久规则。原owner已实测CLI隐藏绑定、X登录、自有页关闭、release及临时工件清理；后端是否实际切换只认唯一handoff及正式配置，不以普通MCP导航成功或技能安装替代采集适配、两DOM reader、当前CUA61、三人工轮和四真实周期。用户授权直接接管时，先核对原维护任务已静止，开发可串行完成共享修复/发布，不反复微派发；原owner身份和业务内存仍不迁移或伪造。
+当前MCP接口以业务仓 `HIDDEN_CHROME_MCP.md` 为准；`HIDDEN_CHROME_CLI.md`仅为旧后端及共用接口历史。用户选择MCP后不再启动CLI采集轮。已完成固定MCP适配、跨层合成回归和受控安装，不等于实际页面/同CUA/业务通过；原CLI隐藏绑定、登录、单页留存及清理的历史验收不自动迁算MCP。后端和验收范围只认唯一handoff及正式配置，不以普通MCP导航或技能安装替代两个reader、当前CUA61、三人工轮和四真实周期。用户授权直接接管时，先核对原维护任务静止，开发串行完成共享修复/发布；原owner身份和业务内存不迁移或伪造。
 
 ## 历史：一次 Linux 接替授权（2026-09-12）
 
@@ -25,10 +25,10 @@
 ## 固定接口
 
 - 开发任务按公共配置定位X源码；原owner的持久cwd与中枢受审Desktop登记分别回读，不依赖旧目录链接。代码不可变发布 `/srv/x-monitor/current`；正式账本始终 `/var/lib/x-monitor/x-monitor.sqlite3`，不存在时停止，不能建立空库代替迁移。中枢只读解析器使用同一 data-dir。
-- 驱动 `scripts/desktop_monitor_driver.js`、CLI adapter、guard、control及标准输入客户端均按当前已接受manifest核对，不把本文历史版本写成固定门禁；Python `/srv/x-monitor/current/.venv/bin/python`，固定控制入口同发布的 `scripts/fixed_session_entry.py`。均从同一发布原样加载并核对版本与指纹。driver VM注入公开node:perf_hooks.performance，CLI要求monotonic_v1；这是预算时钟，UTC事实仍用Date。同CUA加载与单页留存已验，完整业务仍待验收。
-- 本次选择 `/etc/x-monitor/browser.json` 的 `hidden_chrome_cli` 后端，六字段及精确路径按业务仓说明校验：隐藏Chrome `/var/lib/codex-browser-automation/chrome/Default`、UID1000、目录归属、主进程/PID/start_ticks、沙箱、显式代理和官方Playwright扩展/session。允许其他独立Chrome共存；不使用GPT的extensionInstanceId冒充CLI身份。选择器在acquire前冻结，来源固定为已有 `desktop_chrome_playwright_linux`；CLI版本/隐藏绑定仅入运行回执，不改历史账本。
+- 驱动 `scripts/desktop_monitor_driver.js`、所选adapter、guard、control及标准输入客户端均按当前已接受manifest核对，不把本文历史版本写成固定门禁；Python `/srv/x-monitor/current/.venv/bin/python`，固定控制入口同发布的 `scripts/fixed_session_entry.py`。均从同一发布原样加载并核对版本与指纹。driver VM注入公开node:perf_hooks.performance，受管CLI/MCP均要求monotonic_v1；这是预算时钟，UTC事实仍用Date。原CLI同CUA加载与单页留存已验，新MCP及完整业务验收分别记录。
+- `/etc/x-monitor/browser.json`当前受控选择`hidden_chrome_mcp`，六字段及精确路径按业务仓说明校验：隐藏Chrome `/var/lib/codex-browser-automation/chrome/Default`、UID1000、目录归属、主进程/PID/start_ticks、沙箱、显式代理和官方Playwright扩展/session。允许其他独立Chrome共存；不使用GPT的extensionInstanceId冒充MCP身份。选择器在acquire前冻结，来源仍为 `desktop_chrome_playwright_linux`；后端版本/隐藏绑定仅入运行回执，不改历史账本。
 - 旧 `playwright_linux` 专用配置及 `/var/lib/x-monitor-browser/profile` 保留停用。当前不调用其 launch，不复制 Cookie，不将 Playwright 指向日常 Chrome 目录，不因扩展故障自动恢复备用后端。原生启动器明确拒绝扩展配置和日常目录；两种后端都不新增独立扫描者。
-- 固定后端在acquire前加载，轮内不切换。官方CLI仅为受管浏览器子进程，不新增扫描者或扩大旧MCP白名单；模型不直接构造CLI argv/eval/CDP。保留15秒、单次40秒、回复八导航、20分钟租约与双流独立提交；身份、UTC、正文、引用、水位不放宽。两个已审DOM reader以原函数身份映射固定ID，禁止自选脚本/路径/hash，AX刷新文本不输出。真正未知停止后续浏览器操作，不为清理再发关闭、不重放失败页。
+- 固定后端在acquire前加载，轮内不切换。官方MCP受管子进程只执行服务端固定模板及两个受审reader，调用者不可传任意code/tool/file/profile，普通MCP白名单不扩大。跨层回归应实际贯通driver、adapter、IPC、broker/方法锁和MCP协议，不能只拼各层mock。保留15秒、单次40秒含收尾、回复八导航、20分钟租约与独立双流，不沿用普通MCP的55秒超时。身份、UTC、正文、引用、水位不放宽；未知及仍pending的初始化不能提前finish、重试或放行下一动作，晚到回执也不自动解除unknown。
 
 ## 三种身份不可互换
 
@@ -38,11 +38,11 @@ heartbeat 为 PAUSED 只停止定时调度，不撤销主控已经明确放行�
 
 ## 静态准备与浏览器控制
 
-唯一固定任务的实际CUA宿主保留事实、业务lease、五sendKept及回执。通过公开Node createRequire加载current的hidden_chrome_cli_adapter.js，连接受管客户端并绑定真实任务/session/资料身份；不得把内部shared client当adapter。CUA不暴露CODEX_THREAD_ID时不改env或绕过被拒绝的模块导入；仅使用已受审root进程证明分支，按当前业务接口读取本kernel证明的task_id字段，检查完整UUID，不手抄。证明独立绑定原owner工具回执、boot/进程链与仍打开的非秘密见证FD，错身份/重建/过期/损坏拒绝，不自动续期；参数不是身份证明。真实同CUA连接和正常清理已验，长期续期仍须单独验收。
+唯一固定任务的实际CUA宿主保留事实、业务lease、五sendKept及回执。通过公开Node createRequire加载current实际路径的hidden_chrome_mcp_adapter.js，连接受管客户端并绑定真实任务/session/资料身份；不得把shared client当adapter。CUA不暴露CODEX_THREAD_ID时不改env或绕过被拒绝的模块导入；仅使用已受审root进程证明分支，按当前业务接口读取本kernel证明的task_id字段，检查完整UUID，不手抄。证明独立绑定原owner工具回执、boot/进程链与仍打开的非秘密见证FD，错身份/重建/过期/损坏拒绝，不自动续期；参数不是身份证明。MCP公共client可能复用公共CLI client的协议代码：发布后按精确依赖核验两个公共模块缓存，旧实例已撤销才失效对应缓存，不操作工具内部模块或reset同CUA。
 
 公开标准库注入保持原契约；版本在工厂核对，launch返回立即保存到预先声明的顶层runtime变量，再生成摘要。隐藏adapter只暴露固定方法与自有不透明handle，不提供裸tab、任意evaluate、CDP或存储；没有identity()方法，公开元数据用state()/receipt()，缺字段不猜值。独立Node控制验收/selfTest不能代替当前CUA61；每次工具只调用一个固定浏览器方法或一次sendKept，不现场循环合并多页。固定浏览器方法按快速路径直接nodeRepl.write(await ...)输出受审回执，不再手工摘取字段而遗漏同次probe/readiness/差异元数据；这是V7已证实的诊断信息缺失，不为补报重读失败页。
 
-每个固定方法由ManagedHiddenCLI.v1的withOperation取得短租约，固定primitive串行执行后共享客户端按真实回执结算，调用方不能自报known/unknown。只从当前CUA公开Node加载已接受固定模块，不加载内部浏览器实现或跨宿主传凭证。总40秒前35秒含准备/工作、末5秒留结算，单页15秒、整轮20分钟；超时不证明进程已取消，真实在途保持不允许清理/重开。短租约不跨研究、长思考或下一消息。
+每个固定方法由ManagedHiddenMCP.v1的withOperation取得短租约，固定primitive串行执行后共享客户端按真实回执结算，调用方不能自报known/unknown。物理worker与逻辑客户端分离，自己的常驻worker不能被误判为外来占用，但其他客户端仍拒绝；原方法锁与MCP调用不能重复取锁。只从当前CUA公开Node加载已接受固定模块，不跨宿主传凭证。总40秒前35秒含准备/工作、末5秒留结算，单页15秒、整轮20分钟；超时不证明进程已取消，真实在途保持不允许清理/重开。短租约不跨研究、长思考或下一消息。
 
 业务结果与控制结果分开：正常返回的空DOM、未找到唯一目标或业务校验失败，不等于浏览器动作结果未知；可以业务失败且正常known结算，但不能据此放宽目标核验。只有真实超时、连接/动作结果或结算未知才走unknown。人工接管/其他客户端明确拒绝时不调用CUA、不循环申请；在途未返回时不提前known结算。未知、过期、关闭失败保留真实现场，不重end、不begin、不自动resume/restart或清状态；只经受支持且有新证据的独立对账恢复。关闭后的lease客户端、adapter及runtime均不复用。
 
