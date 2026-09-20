@@ -26,17 +26,19 @@ from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
 if __package__:
-    from . import chunk_upload
+    from . import chunk_upload, content_receipts, ledger_views
     from .ocr_runtime import OcrError, run_ocr
     from .upload_transport import bounded_request, upload_request
     from .workflow_reporting import ReportingError, record_timing, render_report, write_report
 else:
     import chunk_upload
+    import content_receipts
+    import ledger_views
     from ocr_runtime import OcrError, run_ocr
     from upload_transport import bounded_request, upload_request
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
-VERSION = "1.8.1"
+VERSION = "1.9.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -2745,7 +2747,7 @@ def prepare_case_content(
     expected_count: int,
     write_headers: dict[str, str],
     wait_seconds: float = CASE_RECALL_WAIT_SECONDS,
-) -> None:
+) -> dict[str, Any]:
     """Use the existing bounded whole-case recall quota, without building a ZIP."""
     if (
         type(wait_seconds) not in {int, float}
@@ -2782,7 +2784,7 @@ def prepare_case_content(
             raise RegistryError("整卷正文准备范围或计数不一致，停止核验")
         status = projection.get("status")
         if status == "READY" and counts[2] == 0:
-            return
+            return projection
         if status not in {"PENDING", "PROCESSING"}:
             raise RegistryError("整卷正文取回未完成；保留原取回任务和导入断点")
         now = time.monotonic()
@@ -2820,6 +2822,8 @@ def verify_with_client(
     write_headers: dict[str, str] | None = None,
     deep_content_verify: bool = False,
     recall_wait_seconds: float = CASE_RECALL_WAIT_SECONDS,
+    receipt_manifest_path: Path | None = None,
+    require_nas_ready: bool = True,
 ) -> dict[str, Any]:
     listed = exact_case(client, api_base, manifest["case"]["projectNo"])
     if not listed:
@@ -2993,23 +2997,31 @@ def verify_with_client(
     source_files = {item["clientRef"]: item for item in manifest["files"]}
     rows = directory.get("rows", [])
     remote_files: dict[str, str] = {}
+    content_identities: dict[str, dict[str, Any]] = {}
 
     def check_file(file_ref: str, remote: dict[str, Any]) -> None:
         expected = source_files[file_ref]
         if remote.get("sha256") != expected["sha256"]:
             raise RegistryError(f"目录 SHA-256 不一致：{file_ref}")
         remote_state = remote.get("remoteState")
-        if remote_state != "AVAILABLE":
+        if require_nas_ready and remote_state != "AVAILABLE":
             if remote_state == "PENDING":
                 raise RegistryError(f"飞牛落盘核验中：{file_ref}")
             raise RegistryError(f"飞牛正式库不可用：{file_ref}")
         nas_verified_at = remote.get("nasVerifiedAt")
-        if not isinstance(nas_verified_at, str) or not nas_verified_at.strip():
+        if require_nas_ready and (
+            not isinstance(nas_verified_at, str) or not nas_verified_at.strip()
+        ):
             raise RegistryError(f"飞牛落盘核验中：{file_ref}")
         remote_id = remote.get("id")
         if not isinstance(remote_id, str):
             raise RegistryError(f"目录缺少文件标识：{file_ref}")
         remote_files[file_ref] = remote_id
+        if deep_content_verify and receipt_manifest_path is not None:
+            try:
+                content_identities[file_ref] = content_receipts.file_identity(remote)
+            except ValueError as error:
+                raise RegistryError(str(error)) from error
 
     for slot in manifest.get("documentSlots", []):
         code, (multiplicity, stage) = slot["slotCode"], SLOT_META[slot["slotCode"]]
@@ -3100,14 +3112,33 @@ def verify_with_client(
                     collect_file_ids(child)
 
         collect_file_ids(rows)
+        receipt_path = (
+            receipt_manifest_path.parent / "content-verification.json"
+            if receipt_manifest_path
+            else None
+        )
+        receipt = content_receipts.resume_receipt(
+            read_json(receipt_path) if receipt_path and receipt_path.exists() else {},
+            project_no=manifest["case"]["projectNo"],
+            case_id=case_id,
+            origin=origin_of(api_base)[1],
+            manifest_sha=file_sha256(receipt_manifest_path) if receipt_manifest_path else "",
+            identities=content_identities,
+        )
+        pending_files = {
+            ref: file_id for ref, file_id in remote_files.items() if ref not in receipt["files"]
+        }
+        lease = None
         if (
-            len(source_files) > 1
+            pending_files
+            and len(pending_files) == len(source_files)
+            and len(source_files) > 1
             and write_headers is not None
             and all_directory_ids == set(remote_files.values())
         ):
             # Only prepare a whole case when every remote file is in the
             # explicitly verified manifest. Never recall unrelated additions.
-            prepare_case_content(
+            lease = prepare_case_content(
                 client,
                 api_base,
                 case_id,
@@ -3115,7 +3146,20 @@ def verify_with_client(
                 write_headers,
                 wait_seconds=recall_wait_seconds,
             )
-        for file_ref, remote_id in remote_files.items():
+        if receipt_path:
+            write_json(receipt_path, receipt)
+        for file_ref, remote_id in pending_files.items():
+            if lease and lease.get("leaseId"):
+                response_json(
+                    api_request(
+                        client,
+                        "POST",
+                        f"{api_base}/api/v2/cases/{case_id}/export-leases/{lease['leaseId']}/renew",
+                        headers=write_headers,
+                        retry_on_429=False,
+                    ),
+                    "延长整卷正文保留期限",
+                )
             download_verified_file(
                 client,
                 api_base,
@@ -3123,6 +3167,36 @@ def verify_with_client(
                 source_files[file_ref]["sha256"],
                 write_headers,
                 file_ref,
+            )
+            if receipt_path:
+                receipt["files"][file_ref] = {
+                    **content_identities[file_ref],
+                    "verifiedAt": utc_now(),
+                    "verifiedAgainstManifestSha256": receipt["manifestSha256"],
+                }
+                write_json(receipt_path, receipt)
+        if receipt_path:
+            fresh_directory = response_json(
+                api_request(client, "GET", f"{api_base}/api/v2/cases/{case_id}/directory"),
+                "复核正文身份代际",
+            )
+            try:
+                fresh = content_receipts.identities_from_directory(
+                    fresh_directory, set(remote_files.values())
+                )
+            except ValueError as error:
+                raise RegistryError(str(error)) from error
+            if fresh != {item["fileId"]: item for item in content_identities.values()}:
+                raise RegistryError("正文核验期间文件身份变化，保留逐份断点并重新对账")
+            receipt["completedAt"] = utc_now()
+            write_json(receipt_path, receipt)
+        if lease and lease.get("leaseId"):
+            api_request(
+                client,
+                "DELETE",
+                f"{api_base}/api/v2/case-export-leases/{lease['leaseId']}",
+                headers=write_headers,
+                retry_on_429=False,
             )
     return {
         "caseId": case_id,
@@ -3590,6 +3664,7 @@ def verify_command(args: argparse.Namespace) -> None:
                 getattr(args, "deep_content_verify", False),
                 min(max(float(args.timeout), 1.0), 60.0),
                 recall_wait_seconds=getattr(args, "recall_wait_seconds", CASE_RECALL_WAIT_SECONDS),
+                receipt_manifest_path=path,
             )
         except RegistryError as error:
             if existing_state.get("status") == "FINALIZED_UNVERIFIED":
@@ -3633,6 +3708,7 @@ def verify_with_poll(
     deep_content_verify: bool,
     max_seconds: float,
     recall_wait_seconds: float = CASE_RECALL_WAIT_SECONDS,
+    receipt_manifest_path: Path | None = None,
 ) -> dict[str, Any] | None:
     deadline = time.monotonic() + max_seconds
     while True:
@@ -3644,6 +3720,7 @@ def verify_with_poll(
                 write_headers,
                 deep_content_verify,
                 recall_wait_seconds=recall_wait_seconds,
+                receipt_manifest_path=receipt_manifest_path,
             )
         except httpx.TransportError as error:
             raise RegistryWaitError(
@@ -3811,6 +3888,7 @@ def upload_command(args: argparse.Namespace) -> None:
                         recall_wait_seconds=getattr(
                             args, "recall_wait_seconds", CASE_RECALL_WAIT_SECONDS
                         ),
+                        receipt_manifest_path=path,
                     )
                 except RegistryError as error:
                     mark_verification_error(args, path, manifest, state, error)
@@ -4018,6 +4096,7 @@ def upload_command(args: argparse.Namespace) -> None:
                 getattr(args, "deep_content_verify", False),
                 min(max(float(args.timeout), 1.0), 60.0),
                 recall_wait_seconds=getattr(args, "recall_wait_seconds", CASE_RECALL_WAIT_SECONDS),
+                receipt_manifest_path=path,
             )
         except RegistryError as error:
             mark_verification_error(args, path, manifest, state, error)
@@ -4205,6 +4284,7 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                         recall_wait_seconds=getattr(
                             args, "recall_wait_seconds", CASE_RECALL_WAIT_SECONDS
                         ),
+                        receipt_manifest_path=manifest_path,
                     )
                 except RegistryError as error:
                     mark_verification_error(args, manifest_path, full_manifest, main_state, error)
@@ -4403,6 +4483,7 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
                 getattr(args, "deep_content_verify", False),
                 min(max(float(args.timeout), 1.0), 60.0),
                 recall_wait_seconds=getattr(args, "recall_wait_seconds", CASE_RECALL_WAIT_SECONDS),
+                receipt_manifest_path=manifest_path,
             )
         except RegistryError as error:
             mark_verification_error(args, manifest_path, full_manifest, supplement_state, error)
@@ -4653,6 +4734,8 @@ def upload_batch_command(args: argparse.Namespace) -> None:
     projects = list(dict.fromkeys(args.project))
     if len(projects) != len(args.project):
         raise RegistryError("upload-batch 的 --project 不得重复")
+    if len(projects) > 10:
+        raise RegistryError("正式批次最多 10 案；先完成 3 案验收，再分批续跑")
     workspace = workspace_api()
     try:
         _config, layout = workspace.resolve_workspace(
@@ -4903,28 +4986,111 @@ def ledger_status_command(args: argparse.Namespace) -> None:
     workspace = workspace_api()
     try:
         _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
-        result = workspace.workspace_progress(layout, batch_id=args.batch_id)
+        result = (
+            workspace.workspace_progress(layout, batch_id=args.batch_id)
+            if getattr(args, "scope", "batch") == "batch"
+            else ledger_views.ledger_view(
+                layout, view=getattr(args, "view", "all"), batch_id=args.batch_id
+            )
+        )
     except workspace.WorkspaceStateError as error:
         raise RegistryError(str(error)) from error
     print(json.dumps(result, ensure_ascii=False))
+
+
+def ledger_reconcile_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(
+        f"{__package__}.ledger_reconcile" if __package__ else "ledger_reconcile"
+    )
+    _config, layout = workspace_api().resolve_workspace(
+        **workspace_kwargs(args), create_layout=False
+    )
+    ledger = workspace_api().load_waterline(layout)
+    projects = list(
+        dict.fromkeys(
+            args.project or [r["projectNo"] for r in ledger_views.scan_plan(layout)["pending"]]
+        )
+    )
+    if any(p not in ledger["cases"] for p in projects):
+        raise RegistryError("对账只接受总账已有项目，未知项目须先建立来源身份")
+    if not projects:
+        print(json.dumps({"readOnly": not args.apply, "serverWrites": [], "cases": []}))
+        return
+    manifests = [ledger_views.case_inputs(layout, p, ledger["cases"][p])[1] for p in projects]
+    auth_manifest = next(
+        (m for m in manifests if m.get("case", {}).get("brigadeCode") in BRIGADES), None
+    )
+    if not auth_manifest:
+        brigade = next(
+            (
+                ledger["cases"][p].get("brigadeCode")
+                for p in projects
+                if ledger["cases"][p].get("brigadeCode") in BRIGADES
+            ),
+            None,
+        )
+        if not brigade:
+            raise RegistryError("缺少可信大队身份，先核对来源最小索引")
+        auth_manifest = {"case": {"brigadeCode": brigade}}
+    api_base, origin = origin_of(args.api_base)
+    with httpx.Client(timeout=httpx.Timeout(args.timeout), follow_redirects=False) as client:
+        identity, _headers = authenticate_client(
+            client, api_base, origin, auth_manifest, secure_auth_config_path(Path(args.auth_config))
+        )
+        result = module.reconcile(
+            sys.modules[__name__],
+            client,
+            api_base,
+            origin,
+            layout,
+            projects,
+            identity,
+            apply=args.apply,
+        )
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def ledger_index_history_command(args: argparse.Namespace) -> None:
+    _config, layout = workspace_api().resolve_workspace(
+        **workspace_kwargs(args), create_layout=False
+    )
+    print(json.dumps(ledger_views.index_history(layout, apply=args.apply), ensure_ascii=False))
 
 
 def ledger_report_command(args: argparse.Namespace) -> None:
     workspace = workspace_api()
     try:
         _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
-        progress = workspace.workspace_progress(layout, batch_id=args.batch_id)
-        markdown = render_report(progress)
+        if getattr(args, "scope", "batch") == "batch":
+            progress = workspace.workspace_progress(layout, batch_id=args.batch_id)
+            markdown = render_report(progress)
+            case_count = progress["waterline"]["caseCount"]
+        else:
+            progress = ledger_views.ledger_view(
+                layout, view=getattr(args, "view", "all"), batch_id=args.batch_id
+            )
+            markdown = ledger_views.render_ledger_report(progress)
+            case_count = progress["counts"]["cases"]
         if args.output:
             target = write_report(Path(args.output), layout, markdown)
             result = {
                 "status": "exported",
                 "reportPath": str(target),
-                "caseCount": progress["waterline"]["caseCount"],
+                "caseCount": case_count,
             }
         else:
             result = {"status": "read_only", "markdown": markdown}
     except (workspace.WorkspaceStateError, ReportingError) as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def source_scan_plan_command(args: argparse.Namespace) -> None:
+    workspace = workspace_api()
+    try:
+        layout = resolve_source_layout(args)
+        result = ledger_views.scan_plan(layout, getattr(args, "batch_id", None))
+    except workspace.WorkspaceStateError as error:
         raise RegistryError(str(error)) from error
     print(json.dumps(result, ensure_ascii=False))
 
@@ -4966,6 +5132,11 @@ def run_source_action(args: argparse.Namespace, action: str, **kwargs: Any) -> N
 
 
 def source_begin_command(args: argparse.Namespace) -> None:
+    if not getattr(args, "filter_json", None) and not getattr(args, "acceptance_sample", False):
+        raise RegistryError(
+            "正式采集必须提供实际查询筛选；日常按 source scan-plan 的近三个月日期窗口"
+            "回读页面后保存，不隐式使用本年"
+        )
     source = source_intake_api()
     workspace = workspace_api()
     try:
@@ -5210,6 +5381,11 @@ def build_parser() -> argparse.ArgumentParser:
     source = sub.add_parser("source", help="接收已登录浏览器生成的本地采集物")
     source_sub = source.add_subparsers(dest="source_command", required=True)
 
+    source_plan = source_sub.add_parser("scan-plan", help="只读生成近三个月查询范围和未完成断点")
+    add_workspace_resolution_options(source_plan)
+    source_plan.add_argument("--batch-id", help="可选：对账已稳定的增量清单")
+    source_plan.set_defaults(func=source_scan_plan_command)
+
     source_begin = source_sub.add_parser("begin", help="创建 BrowserCaptureV1 采集批次")
     add_workspace_resolution_options(source_begin)
     source_begin.add_argument(
@@ -5336,13 +5512,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--batch-id",
         help="指定 scope=all 的正式批次；省略时选择更新时间最新的正式批次",
     )
+    ledger_status.add_argument("--scope", choices=("all", "batch"), default="all")
+    ledger_status.add_argument(
+        "--view", choices=("all", "unqualified", "unknown", "unfinished"), default="all"
+    )
     ledger_status.set_defaults(func=ledger_status_command)
+    ledger_reconcile = ledger_sub.add_parser(
+        "reconcile", help="默认只读对账；--apply 仅按服务器事实推进原本地断点"
+    )
+    add_workspace_resolution_options(ledger_reconcile)
+    ledger_reconcile.add_argument(
+        "--project", action="append", help="省略时仅对账活动待办；已完成历史案不主动访问服务器"
+    )
+    ledger_reconcile.add_argument("--api-base", required=True)
+    ledger_reconcile.add_argument("--auth-config", default=str(DEFAULT_AUTH_CONFIG))
+    ledger_reconcile.add_argument("--timeout", type=float, default=60.0)
+    ledger_reconcile.add_argument("--apply", action="store_true")
+    ledger_reconcile.set_defaults(func=ledger_reconcile_command)
+    ledger_index = ledger_sub.add_parser(
+        "index-history", help="复用本地正式批次清单补充总账索引，不扫描来源网页"
+    )
+    add_workspace_resolution_options(ledger_index)
+    ledger_index.add_argument("--apply", action="store_true")
+    ledger_index.set_defaults(func=ledger_index_history_command)
     ledger_report = ledger_sub.add_parser(
         "report",
         help="只读汇总事实源；可显式输出 Markdown 核验摘要",
     )
     add_workspace_resolution_options(ledger_report)
     ledger_report.add_argument("--batch-id")
+    ledger_report.add_argument("--scope", choices=("all", "batch"), default="all")
+    ledger_report.add_argument(
+        "--view", choices=("all", "unqualified", "unknown", "unfinished"), default="all"
+    )
     ledger_report.add_argument("--output", help="核验记录目录内的新 .md 文件；省略时只返回摘要")
     ledger_report.set_defaults(func=ledger_report_command)
 
@@ -5363,8 +5565,9 @@ def build_parser() -> argparse.ArgumentParser:
         add_recall_wait_option(command)
         command.add_argument(
             "--deep-content-verify",
+            default=True,
             action="store_true",
-            help="显式取回飞牛正文并下载校验内容 SHA-256（默认只核对目录和飞牛落盘证据）",
+            help="默认逐份核验正文 SHA-256；复用身份和内容代际均一致的已有回执",
         )
         add_workspace_resolution_options(command)
         command.add_argument(
@@ -5403,6 +5606,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_recall_wait_option(supplement)
     supplement.add_argument(
         "--deep-content-verify",
+        default=True,
         action="store_true",
         help="显式取回飞牛正文并下载校验内容 SHA-256",
     )
@@ -5443,6 +5647,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_recall_wait_option(supplement_batch)
     supplement_batch.add_argument(
         "--deep-content-verify",
+        default=True,
         action="store_true",
         help="显式取回飞牛正文并下载校验内容 SHA-256",
     )
@@ -5491,6 +5696,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     upload_batch.add_argument(
         "--deep-content-verify",
+        default=True,
         action="store_true",
         help="显式取回飞牛正文并下载校验内容 SHA-256",
     )
@@ -5530,7 +5736,7 @@ def record_command_timing(
     operation = command
     if command == "source":
         subcommand = args.source_command
-        if subcommand == "tail-cursor" or not getattr(args, "batch_id", None):
+        if subcommand in {"tail-cursor", "scan-plan"} or not getattr(args, "batch_id", None):
             return
         layout = resolve_source_layout(args)
         directory = layout.batch_dir(args.batch_id)

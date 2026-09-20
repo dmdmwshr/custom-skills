@@ -201,14 +201,21 @@ def _timestamp(value: datetime | str | None = None) -> str:
     return parsed.astimezone(SHANGHAI).isoformat(timespec="seconds")
 
 
-def _default_filters(value: datetime | str | None, explicit: dict[str, Any], *, acceptance: bool = False) -> dict[str, Any]:
+def _default_filters(
+    value: datetime | str | None, explicit: dict[str, Any], *, acceptance: bool = False
+) -> dict[str, Any]:
     # A user-requested single completed task is a sample, never an annual list.
     if explicit.get("selectionMode") == "LATEST_CLOSED_TASK":
         if not acceptance or explicit.get("acceptanceMode") != "SINGLE_CASE_DOWNLOAD_PROOF":
             raise SourceIntakeError("最近已结案任务仅允许隔离单案验收")
-        expected = {"taskStatus": "已结案", "sortField": "结束日期", "sortDirection": "descending",
-                    "queryRoute": "#/xfjd/cpjd/cxtj/jcwcx/rcjcrw",
-                    "jurisdiction": "全部管辖单位(含派出所)", "brigadeScope": "ALL"}
+        expected = {
+            "taskStatus": "已结案",
+            "sortField": "结束日期",
+            "sortDirection": "descending",
+            "queryRoute": "#/xfjd/cpjd/cxtj/jcwcx/rcjcrw",
+            "jurisdiction": "全部管辖单位(含派出所)",
+            "brigadeScope": "ALL",
+        }
         for key, target in expected.items():
             if explicit.get(key) != target:
                 raise SourceIntakeError(f"单案验收筛选 {key} 未明确回读")
@@ -223,6 +230,30 @@ def _default_filters(value: datetime | str | None, explicit: dict[str, Any], *, 
             raise SourceIntakeError("任务样本不能伪称法律文书筛选或日期快捷项")
         return {**explicit, "timezone": "Asia/Shanghai"}
     current = datetime.fromisoformat(_timestamp(value))
+    if explicit.get("selectionMode") == "RECENT_DOCUMENT_ACTIVITY":
+        try:
+            start = datetime.strptime(str(explicit["startDate"]), "%Y-%m-%d").date()
+            end = datetime.strptime(str(explicit["endDate"]), "%Y-%m-%d").date()
+        except (KeyError, ValueError) as error:
+            raise SourceIntakeError("增量扫描必须提供实际起止日期") from error
+        if start > end or end > current.date():
+            raise SourceIntakeError("增量扫描日期倒置或超过执行日")
+        for key, target in {
+            "documentType": "ALL",
+            "dateFieldLabel": "创建日期",
+            "jurisdiction": "全部管辖单位(含派出所)",
+            "brigadeScope": "ALL",
+        }.items():
+            if explicit.get(key) != target:
+                raise SourceIntakeError(f"增量扫描 {key} 未回读为规定值")
+        if (
+            not isinstance(explicit.get("queryEvidencePath"), str)
+            or not explicit["queryEvidencePath"].strip()
+        ):
+            raise SourceIntakeError("增量扫描必须记录实际筛选证据 queryEvidencePath")
+        if explicit.get("dateShortcut") or explicit.get("documentTypePage") or "year" in explicit:
+            raise SourceIntakeError("增量窗口不能伪称本年或精确文书类型查询")
+        return {**explicit, "timezone": "Asia/Shanghai"}
     notice_query = explicit.get("selectionMode") == "ANNUAL_RECTIFICATION_NOTICE"
     if notice_query:
         if explicit.get("documentType") != "责令限期改正通知书":
@@ -1074,6 +1105,28 @@ def _sorted_unique_appearances(values: list[dict[str, Any]]) -> list[dict[str, A
     return [unique[key] for key in sorted(unique)]
 
 
+def document_fingerprint(value: dict[str, Any]) -> str:
+    # Page position and observation time are not source document changes.
+    def stable(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {
+                k: stable(v)
+                for k, v in item.items()
+                if _normalized_key(k)
+                not in {
+                    "sourcepage",
+                    "sourcerow",
+                    "sourceorder",
+                    "pagenumber",
+                    "observedat",
+                    "capturedat",
+                }
+            }
+        return [stable(v) for v in item] if isinstance(item, list) else item
+
+    return _fingerprint(stable(value))
+
+
 def _normalize_record(item: dict[str, Any]) -> dict[str, Any]:
     clean = _clean_evidence(item)
     rwid = _require_rwid(_find_first(clean, _RWID_KEYS))
@@ -1277,7 +1330,9 @@ def begin_capture(
 
     layout = _layout(workspace)
     filter_value = _json_input(filter_json if filter_json is not None else filters, "筛选条件")
-    clean_filters = _default_filters(now, _clean_evidence(filter_value), acceptance=scope == "acceptance")
+    clean_filters = _default_filters(
+        now, _clean_evidence(filter_value), acceptance=scope == "acceptance"
+    )
     if scope not in {"all", "acceptance"}:
         raise SourceIntakeError("采集范围只能是 all 或 acceptance")
     if scope == "acceptance":
@@ -1451,7 +1506,9 @@ def add_page(
     return state
 
 
-def _round_records(round_value: dict[str, Any], *, inspection_query: bool = True) -> tuple[dict[str, dict[str, Any]], int, int]:
+def _round_records(
+    round_value: dict[str, Any], *, inspection_query: bool = True
+) -> tuple[dict[str, dict[str, Any]], int, int]:
     pages = round_value.get("pages") or {}
     if not pages:
         raise SourceIntakeError("当前扫描轮次还没有分页数据")
@@ -1563,10 +1620,53 @@ def _prepare_incremental_queue(
 ) -> None:
     """列表阶段只建立 RWID 详情队列，项目水位必须在详情读到项目编号后判断。"""
 
+    if __package__:
+        from .ledger_views import describe
+    else:
+        from ledger_views import describe
     actions: list[str] = []
+    incremental = state["filters"].get("selectionMode") == "RECENT_DOCUMENT_ACTIVITY"
+    known = (load_waterline(layout).get("cases") or {}) if incremental and load_waterline else {}
     for rwid in _tail_ordered_rwids(records):
         record = records[rwid]
         record["sourceRecordFingerprint"] = _record_equivalence(record)
+        matches = [
+            (p, r)
+            for p, r in known.items()
+            if r.get("source", {}).get("rwid") == rwid
+            or rwid in r.get("source", {}).get("observationsByRwid", {})
+        ]
+        if len(matches) == 1:
+            project, previous = matches[0]
+            old = previous.get("source", {}).get("observationsByRwid", {}).get(rwid, {})
+            incoming = {document_fingerprint(a) for a in record.get("sourceAppearances", [])}
+            seen = set(old.get("documentFingerprints") or [])
+            if (
+                incoming
+                and incoming <= seen
+                and not previous.get("source", {}).get("changePending")
+                and (
+                    _verified_completed_waterline(layout, project)
+                    or (
+                        previous.get("source", {}).get("indexOnly") is True
+                        and describe(layout, project, previous)["initialResult"] == "QUALIFIED"
+                    )
+                )
+            ):
+                record.update(
+                    {
+                        "projectNo": project,
+                        "skippedAsUnchanged": True,
+                        "skippedAsCompletedProject": previous.get("state") == "COMPLETED",
+                        "skipReason": "SOURCE_DOCUMENTS_ALREADY_VERIFIED",
+                    }
+                )
+                _maybe_waterline(
+                    layout,
+                    project,
+                    source={"lastObservedAt": _timestamp(observed_at), "batchId": state["batchId"]},
+                )
+                continue
         actions.append(rwid)
     state["detailRwids"] = list(actions)
     state["waterlineDecision"] = "AFTER_DETAIL_PROJECT_NO"
@@ -1598,7 +1698,8 @@ def finalize_capture(
     try:
         records, total, total_pages = _round_records(
             round_value,
-            inspection_query=state["filters"].get("selectionMode") != "ANNUAL_RECTIFICATION_NOTICE",
+            inspection_query=state["filters"].get("selectionMode")
+            not in {"ANNUAL_RECTIFICATION_NOTICE", "RECENT_DOCUMENT_ACTIVITY"},
         )
     except _RoundUnstable as error:
         round_value.update(
@@ -1971,7 +2072,81 @@ def add_detail(
         _write_json(capture_path, state)
         raise SourceIntakeError("详情项目编号与清单不一致，已转人工处理")
     captured = _timestamp(captured_at)
-    if not _is_acceptance_sample(state) and _verified_completed_waterline(layout, project_no):
+    completed_record = (
+        None if _is_acceptance_sample(state) else _verified_completed_waterline(layout, project_no)
+    )
+    if completed_record and state["filters"].get("selectionMode") == "RECENT_DOCUMENT_ACTIVITY":
+        old_source = completed_record.get("source") or {}
+        old_observation = old_source.get("observationsByRwid", {}).get(record_key, {})
+        observed_docs = sorted(
+            {document_fingerprint(a) for a in record.get("sourceAppearances", [])}
+        )
+        unchanged = bool(
+            old_source.get("detailBusinessFingerprint")
+            == _business_detail_fingerprint(clean_detail)
+        )
+        if old_observation.get("documentFingerprints"):
+            unchanged = unchanged and set(observed_docs) <= set(
+                old_observation["documentFingerprints"]
+            )
+        observation = {
+            "fingerprint": record.get("sourceRecordFingerprint"),
+            "documentFingerprints": observed_docs,
+            "observedAt": captured,
+        }
+        record["projectNo"] = project_no
+        record["detail"] = {
+            "projectNo": project_no,
+            "capturedAt": captured,
+            "fields": {"projectNo": project_no, "unitName": str(detail_unit_name).strip()},
+        }
+        if not unchanged:
+            # Preserve the accepted package/archive; capture only the new source observation.
+            change_dir = capture_path.parent / "changes" / project_no
+            change_dir.mkdir(parents=True, exist_ok=True)
+            change_path = change_dir / f"{record_key}-{_fingerprint(clean_detail)[7:19]}.json"
+            _write_json(
+                change_path,
+                {
+                    "schemaVersion": "SourceChangeV1",
+                    "projectNo": project_no,
+                    "rwid": record_key,
+                    "observedAt": captured,
+                    "fields": clean_detail,
+                },
+            )
+            record["sourceChangePending"] = True
+            _maybe_waterline(
+                layout,
+                project_no,
+                source={
+                    "changePending": True,
+                    "lastObservedAt": captured,
+                    "batchId": batch_id,
+                    "pendingObservationsByRwid": {record_key: observation},
+                    "changeEvidencePath": str(change_path.relative_to(layout.root)),
+                },
+            )
+        else:
+            record["skippedAsUnchanged"] = True
+            record["skippedAsCompletedProject"] = True
+            _maybe_waterline(
+                layout,
+                project_no,
+                source={
+                    "lastObservedAt": captured,
+                    "batchId": batch_id,
+                    "observationsByRwid": {record_key: observation},
+                },
+            )
+        state["actionRwids"] = [item for item in state.get("actionRwids", []) if item != record_key]
+        _refresh_progress(state)
+        if not unchanged:
+            state["status"] = "SOURCE_CHANGES_PENDING"
+        state["updatedAt"] = captured
+        _write_json(capture_path, state)
+        return state
+    if completed_record:
         # Resolve the live detail identity first, but never recreate pending
         # evidence or replace the provenance of an already archived case.
         record["projectNo"] = project_no
@@ -1986,7 +2161,7 @@ def add_detail(
         record["skippedAsCompletedProject"] = True
         record["skipReason"] = "PROJECT_NO_ALREADY_VERIFIED"
         state["actionRwids"] = [item for item in state.get("actionRwids", []) if item != record_key]
-        _maybe_waterline(layout, project_no)
+        _maybe_waterline(layout, project_no, source={"lastObservedAt": captured})
         _refresh_progress(state)
         state["updatedAt"] = captured
         _write_json(capture_path, state)
@@ -2095,10 +2270,15 @@ def add_detail(
         screenshot_record = existing["screenshot"]
     else:
         raise SourceIntakeError("每个新处理案卷必须提供一张完整详情截图")
-    notice_query = state["filters"].get("selectionMode") == "ANNUAL_RECTIFICATION_NOTICE"
+    notice_query = state["filters"].get("selectionMode") in {
+        "ANNUAL_RECTIFICATION_NOTICE",
+        "RECENT_DOCUMENT_ACTIVITY",
+    }
     source_stages = [] if notice_query else list(record.get("inspectionStages") or ["INITIAL"])
     project_stages = (
-        ["ANOMALY" if "ANOMALY" in source_stages else "RECHECK"] if alias_of and not notice_query else source_stages
+        ["ANOMALY" if "ANOMALY" in source_stages else "RECHECK"]
+        if alias_of and not notice_query
+        else source_stages
     )
     stage_label = {"INITIAL": "初查", "RECHECK": "复查", "ANOMALY": "检查记录次数异常"}
     stage_tags = {stage_label[item] for item in project_stages}
@@ -2144,6 +2324,16 @@ def add_detail(
         "rwid": record_key,
         "tags": tags,
         "capturedAt": captured,
+        "lastObservedAt": captured,
+        "observationsByRwid": {
+            record_key: {
+                "fingerprint": record.get("sourceRecordFingerprint"),
+                "observedAt": captured,
+                "documentFingerprints": sorted(
+                    {document_fingerprint(a) for a in record.get("sourceAppearances", [])}
+                ),
+            }
+        },
         "projectIdentitySource": "DETAIL",
         "sourceRecordFingerprint": record.get("sourceRecordFingerprint"),
         "detailBusinessFingerprint": business_fingerprint,
@@ -2151,6 +2341,46 @@ def add_detail(
         "projectInspectionStages": project_stages,
         "sourceDocumentCount": len(record.get("sourceAppearances") or []) or 1,
     }
+    document_dates = [
+        _find_first(
+            a,
+            {
+                "createdate",
+                "createdat",
+                "creationdate",
+                "documentdate",
+                "创建日期",
+                "创建时间",
+                "createtime",
+            },
+        )
+        for a in record.get("sourceAppearances", [])
+    ]
+    normalized_dates = [
+        str(d)[:10] for d in document_dates if d and re.match(r"^\d{4}-\d{2}-\d{2}", str(d))
+    ]
+    if normalized_dates:
+        source_fields["latestDocumentCreatedAt"] = max(normalized_dates)
+    if isinstance(clean_detail.get("initialInspection"), dict):
+        # Structured initial-product evidence only; keyword tags cannot classify a case.
+        if __package__:
+            from .ledger_views import qualification
+        else:
+            from ledger_views import qualification
+        classification = qualification({"initialInspection": clean_detail["initialInspection"]})
+        source_fields["classification"] = {
+            **classification,
+            "evidencePath": str(evidence_path.relative_to(layout.root)),
+            "evidenceSha256": _sha256(evidence_path),
+            "observedAt": captured,
+        }
+        source_fields["indexOnly"] = classification["initialResult"] == "QUALIFIED"
+        if source_fields["indexOnly"]:
+            record["indexOnly"] = True
+            record["skippedAsUnchanged"] = True
+            state["actionRwids"] = [
+                item for item in state.get("actionRwids", []) if item != record_key
+            ]
     if record.get("anomalies"):
         source_fields["anomalies"] = list(record["anomalies"])
     if alias_of:

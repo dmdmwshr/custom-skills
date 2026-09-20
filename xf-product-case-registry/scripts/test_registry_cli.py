@@ -2506,12 +2506,16 @@ def test_source_snapshot_downloads_persists_per_case_baseline(
         download_dir=downloads,
         config_path=config_path,
     )
+    filter_path = tmp_path / "legacy-explicit-filters.json"
+    filter_path.write_text(json.dumps(source._default_filters(None, {})), encoding="utf-8")
     begin_args = cli.build_parser().parse_args(
         [
             "source",
             "begin",
             "--batch-id",
             "batch-1",
+            "--filter-json",
+            str(filter_path),
             "--origin",
             "http://registry-source.example/#/xfjd/list?runId=secret",
             "--workspace-config",

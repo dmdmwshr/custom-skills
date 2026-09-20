@@ -564,7 +564,15 @@ def upsert_case(
                 "errorSummary": None,
             }
             data["cases"][project] = record
+        prior_source = deepcopy(record.get("source") or {})
         _deep_merge(record, merged)
+        # The window may shrink, but known document membership never shrinks with it.
+        for rwid, observation in (record.get("source", {}).get("observationsByRwid") or {}).items():
+            previous = prior_source.get("observationsByRwid", {}).get(rwid, {})
+            observation["documentFingerprints"] = sorted(
+                set(observation.get("documentFingerprints") or [])
+                | set(previous.get("documentFingerprints") or [])
+            )
         new_state = merged.get("state")
         if isinstance(new_state, str) and new_state:
             for section in ("source", "local", "upload", "nasVerification"):
@@ -575,7 +583,17 @@ def upsert_case(
         if isinstance(source_change, Mapping) and "tags" in source_change and "tags" not in merged:
             record["tags"] = deepcopy(source_change["tags"])
         record["projectNo"] = project
-        record["lastSeenAt"] = now
+        record["workflowUpdatedAt"] = now
+        # Source freshness is only changed by a source observation, never by uploads/OCR.
+        if isinstance(source_change, Mapping) and source_change.get("lastObservedAt"):
+            record["lastSeenAt"] = source_change["lastObservedAt"]
+        source_section = record.get("source") or {}
+        if source_section.get("batchId"):
+            source_section["batchIds"] = sorted(
+                set(source_section.get("batchIds") or [])
+                | set(prior_source.get("batchIds") or [])
+                | {source_section["batchId"]}
+            )
         _save_waterline_unlocked(layout, data)
         return deepcopy(record)
 

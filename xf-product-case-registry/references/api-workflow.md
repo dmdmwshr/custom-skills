@@ -77,16 +77,16 @@
 - `/api/health`、`/api/ready` 正常，认证和第 1 至 3 步成功，但第 4 步 finalize 对多个独立任务稳定返回 5xx 或服务端任务进入 FAILED：优先归类为登记系统服务端问题。暂停新的 finalize，但可继续其他案卷的 inventory、OCR/拆分、compose、validate 和 dry-run。
 - finalize 成功而飞牛不是 AVAILABLE、缺少 `nasVerifiedAt` 或目录哈希未就绪：属于远端存储核验未完成；不得归档，也不得称为网络或 finalize 失败。
 
-登记系统问题应反馈给对应系统项目任务，由该任务检查服务日志、数据库任务元数据、代码、测试和部署。本 Skill 执行会话不得跨边界修改系统仓库、接口或部署。反馈内容仅限脱敏的项目编号、失败步骤、HTTP 状态、发生时间范围、前置成功里程碑和是否可重复；不得发送用户名、密码、Cookie、CSRF、任务 ID、PDF/ZIP、完整响应或浏览器配置。系统修复前不得清除 V6 状态、另建任务或重试真实 FAILED 任务；修复后先由系统任务说明旧任务的安全处置方式，再以一个验证通过的小案卷作正式 canary，成功完成 verify 后才恢复批量 finalize。
+登记系统故障按当前授权诊断或修复。用户已授权系统与 Skill 联动优化时，由当前实施者完成代码、隔离验证、发布和真实回读，不因任务职责名称要求转交。仅诊断授权时保持只读。保护原 V6 和真实失败任务；对账确认前不补传、再次 finalize 或创建替代任务。
 
 ## 飞牛核验
 
 - finalize 成功后保存服务端 `finalizedAt` 和白名单摘要，并进入“已上传待飞牛核验”。有限轮询目录 SHA-256、`remoteState=AVAILABLE` 和 `nasVerifiedAt`；约 60 秒未满足时保持 `FINALIZED_UNVERIFIED`，稍后可单独运行 `verify`。
 - 完整导入 finalize 摘要包含冲突、跳过项或 `created=false` 时进入 `FINALIZED_WITH_CONFLICTS`，标记“需人工处理”；不得自动核验、重新终结或称为完成。`SUPPLEMENT_EXISTING` 的 `created=false` 按上节补录专用门禁判断，不能用于完整导入。
-- `verify` 默认低流量核对目录 SHA-256、飞牛状态和落盘时间，不下载全部正文。证据缺失或仍处理中时保持“已上传待飞牛核验”。
-- 只有显式 `--deep-content-verify` 才允许正文核验。遇结构化 `RECALL_REQUIRED` 后可用当前登记系统会话发起或复用 recall，轮询到 READY 再下载；PENDING/PROCESSING 继续等待，OFFLINE/FAILED/超时停止。网络异常不能写成哈希不一致。
+- verify 默认逐份正文核验；只读浅对账使用 ledger reconcile。来源、系统登记、正文核验分别表达；未通过正文校验保持待核验。
+- --deep-content-verify 保留兼容参数，正文核验已是默认；已有有效文件回执直接复用。遇结构化 `RECALL_REQUIRED` 后可用当前登记系统会话发起或复用 recall，轮询到 READY 再下载；PENDING/PROCESSING 继续等待，OFFLINE/FAILED/超时停止。网络异常不能写成哈希不一致。
 - 多文件整卷核验先完成全部目录字段、文件归属、SHA-256 和飞牛状态检查；只有服务器整卷文件 ID 集合与本次清单精确相等，才调用现有 `POST /api/v2/cases/:id/export-preparations` 并轮询现有准备状态，再逐份取回正文比对哈希。不创建或下载 ZIP，不新增导入步骤，不放宽缓存额度。准备回执的案卷、准备任务及文件总数必须一致。服务器有本次清单范围外文件时，不批量取回整卷，仍只对已授权文件逐份处理。缓存额度不足与请求频率限流分开报告，不通过重新登录绕过额度。
-- 整卷正文准备使用独立等待预算：默认1800秒，可用 `--recall-wait-seconds` 显式设置30～7200秒；与单次连接超时、上传总期限、约60秒飞牛目录状态轮询分开。每次调用只发一次prepare POST，之后每10秒查询原preparation，不因429自动重复POST/GET，不创建替代取回任务；达到预算停止，保留原服务端任务。单次控制请求超时不超过30秒及剩余等待预算，不关闭服务端后台任务。该选项在upload/verify/upload-batch/supplement/supplement-batch共用，默认浅核验仍不取回正文。
+- 整卷正文准备使用独立等待预算：默认1800秒，可用 `--recall-wait-seconds` 显式设置30～7200秒；与单次连接超时、上传总期限、约60秒飞牛目录状态轮询分开。每次调用只发一次prepare POST，之后每10秒查询原preparation，不因429自动重复POST/GET，不创建替代取回任务；达到预算停止，保留原服务端任务。单次控制请求超时不超过30秒及剩余等待预算，不关闭服务端后台任务。该选项在upload/verify/upload-batch/supplement/supplement-batch共用，默认深核验只取回尚未核验或已变化正文。
 - “后台已就绪7/32”只表示准备阶段可用正文计数，不是客户端已下载或已通过哈希比对的份数；READY后才逐份下载比对。该进度查询不新增取回任务，但服务器在发现缓存缺失时可能校正缓存存在标记，不能称为任何情况下数据库零写入。默认1800秒不保证所有网络速度下都完成；超时保留等待状态，按真实后台进度决定后续续跑，不靠扩大并发提速。
 - 同一检查阶段允许多个名称、型号相同而 `clientRef` 不同的产品。此时核验只读现有 `CaseImportStateV1`，用 `clientRef → ownerKey → 产品 ID` 唯一映射，并逐产品比较字段和文件归属。缺少、共享或跨案卷/阶段的绑定均停止核验；不得猜测对应关系。名称型号唯一的旧清单保持原路径。
 - 批量命令捕获核验异常后，回读并严格验证同一清单、正文投影、服务器、大队及认证身份绑定的 V6 状态。已完成 finalize 的待核验案卷仍报告 `FINALIZED_UNVERIFIED`，有冲突的仍报告 `FINALIZED_WITH_CONFLICTS`；保留具体错误，不计入通过。状态损坏或归属不一致仍报告失败，不能仅凭状态文件存在认定已建档。
@@ -103,3 +103,13 @@
 4. 原子更新 `CaseWaterlineV1`，再由 JSON 重建 `案卷水位记录表.xlsx`。Excel 被占用时保留 JSON 成功状态并报告可稍后导出。
 
 飞牛离线、核验等待、网络失败、冲突、跳过、旧状态或任何人工处理项均不得触发归档；完整导入的 `created=false` 同样阻止归档，补录则按本节专用门禁判断。归档失败不撤销服务端 VERIFIED，但水位必须明确记录“已核验、归档待处理”，再次运行只重试未完成的本地归档步骤。
+
+## 持久保留租约与正文断点（1.9）
+
+整卷 POST export-preparations 返回 leaseId、snapshotDigest、idleExpiresAt、hardExpiresAt。准备 GET 以当前用户续期，顺序下载前 POST cases/:id/export-leases/:leaseId/renew；成功后 DELETE case-export-leases/:leaseId。默认闲置 15 分钟、创建后最多 4 小时，重启由数据库恢复。保留额度、所有权及完整内容快照检查；文件内容代际变化返回冲突，不能继续旧核验。
+
+仅所有文件都待核验且与整卷目录范围精确一致时准备整卷。中断后只剩部分文件时按剩余文件取回，不重复准备已证明的文件。每份正文成功立即保存 content-verification.json（ContentVerificationV1），全部结束再次回读服务器文件身份；只在一致时写 completedAt。文件 ID、SHA-256、大小、内容代际任一变化都使该份旧回执失效。
+
+ledger reconcile 默认只报告，--apply 仅推进本地断点。FINALIZED 任务的临时 receivedFiles 允许已清空，此时验证正式案卷目录及文件归属；不能推断丢失并重传。认证配置由 CLI 内部读取；所有浏览器证据、回执及本地水位继续留在工作根，不进入业务 manifest。
+
+新完成案归档前必须具备完整正文回执。历史已完成但没有新版回执时保留历史完成，标记证据不足，不伪造、不自动重新上传或归档。整文件链路与尚未单独验收发布的分块开发隔离。

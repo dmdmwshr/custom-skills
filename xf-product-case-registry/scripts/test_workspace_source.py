@@ -1057,9 +1057,11 @@ def test_completed_case_is_queued_until_detail_project_number_is_verified(
     assert waterline["upload"]["status"] == "VERIFIED"
     assert waterline["nasVerification"]["status"] == "VERIFIED"
     assert not layout.pending_case_dir(PROJECT_A).exists()
-    assert {key: value for key, value in waterline.items() if key != "lastSeenAt"} == {
-        key: value for key, value in completed_before.items() if key != "lastSeenAt"
-    }
+    assert waterline["source"]["lastObservedAt"] == FIXED_NOW
+    assert waterline["lastSeenAt"] == FIXED_NOW
+    for key in ("state", "completedAt", "local", "upload", "nasVerification", "archive", "history"):
+        assert waterline[key] == completed_before[key]
+    assert {k: v for k, v in waterline["source"].items() if k != "lastObservedAt"} == completed_before["source"]
     assert resolved_record["detail"]["completedProjectObservation"] is True
 
 

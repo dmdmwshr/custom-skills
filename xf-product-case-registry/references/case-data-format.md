@@ -32,7 +32,7 @@
 
 `下载交付异常_<RWID>.json` 只表达本案下载断点，不是 ZIP 或上传输入。外部 Edge 顺序取流失败时固定使用错误码 `EDGE_CDP_STREAM_UNAVAILABLE`，只允许保存项目编号、RWID、预期字节数、已接收字节数、失败阶段、发生时间和 `nonBlocking=true`；不得保存请求 ID、来源 URL、响应建议名、响应头全文、Cookie、令牌、浏览器存储或配置。对应 `CaseWaterlineV1` 仍为 `DETAIL_CAPTURED / PACKAGE_WAITING / NOT_STARTED`，单案异常不改变其他项目水位。
 
-每个项目工作区只保留一套当前根级控制文件：`inventory.json`、`ocr-result.json`、`split-plan.json`、`split-index.json`、按需生成的 `field-resolution.json`、`case-data.json`、`manifest.json`、`upload-map.json`、`upload-state.json`，以及 `normalized/` 下的规范 PDF。已有案卷进入正式 `MISSING_ONLY` 补录时，另固定生成 `supplement-manifest.json`、`supplement-upload-map.json`、`supplement-state.json`；三者只记录本次服务器快照确认缺失的文件版本和可续传断点，不能替代完整 manifest。CLI/OCR 生成的结构化诊断文件、文本层清单和专用输出子目录可按原名保留，不得改成另一套事实源。同一项目编号同时只能有一个写执行单元；跨项目并行时，每个执行单元显式绑定项目编号和上述两个项目目录。不得在工作根散落一次性上传包装脚本、第二份完整 manifest、手工复制的状态文件或以“第几行”命名的业务文件。登记系统明确允许清理 FAILED 任务并重建时，旧状态只按 `upload-state.failed-before-recreate-<UTC>.json` 留一份只读证据，然后由正式 CLI 创建新 V6 状态。
+每个项目工作区只保留一套当前根级控制文件：`inventory.json`、`ocr-result.json`、`split-plan.json`、`split-index.json`、按需生成的 `field-resolution.json`、`case-data.json`、`manifest.json`、`upload-map.json`、`upload-state.json`、`content-verification.json`，以及 `normalized/` 下的规范 PDF。已有案卷进入正式 `MISSING_ONLY` 补录时，另固定生成 `supplement-manifest.json`、`supplement-upload-map.json`、`supplement-state.json`；三者只记录本次服务器快照确认缺失的文件版本和可续传断点，不能替代完整 manifest。CLI/OCR 生成的结构化诊断文件、文本层清单和专用输出子目录可按原名保留，不得改成另一套事实源。同一项目编号同时只能有一个写执行单元；跨项目并行时，每个执行单元显式绑定项目编号和上述两个项目目录。不得在工作根散落一次性上传包装脚本、第二份完整 manifest、手工复制的状态文件或以“第几行”命名的业务文件。登记系统明确允许清理 FAILED 任务并重建时，旧状态只按 `upload-state.failed-before-recreate-<UTC>.json` 留一份只读证据，然后由正式 CLI 创建新 V6 状态。
 
 ## BrowserCaptureV1
 
@@ -137,3 +137,12 @@ Excel 至少展示项目编号、单位、大队、标签、来源进度、本�
 - 普通槽位的 `ELECTRONIC` 和 `SCANNED` 各最多一个；现场照片只能有一个 `SCANNED`。截图、原 ZIP 和组合件不能直接作为正式版本。
 - 每个 `files` 条目必须恰好被一个槽位版本或 `OTHER_ATTACHMENT` 引用。一个来源对应多个槽位时生成独立规范 PDF、独立 `fileRef` 和独立上传路径。
 - 拆分目标只能位于项目工作区的 `normalized/`，不得覆盖原件或已有文件；空白页不生成规范 PDF。
+
+
+## 统一水位版本补充（1.9）
+
+查询默认覆盖所有已知案卷及明确归档代际，不再默认只看最新批次。所有、不合格、待确认、未完成为同一总账视图；当前批次要显式 --scope batch。来源创建日期窗口支持跨年，固定本年规则仅适用于旧年度批次。新增结构与命令见 [统一水位](unified-waterline.md)。
+
+来源记录保存累计 observationsByRwid/documentFingerprints、独立 lastObservedAt 和 latestDocumentCreatedAt；本地处理用 workflowUpdatedAt。changePending 表示旧案出现新材料尚待处理，不能被普通刷新清除。原始包摘要、V6 系统绑定和 archive.workspacePath 对应的归档代际继续保留。
+
+content-verification.json 是本地逐文件核验回执，不是第二套上传状态或业务账本。ContentVerificationV1 绑定项目、origin、caseId、manifestSha256；每份含 fileId、sha256、sizeBytes、contentGeneration、verifiedAt 和 verifiedAgainstManifestSha256。全部当前文件通过且目录回读一致才写 completedAt。旧 V6 VERIFIED 仅有目录与飞牛证据时为 LEGACY_UNSPECIFIED，不自动视为逐份正文核验。
