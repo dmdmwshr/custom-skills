@@ -1,6 +1,7 @@
 """Package checks plus execution of real business driver/ledger fixtures."""
 from pathlib import Path
 import os
+import json
 import re
 import shutil
 import subprocess
@@ -11,6 +12,59 @@ BUSINESS=Path(os.environ.get("X_MONITOR_PROJECT_ROOT", str(Path.home()/"Desktop/
 
 
 class SkillContractTests(unittest.TestCase):
+    def test_pure_analysis_fields_against_real_contract_and_isolated_ledger(self):
+        node = shutil.which("node")
+        python = Path(os.environ.get("X_MONITOR_PYTHON", str(BUSINESS / ".venv/bin/python")))
+        if not node or not python.is_file() or not (BUSINESS / "tests/test_reset_quote_policy.py").is_file():
+            self.skipTest("business fixture environment unavailable")
+        helper = ROOT / "scripts/analysis_fields.cjs"
+        unit = subprocess.run([node, "--test", str(ROOT / "tests/test_analysis_fields.cjs")],
+                              capture_output=True, text=True, timeout=15)
+        self.assertEqual(0, unit.returncode, unit.stdout + unit.stderr)
+        emitted = subprocess.run([node, "-e", "const h=require(process.argv[1]);console.log(JSON.stringify([h.aiRelevance(true,'AI产品讨论。'),h.aiRelevance(false,'视频制作归属讨论。'),h.aiRelevance(null,'context_unavailable')]))", str(helper)],
+                                 capture_output=True, text=True, timeout=10)
+        self.assertEqual(0, emitted.returncode, emitted.stderr)
+        self.assertEqual(3, len(json.loads(emitted.stdout)))
+        program = '''
+import json, sys
+from x_monitor.contracts import AiRelevanceV1, ContractError
+from test_reset_quote_policy import ResetQuotePolicyTests, raw_stream, semantic
+values = json.load(sys.stdin)
+for value in values:
+    assert AiRelevanceV1.from_json(value).as_json() == value
+try:
+    AiRelevanceV1.from_json({'schema_version':'AiRelevanceV1','related':False,'reasoning':'离线依据。'})
+except ContractError as exc:
+    assert exc.code == 'unknown_ai_relevance_field'
+else:
+    raise AssertionError('observed alias unexpectedly accepted')
+fixture = ResetQuotePolicyTests()
+fixture.setUp()
+try:
+    fixture.service.store.migrate_desktop_v2(now=fixture.current)
+    lease = fixture.begin(manual=True)
+    fixture.empty(lease, 'main')
+    raw = raw_stream(fixture.current, 'reply')
+    item = raw['timeline']['replies']['items'][0]
+    item['replyParentVisibleText'] = 'Here is the video I made.'
+    item['replyContext']['direct_parent']['original_text'] = item['replyParentVisibleText']
+    analysis = semantic('reply', False, product='other')
+    analysis['ai_relevance'] = values[1]
+    result = fixture.submit(lease, 'reply', raw=raw, analysis=analysis)
+    assert result['outcome'] == 'ok'
+    assert result['fresh_status_count'] == 1
+    assert result['notifiable_status_count'] == 0
+    assert fixture.finish_streamed(lease)['heartbeat_complete'] is True
+    assert fixture.service.health()['heartbeat_lease']['held'] is False
+finally:
+    fixture.tearDown()
+print('helper -> actual AiRelevanceV1 -> stream assembly -> isolated ledger -> finish passed')
+'''
+        result = subprocess.run([str(python), "-B", "-c", program], input=emitted.stdout,
+                                cwd=BUSINESS, capture_output=True, text=True, timeout=30,
+                                env={**os.environ, "PYTHONPATH":os.pathsep.join([str(BUSINESS / "src"), str(BUSINESS / "tests")])})
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_discovery_references_and_no_unsupported_global_assignment(self):
         skill=(ROOT/"SKILL.md").read_text(encoding="utf-8")
         self.assertIn("name: x-message-monitoring",skill)

@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-21.3）
+## 当前目录与恢复边界（步骤 WSL-2026-09-21.4）
 
 用户最新内容标准是“完整一致，不必完全一样”。model_semantic_v1已完成受控发布，并由当前Astra在真实主帖及回复完整采集中接受同正文的链接卡展示差异、完成两流独立入账；扫描通过与投递闭环通过分别记录，实时版本/范围看项目handoff。支持此接口的已接受发布在rawStream前读取contentReview(cycle,stream)，模型对每组before/after按上下文作equivalent/different/uncertain判断并用resolveContentReview提交具体依据；不按关键词、字符比例或批量固定答案自动通过。正常采集不强制点显示原文或跟随外链；实际观察不改写，页面译文不冒充独立原文，必要判断依据进入full_analysis。新readPage发生变化时不能沿“reader未变”分支保留旧reader包。下文“正文不放宽”指含义与完整性，不是逐字匹配；身份、防重复和unknown结果仍独立核验。
 
@@ -106,6 +106,8 @@ V8已验证的预租约拒绝不能套用正常关闭：即使control在spawn前
 用户明确要求重置水位时，不扩大为删除消息、去重、投递或审计。已验证维护方式是调度暂停/原执行者静止、原管理与配对排他锁、新鲜且全表核验的备份，在单事务仅改活动watermarks，逐表确认其他历史不变，正常关闭后原fixed health回读。空bootstrap_pending本身不是时间分界：普通bootstrap可能处理旧最新项。用户指定“从两天前”等固定起点时，先固定UTC；用已发布的有界诊断在当前真实两流中取得起点前锚点及其相邻新项身份/UTC，诊断不入账、不发送。再由源码维护入口在独立新鲜静止窗口原子安装这两个真实锚点，保护其他表；随后另起业务轮，保留去重，不能重发已处理项。维护工具位于maintenance/，不进入生产scripts发布清单。具体窗口/时间/证据只记项目handoff；已commit后收尾命令非零须独立回读，不能重跑重置或基线。没有真实锚点证据时不编造ID、不恢复历史正文充数。
 
 ## 每轮业务与清理
+
+新回复分析使用[分析契约](reply-reset-contract.md)的纯内存analysis_fields.cjs：模型独立判断，aiRelevance只组装正确的ai_related字段，发送前validateAnalyses拒绝related别名，不改变事实或放宽原校验。此helper已通过真实Python契约及隔离新回复入账/finish，属于Skill中的无I/O调用辅助，不是新驱动、独立扫描器或发送入口；生产首次使用仍须原owner新鲜验收。原五sendKept、同CUA和已接受发布保持。scan-analysis已将流终结时不再补stream-failure，先保留实际kept回执并读health，不把重复登记的stream_already_terminal当浏览器故障。
 
 acquire前完整读取当前快速路径和上下文契约的业务部分；Windows路径替换为上述Linux发布入口，CLI来源为desktop_chrome_playwright_linux。五sendKept、内存载荷、语义筛选、fingerprint、草稿/冻结各一次、预检顺序和两阶段finish保持。permalinkBurst第三参数只能取本轮xMonStdin.kept(xMonLease,"observation-fingerprint").result.response.fingerprint，不是流名或空串；永久链接完成前不能用另一stdin业务动作覆盖它。V7两次错误参数在导航前被拒绝且未设置流失败，不等于浏览器unknown；有cycle.failures.reply的真实失败仍禁止续批，不能以参数纠正恢复失败流。
 

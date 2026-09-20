@@ -53,13 +53,17 @@ ResetAnalysisV3 的完整无时间示例：
 - **无关**：共同五键中 related=false，不带时间、置信度或未评估原因。AI 功能发布可以 ai_related=true，同时额度无关。明确不是 Codex 的产品归 other。
 - **无法判断**：共同五键中 related=null，另加 unassessed_reason：insufficient_context、context_depth_limit、context_unavailable、media_only_not_inspected、parent_media_only_not_inspected、quote_unavailable、quote_media_only_not_inspected。原因必须与实际采集事实相符；主帖不使用父对象或上文深度原因。
 
-AiRelevanceV1 只适用于回复，true/false 带 reasoning，null 带 unassessed_reason。额度相关必然 AI 相关，反向不成立。当前消息纯媒体时 reset 为 null；回复 AI 也为 null，翻译、摘要及完整分析均包含“未读取媒体内容”。图文中可信作者正文可读时不属于纯媒体；通知不能依赖未读取的引用媒体或父对象媒体。
+AiRelevanceV1 只适用于回复，判定键是 `ai_related`，不是 ResetAnalysisV3 的 `related`。true/false 的完整形态为 `{schema_version:"AiRelevanceV1",ai_related:false,reasoning:"本轮模型依据"}`；null 为 `{schema_version:"AiRelevanceV1",ai_related:null,unassessed_reason:"context_unavailable"}`。示例判定不是默认答案。额度相关必然 AI 相关，反向不成立。当前消息纯媒体时 reset 为 null；回复 AI 也为 null，翻译、摘要及完整分析均包含“未读取媒体内容”。图文中可信作者正文可读时不属于纯媒体；通知不能依赖未读取的引用媒体或父对象媒体。
+
+为避免同名字段混用，在当前CUA公开Node环境锁前加载本Skill的 [纯内存字段构造器](../scripts/analysis_fields.cjs)，例如通过现有createRequire将其绑定为`xMonAnalysisFields`。新回复使用`xMonAnalysisFields.aiRelevance(本轮模型判断的true/false/null, 本轮具体依据或未评估原因码)`组装ai_relevance。它没有I/O、浏览器/账本操作或语义推断，不保存事实，不把失败轮正文带到下一轮。
+
+scan-analysis的payload内将analyses设为`xMonAnalysisFields.validateAnalyses(xMonAnalyses, 当前流名)`，返回原对象，不改模型结论/正文；保持collected取同轮analysis-plan的kept载荷。纯内存字段检查先于sendKept求值，拼写错误在尚未发送时可就地更正，不重读页面或重新冻结。真实sendKept已经提交并被入口拒绝后，仍按实际终态收口，不用本地检查绕过未知、重新提交或恢复失败事实。它只检查此易混字段形态，其他事实、ID、UTC、完整性和业务核验仍由原入口负责。
 
 账本创建投递前执行 codex_reset_only_v2 两流筛选，按流、策略及原因登记 notify/unrelated/unassessed。无关与无法判断冻结为已处理/已抑制并推进可信水位；后续不重分类、不补发。通知分列当前消息、直接对象和采用的上文/引用的原文、翻译、北京时间、规范链接，标明引用归属；无时间依据明确写“未提供可推算时间”。公开帖子不能证明本账户已经重置。
 
 ## 异常与完成
 
-- 未终止的流发生采集/上下文/翻译分析失败，用 stream-failure（account、stream、stage、failure_code）；collect/scan 已登记失败则不覆盖。主帖与回复独立提交。
+- 未终止的流发生采集/上下文/翻译分析失败，用 stream-failure（account、stream、stage、failure_code）；collect/scan 已登记失败则不覆盖。特别是scan-analysis返回已知entry_rejected时，先保留其kept错误并核对原health该流终态；已failed_closed不再补stream-failure，也不重投分析。主帖与回复独立提交。
 - 已终止流又有其他阶段失败，或投递/回执/标签关闭/收口失败，用 cycle-failure 追加。stream 为 main/reply/both/cycle；stage 采用 browser、identity、search、navigation、surface、target、members、parent、context、watermark、collect、analysis、translation、scan、ledger、publish、receipt、cleanup、finish、budget。仅用脱敏稳定错误码，不写异常原文、正文或凭据。
 - 全轮保留首错并汇总全部阶段、完成部分、最近成功和投递证据。故障按首次、类别/范围实质变化、满二十四小时一次、完整恢复一次去重；已认领或未知提醒不改写、不重发。
 - 双流成功及本轮投递确定才报告恢复。sync-receipts 仅认证 GET，不因登记/传输接受制造送达证据；下一原 heartbeat 识别上轮缺失完成回执，不建重试任务。
