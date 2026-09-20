@@ -3055,6 +3055,28 @@ def test_get_import_job_failed_or_missing_stops_without_guessing(
         )
 
 
+@pytest.mark.parametrize("code", ["USER_EXPORT_RECALL_BATCH_BUSY", "EXPORT_RECALL_BATCH_BUSY"])
+@pytest.mark.parametrize("retry_after", [None, "10", "wrong"])
+def test_busy_recall_retains_stable_code_and_only_numeric_wait(code, retry_after):
+    headers = {"Retry-After": retry_after} if retry_after is not None else {}
+    response = httpx.Response(
+        429,
+        headers=headers,
+        json={
+            "code": code,
+            "message": "sensitive synthetic text never copied",
+            "details": {"retryAfterSeconds": 999, "retryAt": "not trusted"},
+        },
+    )
+    with pytest.raises(cli.RegistryWaitError) as caught:
+        cli.response_json(response, "准备整卷取回")
+    details = cli.verification_wait_details(caught.value)
+    assert details["reasonCode"] == code and details["status"] == "RATE_LIMITED"
+    assert details["retryAfterSeconds"] == (10 if retry_after == "10" else None)
+    assert bool(details["retryAt"]) == (retry_after == "10")
+    assert "sensitive" not in str(caught.value) and "原批次" in str(caught.value)
+
+
 def test_response_error_code_reads_bounded_unread_stream() -> None:
     class ErrorStream(httpx.SyncByteStream):
         def __iter__(self):

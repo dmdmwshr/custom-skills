@@ -1476,7 +1476,8 @@ def api_request(
 def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
     if not 200 <= response.status_code < 300:
         if response.status_code == 429:
-            if response_error_code(response) in {
+            code = response_error_code(response)
+            if code in {
                 "RECALL_GLOBAL_QUOTA_EXCEEDED",
                 "RECALL_USER_QUOTA_EXCEEDED",
                 "RECALL_CASE_QUOTA_EXCEEDED",
@@ -1492,6 +1493,12 @@ def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
                 if re.fullmatch(r"[1-9][0-9]{0,5}", retry_after)
                 else "，请按服务端提示稍后重试"
             )
+            if code in {"USER_EXPORT_RECALL_BATCH_BUSY", "EXPORT_RECALL_BATCH_BUSY"}:
+                raise RegistryWaitError(
+                    f"{label} 的正文取回批次仍在运行{wait_hint}；重查原批次，不另起并行取回",
+                    code,
+                    int(retry_after) if re.fullmatch(r"[1-9][0-9]{0,5}", retry_after) else None,
+                )
             raise RegistryWaitError(
                 f"{label} 触发登记系统限流{wait_hint}；"
                 "多案上传必须使用 upload-batch 共用一次登录会话",
@@ -3391,10 +3398,14 @@ def verification_wait_details(error: RegistryError | str) -> dict[str, Any] | No
         "NETWORK_WAIT",
         "NAS_PENDING",
         "RECALL_QUOTA",
+        "USER_EXPORT_RECALL_BATCH_BUSY",
+        "EXPORT_RECALL_BATCH_BUSY",
     }:
         return None
     return {
-        "status": reason
+        "status": "RATE_LIMITED"
+        if reason in {"USER_EXPORT_RECALL_BATCH_BUSY", "EXPORT_RECALL_BATCH_BUSY"}
+        else reason
         if reason in {"RATE_LIMITED", "WAIT_TIMEOUT", "NETWORK_WAIT"}
         else "PENDING",
         "reasonCode": reason,
