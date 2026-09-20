@@ -255,6 +255,33 @@ def test_counted_onsite_failures_require_positive_exact_display(text, expected):
     assert (result["initialResult"] if result else None) == expected
 
 
+@pytest.mark.parametrize(
+    "text,stage,result,icon,expected",
+    [
+        ("1项不合格(2021081810000043)", "0", "", "el-icon-error", "UNQUALIFIED"),
+        ("1项不合格（2021081810000043）", "0", "", "el-icon-error", "UNQUALIFIED"),
+        ("0项不合格(2021081810000043)", "0", "", "el-icon-error", None),
+        ("1项不合格(待复检)", "0", "", "el-icon-error", None),
+        ("1项不合格(2021081810000043)待复检", "0", "", "el-icon-error", None),
+        ("1项不合格(2021081810000043)", "1", "[复查]", "el-icon-error", None),
+        ("1项不合格(2021081810000043)", "0", "[检]", "el-icon-error", None),
+        ("1项不合格(2021081810000043)", "0", "", "el-icon-success", None),
+    ],
+)
+def test_market_access_failure_certificate_suffix_does_not_change_result_contract(
+    text, stage, result, icon, expected
+):
+    fields = {"检查产品信息": [{
+        "页面记录": {"SFCPFC": stage, "JCRQ": "2099-03-02 10:00:00"},
+        "检查结果": result, "检查结果标记": [icon],
+        "产品质量现场检查情况": "未检查", "市场准入检查情况": text,
+    }]}
+    observed = views.source_qualification(fields, [])
+    assert (observed["initialResult"] if observed else None) == expected
+    if observed:
+        assert observed["initialInspectionDate"] == "2099-03-02"
+
+
 def test_workflow_mutation_does_not_refresh_source_observation(layout):
     ws.upsert_case(layout, A, source={"lastObservedAt": NOW})
     ws.upsert_case(layout, A, upload={"status": "UPLOADING"})
@@ -524,6 +551,21 @@ def test_excel_views_share_one_snapshot_and_keep_business_stages_independent(lay
         assert book["未完成案卷"]["A2"].value == B
         assert book["未完成案卷"]["G2"].value == "未确认"
         assert book["未完成案卷"]["H2"].value == "是"
+
+
+def test_excel_body_proof_does_not_hide_source_material_gap(layout):
+    from contextlib import closing
+
+    from openpyxl import load_workbook
+
+    add_case(layout, A, deep=True)
+    ws.upsert_case(layout, A, source={"materialGaps": [{"code": "SOURCE_REPORT_BODY_UNAVAILABLE"}]})
+    with closing(load_workbook(ws.export_waterline_xlsx(layout))) as book:
+        row = book["所有案卷"]
+        assert row["G2"].value == "未确认" and row["I2"].value == "是"
+        assert "来源材料缺件" in row["O2"].value
+        summary = {r[0].value: r[1].value for r in book["年度来源覆盖"] if r[0].value}
+        assert summary["材料已采集"] == 0 and summary["正文已核验"] == 1
 
 
 def native_qualified_fields():

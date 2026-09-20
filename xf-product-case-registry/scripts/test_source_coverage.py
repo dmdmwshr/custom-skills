@@ -105,6 +105,7 @@ def test_500_case_census_requires_every_category_and_all_identities(layout):
     assert layout.waterline_json.read_bytes() == before
     scoped = views.ledger_view(layout, source_year=2099)
     assert scoped["counts"]["cases"] == 500
+    assert all(r["sourceAnnualMember"] and r["sourceAnnualYear"] == 2099 for r in scoped["cases"])
     assert scoped["counts"]["materialsCollected"] == scoped["counts"]["systemRegistered"] == 0
     plan = views.scan_plan(layout, year=2099)
     assert plan["mode"] == "recent"

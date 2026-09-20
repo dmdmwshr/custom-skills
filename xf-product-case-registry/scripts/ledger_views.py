@@ -112,7 +112,11 @@ def source_qualification(fields: dict[str, Any], stages: list[str]) -> dict[str,
             and p.get("检查结果") in ("", "不合格")
             and p.get("检查结果标记") == ["el-icon-error"]
             and any(
-                re.fullmatch(r"(?:[1-9][0-9]*项)?不合格", str(p.get(key, "")))
+                re.fullmatch(
+                    r"(?:[1-9][0-9]*项)?不合格"
+                    + (r"(?:\([0-9]{16}\)|（[0-9]{16}）)?" if key == "市场准入检查情况" else ""),
+                    str(p.get(key, "")),
+                )
                 for key in ("产品质量现场检查情况", "市场准入检查情况")
             )
         ]
@@ -511,6 +515,8 @@ def ledger_view(
     rows = [describe(layout, p, r) for p, r in sorted(records.items())]
     for row in rows:
         row["unqualifiedCandidate"] = row["projectNo"] in annual["candidateProjectNos"]
+        row["sourceAnnualYear"] = annual["sourceYear"]
+        row["sourceAnnualMember"] = row["projectNo"] in annual["projectNos"]
     known = len(rows)
     if view == "unqualified":
         rows = [r for r in rows if r["initialResult"] == "UNQUALIFIED"]
@@ -636,6 +642,28 @@ def render_ledger_report(value: dict[str, Any], *, include_all: bool = False) ->
     return "\n".join(lines) + "\n"
 
 
+def _excel_evidence_note(row: dict[str, Any]) -> str:
+    notes = [
+        "历史完成，缺少新版正文回执，默认复用"
+        if row["evidenceLevel"] == "LEGACY_UNSPECIFIED"
+        else "逐份正文回执已核对"
+        if row["evidenceLevel"] == "DEEP_CONTENT"
+        else "待处理"
+    ]
+    if "SOURCE_MATERIALS_INCOMPLETE" in row["issues"]:
+        notes.append("来源材料缺件，采集未完成，不能归档")
+    if row["sourceChanged"]:
+        notes.append("来源新增或变化尚未处理")
+    if row["systemChanged"]:
+        notes.append("系统当前内容与原核验证据不同")
+    if any(
+        issue not in {"SOURCE_MATERIALS_INCOMPLETE", "SYSTEM_CONTENT_CHANGED_SINCE_VERIFICATION"}
+        for issue in row["issues"]
+    ):
+        notes.append("存在待核对的证据异常")
+    return "；".join(notes)
+
+
 def add_ledger_sheets(workbook: Any, layout: Any) -> None:
     """Export four views of one evidence snapshot; the workbook is never a second ledger."""
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -665,6 +693,8 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
         "最近来源核对",
         "本地处理时间",
         "证据说明",
+        "来源年度清单",
+        "文书提示不合格候选",
     ]
     stage_names = (
         "sourceRegistered",
@@ -691,11 +721,11 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
                     "是" if row["sourceChanged"] else "否",
                     row["sourceObservedAt"] or "",
                     row["workflowUpdatedAt"] or "",
-                    "历史完成，缺少新版正文回执，默认复用"
-                    if row["evidenceLevel"] == "LEGACY_UNSPECIFIED"
-                    else "逐份正文回执已核对"
-                    if row["evidenceLevel"] == "DEEP_CONTENT"
-                    else "待处理",
+                    _excel_evidence_note(row),
+                    f"{row['sourceAnnualYear']} 年已核实范围"
+                    if row["sourceAnnualMember"]
+                    else "未纳入当前年度已核实范围",
+                    "是，仅提示需核实结果" if row["unqualifiedCandidate"] else "否",
                 ]
             )
         sheet.freeze_panes = "A2"
@@ -717,7 +747,7 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
                         "solid", fgColor="17365D" if cell.row == 1 else "EAF2F8"
                     )
         for column, width in enumerate(
-            [24, 34, 12, 15, 10, 13, 13, 13, 13, 13, 12, 12, 25, 25, 42], 1
+            [24, 34, 12, 15, 10, 13, 13, 13, 13, 13, 12, 12, 25, 25, 48, 30, 27], 1
         ):
             sheet.column_dimensions[get_column_letter(column)].width = width
         sheet.row_dimensions[1].height = 32
@@ -729,10 +759,18 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
     info.append(["历史证据", "未完成视图包含证据不足的历史完成案；活动待办为否时不默认重新采集。"])
     coverage = snapshot["sourceCoverage"]
     sheet = workbook.create_sheet("年度来源覆盖")
+    status = (
+        "年度身份已逐项对齐"
+        if coverage.get("complete")
+        else "有来源入口不可用，尚未全部核实"
+        if coverage.get("unavailableTaskCategories")
+        else "年度身份尚未全部核实"
+    )
     for label, key in [
         ("来源年度", "sourceYear"),
         ("覆盖状态", "status"),
         ("年度来源列表总数", "sourceListCount"),
+        ("已核实类别列表条数", "observedSourceListCount"),
         ("已知年度文书数", "sourceDocumentCount"),
         ("来源标识数", "sourceIdentityCount"),
         ("已关联来源标识", "linkedSourceIdentities"),
@@ -743,9 +781,37 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
         ("来源清单核对时间", "sourceObservedAt"),
         ("覆盖说明", "note"),
     ]:
-        sheet.append([label, coverage.get(key) if coverage.get(key) is not None else "未核实"])
+        value = status if key == "status" else coverage.get(key)
+        sheet.append([label, value if value is not None else "未核实"])
+    sheet.append([])
+    sheet.append(["任务类别", "已核实列表条数", "核对状态", "来源核对时间"])
+    for category, item in coverage.get("taskCategories", {}).items():
+        accepted = item.get("accepted") and item.get("stableRounds", 0) >= 2
+        sheet.append(
+            [category, item.get("sourceListCount") if accepted else "未核实",
+             "两轮稳定" if accepted else "尚未核实", item.get("sourceObservedAt")]
+        )
+    sheet.append([])
+    sheet.append(["全部已知案卷进度", "所有案卷", "其中不合格"])
+    unqualified = [r for r in all_rows if r["initialResult"] == "UNQUALIFIED"]
+    metrics = [
+        ("去重案卷", lambda r: True),
+        ("来源已登记", lambda r: r["stages"]["sourceRegistered"]),
+        ("材料已采集", lambda r: r["stages"]["materialsCollected"]),
+        ("系统已登记", lambda r: r["stages"]["systemRegistered"]),
+        ("正文已核验", lambda r: r["stages"]["bodyVerified"]),
+        ("归档累计", lambda r: r["stages"]["archived"]),
+        ("全部完成（含正文证据）", lambda r: r["complete"]),
+        ("活动待办", lambda r: r["activePending"]),
+    ]
+    for label, include in metrics:
+        sheet.append(
+            [label, sum(include(r) for r in all_rows), sum(include(r) for r in unqualified)]
+        )
     sheet.column_dimensions["A"].width = 28
     sheet.column_dimensions["B"].width = 80
+    sheet.column_dimensions["C"].width = 22
+    sheet.column_dimensions["D"].width = 30
     for cells in sheet:
         for cell in cells:
             if isinstance(cell.value, str):
