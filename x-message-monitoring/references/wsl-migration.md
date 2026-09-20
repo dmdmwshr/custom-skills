@@ -1,8 +1,8 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-20.12）
+## 当前目录与恢复边界（步骤 WSL-2026-09-20.13）
 
-用户最新内容标准是“完整一致，不必完全一样”。model_semantic_v1已完成受控发布，并在当前Astra真实主帖轮由模型接受同正文的链接卡展示差异、完成独立入账；回复页面就绪仍失败，不代表完整业务恢复，实时版本/范围看项目handoff。支持此接口的已接受发布在rawStream前读取contentReview(cycle,stream)，模型对每组before/after按上下文作equivalent/different/uncertain判断并用resolveContentReview提交具体依据；不按关键词、字符比例或批量固定答案自动通过。正常采集不强制点显示原文或跟随外链；实际观察不改写，页面译文不冒充独立原文，必要判断依据进入full_analysis。新readPage发生变化时不能沿“reader未变”分支保留旧reader包。下文“正文不放宽”指含义与完整性，不是逐字匹配；身份、防重复和unknown结果仍独立核验。
+用户最新内容标准是“完整一致，不必完全一样”。model_semantic_v1已完成受控发布，并由当前Astra在真实主帖及回复完整采集中接受同正文的链接卡展示差异、完成两流独立入账；扫描通过与投递闭环通过分别记录，实时版本/范围看项目handoff。支持此接口的已接受发布在rawStream前读取contentReview(cycle,stream)，模型对每组before/after按上下文作equivalent/different/uncertain判断并用resolveContentReview提交具体依据；不按关键词、字符比例或批量固定答案自动通过。正常采集不强制点显示原文或跟随外链；实际观察不改写，页面译文不冒充独立原文，必要判断依据进入full_analysis。新readPage发生变化时不能沿“reader未变”分支保留旧reader包。下文“正文不放宽”指含义与完整性，不是逐字匹配；身份、防重复和unknown结果仍独立核验。
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
@@ -102,11 +102,13 @@ V8已验证的预租约拒绝不能套用正常关闭：即使control在spawn前
 
 正式账本的常规诊断使用原 fixed health；需要扩展只读核验时沿用官方 startup_guard，并复用原 `SQLiteStore(read_only=True)` 已通过静止签名检查的连接，不自行用裸 `mode=ro` 打开 WAL 库。只读连接也可能在退出后留下空 WAL/SHM，不能据此放宽原 health 或把它误报为浏览器故障。已经出现且独立确认无连接、owner idle、heartbeat 暂停及无运行 marker 时，可按明确维护授权使用业务仓已审计 `close_empty_wal_reader.py` 的空 WAL 正常关闭方法；它拒绝非空 WAL/活动锁/待收口，原生 rw/query_only 正常 close 后比对全表摘要并要求原 health 通过，无可写 Store 初始化、显式 checkpoint、手删旁车或业务行写入。此入口不是定时 health 的自动回退或重试，候选维护不切换生产 current。
 
-用户明确要求“删除历史水位、从现在开始”时，不扩大为删除消息、去重、投递或审计。已验证维护方式是调度暂停/原执行者静止、原管理与配对排他锁、新鲜且全表核验的备份，在单事务仅删除活动watermarks并创建空bootstrap_pending，逐表确认其他历史不变，正常关闭后原fixed health回读。具体一次性窗口与新起点只记项目handoff；已提交后收尾命令非零应独立回读，不能重跑重置。特别注意：当前普通bootstrap可能处理并推送重置前的最新项，清空水位不等于“不补历史”已实现；按新起点的基线/过滤另行实现验收，之前保持业务暂停，不凭空构造帖子ID或恢复旧事实。
+用户明确要求重置水位时，不扩大为删除消息、去重、投递或审计。已验证维护方式是调度暂停/原执行者静止、原管理与配对排他锁、新鲜且全表核验的备份，在单事务仅改活动watermarks，逐表确认其他历史不变，正常关闭后原fixed health回读。空bootstrap_pending本身不是时间分界：普通bootstrap可能处理旧最新项。用户指定“从两天前”等固定起点时，先固定UTC；用已发布的有界诊断在当前真实两流中取得起点前锚点及其相邻新项身份/UTC，诊断不入账、不发送。再由源码维护入口在独立新鲜静止窗口原子安装这两个真实锚点，保护其他表；随后另起业务轮，保留去重，不能重发已处理项。维护工具位于maintenance/，不进入生产scripts发布清单。具体窗口/时间/证据只记项目handoff；已commit后收尾命令非零须独立回读，不能重跑重置或基线。没有真实锚点证据时不编造ID、不恢复历史正文充数。
 
 ## 每轮业务与清理
 
 acquire前完整读取当前快速路径和上下文契约的业务部分；Windows路径替换为上述Linux发布入口，CLI来源为desktop_chrome_playwright_linux。五sendKept、内存载荷、语义筛选、fingerprint、草稿/冻结各一次、预检顺序和两阶段finish保持。permalinkBurst第三参数只能取本轮xMonStdin.kept(xMonLease,"observation-fingerprint").result.response.fingerprint，不是流名或空串；永久链接完成前不能用另一stdin业务动作覆盖它。V7两次错误参数在导航前被拒绝且未设置流失败，不等于浏览器unknown；有cycle.failures.reply的真实失败仍禁止续批，不能以参数纠正恢复失败流。
+
+纯内存resolveContext由受管runtime.driver提供，不在隐藏adapter facade；核对实际接口后使用，不能为调用方接口错误重复已完成浏览器动作。两流扫描通过但heartbeat_delivery_pending时，先核对同轮原投递及异步时间：首次GET可能仍held，随后才transport_accepted；不能据首次排队就认定发送失败。当前接口缺平台证据时，多等一次也不能把transport_accepted变delivered。按feishu-operations仅核对原目标、窄时间窗内唯一匹配内容/应用，再按消息ID精确读取；平台证据不等于用户已读，也不能直接改业务库或重写已经完成的周期终态，回执协议修复与新轮验收另行完成。未生成合格业务通知不代表没有故障/恢复提醒，按实际提交分别报告。
 
 当前直接CUA工具无法嵌入functions，不能假定存在跨宿主opaque传递，也不把lease写临时文件。已批准的新同宿主分支使用 `desktop_control_client.js`，只封装原固定Python的health/acquire/预检/失败/对账/finish等有限小型控制；五项业务sendKept与Python入口不变。候选未正式接受时不得先用旧functions acquire等待搬运凭证；旧轮只按其已有原lease收口，不能迁入新实例。
 
