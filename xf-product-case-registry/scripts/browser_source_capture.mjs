@@ -61,7 +61,7 @@ function currentListObservation() {
     return { documentName: cells[indexes[0]], caseName: cells[indexes[1]], createdAt: cells[indexes[2]] };
   });
   const renderedText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
-  const visibleMatched = visibleRows.length > 0 && visibleRows.every((row) => items.some(
+  const visibleMatched = (totalCount === 0 && items.length === 0) || visibleRows.length > 0 && visibleRows.every((row) => items.some(
     (item) => renderedText(item.documentName) === renderedText(row.documentName) &&
       renderedText(item.caseName) === renderedText(row.caseName) && renderedText(item.createdAt) === renderedText(row.createdAt),
   ));
@@ -73,18 +73,18 @@ function currentListObservation() {
   return {
     ready: !loading && visibleMatched, busy: loading,
     reason: loading ? "SOURCE_LOADING" : visibleMatched ? null : "SOURCE_VISIBLE_ROWS_MISMATCH",
-    pageNumber, pageSize, totalCount, totalPages: Math.ceil(totalCount / pageSize),
+    pageNumber, pageSize, totalCount, totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
     visibleRows: visibleRows.length, items,
     dateValues: dateInputs.map((input) => input.value),
     viewport: { width: innerWidth, height: innerHeight },
   };
 }
 
-export function validateListObservation(value, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize = 50) {
+export function validateListObservation(value, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize = 50, expectedWindow = null) {
   if (!value?.ready) throw new Error(value?.reason ?? "SOURCE_NOT_READY");
   const { pageNumber, pageSize, totalCount, totalPages, items, dateValues } = value;
   if (pageNumber !== expectedPage || pageSize !== expectedPageSize || totalCount !== expectedTotal ||
-      totalPages !== Math.ceil(totalCount / pageSize) || pageNumber > totalPages) {
+      totalPages !== Math.max(1, Math.ceil(totalCount / pageSize)) || pageNumber > totalPages) {
     throw new Error("SOURCE_PAGINATION_NOT_COMMITTED");
   }
   const expectedRows = Math.min(pageSize, totalCount - (pageNumber - 1) * pageSize);
@@ -93,7 +93,9 @@ export function validateListObservation(value, expectedPage, expectedTotal, prev
     throw new Error("SOURCE_ROW_COUNT_OR_IDENTITY_INVALID");
   }
   const year = new Intl.DateTimeFormat("en", { timeZone: "Asia/Shanghai", year: "numeric" }).format(new Date());
-  if (dateValues?.length !== 2 || dateValues[0] !== `${year}-01-01` || dateValues[1] !== `${year}-12-31`) {
+  const expectedDates = expectedWindow ? [expectedWindow.startDate, expectedWindow.endDate] : [`${year}-01-01`, `${year}-12-31`];
+  if (expectedDates.some(value => !/^\d{4}-\d{2}-\d{2}$/.test(value ?? "")) || expectedDates[0] > expectedDates[1] ||
+      dateValues?.length !== 2 || dateValues.some((value, index) => value !== expectedDates[index])) {
     throw new Error("SOURCE_YEAR_RANGE_CHANGED");
   }
   const rowValues = items.map(({ rwid, caseName, documentName, createdAt }) => ({ rwid, caseName, documentName, createdAt }));
@@ -111,14 +113,14 @@ export async function readSourceListPage(cdp) {
 }
 
 /** A bounded read-only wait. Navigation is always performed separately, once. */
-export async function waitSourceListPage(cdp, { expectedPage, expectedTotal, previousRowsDigest, expectedPageSize = 50, timeoutMs = 45000 }) {
+export async function waitSourceListPage(cdp, { expectedPage, expectedTotal, previousRowsDigest, expectedPageSize = 50, expectedWindow = null, timeoutMs = 45000 }) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw new Error("SOURCE_WAIT_ARGUMENT_INVALID");
   const deadline = Date.now() + timeoutMs;
   let lastReason;
   do {
     const observation = await readSourceListPage(cdp);
     try {
-      return validateListObservation(observation, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize);
+      return validateListObservation(observation, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize, expectedWindow);
     } catch (error) {
       lastReason = error.message;
       const transitional = ["SOURCE_LOADING", "SOURCE_PAGINATION_NOT_COMMITTED", "SOURCE_PREVIOUS_PAGE_STILL_VISIBLE"];
@@ -140,12 +142,12 @@ async function writeImmutable(destination, content) {
 }
 
 /** Capture two agreeing observations and one screenshot; returns paths, never image bytes. */
-export async function captureSourceListPage({ tab, cdp, evidenceDir, round, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize = 50 }) {
+export async function captureSourceListPage({ tab, cdp, evidenceDir, round, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize = 50, expectedWindow = null }) {
   if (![1, 2, 3].includes(round) || !path.isAbsolute(evidenceDir)) throw new Error("SOURCE_CAPTURE_ARGUMENT_INVALID");
   const first = await readSourceListPage(cdp);
-  const firstReceipt = validateListObservation(first, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize);
+  const firstReceipt = validateListObservation(first, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize, expectedWindow);
   const second = await readSourceListPage(cdp);
-  const receipt = validateListObservation(second, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize);
+  const receipt = validateListObservation(second, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize, expectedWindow);
   if (firstReceipt.rowsDigest !== receipt.rowsDigest) throw new Error("SOURCE_PAGE_CHANGED_DURING_CAPTURE");
   await mkdir(evidenceDir, { recursive: true });
   const resolvedDir = await realpath(evidenceDir);
@@ -161,7 +163,7 @@ export async function captureSourceListPage({ tab, cdp, evidenceDir, round, expe
   if (existingPage === null) {
     const screenshot = await tab.screenshot({ fullPage: false });
     const after = await readSourceListPage(cdp);
-    const afterReceipt = validateListObservation(after, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize);
+    const afterReceipt = validateListObservation(after, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize, expectedWindow);
     if (afterReceipt.rowsDigest !== receipt.rowsDigest) throw new Error("SOURCE_PAGE_CHANGED_DURING_SCREENSHOT");
     const screenshotSha256 = createHash("sha256").update(screenshot).digest("hex");
     screenshotPath = path.join(evidenceDir, screenshotName(screenshotSha256));
@@ -299,11 +301,11 @@ export async function captureSourceDetail({ tab, cdp, stagingDir, target }) {
 }
 
 /** Open only the associated case link after rechecking the current visible triple. */
-export async function openSourceCase({ tab, cdp, target }) {
+export async function openSourceCase({ tab, cdp, target, expectedWindow = null }) {
   const first = await readSourceListPage(cdp);
-  const firstReceipt = validateListObservation(first, first.pageNumber, first.totalCount, undefined, 20);
+  const firstReceipt = validateListObservation(first, first.pageNumber, first.totalCount, undefined, 20, expectedWindow);
   const second = await readSourceListPage(cdp);
-  const secondReceipt = validateListObservation(second, first.pageNumber, first.totalCount, undefined, 20);
+  const secondReceipt = validateListObservation(second, first.pageNumber, first.totalCount, undefined, 20, expectedWindow);
   if (firstReceipt.rowsDigest !== secondReceipt.rowsDigest) throw new Error("SOURCE_PAGE_CHANGED_BEFORE_CLICK");
   const equivalent = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
   const matches = second.items.filter((item) => item.rwid === target.rwid &&
@@ -321,11 +323,11 @@ export async function openSourceCase({ tab, cdp, target }) {
 
 /** Bounded list transition: action is optional and is not repeated after a checkpoint. */
 export async function advanceSourceListPage(cdp, options) {
-  const { expectedPage, expectedTotal, previousRowsDigest, expectedPageSize = 50, ...runtime } = options;
+  const { expectedPage, expectedTotal, previousRowsDigest, expectedPageSize = 50, expectedWindow = null, ...runtime } = options;
   return advanceSourceStage({ ...runtime, stage: "LIST",
-    identity: { expectedPage, expectedTotal, previousRowsDigest: previousRowsDigest ?? null, expectedPageSize },
+    identity: { expectedPage, expectedTotal, previousRowsDigest: previousRowsDigest ?? null, expectedPageSize, expectedWindow },
     read: () => readSourceListPage(cdp),
-    validate: (value) => validateListObservation(value, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize) });
+    validate: (value) => validateListObservation(value, expectedPage, expectedTotal, previousRowsDigest, expectedPageSize, expectedWindow) });
 }
 
 export async function advanceSourceDetail(cdp, { target, ...runtime }) {

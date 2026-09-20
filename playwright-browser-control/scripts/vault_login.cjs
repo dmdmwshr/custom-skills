@@ -35,7 +35,9 @@ function buildCode(r, credential) {
       if (request.captchaPlaceholder) await page.getByPlaceholder(request.captchaPlaceholder, {exact:true}).fill(request.captchaValue);
       await password.fill(${JSON.stringify(credential.password)});
       submitted = true;
-      await page.locator('button:visible').filter({hasText: new RegExp(${JSON.stringify(submitPattern)})}).click();
+      // Keyboard activation also works when browser zoom makes the extension's
+      // pointer coordinates differ from the visible page. Submit exactly once.
+      await page.locator('button:visible').filter({hasText: new RegExp(${JSON.stringify(submitPattern)})}).press('Enter');
       await success.waitFor({state:'visible',timeout:15000});
       if (page.url().startsWith(request.loginUrlPrefix)) return {state:'LOGIN_NOT_CONFIRMED',submitted};
       return {state:'LOGIN_VERIFIED',submitted};

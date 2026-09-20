@@ -11,7 +11,7 @@ function fixture({fail=false,url=request.loginUrlPrefix,masked=true}={}) {
     url:()=>url,
     getByText:()=>({isVisible:async()=>!url.includes('/login'),waitFor:async()=>{if(fail)throw new Error('timeout');}}),
     getByPlaceholder:(name)=>({getAttribute:async()=>masked?'password':'text',fill:async(value)=>{values[name]=value;}}),
-    locator:()=>({filter:()=>({click:async()=>{clicks++;if(!fail)url='https://example.test/#/home';}})})
+    locator:()=>({filter:()=>({press:async(key)=>{assert.equal(key,'Enter');clicks++;if(!fail)url='https://example.test/#/home';}})})
   }};
 }
 async function run(f,r=request){return vm.runInNewContext('('+buildCode(r,credential)+')')(f.page);}

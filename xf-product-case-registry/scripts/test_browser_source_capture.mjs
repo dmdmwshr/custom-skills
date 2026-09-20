@@ -11,6 +11,11 @@ const fixture = {
   items: Array.from({ length: 30 }, (_, index) => ({ rwid: `fixture-${index}`, caseName: "合成测试", documentName: "测试记录", createdAt: `${year}-01-01 00:00:00` })),
 };
 const good = validateListObservation(fixture, 12, 580);
+const crossYear = {startDate: "2025-11-20", endDate: "2026-02-20"};
+assert.equal(validateListObservation({...fixture, dateValues: Object.values(crossYear)},
+  12, 580, undefined, 50, crossYear).rows, 30);
+assert.throws(() => validateListObservation(fixture, 12, 580, undefined, 50, crossYear), /SOURCE_YEAR_RANGE_CHANGED/);
+assert.equal(validateListObservation({...fixture, pageNumber:1,totalCount:0,totalPages:1,items:[]},1,0).rows,0);
 assert.equal(good.rows, 30);
 assert.match(good.rowsDigest, /^[a-f0-9]{64}$/);
 assert.throws(() => validateListObservation({ ...fixture, ready: false, reason: "SOURCE_LOADING" }, 12, 580), /SOURCE_LOADING/);

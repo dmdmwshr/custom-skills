@@ -1,8 +1,10 @@
-# 统一案卷水位与三个月增量复核
+# 年度总水位与三个月增量复核
+
+先按监督系统本年完整案卷任务清单对齐年度索引，再优先核实迁移不合格子集；年度基线完成后才将近三个月文书扫描作为日常默认。范围、六类入口和年度身份验收见 [年度基线](annual-baseline.md)。历史本地案数、文书数和 RWID 数都不能代替来源年度案卷数。
 
 ## 查询契约
 
-唯一总账是按项目编号键控的 CaseWaterlineV1，不是最新批次。ledger status --scope all 是默认；--view all|unqualified|unknown|unfinished 从同一集合筛选；--scope batch --batch-id <批次> 才限定历史或当前批次。批次原日期、类型和计数不改写。ledger report 是只读本地报告，不意味着访问来源或服务器。
+唯一总账是按项目编号键控的 CaseWaterlineV1。ledger status --scope all 是默认；--scope source-year --year YYYY 按来源年度成员筛选；--view all|unqualified|unknown|unfinished 从同一集合派生；--scope batch --batch-id <批次> 限定指定批次。批次原日期、类型和计数不改写。ledger report 是只读本地报告，不意味着访问来源或服务器。
 
 1.9.1 导出的案卷水位记录表包含“所有案卷、不合格案卷、待确认案卷、未完成案卷”四张中文视图，来自同一次总账证据快照；旧断点表保留为隐藏兼容页。五个阶段、活动待办和证据说明分列。未完成视图中的历史回执缺口不自动进入活动队列。
 
@@ -12,7 +14,7 @@
 
 ## 日期与去重
 
-source scan-plan 只生成只读计划和待办，不打开浏览器。日期取上海执行日减三个月，同日不存在时取该月末日；2026-09-20 对应 2026-06-20 至 2026-09-20，跨年正常。日期筛选是来源文书创建日期，不是初查日期或审批日期。
+source scan-plan 只生成只读计划和待办，不打开浏览器；默认 auto 在年度完整身份对齐后切换近期增量，也支持显式 annual-baseline/recent。近期窗口取上海执行日减三个自然月，同日不存在时取该月末日；2026-09-20 对应 2026-06-20 至 2026-09-20，跨年正常。日期筛选是来源文书创建日期，不是初查日期或审批日期。来源年度任务筛选则保存其页面实际字段，两者不混用。
 
 正式筛选使用 selectionMode=RECENT_DOCUMENT_ACTIVITY、显式 startDate/endDate、dateFieldLabel=创建日期、documentType=ALL、全部管辖单位及全部大队；页面回读证据路径 queryEvidencePath 必填。不要从计划假造页面已选择。旧年度通知书批次保持原筛选契约，可查看或续跑，不移作日常默认。
 

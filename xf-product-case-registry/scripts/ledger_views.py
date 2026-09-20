@@ -11,8 +11,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 if __package__:
+    from . import source_coverage as coverage_api
     from . import workspace_state as ws
 else:
+    import source_coverage as coverage_api
     import workspace_state as ws
 
 
@@ -397,9 +399,16 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
     }
 
 
-def ledger_view(layout: Any, *, view: str = "all", batch_id: str | None = None) -> dict[str, Any]:
+def ledger_view(
+    layout: Any, *, view: str = "all", batch_id: str | None = None, source_year: int | None = None
+) -> dict[str, Any]:
     ledger = ws.load_waterline(layout)
     records = ledger["cases"]
+    if source_year is not None and batch_id:
+        raise ws.WorkspaceStateError("来源年度和指定批次必须分别查询")
+    annual = coverage_api.annual_coverage(layout, source_year, ledger=ledger)
+    if source_year is not None:
+        records = {p: r for p, r in records.items() if p in annual["projectNos"]}
     if batch_id:
         # Validate the batch exists and is formal; its RWIDs are not project identities.
         ws._formal_capture_batch(layout, batch_id)
@@ -410,6 +419,8 @@ def ledger_view(layout: Any, *, view: str = "all", batch_id: str | None = None) 
             or batch_id in r.get("source", {}).get("batchIds", [])
         }
     rows = [describe(layout, p, r) for p, r in sorted(records.items())]
+    for row in rows:
+        row["unqualifiedCandidate"] = row["projectNo"] in annual["candidateProjectNos"]
     known = len(rows)
     if view == "unqualified":
         rows = [r for r in rows if r["initialResult"] == "UNQUALIFIED"]
@@ -428,7 +439,8 @@ def ledger_view(layout: Any, *, view: str = "all", batch_id: str | None = None) 
     )
     return {
         "schemaVersion": "CaseLedgerViewV1",
-        "scope": "KNOWN_CASES",
+        "scope": "SOURCE_YEAR" if source_year is not None else "KNOWN_CASES",
+        "sourceYear": source_year,
         "view": view,
         "batchId": batch_id,
         "generatedAt": ws._utc_now(),
@@ -438,6 +450,7 @@ def ledger_view(layout: Any, *, view: str = "all", batch_id: str | None = None) 
             "historicalSourceComplete": False,
             "note": "仅已知案卷索引；未证明来源系统全部历史覆盖",
         },
+        "sourceCoverage": coverage_api.summary(annual),
         "counts": {
             "cases": len(rows),
             **{key: sum(r["stages"][key] for r in rows) for key in stage_names},
@@ -458,11 +471,24 @@ def ledger_view(layout: Any, *, view: str = "all", batch_id: str | None = None) 
 
 def render_ledger_report(value: dict[str, Any], *, include_all: bool = False) -> str:
     counts = value["counts"]
+    coverage = value.get("sourceCoverage") or {}
+    source_total = coverage.get("sourceListCount")
+    source_total_label = source_total if source_total is not None else "未核实"
     lines = [
         "# 案卷总水位",
         "",
         "所有视图共用项目编号唯一总账；历史来源覆盖未知。",
         "本报告只读本地证据，不等同于本次重新访问服务器核验。",
+        f"来源 {coverage.get('sourceYear', '本')} 年度："
+        + ("年度身份已对齐" if coverage.get("complete") else "尚未对齐")
+        + f"；年度列表总数 {source_total_label}；"
+        + f"已保存来源标识 {coverage.get('sourceIdentityCount', 0)}，"
+        + f"待关联 {coverage.get('unresolvedSourceIdentities', 0)}，"
+        + f"身份冲突 {coverage.get('conflictingSourceIdentities', 0)}。",
+        f"已关联来源标识 {coverage.get('linkedSourceIdentities', 0)}，"
+        + f"去重项目 {coverage.get('uniqueProjectCount', 0)}；"
+        + f"已知年度文书 {coverage.get('sourceDocumentCount', 0)} 份。"
+        + "这些数量分别计数，不用文书或来源标识代替案卷总数。",
         "",
         f"本视图 {counts['cases']} 案；材料已采集 {counts['materialsCollected']}；"
         f"系统已登记 {counts['systemRegistered']}；正文已核验 {counts['bodyVerified']}；"
@@ -611,10 +637,59 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
         ["覆盖范围", "仅已知案卷；不代表来源系统全部历史。四种视图按项目编号共用同一总账。"]
     )
     info.append(["历史证据", "未完成视图包含证据不足的历史完成案；活动待办为否时不默认重新采集。"])
+    coverage = snapshot["sourceCoverage"]
+    sheet = workbook.create_sheet("年度来源覆盖")
+    for label, key in [
+        ("来源年度", "sourceYear"),
+        ("覆盖状态", "status"),
+        ("年度来源列表总数", "sourceListCount"),
+        ("已知年度文书数", "sourceDocumentCount"),
+        ("来源标识数", "sourceIdentityCount"),
+        ("已关联来源标识", "linkedSourceIdentities"),
+        ("待关联来源标识", "unresolvedSourceIdentities"),
+        ("身份冲突", "conflictingSourceIdentities"),
+        ("去重项目数", "uniqueProjectCount"),
+        ("已进总账项目数", "indexedProjectCount"),
+        ("来源清单核对时间", "sourceObservedAt"),
+        ("覆盖说明", "note"),
+    ]:
+        sheet.append([label, coverage.get(key) if coverage.get(key) is not None else "未核实"])
+    sheet.column_dimensions["A"].width = 28
+    sheet.column_dimensions["B"].width = 80
+    for cells in sheet:
+        for cell in cells:
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
+            cell.alignment = Alignment(wrap_text=True, vertical="center")
 
 
-def scan_plan(layout: Any, batch_id: str | None = None) -> dict[str, Any]:
+def scan_plan(
+    layout: Any,
+    batch_id: str | None = None,
+    *,
+    mode: str = "auto",
+    year: int | None = None,
+    limit: int = 10,
+) -> dict[str, Any]:
     ledger = ws.load_waterline(layout)
+    annual = coverage_api.annual_coverage(layout, year, details=True, ledger=ledger)
+    if mode not in {"auto", "annual-baseline", "recent"}:
+        raise ws.WorkspaceStateError("扫描模式无效")
+    if limit < 1 or limit > 10000:
+        raise ws.WorkspaceStateError("计划条数必须在 1 至 10000 之间")
+    selected_mode = (
+        ("recent" if annual["complete"] else "annual-baseline") if mode == "auto" else mode
+    )
+    batch_filters = None
+    if batch_id:
+        _, _, saved_batch = ws._formal_capture_batch(layout, batch_id)
+        batch_filters = saved_batch.get("filters")
+        if mode == "auto":
+            selected_mode = (
+                "annual-baseline"
+                if batch_filters.get("selectionMode") == coverage_api.ANNUAL_MODE
+                else "recent"
+            )
     pending = []
     for project, record in ledger["cases"].items():
         row = describe(layout, project, record)
@@ -623,6 +698,7 @@ def scan_plan(layout: Any, batch_id: str | None = None) -> dict[str, Any]:
                 {
                     "projectNo": project,
                     "initialResult": row["initialResult"],
+                    "unqualifiedCandidate": project in annual["candidateProjectNos"],
                     "changeEvidence": list(
                         record.get("source", {}).get("changeEvidenceByFingerprint", {}).values()
                     )
@@ -637,7 +713,13 @@ def scan_plan(layout: Any, batch_id: str | None = None) -> dict[str, Any]:
                     else "INDEX_ONLY",
                 }
             )
-    pending.sort(key=lambda x: (x["initialResult"] != "UNQUALIFIED", x["projectNo"]))
+    pending.sort(
+        key=lambda x: (
+            x["initialResult"] != "UNQUALIFIED",
+            not x["unqualifiedCandidate"],
+            x["projectNo"],
+        )
+    )
     actions = []
     if batch_id:
         if __package__:
@@ -687,13 +769,64 @@ def scan_plan(layout: Any, batch_id: str | None = None) -> dict[str, Any]:
                     "sourceChanged": bool(previous and not same),
                 }
             )
+    if selected_mode == "annual-baseline":
+        actions = [
+            {
+                **item,
+                "action": "IDENTITY_CONFLICT"
+                if item["status"] == "IDENTITY_CONFLICT"
+                else "READ_IDENTITY"
+                if not item["projectNo"]
+                else "REUSE_IDENTITY",
+            }
+            for item in annual["identities"]
+        ]
+        actions.sort(
+            key=lambda item: (
+                item["action"] == "REUSE_IDENTITY",
+                item["candidatePriority"],
+                item["rwid"],
+            )
+        )
+    filters = (
+        scan_filters()
+        if selected_mode == "recent"
+        else {
+            "selectionMode": coverage_api.ANNUAL_MODE,
+            "year": annual["sourceYear"],
+            "dateShortcut": "本年",
+            "sourceListKind": "CASE_TASK",
+            "taskStatus": "ALL",
+            "lawEnforcementUnit": "ALL",
+            "jurisdiction": "全部管辖单位(含派出所)",
+            "brigadeScope": "ALL",
+            "timezone": "Asia/Shanghai",
+        }
+    )
     return {
-        "schemaVersion": "IncrementalCasePlanV1",
+        "schemaVersion": "SourceScanPlanV2",
         "readOnly": True,
-        "filters": scan_filters(),
+        "mode": selected_mode,
+        "readyToScan": selected_mode == "annual-baseline" or annual["complete"],
+        "readyToResumeBatch": bool(batch_id),
+        "sourceCoverage": coverage_api.summary(annual),
+        "filters": batch_filters or filters,
+        "requiredPageReadback": [
+            "startDate",
+            "endDate",
+            "dateFieldLabel",
+            "queryRoute",
+            "queryEvidencePath",
+        ],
+        "requiredTaskCategories": list(coverage_api.TASK_CATEGORIES)
+        if selected_mode == "annual-baseline"
+        else [],
         "pendingOutsideWindowRetained": True,
-        "pending": pending,
-        "sourceActions": actions,
+        "pendingCount": len(pending),
+        "pending": pending[:limit],
+        "sourceActionCount": len(actions),
+        "sourceActionCounts": dict(Counter(a["action"] for a in actions)),
+        "sourceActions": actions[:limit],
     }
 
 
@@ -704,54 +837,74 @@ def index_history(layout: Any, *, apply: bool = False) -> dict[str, Any]:
     else:
         from source_intake import document_fingerprint
     results = []
+    captures = coverage_api.formal_captures(layout)
+    ledger = ws.load_waterline(layout)
+    bindings = coverage_api.identity_bindings(captures, ledger)
     missing_identity = set()
-    for directory in sorted(layout.capture_batches.iterdir()):
-        if not directory.is_dir():
-            continue
-        try:
-            _, _, capture = ws._formal_capture_batch(layout, directory.name)
-        except ws.WorkspaceStateError:
+    conflicts = set()
+    rejected_batches = []
+    for capture in captures:
+        batch_id = capture["batchId"]
+        annual = capture.get("filters", {}).get("selectionMode") == coverage_api.ANNUAL_MODE
+        if annual and coverage_api.query_evidence_issue(layout, capture):
+            rejected_batches.append(batch_id)
             continue
         for rwid, item in capture.get("records", {}).items():
             detail = item.get("detail") or {}
-            project = detail.get("projectNo")
-            fields = detail.get("fields") or {}
-            if (
-                not project
-                or fields.get("projectNo") != project
-                or not ws.PROJECT_NO.fullmatch(project)
+            projects = bindings.get(rwid, set())
+            if len(projects) > 1 or (
+                projects and item.get("projectNo") and item["projectNo"] not in projects
             ):
+                conflicts.add(rwid)
+                continue
+            project = next(iter(projects)) if projects else None
+            fields = detail.get("fields") or {}
+            if not project:
                 missing_identity.add(rwid)
                 continue
             observation = {
                 "fingerprint": item.get("sourceRecordFingerprint"),
                 "documentFingerprints": sorted(
                     {document_fingerprint(a) for a in item.get("sourceAppearances", [])}
+                    if not annual
+                    else set()
                 ),
-                "observedAt": detail.get("capturedAt"),
+                "observedAt": coverage_api.observed_at(capture),
             }
-            record = ws.load_waterline(layout)["cases"].get(project, {})
+            record = ledger["cases"].get(project, {})
             prior = record.get("source", {}).get("observationsByRwid", {}).get(rwid, {})
             new_docs = set(observation["documentFingerprints"]) - set(
                 prior.get("documentFingerprints", [])
             )
-            if project in ws.load_waterline(layout)["cases"] and not new_docs:
+            prior_batches = set(record.get("source", {}).get("batchIds", []))
+            if project in ledger["cases"] and not new_docs and batch_id in prior_batches:
                 continue
+            updates = {
+                "observationsByRwid": {rwid: observation} if not annual else {},
+                "batchIds": sorted(prior_batches | {batch_id}),
+            }
+            if not record:
+                updates.update(projectIdentitySource="DETAIL", rwid=rwid, status="DISCOVERED")
             if apply:
-                updates = {
-                    "observationsByRwid": {rwid: observation},
-                    "batchIds": sorted(
-                        set(record.get("source", {}).get("batchIds", [])) | {directory.name}
-                    ),
-                }
-                if not record:
-                    updates.update(projectIdentitySource="DETAIL", rwid=rwid, status="DISCOVERED")
-                ws.upsert_case(
+                ledger["cases"][project] = ws.upsert_case(
                     layout,
                     project,
                     source=updates,
                     **({"unitName": fields.get("unitName")} if not record else {}),
                 )
+            else:
+                # Simulate the same merge so report/apply agree across repeated batches.
+                from copy import deepcopy
+
+                simulated = deepcopy(record)
+                ws._deep_merge(simulated, {"source": updates})
+                simulated["source"].setdefault("observationsByRwid", {}).setdefault(rwid, {})[
+                    "documentFingerprints"
+                ] = sorted(
+                    set(prior.get("documentFingerprints", []))
+                    | set(observation["documentFingerprints"])
+                )
+                ledger["cases"][project] = simulated
             results.append(
                 {"projectNo": project, "newKnownDocuments": len(new_docs), "applied": apply}
             )
@@ -759,6 +912,8 @@ def index_history(layout: Any, *, apply: bool = False) -> dict[str, Any]:
         "readOnly": not apply,
         "historicalSourceComplete": False,
         "sourceIdentitiesWithoutProject": len(missing_identity),
+        "sourceIdentityConflicts": sorted(conflicts),
+        "rejectedAnnualBatches": rejected_batches,
         "changes": results,
         "classificationChanges": classify_saved_details(layout, apply=apply),
     }

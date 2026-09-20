@@ -230,6 +230,43 @@ def _default_filters(
             raise SourceIntakeError("任务样本不能伪称法律文书筛选或日期快捷项")
         return {**explicit, "timezone": "Asia/Shanghai"}
     current = datetime.fromisoformat(_timestamp(value))
+    if explicit.get("selectionMode") == "ANNUAL_CASE_BASELINE":
+        if __package__:
+            from .source_coverage import TASK_CATEGORIES
+        else:
+            from source_coverage import TASK_CATEGORIES
+        if explicit.get("taskCategory") not in TASK_CATEGORIES:
+            raise SourceIntakeError("年度清单必须声明页面实际任务类别")
+        _require_safe_component(str(explicit.get("baselineId") or ""), "年度基线组编号")
+        for key, target in {
+            "year": current.year,
+            "dateShortcut": "本年",
+            "sourceListKind": "CASE_TASK",
+            "taskStatus": "ALL",
+            "lawEnforcementUnit": "ALL",
+            "jurisdiction": "全部管辖单位(含派出所)",
+            "brigadeScope": "ALL",
+        }.items():
+            if explicit.get(key) != target:
+                raise SourceIntakeError(f"年度案卷基线 {key} 必须经页面回读为 {target}")
+        for key in ("dateFieldLabel", "queryRoute", "queryEvidencePath"):
+            if not isinstance(explicit.get(key), str) or not explicit[key].strip():
+                raise SourceIntakeError(f"年度案卷基线必须记录实际 {key}")
+        if not explicit["queryRoute"].startswith("#/xfjd/") or "flwscx" in explicit["queryRoute"]:
+            raise SourceIntakeError("年度基线必须使用案卷或任务总清单，不能以文书查询替代")
+        if explicit.get("documentType") or explicit.get("brigadeCode"):
+            raise SourceIntakeError("年度案卷基线不能限定文书类型或单个大队")
+        try:
+            start = datetime.strptime(str(explicit["startDate"]), "%Y-%m-%d").date()
+            end = datetime.strptime(str(explicit["endDate"]), "%Y-%m-%d").date()
+        except (KeyError, ValueError) as error:
+            raise SourceIntakeError("年度基线必须记录本年快捷项实际起止日期") from error
+        if (
+            start.isoformat() != f"{current.year}-01-01"
+            or not current.date() <= end <= current.date().replace(month=12, day=31)
+        ):
+            raise SourceIntakeError("年度基线的本年日期范围不完整")
+        return {**explicit, "timezone": "Asia/Shanghai"}
     if explicit.get("selectionMode") == "RECENT_DOCUMENT_ACTIVITY":
         try:
             start = datetime.strptime(str(explicit["startDate"]), "%Y-%m-%d").date()
@@ -1377,6 +1414,13 @@ def begin_capture(
         "createdAt": created_at,
         "updatedAt": created_at,
     }
+    if clean_filters.get("selectionMode") == "ANNUAL_CASE_BASELINE":
+        evidence_path = _workspace_relative_path(
+            layout, clean_filters["queryEvidencePath"], "年度筛选证据"
+        )
+        if not evidence_path.is_file():
+            raise SourceIntakeError("年度筛选页面回读证据不存在")
+        state["queryEvidence"] = _evidence_file(evidence_path, Path(layout.root))
     if scope == "acceptance":
         state["listContract"] = "SAMPLE_ONLY"
         state["updatesGlobalWaterline"] = False
@@ -1585,6 +1629,15 @@ def _selected_rwids(state: dict[str, Any]) -> set[str]:
 def _refresh_progress(state: dict[str, Any]) -> None:
     acceptance = _is_acceptance_sample(state)
     selected = _selected_rwids(state)
+    if state.get("filters", {}).get("selectionMode") == "ANNUAL_CASE_BASELINE":
+        state["status"] = (
+            "NEEDS_MANUAL_REVIEW"
+            if state.get("conflicts")
+            else "BASELINE_INDEXED"
+            if not selected
+            else "COLLECTING_IDENTITIES"
+        )
+        return
     if not selected:
         if state.get("listResult") in {"STABLE", "SAMPLE_STABLE"} and not state.get("conflicts"):
             state["status"] = "ACCEPTANCE_COMPLETE" if acceptance else "COMPLETED"
@@ -1674,6 +1727,129 @@ def _prepare_incremental_queue(
     state["actionRwids"] = actions
 
 
+def _prepare_annual_queue(layout: Any, state: dict, records: dict, observed_at: Any) -> None:
+    if __package__:
+        from .source_coverage import formal_captures, identity_bindings
+    else:
+        from source_coverage import formal_captures, identity_bindings
+    known = load_waterline(layout) if load_waterline else {"cases": {}}
+    bindings = identity_bindings(formal_captures(layout), known)
+    actions = []
+    for rwid, record in records.items():
+        record["sourceRecordFingerprint"] = _record_equivalence(record)
+        projects = bindings.get(rwid, set())
+        if len(projects) == 1 and (not record.get("projectNo") or record["projectNo"] in projects):
+            project = next(iter(projects))
+            record.update(projectNo=project, identityReused=True, skippedAsUnchanged=True)
+            prior = known["cases"].get(project, {})
+            _maybe_waterline(
+                layout,
+                project,
+                source={
+                    "projectIdentitySource": "DETAIL",
+                    "batchId": state["batchId"],
+                    "annualIdentitiesByRwid": {
+                        rwid: {
+                            "sourceYear": state["filters"]["year"],
+                            "batchId": state["batchId"],
+                            "observedAt": _timestamp(observed_at),
+                        }
+                    },
+                    "lastObservedAt": _timestamp(observed_at),
+                },
+                **(
+                    {"unitName": _find_first(record.get("fields", {}), _UNIT_NAME_KEYS)}
+                    if not prior
+                    else {}
+                ),
+            )
+        else:
+            actions.append(rwid)
+            if len(projects) > 1 or (projects and record.get("projectNo") not in projects):
+                state.setdefault("conflicts", []).append(
+                    {"type": "IDENTITY_CONFLICT", "rwid": rwid}
+                )
+    state["detailRwids"] = actions
+    state["actionRwids"] = list(actions)
+    state["waterlineDecision"] = "ANNUAL_IDENTITY_ONLY"
+
+
+def _add_annual_identity(
+    layout: Any,
+    path: Path,
+    state: dict,
+    record: dict,
+    rwid: str,
+    project: str,
+    fields: dict,
+    source_url: str | None,
+    screenshot: str | Path | None,
+    captured: str,
+) -> dict:
+    if not source_url or not screenshot or not Path(screenshot).is_file():
+        raise SourceIntakeError("年度身份关联必须提供本案详情 URL 和完整详情截图")
+    target = path.parent / "identities" / project
+    target.mkdir(parents=True, exist_ok=True)
+    digest = _fingerprint(fields).removeprefix("sha256:")
+    image = target / (f"{rwid}-{_sha256(Path(screenshot))[-12:]}" + Path(screenshot).suffix)
+    _copy_immutable(Path(screenshot), image)
+    evidence_path = target / f"{rwid}-{digest[:12]}.json"
+    evidence = {
+        "schemaVersion": "SourceIdentityV1",
+        "projectNo": project,
+        "rwid": rwid,
+        "sourceUrl": source_url,
+        "fields": fields,
+        "observedAt": captured,
+        "screenshot": _evidence_file(image, Path(layout.root)),
+    }
+    if not evidence_path.exists():
+        _write_json(evidence_path, evidence)
+    record.update(
+        projectNo=project,
+        detail={
+            "projectNo": project,
+            "fields": fields,
+            "capturedAt": captured,
+            "sourceUrl": source_url,
+            "evidence": _evidence_file(evidence_path, Path(layout.root)),
+        },
+        skippedAsUnchanged=True,
+        indexOnly=True,
+    )
+    source = {
+        "projectIdentitySource": "DETAIL",
+        "batchId": state["batchId"],
+        "lastObservedAt": captured,
+        "annualIdentitiesByRwid": {
+            rwid: {
+                "sourceYear": state["filters"]["year"],
+                "batchId": state["batchId"],
+                "observedAt": captured,
+            }
+        },
+    }
+    if __package__:
+        from .ledger_views import source_qualification
+    else:
+        from ledger_views import source_qualification
+    classification = source_qualification(fields, [])
+    if classification:
+        source["classification"] = {
+            **classification,
+            "evidencePath": str(evidence_path.relative_to(layout.root)),
+            "evidenceSha256": _sha256(evidence_path),
+            "observedAt": captured,
+        }
+        source["indexOnly"] = classification["initialResult"] == "QUALIFIED"
+    _maybe_waterline(layout, project, source=source, unitName=_find_first(fields, _UNIT_NAME_KEYS))
+    state["actionRwids"] = [key for key in state.get("actionRwids", []) if key != rwid]
+    _refresh_progress(state)
+    state["updatedAt"] = captured
+    _write_json(path, state)
+    return state
+
+
 def finalize_capture(
     workspace: Any,
     batch_id: str,
@@ -1700,7 +1876,11 @@ def finalize_capture(
         records, total, total_pages = _round_records(
             round_value,
             inspection_query=state["filters"].get("selectionMode")
-            not in {"ANNUAL_RECTIFICATION_NOTICE", "RECENT_DOCUMENT_ACTIVITY"},
+            not in {
+                "ANNUAL_RECTIFICATION_NOTICE",
+                "RECENT_DOCUMENT_ACTIVITY",
+                "ANNUAL_CASE_BASELINE",
+            },
         )
     except _RoundUnstable as error:
         round_value.update(
@@ -1734,7 +1914,18 @@ def finalize_capture(
         state["updatedAt"] = _timestamp(now)
         _write_json(path, state)
         return state
-    fingerprint = _fingerprint([{"rwid": key, **records[key]} for key in sorted(records)])
+    fingerprint = _fingerprint(
+        [
+            {
+                "rwid": key,
+                **_record_core(records[key]),
+                "documents": sorted(
+                    document_fingerprint(a) for a in records[key].get("sourceAppearances", [])
+                ),
+            }
+            for key in sorted(records)
+        ]
+    )
     round_value.update(
         {
             "fingerprint": fingerprint,
@@ -1751,7 +1942,9 @@ def finalize_capture(
     state["stableRounds"] = 2 if stable else 1
     if stable:
         state["records"] = records
-        state["sourceDocumentCount"] = total
+        annual_baseline = state["filters"].get("selectionMode") == "ANNUAL_CASE_BASELINE"
+        state["sourceListCount"] = total
+        state["sourceDocumentCount"] = 0 if annual_baseline else total
         state["uniqueRwidCount"] = len(records)
         state["anomalies"] = list(round_value.get("anomalies") or [])
         conflicts = list(round_value.get("conflicts") or []) + _project_conflicts(records)
@@ -1763,6 +1956,8 @@ def finalize_capture(
             if _is_acceptance_sample(state):
                 _prepare_acceptance_queue(state, records)
                 state["status"] = "ACCEPTANCE_COLLECTING_DETAILS"
+            elif annual_baseline:
+                _prepare_annual_queue(layout, state, records, now)
             else:
                 _prepare_incremental_queue(layout, state, records, now)
                 state["status"] = "COLLECTING_DETAILS"
@@ -2025,7 +2220,9 @@ def add_detail(
         raise SourceIntakeError("详情 RWID 不在已稳定清单中")
     if record.get("aliasOf"):
         raise SourceIntakeError(f"该 RWID 已合并，请使用主记录 {record['aliasOf']}")
-    if record.get("skippedAsUnchanged"):
+    if record.get("skippedAsUnchanged") and (
+        state["filters"].get("selectionMode") != "ANNUAL_CASE_BASELINE"
+    ):
         raise SourceIntakeError("详情项目编号已在水位中完成并通过飞牛核验")
     clean_detail = _clean_evidence(_json_input(detail, "案卷详情"))
     project_raw = _find_first(clean_detail, _PROJECT_KEYS)
@@ -2073,6 +2270,21 @@ def add_detail(
         _write_json(capture_path, state)
         raise SourceIntakeError("详情项目编号与清单不一致，已转人工处理")
     captured = _timestamp(captured_at)
+    if state["filters"].get("selectionMode") == "ANNUAL_CASE_BASELINE":
+        if record.get("detail", {}).get("fields") == clean_detail:
+            return state
+        return _add_annual_identity(
+            layout,
+            capture_path,
+            state,
+            record,
+            record_key,
+            project_no,
+            clean_detail,
+            safe_url,
+            screenshot or screenshot_path,
+            captured,
+        )
     completed_record = (
         None if _is_acceptance_sample(state) else _verified_completed_waterline(layout, project_no)
     )

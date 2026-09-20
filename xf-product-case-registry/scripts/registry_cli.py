@@ -38,7 +38,7 @@ else:
     from upload_transport import bounded_request, upload_request
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
-VERSION = "1.9.3"
+VERSION = "1.10.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -4984,18 +4984,34 @@ def ledger_export_command(args: argparse.Namespace) -> None:
 
 def ledger_status_command(args: argparse.Namespace) -> None:
     workspace = workspace_api()
+    source_year = ledger_source_year(args)
     try:
         _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
         result = (
             workspace.workspace_progress(layout, batch_id=args.batch_id)
             if getattr(args, "scope", "batch") == "batch"
             else ledger_views.ledger_view(
-                layout, view=getattr(args, "view", "all"), batch_id=args.batch_id
+                layout,
+                view=getattr(args, "view", "all"),
+                batch_id=args.batch_id,
+                source_year=source_year,
             )
         )
     except workspace.WorkspaceStateError as error:
         raise RegistryError(str(error)) from error
     print(json.dumps(result, ensure_ascii=False))
+
+
+def ledger_source_year(args: argparse.Namespace) -> int | None:
+    scope = getattr(args, "scope", "all")
+    year = getattr(args, "year", None)
+    if year is not None and scope != "source-year":
+        raise RegistryError("--year 仅用于 --scope source-year")
+    if scope == "source-year":
+        if getattr(args, "batch_id", None):
+            raise RegistryError("来源年度查询不能同时限定批次")
+        return year if year is not None else ledger_views.coverage_api.execution_year()
+    return None
 
 
 def ledger_reconcile_command(args: argparse.Namespace) -> None:
@@ -5059,6 +5075,7 @@ def ledger_index_history_command(args: argparse.Namespace) -> None:
 
 def ledger_report_command(args: argparse.Namespace) -> None:
     workspace = workspace_api()
+    source_year = ledger_source_year(args)
     try:
         _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
         if getattr(args, "scope", "batch") == "batch":
@@ -5067,7 +5084,10 @@ def ledger_report_command(args: argparse.Namespace) -> None:
             case_count = progress["waterline"]["caseCount"]
         else:
             progress = ledger_views.ledger_view(
-                layout, view=getattr(args, "view", "all"), batch_id=args.batch_id
+                layout,
+                view=getattr(args, "view", "all"),
+                batch_id=args.batch_id,
+                source_year=source_year,
             )
             markdown = ledger_views.render_ledger_report(
                 progress, include_all=getattr(args, "all_cases", False)
@@ -5091,9 +5111,27 @@ def source_scan_plan_command(args: argparse.Namespace) -> None:
     workspace = workspace_api()
     try:
         layout = resolve_source_layout(args)
-        result = ledger_views.scan_plan(layout, getattr(args, "batch_id", None))
+        result = ledger_views.scan_plan(
+            layout,
+            getattr(args, "batch_id", None),
+            mode=args.mode,
+            year=args.year,
+            limit=args.limit,
+        )
     except workspace.WorkspaceStateError as error:
         raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def source_coverage_command(args: argparse.Namespace) -> None:
+    try:
+        result = ledger_views.coverage_api.annual_coverage(
+            resolve_source_layout(args), args.year, details=args.details
+        )
+    except workspace_api().WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    if not args.details:
+        result = ledger_views.coverage_api.summary(result)
     print(json.dumps(result, ensure_ascii=False))
 
 
@@ -5136,13 +5174,21 @@ def run_source_action(args: argparse.Namespace, action: str, **kwargs: Any) -> N
 def source_begin_command(args: argparse.Namespace) -> None:
     if not getattr(args, "filter_json", None) and not getattr(args, "acceptance_sample", False):
         raise RegistryError(
-            "正式采集必须提供实际查询筛选；日常按 source scan-plan 的近三个月日期窗口"
-            "回读页面后保存，不隐式使用本年"
+            "正式采集必须提供实际查询筛选；先完成年度案卷基线，"
+            "再按 source scan-plan 使用近三个月窗口，页面回读后保存"
         )
     source = source_intake_api()
     workspace = workspace_api()
     try:
         _, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        if getattr(args, "filter_json", None):
+            requested_filters = source._json_input(Path(args.filter_json), "筛选条件")
+            if requested_filters.get("selectionMode") == "RECENT_DOCUMENT_ACTIVITY":
+                coverage = ledger_views.coverage_api.annual_coverage(layout)
+                if not coverage["complete"]:
+                    raise RegistryError(
+                        "年度来源总水位尚未对齐，请先完成年度基线；既有批次仍可续跑"
+                    )
         result = source.begin_capture(
             layout,
             filter_json=Path(args.filter_json) if getattr(args, "filter_json", None) else None,
@@ -5383,16 +5429,34 @@ def build_parser() -> argparse.ArgumentParser:
     source = sub.add_parser("source", help="接收已登录浏览器生成的本地采集物")
     source_sub = source.add_subparsers(dest="source_command", required=True)
 
-    source_plan = source_sub.add_parser("scan-plan", help="只读生成近三个月查询范围和未完成断点")
+    source_plan = source_sub.add_parser(
+        "scan-plan", help="只读规划年度基线或近三个月增量及未完成断点"
+    )
     add_workspace_resolution_options(source_plan)
     source_plan.add_argument("--batch-id", help="可选：对账已稳定的增量清单")
+    source_plan.add_argument(
+        "--mode", choices=("auto", "annual-baseline", "recent"), default="auto"
+    )
+    source_plan.add_argument("--year", type=int, help="来源年度；默认上海执行年")
+    source_plan.add_argument(
+        "--limit", type=int, default=10, help="最多展开多少项来源动作；默认 10"
+    )
     source_plan.set_defaults(func=source_scan_plan_command)
+    source_coverage = source_sub.add_parser(
+        "coverage", help="只读逐项核对年度来源覆盖，不把文书数当案卷数"
+    )
+    add_workspace_resolution_options(source_coverage)
+    source_coverage.add_argument("--year", type=int)
+    source_coverage.add_argument(
+        "--details", action="store_true", help="展开全部来源身份及未关联项"
+    )
+    source_coverage.set_defaults(func=source_coverage_command)
 
     source_begin = source_sub.add_parser("begin", help="创建 BrowserCaptureV1 采集批次")
     add_workspace_resolution_options(source_begin)
     source_begin.add_argument(
         "--filter-json",
-        help="可选的筛选条件 JSON；缺省时生成上海时间本年、全部大队默认筛选",
+        help="正式批次必填；保存来源页面实际回读的筛选条件",
     )
     source_begin.add_argument("--origin", required=True)
     source_begin.add_argument("--batch-id")
@@ -5514,7 +5578,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--batch-id",
         help="显式限定正式批次；scope=all 不指定时包含所有已知历史案卷",
     )
-    ledger_status.add_argument("--scope", choices=("all", "batch"), default="all")
+    ledger_status.add_argument("--scope", choices=("all", "batch", "source-year"), default="all")
+    ledger_status.add_argument(
+        "--year", type=int, help="来源年度范围，默认执行年；不是初查统计年份"
+    )
     ledger_status.add_argument(
         "--view", choices=("all", "unqualified", "unknown", "unfinished"), default="all"
     )
@@ -5543,7 +5610,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_workspace_resolution_options(ledger_report)
     ledger_report.add_argument("--batch-id")
-    ledger_report.add_argument("--scope", choices=("all", "batch"), default="all")
+    ledger_report.add_argument("--scope", choices=("all", "batch", "source-year"), default="all")
+    ledger_report.add_argument("--year", type=int)
     ledger_report.add_argument(
         "--view", choices=("all", "unqualified", "unknown", "unfinished"), default="all"
     )
