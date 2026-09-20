@@ -1,88 +1,94 @@
-"""Build or normalize a local expert-review DOCX; external templates stay authoritative.
+"""Fill a checked table-based review template without rebuilding its layout.
 
-Requires python-docx. Writes a new file only; the caller owns backup and publication.
+The template supplies formatting; source/content supplies reviewed wording.
+Only document.xml is edited; every other ZIP part is copied byte-for-byte.
 """
 from __future__ import annotations
-
 import argparse
 from copy import deepcopy
 import json
 from pathlib import Path
 import re
-
+from zipfile import ZipFile
+from lxml import etree
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Mm, Pt
 
-FONT = "方正仿宋_GBK"
 DATE_RE = re.compile(r"[0-9X]{4}年[0-9X]{1,2}月[0-9X]{1,2}日")
+OPINION_RE = re.compile(r"^[1-3][、.．]")
 
 
-def add_text(paragraph, text, size=16, font=FONT, bold=False):
-    for chunk in re.split(r"(X+)", text):
-        if not chunk:
-            continue
-        run = paragraph.add_run(chunk)
-        run.font.name, run.font.size, run.bold = font, Pt(size), bold
-        run._element.get_or_add_rPr().rFonts.set(qn("w:eastAsia"), font)
-        if re.fullmatch(r"X+", chunk):
-            run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+def locate(document):
+    paragraphs = document.paragraphs
+    title = next(p for p in paragraphs if p.text.strip())
+    introductions = [p for p in paragraphs if DATE_RE.search(p.text) and
+                     ("形成" in p.text or "组织召开" in p.text)]
+    opinions = [p for p in paragraphs if OPINION_RE.match(p.text)]
+    if len(introductions) != 1 or len(opinions) != 3:
+        raise ValueError("Expected one dated introduction and three numbered opinions")
+    end = next(i for i,p in enumerate(paragraphs) if p._p is opinions[-1]._p)
+    tail = [p for p in paragraphs[end+1:] if p.text.strip()]
+    if len(tail) != 2 or "签字" not in tail[1].text:
+        raise ValueError("Expected conclusion and intact signature area; inspect unfamiliar structure")
+    return title, introductions[0], opinions, tail[0]
 
 
-def no_grid(paragraph):
-    pr = paragraph._p.get_or_add_pPr()
-    for tag in ("w:snapToGrid",):
-        for old in list(pr.findall(qn(tag))):
-            pr.remove(old)
-    element = OxmlElement("w:snapToGrid")
-    element.set(qn("w:val"), "0")
-    pr.append(element)
-
-
-def border(paragraph, edges, space=8):
-    pr = paragraph._p.get_or_add_pPr()
-    element = OxmlElement("w:pBdr")
-    for edge in edges:
-        line = OxmlElement("w:" + edge)
-        for key, value in {"val": "single", "sz": "16", "space": str(space), "color": "000000"}.items():
-            line.set(qn("w:" + key), value)
-        element.append(line)
-    # Borders precede tabs/spacing/ind/jc in paragraph properties.
-    before = next((c for c in pr if c.tag in {qn("w:tabs"), qn("w:spacing"), qn("w:ind"), qn("w:jc"), qn("w:rPr")}), None)
-    if before is None:
-        pr.append(element)
-    else:
-        before.addprevious(element)
+def table_fields(document):
+    if len(document.tables) != 1 or len(document.sections) != 1:
+        raise ValueError("Use an explicitly selected single-section, table-based layout template")
+    table = document.tables[0]
+    if any(len(r.cells) != 2 for r in table.rows):
+        raise ValueError("Expected two-column cover table without merged cells")
+    people, spacers, dates = [], [], []
+    for row in table.rows:
+        cells = [c.text.strip() for c in row.cells]
+        if any(DATE_RE.fullmatch(c) for c in cells):
+            dates.append(row)
+        elif not any(cells):
+            spacers.append(row)
+        elif all(cells):
+            people.append(row)
+        else:
+            raise ValueError("Unrecognized cover row")
+    if len(people) != 5 or len(dates) != 1 or not spacers or dates[0]._tr is not table.rows[-1]._tr:
+        raise ValueError("Expected five people, blank spacer rows and a final date row")
+    return table, people, spacers, dates[0]
 
 
 def source_fields(document):
-    paragraphs = list(document.paragraphs)
-    title = next((p.text.strip() for p in paragraphs if p.text.strip()), "")
-    start = next((i for i, p in enumerate(paragraphs)
-                  if DATE_RE.search(p.text) and ("形成" in p.text or "组织召开" in p.text)), None)
-    if start is None:
-        raise ValueError("Cannot locate dated meeting introduction; inspect the source manually")
+    title, intro, opinions, conclusion = locate(document)
     experts = []
     if document.tables:
-        table = document.tables[0]
-        for row in table.rows:
-            cells = [c.text.strip() for c in row.cells]
-            if len(cells) >= 2 and cells[0] and not DATE_RE.fullmatch(cells[0]):
-                if DATE_RE.search(cells[1]):
-                    continue
-                experts.append([cells[0], cells[1]])
+        _, people, _, _ = table_fields(document)
+        experts = [[c.text.strip() for c in row.cells] for row in people]
     else:
-        for p in paragraphs[:start]:
+        for p in document.paragraphs:
+            if p._p is intro._p:
+                break
             if "\t" in p.text and "评审人员姓名" not in p.text:
-                fields = p.text.split("\t", 1)
-                if all(f.strip() for f in fields):
-                    experts.append([f.strip() for f in fields])
-    if not 1 <= len(experts) <= 8:
-        raise ValueError("Expected 1-8 expert rows; do not guess missing names")
-    date = DATE_RE.search(paragraphs[start].text).group()
-    return title, experts, date, [deepcopy(p._p) for p in paragraphs[start:]]
+                experts.append([v.strip() for v in p.text.split("\t", 1)])
+    if len(experts) != 5:
+        raise ValueError("Expected five reviewed name/description pairs")
+    return {"title": title.text, "experts": experts,
+            "date": DATE_RE.search(intro.text).group(), "introduction": intro.text,
+            "opinions": [OPINION_RE.sub("",p.text, count=1) for p in opinions],
+            "conclusion": conclusion.text}
+
+
+def replace_text(paragraph, value):
+    # Keep paragraph properties, run properties and non-text objects in place.
+    texts = list(paragraph._p.iter(qn("w:t")))
+    if not texts:
+        raise ValueError("Replacement field has no template text run")
+    if paragraph._p.xpath('.//w:fldChar|.//w:instrText|.//w:br|.//w:tab'):
+        raise ValueError("Complex replacement field requires manual review")
+    offset = 0
+    for i,t in enumerate(texts):
+        n = len(value)-offset if i == len(texts)-1 else min(len(t.text or ""), len(value)-offset)
+        t.text = value[offset:offset+n]
+        t.set(qn("xml:space"), "preserve")
+        offset += n
 
 
 def restore_placeholder_highlights(root):
@@ -130,117 +136,97 @@ def prefix_advice(element):
         position -= len(current)
 
 
-def build(source, output, blank=False, content=None, prefix_suggestions=False):
+def build(source, output, blank=False, content=None, prefix_suggestions=False,
+          template=None, name_width_twips=None, spacer_total_twips=None,
+          body_page_break=False):
     source, output = Path(source), Path(output)
-    if source.resolve() == output.resolve() or output.exists():
-        raise ValueError("Output must be a new path; never overwrite a source or candidate")
-    doc = Document(source)
-    if len(doc.sections) != 1:
-        raise ValueError("Only the checked single-section review format is supported")
-    title, experts, date, body = source_fields(doc)
+    template = Path(template) if template else source
+    if output.exists() or output.resolve() in {source.resolve(), template.resolve()}:
+        raise ValueError("Output must be a new path; caller owns backup and publication")
+    doc = Document(template)
+    table, people, spacers, date_row = table_fields(doc)
+    fields = source_fields(Document(source)) if content is None else deepcopy(content)
+    required = {"title", "experts", "date", "introduction", "opinions", "conclusion"}
+    if not required <= fields.keys():
+        raise ValueError("Missing content fields: " + ",".join(sorted(required-fields.keys())))
     if blank:
-        experts = [["XXX", "XXXXXXXXXXXXX"] for _ in range(5)]
-        date = "XXXX年XX月XX日"
+        title = fields["title"]
         phase = "专家验收评审会" if "验收" in title else ("技术需求分析报告评审会" if "技术需求" in title else "需求及预算专家论证会")
-        content = {"title": title, "experts": experts, "date": date,
-                   "introduction": f"{date}，无锡市消防救援局在XXX组织召开XXX项目{phase}。与会专家审阅相关材料、听取汇报，经质询和讨论，形成意见如下：",
-                   "opinions": ["建议XXX", "建议XXX", "建议XXX"], "conclusion": "评审结论：XXX。"}
-    if content is not None:
-        required = {"title", "experts", "date", "introduction", "opinions", "conclusion"}
-        if not required <= content.keys():
-            raise ValueError("Content is missing: " + ",".join(sorted(required - content.keys())))
-        title, experts, date = content["title"], content["experts"], content["date"]
-        if len(content["opinions"]) != 3:
-            raise ValueError("This template expects exactly 3 project-specific opinions")
-        if not 1 <= len(experts) <= 8 or any(len(e) != 2 for e in experts):
-            raise ValueError("Experts must be 1-8 name/description pairs")
-    experts = [[name, ("XXXXXXXXXXXXX" if desc.startswith("基层代表：") else desc)] for name, desc in experts]
-    body_element = doc._element.body
-    for element in list(body_element):
-        if element.tag != qn("w:sectPr"):
-            body_element.remove(element)
-    section = doc.sections[0]
-    section.page_width, section.page_height = Mm(210), Mm(297)
-    section.top_margin, section.bottom_margin = Mm(25.4), Mm(25.4)
-    section.left_margin, section.right_margin = Mm(31.75), Mm(31.75)
-    section.footer_distance = Mm(20)
-    section.different_first_page_header_footer = True
-    # One first-page footer anchors date and bottom rule independently of expert rows.
-    for hf in (section.header, section.first_page_header, section.footer, section.first_page_footer):
-        for e in list(hf._element):
-            hf._element.remove(e)
-        hf.add_paragraph()
-    foot = section.first_page_footer.paragraphs[0]
-    foot.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    foot.paragraph_format.space_after = Pt(0)
-    foot.paragraph_format.line_spacing = Pt(24)
-    no_grid(foot)
-    add_text(foot, date)
-    border(foot, ["bottom"], 10)
-
-    heading = doc.add_paragraph()
-    heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    heading.paragraph_format.line_spacing = Pt(34)
-    heading.paragraph_format.space_before = Pt(6)
-    heading.paragraph_format.space_after = Pt(62)
-    no_grid(heading)
-    add_text(heading, title, 22, "方正小标宋简体")
-    border(heading, ["top", "bottom"], 10)
-    header = doc.add_paragraph()
-    header.paragraph_format.tab_stops.add_tab_stop(Pt(185))
-    header.paragraph_format.line_spacing = Pt(30)
-    header.paragraph_format.space_after = Pt(0)
-    no_grid(header)
-    add_text(header, "评审人员姓名\t人员简介", bold=True, font="方正黑体_GBK")
-    for name, desc in experts:
-        p = doc.add_paragraph()
-        p.paragraph_format.left_indent = Pt(12)
-        p.paragraph_format.tab_stops.add_tab_stop(Pt(80))
-        p.paragraph_format.line_spacing = Pt(30)
-        p.paragraph_format.space_after = Pt(0)
-        no_grid(p)
-        add_text(p, name + "\t" + desc)
-    if content is None:
-        for i, element in enumerate(body):
-            # Existing body is copied verbatim, except explicitly requested advice prefixes.
-            if prefix_suggestions:
-                prefix_advice(element)
-            if i == 0:
-                pr = element.get_or_add_pPr()
-                for old in list(pr.findall(qn("w:pageBreakBefore"))):
-                    pr.remove(old)
-                flag = OxmlElement("w:pageBreakBefore")
-                pr.insert(0, flag)
-            body_element.insert(len(body_element) - 1, element)
-    else:
-        lines = [content["introduction"]] + [f"{i}、{opinion}" for i, opinion in enumerate(content["opinions"], 1)] + [content["conclusion"], "", "专家签字："]
-        for i, text in enumerate(lines):
-            p = doc.add_paragraph()
-            p.paragraph_format.first_line_indent = Pt(32)
-            p.paragraph_format.line_spacing = Pt(31.2)
-            p.paragraph_format.space_after = Pt(0)
-            p.paragraph_format.page_break_before = (i == 0)
-            no_grid(p)
-            add_text(p, text)
+        fields.update(experts=[["XXX", "XXXXXXXXXXXXX"] for _ in range(5)], date="XXXX年XX月XX日",
+                      introduction=f"XXXX年XX月XX日，无锡市消防救援局在XXX组织召开XXX项目{phase}。与会专家审阅相关材料、听取汇报，经质询和讨论，形成意见如下：",
+                      opinions=["建议XXX"]*3, conclusion="评审结论：XXX。")
+    if len(fields["experts"]) != 5 or any(len(p) != 2 for p in fields["experts"]):
+        raise ValueError("Expected five name/description pairs")
+    if len(fields["opinions"]) != 3 or not DATE_RE.fullmatch(fields["date"]):
+        raise ValueError("Expected three opinions and a valid numeric/X date")
+    if DATE_RE.search(fields["introduction"]) is None or DATE_RE.search(fields["introduction"]).group() != fields["date"]:
+        raise ValueError("Cover and introduction dates must agree")
+    title, introduction, opinions, conclusion = locate(doc)
+    for p,text in [(title,fields["title"]),(introduction,fields["introduction"]),(conclusion,fields["conclusion"])]:
+        replace_text(p,text)
+    for i,(p,text) in enumerate(zip(opinions,fields["opinions"]),1):
+        if OPINION_RE.match(text):
+            raise ValueError("Opinion payload excludes its numeric prefix")
+        replace_text(p,f"{i}、{text}")
+        if prefix_suggestions:
+            prefix_advice(p._p)
+    for row,pair in zip(people,fields["experts"]):
+        for cell,text in zip(row.cells,pair):
+            if len(cell.paragraphs) != 1:
+                raise ValueError("Expected one paragraph per cover cell")
+            replace_text(cell.paragraphs[0],text)
+    date_cell = next(c for c in date_row.cells if DATE_RE.fullmatch(c.text.strip()))
+    replace_text(date_cell.paragraphs[0],fields["date"])
+    if name_width_twips is not None:
+        grid = table._tbl.tblGrid.gridCol_lst
+        total = sum(g.w.twips for g in grid)
+        if not 0 < name_width_twips < total:
+            raise ValueError("Name-column width must be inside existing table width")
+        widths = [name_width_twips,total-name_width_twips]
+        for g,width in zip(grid,widths):
+            g.set(qn("w:w"),str(width))
+        for row in table.rows:
+            for cell,width in zip(row.cells,widths):
+                cell._tc.get_or_add_tcPr().get_or_add_tcW().set(qn("w:w"),str(width))
+    if spacer_total_twips is not None:
+        if spacer_total_twips < len(spacers):
+            raise ValueError("Spacer height must be positive")
+        each,extra = divmod(spacer_total_twips,len(spacers))
+        for i,row in enumerate(spacers):
+            pr = row._tr.get_or_add_trPr()
+            for old in list(pr.findall(qn("w:trHeight"))):
+                pr.remove(old)
+            height = OxmlElement("w:trHeight")
+            height.set(qn("w:val"),str(each+(i<extra)))
+            height.set(qn("w:hRule"),"exact")
+            pr.append(height)
+    if body_page_break:
+        introduction.paragraph_format.page_break_before = True
+    # Unknown participant labels must be explicitly normalized in reviewed input.
+    if any("基层代表" in c.text for r in table.rows for c in r.cells):
+        raise ValueError("Use X placeholders for the unnamed participant")
     restore_placeholder_highlights(doc._element)
-    restore_placeholder_highlights(section.first_page_footer._element)
     output.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(output)
-    check = Document(output)
-    assert not check.tables
-    assert len(check.sections) == 1
-    assert all("基层代表" not in p.text for p in check.paragraphs)
-    print(json.dumps({"output": str(output), "experts": len(experts), "tables": 0, "render_required": True}, ensure_ascii=False))
+    document_xml = etree.tostring(doc._element,xml_declaration=True,encoding="UTF-8",standalone=True)
+    with ZipFile(template) as src, ZipFile(output,"w") as dst:
+        for entry in src.infolist():
+            dst.writestr(entry,document_xml if entry.filename == "word/document.xml" else src.read(entry.filename))
+    print(json.dumps({"output":str(output),"template":str(template),"tables":1,"render_required":True},ensure_ascii=False))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", required=True)
+    parser.add_argument("--source", required=True, help="Reviewed content source")
+    parser.add_argument("--template", help="Explicit layout authority; defaults to source only when table-based")
     parser.add_argument("--output", required=True)
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--blank", action="store_true", help="Make a reusable blank template")
-    group.add_argument("--content", help="UTF-8 JSON with reviewed title, experts, date, introduction, opinions, conclusion")
-    parser.add_argument("--prefix-suggestions", action="store_true", help="Explicitly prefix existing numbered opinions with 建议; never duplicate")
+    group.add_argument("--blank", action="store_true")
+    group.add_argument("--content", help="Reviewed UTF-8 JSON content")
+    parser.add_argument("--prefix-suggestions", action="store_true")
+    parser.add_argument("--name-width-twips", type=int, help="Optional name column width; retain total width")
+    parser.add_argument("--spacer-total-twips", type=int, help="Optional total blank-row height, calibrated by Word render")
+    parser.add_argument("--body-page-break", action="store_true", help="Explicitly keep introduction on page 2")
     args = parser.parse_args()
     payload = json.loads(Path(args.content).read_text(encoding="utf-8-sig")) if args.content else None
-    build(args.source, args.output, args.blank, payload, args.prefix_suggestions)
+    build(args.source,args.output,args.blank,payload,args.prefix_suggestions,args.template,
+          args.name_width_twips,args.spacer_total_twips,args.body_page_break)

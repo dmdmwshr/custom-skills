@@ -1,12 +1,19 @@
+import base64
 import hashlib
+from io import BytesIO
 from pathlib import Path
 import tempfile
 import unittest
-
+from zipfile import ZipFile
 from docx import Document
 from docx.oxml.ns import qn
+from docx.shared import Pt
+from lxml import etree
+from review_docx import build, locate, source_fields, table_fields
 
-from review_docx import build, source_fields
+
+def xml(node):
+    return etree.tostring(node) if node is not None else None
 
 
 class ReviewDocumentTests(unittest.TestCase):
@@ -14,84 +21,120 @@ class ReviewDocumentTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.source = self.root / "source.docx"
+        self.source = self.root / 'source.docx'
         d = Document()
-        d.add_paragraph("无锡市消防救援局XXX项目技术需求分析报告论证会专家评审意见")
-        t = d.add_table(rows=2, cols=2)
-        t.cell(0, 0).text = "某专家"
-        t.cell(0, 1).text = "某单位研究所所长/高工"
-        t.cell(1, 0).text = "XXX"
-        t.cell(1, 1).text = "基层代表：XXX"
-        d.add_paragraph("2026年9月XX日下午组织召开评审会，形成意见如下：")
-        d.add_paragraph("1、明确起算条件。")
-        d.add_paragraph("2、建议核对考核口径。")
-        d.add_paragraph("3、补充验收依据。")
-        d.add_paragraph("用户已确定的评审结论。")
-        d.add_paragraph("专家签字：")
+        p = d.add_paragraph('XXX项目技术需求分析报告论证会专家评审意见')
+        p.paragraph_format.space_after = Pt(13)
+        p.runs[0].font.size = Pt(22)
+        image = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
+        d.add_picture(BytesIO(image))
+        t = d.add_table(rows=8, cols=2)
+        for i in range(5):
+            t.cell(i, 0).text = '某专家' if i < 4 else 'XXX'
+            t.cell(i, 1).text = '某单位研究所所长/高工' if i < 4 else 'XXXXXXXXXXXXX'
+        t.cell(7, 1).text = '2026年9月XX日'
+        d.add_paragraph('2026年9月XX日下午组织召开评审会，形成意见如下：')
+        for text in ['1、明确起算条件。', '2、建议核对考核口径。', '3、补充验收依据。']:
+            p = d.add_paragraph(text)
+            p.paragraph_format.line_spacing = Pt(28)
+            p.paragraph_format.first_line_indent = Pt(32)
+            p.runs[0].font.name = '方正仿宋_GBK'
+            p.runs[0]._r.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), '方正仿宋_GBK')
+            p.runs[0].font.size = Pt(16)
+        d.add_paragraph('用户已确定的评审结论。')
+        d.add_paragraph('')
+        d.add_paragraph('专家签字：')
         d.save(self.source)
 
-    def test_normalization_preserves_body_and_source(self):
+    def test_preserves_package_drawings_styles_paragraphs_and_source(self):
         digest = hashlib.sha256(self.source.read_bytes()).digest()
-        result = self.root / "out.docx"
-        original_body = [p.text for p in Document(self.source).paragraphs][1:]
-        build(self.source, result)
-        d = Document(result)
-        self.assertFalse(d.tables)
-        self.assertEqual([p.text for p in d.paragraphs][-len(original_body):], original_body)
-        self.assertEqual(hashlib.sha256(self.source.read_bytes()).digest(), digest)
-        self.assertIn("某专家\t某单位研究所所长/高工", [p.text for p in d.paragraphs])
-        self.assertIn("XXX\tXXXXXXXXXXXXX", [p.text for p in d.paragraphs])
-        self.assertTrue(d.sections[0].different_first_page_header_footer)
-        self.assertEqual(d.sections[0].first_page_footer.paragraphs[0].text, "2026年9月XX日")
+        result = self.root/'out.docx'
+        build(self.source,result)
+        before,after = Document(self.source),Document(result)
+        self.assertEqual(source_fields(before),source_fields(after))
+        self.assertEqual(len(after.tables),1)
+        for a,b in zip(before.paragraphs,after.paragraphs):
+            self.assertEqual(xml(a._p.pPr),xml(b._p.pPr))
+        self.assertEqual(xml(before._element.body.sectPr),xml(after._element.body.sectPr))
+        self.assertEqual([xml(x) for x in before._element.xpath('.//w:drawing')],
+                         [xml(x) for x in after._element.xpath('.//w:drawing')])
+        with ZipFile(self.source) as a, ZipFile(result) as b:
+            self.assertEqual(a.namelist(),b.namelist())
+            for name in a.namelist():
+                if name != 'word/document.xml':
+                    self.assertEqual(a.read(name),b.read(name),name)
+        self.assertEqual(hashlib.sha256(self.source.read_bytes()).digest(),digest)
+
+    def test_content_and_layout_sources_are_separate(self):
+        content = source_fields(Document(self.source))
+        d = Document()
+        d.add_paragraph(content['title'])
+        for name,desc in content['experts']:
+            d.add_paragraph(name+'\t'+desc)
+        d.add_paragraph(content['introduction'])
+        for i,text in enumerate(content['opinions'],1):
+            d.add_paragraph(f'{i}、{text}')
+        d.add_paragraph(content['conclusion'])
+        d.add_paragraph('专家签字：')
+        source = self.root/'tableless-content.docx'
+        d.save(source)
+        with self.assertRaises(ValueError):
+            build(source,self.root/'invalid.docx')
+        result = self.root/'repaired.docx'
+        build(source,result,template=self.source)
+        self.assertEqual(source_fields(Document(result)),content)
+        self.assertEqual(locate(Document(result))[2][0].paragraph_format.line_spacing,Pt(28))
 
     def test_prefix_is_opt_in_and_idempotent(self):
-        first, second = self.root / "one.docx", self.root / "two.docx"
-        build(self.source, first, prefix_suggestions=True)
-        build(first, second, prefix_suggestions=True)
-        lines = [p.text for p in Document(second).paragraphs]
-        self.assertIn("1、建议明确起算条件。", lines)
-        self.assertIn("2、建议核对考核口径。", lines)
-        self.assertIn("3、建议补充验收依据。", lines)
-        self.assertFalse(any("建议建议" in p for p in lines))
-        self.assertIn("用户已确定的评审结论。", lines)
+        first,second = self.root/'one.docx',self.root/'two.docx'
+        build(self.source,first,prefix_suggestions=True)
+        build(first,second,prefix_suggestions=True)
+        lines = source_fields(Document(second))
+        self.assertEqual(lines['opinions'],['建议明确起算条件。','建议核对考核口径。','建议补充验收依据。'])
+        self.assertEqual(lines['conclusion'],'用户已确定的评审结论。')
 
-    def test_blank_template_does_not_retain_people_or_approve_project(self):
-        result = self.root / "blank.docx"
-        build(self.source, result, blank=True)
+    def test_blank_only_highlights_unknown_fields(self):
+        result = self.root/'blank.docx'
+        build(self.source,result,blank=True)
         d = Document(result)
-        text = "\n".join(p.text for p in d.paragraphs)
-        self.assertNotIn("某专家", text)
-        self.assertNotIn("用户已确定的评审结论", text)
-        self.assertIn("评审结论：XXX。", text)
-        self.assertEqual(text.count("、建议XXX"), 3)
-        for r in d._element.iter(qn("w:r")):
-            pr = r.find(qn("w:rPr"))
-            if pr is not None and pr.find(qn("w:highlight")) is not None:
-                self.assertEqual(set("".join(t.text or "" for t in r.iter(qn("w:t")))), {"X"})
+        fields = source_fields(d)
+        self.assertEqual(fields['experts'],[['XXX','XXXXXXXXXXXXX']]*5)
+        self.assertEqual(fields['conclusion'],'评审结论：XXX。')
+        self.assertEqual(fields['opinions'],['建议XXX']*3)
+        for run in d._element.iter(qn('w:r')):
+            hi = run.xpath('./w:rPr/w:highlight')
+            text = ''.join(run.xpath('./w:t/text()'))
+            if hi:
+                self.assertEqual(set(text),{'X'})
+            if 'X' in text:
+                self.assertTrue(hi)
 
-    def test_existing_output_and_wrong_opinion_count_are_rejected(self):
+    def test_only_requested_table_dimensions_change(self):
+        result = self.root/'sized.docx'
+        before = Document(self.source)
+        build(self.source,result,name_width_twips=1280,spacer_total_twips=1401)
+        after = Document(result)
+        t,_,spacers,_ = table_fields(after)
+        self.assertEqual(sum(g.w for g in before.tables[0]._tbl.tblGrid.gridCol_lst),
+                         sum(g.w for g in t._tbl.tblGrid.gridCol_lst))
+        self.assertEqual(t._tbl.tblGrid.gridCol_lst[0].w.twips,1280)
+        self.assertEqual(sum(r.height.twips for r in spacers),1401)
+        self.assertEqual(xml(locate(before)[1]._p.pPr),xml(locate(after)[1]._p.pPr))
+
+    def test_rejects_existing_output_bad_content_and_extra_body(self):
         with self.assertRaises(ValueError):
-            build(self.source, self.source)
-        content = {"title": "测试", "experts": [["XXX", "XXX"]], "date": "XXXX年XX月XX日",
-                   "introduction": "XXXX年XX月XX日组织召开会议，形成意见：", "opinions": ["建议核对。"], "conclusion": "XXX"}
-        target = self.root / "invalid.docx"
+            build(self.source,self.source)
+        fields = source_fields(Document(self.source))
+        for key,value in [('opinions',['建议仅一条']),('experts',[['XXX','XXX']]),('date','2027年9月XX日')]:
+            bad = dict(fields);bad[key]=value
+            target = self.root/(key+'.docx')
+            with self.assertRaises(ValueError):
+                build(self.source,target,content=bad)
+            self.assertFalse(target.exists())
+        d=Document(self.source);d.add_paragraph('不能悄悄丢失的用户备注');d.save(self.root/'extra.docx')
         with self.assertRaises(ValueError):
-            build(self.source, target, content=content)
-        self.assertFalse(target.exists())
-
-    def test_reviewed_content_replaces_template_examples(self):
-        content = {"title": "项目技术需求分析报告论证会专家评审意见", "experts": [["某专家", "某单位研究所所长/高工"], ["XXX", "XXXXXXXXXXXXX"]],
-                   "date": "2026年9月XX日", "introduction": "2026年9月XX日组织召开会议，形成意见如下：",
-                   "opinions": ["建议明确服务范围。", "建议统一计费口径。", "建议补充验收依据。"], "conclusion": "XXX"}
-        result = self.root / "generated.docx"
-        build(self.source, result, content=content)
-        d = Document(result)
-        text = "\n".join(p.text for p in d.paragraphs)
-        self.assertEqual(d.paragraphs[0].text, content["title"])
-        self.assertIn("2、建议统一计费口径。", text)
-        self.assertNotIn("用户已确定的评审结论", text)
-        self.assertFalse(d.tables)
+            build(self.root/'extra.docx',self.root/'dropped.docx')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()
