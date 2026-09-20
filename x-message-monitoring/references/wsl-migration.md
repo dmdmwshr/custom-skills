@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-21.5）
+## 当前目录与恢复边界（步骤 WSL-2026-09-21.6）
 
 用户最新内容标准是“完整一致，不必完全一样”。model_semantic_v1已完成受控发布，并由当前Astra在真实主帖及回复完整采集中接受同正文的链接卡展示差异、完成两流独立入账；扫描通过与投递闭环通过分别记录，实时版本/范围看项目handoff。支持此接口的已接受发布在rawStream前读取contentReview(cycle,stream)，模型对每组before/after按上下文作equivalent/different/uncertain判断并用resolveContentReview提交具体依据；不按关键词、字符比例或批量固定答案自动通过。正常采集不强制点显示原文或跟随外链；实际观察不改写，页面译文不冒充独立原文，必要判断依据进入full_analysis。新readPage发生变化时不能沿“reader未变”分支保留旧reader包。下文“正文不放宽”指含义与完整性，不是逐字匹配；身份、防重复和unknown结果仍独立核验。
 
@@ -109,7 +109,7 @@ V8已验证的预租约拒绝不能套用正常关闭：即使control在spawn前
 
 新回复分析使用[分析契约](reply-reset-contract.md)的纯内存analysis_fields.cjs：模型独立判断，aiRelevance只组装正确的ai_related字段，发送前validateAnalyses拒绝related别名，不改变事实或放宽原校验。此helper已通过真实Python契约、隔离新回复入账/finish及原owner同CUA两个新回复和后续零新增复扫；属于Skill中的无I/O调用辅助，不是新驱动、独立扫描器或发送入口。字段已通过不代表整批恢复完成，后续新故障仍独立判断。原五sendKept、同CUA和已接受发布保持。scan-analysis已将流终结时不再补stream-failure，先保留实际kept回执并读health，不把重复登记的stream_already_terminal当浏览器故障。
 
-heartbeat_collection_time_invalid先核对真实顺序及时间源；不能一律当成旧草稿、正文或浏览器问题。同一次已知拒绝曾出现stdin elapsed_ms=-250，WSL journal同秒Time jumped backwards，随后同CUA/Python只读短采样正常不推翻此前回拨。原stdin耗时是wall差值，而driver已用单调时钟限制预算，两者不能混为一谈；synchronized=yes也不证明没有回拨。失败后不重送、不改collectedAt、不读失败页：若本轮kept仍在，清理前只摘取原payload.timeline.collectedAt、现存preflight_at和原回执耗时等非正文元数据；已清理则明确证据缺失，不从历史恢复。维护可在原CUA做有限公开Node/Python时钟对照，不连接浏览器或取得业务lease。系统时钟与候选修复以项目handoff为准，不自行改Windows/系统时间，不把源码有界等待候选当成已接受发布。
+heartbeat_collection_time_invalid先核对真实顺序及时间源；不能一律当成旧草稿、正文或浏览器问题。同一次已知拒绝曾出现stdin elapsed_ms=-250，WSL journal同秒Time jumped backwards，随后同CUA/Python只读短采样正常不推翻此前回拨。原stdin耗时是wall差值，而driver已用单调时钟限制预算，两者不能混为一谈；synchronized=yes也不证明没有回拨。失败后不重送、不改collectedAt、不读失败页：若本轮kept仍在，清理前只摘取原payload.timeline.collectedAt、现存preflight_at和原回执耗时等非正文元数据；已清理则明确证据缺失，不从历史恢复。维护可在原CUA做有限公开Node/Python时钟对照，不连接浏览器或取得业务lease。已接受的collection_clock在同一原请求/原payload内以monotonic限定最多1秒等实际UTC追上，返回真实wall读数且重验lease，不接受未来/预检前/已过期数据；原预算不延长，超限仍失败，不由调用者重试补偿。此Python-only发布已验证控制/reader字节、配置和正式账本原样，沿现有稳定控制升级路径即可保持常驻MCP，无需为每个Python修复新设控制例外；仍须完整manifest/精确delta、实际管理入口契约及新鲜备份窗口。发布与真实三人工/四定时验收分别记录，系统根因未定位不自行改Windows或系统时间。
 
 acquire前完整读取当前快速路径和上下文契约的业务部分；Windows路径替换为上述Linux发布入口，CLI来源为desktop_chrome_playwright_linux。五sendKept、内存载荷、语义筛选、fingerprint、草稿/冻结各一次、预检顺序和两阶段finish保持。permalinkBurst第三参数只能取本轮xMonStdin.kept(xMonLease,"observation-fingerprint").result.response.fingerprint，不是流名或空串；永久链接完成前不能用另一stdin业务动作覆盖它。V7两次错误参数在导航前被拒绝且未设置流失败，不等于浏览器unknown；有cycle.failures.reply的真实失败仍禁止续批，不能以参数纠正恢复失败流。
 
