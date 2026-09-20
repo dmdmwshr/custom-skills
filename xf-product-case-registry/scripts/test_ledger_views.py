@@ -70,6 +70,7 @@ def add_case(layout, project, result="UNQUALIFIED", archived=False, deep=False):
             work / "content-verification.json",
             {
                 "schemaVersion": "ContentVerificationV1",
+                "projectNo": project,
                 "manifestSha256": digest,
                 "completedAt": NOW,
                 "caseId": state["caseId"],
@@ -124,6 +125,77 @@ def test_legacy_verified_is_not_deep_content_proof(layout):
     assert row["stages"]["bodyVerified"] is False
     assert row["complete"] is False
     assert views.scan_plan(layout)["pending"] == []  # no automatic historical re-download
+
+
+def test_existing_case_body_proof_is_independent_from_local_upload_job(layout):
+    add_case(layout, A, deep=True)
+    work = layout.work_case_dir(A)
+    (work / "upload-state.json").unlink()
+    ws.upsert_case(
+        layout,
+        A,
+        systemObservation={
+            "exists": True,
+            "caseId": "fixture-case",
+            "origin": "https://fixture.example",
+            "snapshotDigest": "sha256:" + "c" * 64,
+            "fileSnapshot": {
+                "fixture-file": {
+                    "sha256": "sha256:" + "b" * 64,
+                    "contentGeneration": 1,
+                    "sizeBytes": "1",
+                }
+            },
+        },
+    )
+    row = views.ledger_view(layout)["cases"][0]
+    assert row["stages"]["systemRegistered"] is True
+    assert row["stages"]["bodyVerified"] is True
+    assert row["stages"]["archived"] is False
+    assert row["complete"] is False
+    assert not (work / "upload-state.json").exists()
+    ws.upsert_case(
+        layout,
+        A,
+        systemObservation={
+            "fileSnapshot": {"fixture-file": {"contentGeneration": 2}},
+        },
+    )
+    assert views.ledger_view(layout)["cases"][0]["stages"]["bodyVerified"] is False
+
+
+def test_body_proof_cannot_be_borrowed_from_another_project(layout):
+    add_case(layout, A, deep=True)
+    path = layout.work_case_dir(A) / "content-verification.json"
+    proof = json.loads(path.read_text(encoding="utf-8"))
+    proof["projectNo"] = B
+    write(path, proof)
+    assert views.ledger_view(layout)["cases"][0]["stages"]["bodyVerified"] is False
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("1项不合格", "UNQUALIFIED"),
+        ("12项不合格", "UNQUALIFIED"),
+        ("0项不合格", None),
+        ("未发现不合格现象", None),
+        ("不合格待复检", None),
+    ],
+)
+def test_counted_onsite_failures_require_positive_exact_display(text, expected):
+    fields = {
+        "检查产品信息": [
+            {
+                "页面记录": {"SFCPFC": "0"},
+                "检查结果": "",
+                "检查结果标记": ["el-icon-error"],
+                "产品质量现场检查情况": text,
+            }
+        ]
+    }
+    result = views.source_qualification(fields, [])
+    assert (result["initialResult"] if result else None) == expected
 
 
 def test_workflow_mutation_does_not_refresh_source_observation(layout):

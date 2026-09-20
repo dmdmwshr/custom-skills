@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import calendar
 import hashlib
+import re
 from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
@@ -110,7 +111,10 @@ def source_qualification(fields: dict[str, Any], stages: list[str]) -> dict[str,
             and p["页面记录"].get("SFCPFC") == "0"
             and p.get("检查结果") in ("", "不合格")
             and p.get("检查结果标记") == ["el-icon-error"]
-            and (p.get("产品质量现场检查情况") == "不合格" or p.get("市场准入检查情况") == "不合格")
+            and any(
+                re.fullmatch(r"(?:[1-9][0-9]*项)?不合格", str(p.get(key, "")))
+                for key in ("产品质量现场检查情况", "市场准入检查情况")
+            )
         ]
         if onsite_failures:
             dates = {
@@ -254,7 +258,8 @@ def _content_verified(work: Path, layout: Any, manifest: dict, state: dict) -> b
     ):
         return False
     if (
-        proof.get("manifestSha256") != state.get("manifestSha256")
+        proof.get("projectNo") != manifest.get("case", {}).get("projectNo")
+        or proof.get("manifestSha256") != state.get("manifestSha256")
         or proof.get("caseId") != state.get("caseId")
         or proof.get("origin") != state.get("origin")
     ):
@@ -297,7 +302,25 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
     if binding.get("exists") is False and binding.get("observedAt"):
         registered = False
     try:
-        body_verified = _content_verified(work, layout, manifest, state) if manifest else False
+        verification_binding = state
+        # Existing formal cases can have body proof without a local upload job.
+        # Use observed server identity; never manufacture a replacement V6 state.
+        if (
+            not state
+            and manifest
+            and registered
+            and binding.get("snapshotDigest")
+            and binding.get("fileSnapshot")
+        ):
+            verification_binding = {
+                "caseId": binding["caseId"],
+                "origin": binding.get("origin"),
+                "manifestSha256": "sha256:"
+                + hashlib.sha256((work / "manifest.json").read_bytes()).hexdigest(),
+            }
+        body_verified = (
+            _content_verified(work, layout, manifest, verification_binding) if manifest else False
+        )
     except (ws.WorkspaceStateError, OSError, KeyError, TypeError):
         body_verified = False
         issues.append("CONTENT_RECEIPT_UNTRUSTED")

@@ -2472,28 +2472,50 @@ def add_detail(
         else None
     )
     screenshot_record = None
+    screenshot_observations = list((existing or {}).get("screenshotObservations") or [])
     if screenshot_source is not None:
         if not screenshot_source.is_file():
             raise SourceIntakeError("详情截图不存在")
         screenshot_sha = _sha256(screenshot_source)
         if existing and existing.get("screenshot"):
-            if existing["screenshot"].get("sha256") != screenshot_sha:
-                state.setdefault("conflicts", []).append(
-                    {
-                        "type": "DETAIL_SCREENSHOT_CONFLICT",
-                        "rwid": record_key,
-                        "projectNo": project_no,
-                    }
-                )
-                state["status"] = "NEEDS_MANUAL_REVIEW"
-                _write_json(capture_path, state)
-                raise SourceIntakeError("同一 RWID 的详情截图发生变化，已转人工处理")
             stored_screenshot = _workspace_relative_path(
                 layout, existing["screenshot"].get("relativePath"), "已登记详情截图"
             )
-            if not stored_screenshot.is_file() or _sha256(stored_screenshot) != screenshot_sha:
+            if not stored_screenshot.is_file() or _sha256(stored_screenshot) != existing[
+                "screenshot"
+            ].get("sha256"):
                 raise SourceIntakeError("已登记详情截图与本地证据无法对账")
             screenshot_record = existing["screenshot"]
+            if screenshot_record["sha256"] != screenshot_sha:
+                # Same structured detail was checked above. Clock, scroll and
+                # session presentation changes do not mean the source case changed.
+                pending = _case_evidence_dir(layout, state, project_no, batch_id)
+                suffix = screenshot_source.suffix.lower() or ".png"
+                target = pending / f"案卷详情_{screenshot_sha.removeprefix('sha256:')[:12]}{suffix}"
+                _copy_immutable(screenshot_source, target)
+                if not any(
+                    item.get("sha256") == screenshot_sha for item in screenshot_observations
+                ):
+                    screenshot_observations.append(
+                        {**_evidence_file(target, Path(layout.root)), "capturedAt": captured}
+                    )
+            remaining_conflicts = []
+            for conflict in state.get("conflicts", []):
+                if (
+                    conflict.get("type") == "DETAIL_SCREENSHOT_CONFLICT"
+                    and conflict.get("rwid") == record_key
+                    and conflict.get("projectNo") == project_no
+                ):
+                    state.setdefault("resolvedConflicts", []).append(
+                        {
+                            **conflict,
+                            "resolvedAt": captured,
+                            "resolution": "IDENTICAL_DETAIL_VALID_PRIOR_SCREENSHOT",
+                        }
+                    )
+                else:
+                    remaining_conflicts.append(conflict)
+            state["conflicts"] = remaining_conflicts
         else:
             pending = _case_evidence_dir(layout, state, project_no, batch_id)
             pending.mkdir(parents=True, exist_ok=True)
@@ -2540,6 +2562,8 @@ def add_detail(
         detail_record["anomalies"] = list(record["anomalies"])
     if screenshot_record:
         detail_record["screenshot"] = screenshot_record
+    if screenshot_observations:
+        detail_record["screenshotObservations"] = screenshot_observations
     if alias_of:
         detail_record["aliasOf"] = alias_of
         record["aliasOf"] = alias_of
