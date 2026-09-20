@@ -1,0 +1,6 @@
+interface:
+  display_name: "项目专家评审意见"
+  short_description: "依据项目最新材料生成三条专家意见，核对专家信息并统一 Word 模板与排版"
+  default_prompt: "使用 $xf-expert-review，查看指定项目的最新需求、专家原始意见和名册，按对应阶段外部模板生成专家评审意见 Word，保留待补的 X 并核验排版。"
+policy:
+  allow_implicit_invocation: true

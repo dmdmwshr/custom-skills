@@ -360,6 +360,17 @@
       },
       "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
     },
+    "xf-expert-review": {
+      "category": "business_specific",
+      "execution_platforms": ["windows"],
+      "managed_wsl": false,
+      "validation": {
+        "windows": "word_rendered_five_documents_verified_20260920",
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "not_supported_by_current_workflow"
+      },
+      "dependencies": "Local external DOCX templates and expert roster; python-docx; Microsoft Word for rendered verification."
+    },
     "xf-product-case-filler": {
       "category": "platform_specific",
       "execution_platforms": [
