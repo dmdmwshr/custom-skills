@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-21.1）
+## 当前目录与恢复边界（步骤 WSL-2026-09-21.2）
 
 用户最新内容标准是“完整一致，不必完全一样”。model_semantic_v1已完成受控发布，并由当前Astra在真实主帖及回复完整采集中接受同正文的链接卡展示差异、完成两流独立入账；扫描通过与投递闭环通过分别记录，实时版本/范围看项目handoff。支持此接口的已接受发布在rawStream前读取contentReview(cycle,stream)，模型对每组before/after按上下文作equivalent/different/uncertain判断并用resolveContentReview提交具体依据；不按关键词、字符比例或批量固定答案自动通过。正常采集不强制点显示原文或跟随外链；实际观察不改写，页面译文不冒充独立原文，必要判断依据进入full_analysis。新readPage发生变化时不能沿“reader未变”分支保留旧reader包。下文“正文不放宽”指含义与完整性，不是逐字匹配；身份、防重复和unknown结果仍独立核验。
 
@@ -37,6 +37,7 @@ MCP预算必须覆盖官方工具包装层，不只固定页面动作：本机�
 - `/etc/x-monitor/browser.json`当前受控选择`hidden_chrome_mcp`，六字段及精确路径按业务仓说明校验：隐藏Chrome `/var/lib/codex-browser-automation/chrome/Default`、UID1000、目录归属、主进程/PID/start_ticks、沙箱、显式代理和官方Playwright扩展/session。允许其他独立Chrome共存；不使用GPT的extensionInstanceId冒充MCP身份。选择器在acquire前冻结，来源仍为 `desktop_chrome_playwright_linux`；后端版本/隐藏绑定仅入运行回执，不改历史账本。
 - 旧 `playwright_linux` 专用配置及 `/var/lib/x-monitor-browser/profile` 保留停用。当前不调用其 launch，不复制 Cookie，不将 Playwright 指向日常 Chrome 目录，不因扩展故障自动恢复备用后端。原生启动器明确拒绝扩展配置和日常目录；两种后端都不新增独立扫描者。
 - 固定后端在acquire前加载，轮内不切换。官方MCP受管子进程只执行服务端固定模板及两个受审reader，调用者不可传任意code/tool/file/profile，普通MCP白名单不扩大。跨层回归应实际贯通driver、adapter、IPC、broker/方法锁和MCP协议，不能只拼各层mock。保留15秒、单次40秒含收尾、回复八导航、20分钟租约与独立双流，不沿用普通MCP的55秒超时。身份、UTC、正文、引用、水位不放宽；未知及仍pending的初始化不能提前finish、重试或放行下一动作，晚到回执也不自动解除unknown。
+- 固定owner已接受的root身份续验入口为`/usr/local/libexec/codex-host/hidden_cua_proof_refresh.py`。每轮launch前，用当前同CUA实际进程PID调用`sudo -n /usr/bin/python3 -B <该路径> --pid <实际PID>`一次，不传`--refresh`、不硬编码旧PID或读取旧内核证明。仅在当前证明仍有效、原官方工具回执hash一致、真实boot/四层进程链/见证FD仍匹配、共享控制known/零在途/无业务guard且原自动化归属正确时，剩余不足4小时才续24小时；其余只回读不写。已过期、PID更换、FD丢失、unknown或原页面脱离不续验、不自动建新连接；转维护按新鲜证据恢复。此入口已完成36项隔离/既有身份/跨层回归及真实更新、随后无需更新的只读回读，不改变业务库、浏览器连接或官方工具权限。`--refresh`只用于一次明确维护验收，不能加到定时流程。root证明不是task_id字典：从旧PID文件抄到相同字符串不代表当前身份新鲜。
 
 ## 三种身份不可互换
 
