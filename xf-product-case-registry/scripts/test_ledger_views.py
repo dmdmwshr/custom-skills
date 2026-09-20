@@ -1,6 +1,7 @@
 import hashlib
 import json
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -210,3 +211,213 @@ def test_bad_archive_reference_cannot_supply_registration_evidence(layout):
     row = views.ledger_view(layout)["cases"][0]
     assert row["stages"]["systemRegistered"] is False
     assert row["issues"] == ["ARCHIVE_REFERENCE_INVALID"]
+
+
+def test_system_snapshot_values_preserve_effective_result_and_initial_year(layout):
+    snapshot = {
+        "inspections": [
+            {
+                "stage": "INITIAL_CHECK",
+                "fields": {"inspectionDate": {"value": "2098-12-10", "source": "MANUAL"}},
+                "products": [
+                    {
+                        "fields": {
+                            "method": {"value": "SAMPLING"},
+                            "result": {"value": "UNQUALIFIED"},
+                            "reinspectionApplied": {"value": "YES"},
+                            "reinspectionResult": {"value": "QUALIFIED"},
+                        }
+                    }
+                ],
+            },
+            {"stage": "RECHECK", "products": [{"fields": {"result": {"value": "UNQUALIFIED"}}}]},
+        ]
+    }
+    classification = views.snapshot_qualification(snapshot)
+    assert classification["initialResult"] == "QUALIFIED"
+    assert classification["statisticsYear"] == 2098
+    ws.upsert_case(
+        layout,
+        A,
+        systemObservation={
+            "exists": True,
+            "caseId": "known-system-case",
+            "snapshotDigest": "sha256:" + "a" * 64,
+            "qualification": classification,
+        },
+    )
+    row = views.ledger_view(layout)["cases"][0]
+    assert row["initialResult"] == "QUALIFIED"
+    assert row["stages"]["systemRegistered"] is True
+    assert row["stages"]["materialsCollected"] is False
+
+
+def test_recent_activity_keeps_archive_and_only_queues_new_document_evidence(layout):
+    add_case(layout, A, result="QUALIFIED", archived=True, deep=True)
+    old_document = {"文书名称": "检查记录", "创建日期": "2098-12-10"}
+    ws.upsert_case(
+        layout,
+        A,
+        source={
+            "rwid": "fixture-rwid",
+            "observationsByRwid": {
+                "fixture-rwid": {
+                    "documentFingerprints": [source.document_fingerprint(old_document)]
+                }
+            },
+        },
+    )
+    archive = ws.load_waterline(layout)["cases"][A]["archive"].copy()
+    work = Path(archive["workspacePath"])
+    original = {p.name: p.read_bytes() for p in work.iterdir() if p.is_file()}
+    filters = {**views.scan_filters(date(2099, 2, 20)), "queryEvidencePath": "synthetic-query.json"}
+    source.begin_capture(
+        layout, filters, origin="https://source.example/", now=NOW, batch_id="new-doc"
+    )
+    row = {
+        "RWID": "fixture-rwid",
+        "单位名称": "测试单位",
+        "文书名称": "抽样复检报告",
+        "创建日期": "2099-02-20",
+    }
+    for round_no in (1, 2):
+        source.add_page(layout, "new-doc", 1, [row], 1, 1, round_no=round_no, observed_at=NOW)
+        source.finalize_capture(layout, "new-doc", now=NOW)
+    detail = {
+        "projectNo": A,
+        "unitName": "测试单位",
+        "initialInspection": {
+            "inspectionDate": "2098-12-10",
+            "products": [{"method": "ONSITE", "result": "UNQUALIFIED"}],
+        },
+    }
+    source.add_detail(layout, "new-doc", "fixture-rwid", detail, captured_at=NOW)
+    case = ws.load_waterline(layout)["cases"][A]
+    assert case["archive"] == archive
+    assert original == {p.name: p.read_bytes() for p in work.iterdir() if p.is_file()}
+    assert not layout.work_case_dir(A).exists()
+    planned = views.scan_plan(layout)["pending"]
+    assert planned[0]["initialResult"] == "UNQUALIFIED"
+    assert planned[0]["changeEvidence"][0]["newDocumentCount"] == 1
+    evidence_path = layout.root / planned[0]["changeEvidence"][0]["evidencePath"]
+    before = evidence_path.read_bytes()
+    source.add_detail(layout, "new-doc", "fixture-rwid", detail, captured_at=NOW)
+    assert evidence_path.read_bytes() == before
+    current = views.ledger_view(layout)
+    assert current["counts"]["cases"] == 1
+    assert current["cases"][0]["complete"] is False
+    assert current["cases"][0]["stages"]["bodyVerified"] is True
+
+
+def test_excel_views_share_one_snapshot_and_keep_business_stages_independent(layout):
+    from openpyxl import load_workbook
+
+    add_case(layout, A, archived=True, deep=True)
+    ws.upsert_case(
+        layout,
+        B,
+        systemObservation={
+            "exists": True,
+            "caseId": "case-only-in-system",
+            "snapshotDigest": "sha256:" + "b" * 64,
+            "qualification": {
+                "initialResult": "UNQUALIFIED",
+                "initialInspectionDate": "2098-11-20",
+                "statisticsYear": 2098,
+                "reinspectionPending": False,
+            },
+        },
+    )
+    before = layout.waterline_json.read_bytes()
+    target = ws.export_waterline_xlsx(layout)
+    assert layout.waterline_json.read_bytes() == before
+    with __import__("contextlib").closing(load_workbook(target)) as book:
+        assert book.sheetnames[:4] == ["所有案卷", "不合格案卷", "待确认案卷", "未完成案卷"]
+        assert book["所有案卷"].max_row == book["不合格案卷"].max_row == 3
+        assert book["待确认案卷"].max_row == 1
+        assert book["未完成案卷"]["A2"].value == B
+        assert book["未完成案卷"]["G2"].value == "未确认"
+        assert book["未完成案卷"]["H2"].value == "是"
+
+
+def native_qualified_fields():
+    return {
+        "检查情况": "已结案[合格]",
+        "预定检查日期": "2098-11-20",
+        "创建日期": "2098-11-21",
+        "检查产品信息": [
+            {
+                "产品质量现场检查情况": "未发现不合格现象",
+                "市场准入检查情况": "未发现不合格现象",
+                "检查结果": "",
+            }
+        ],
+    }
+
+
+def test_native_source_classification_requires_exact_initial_product_evidence():
+    fields = native_qualified_fields()
+    observed = views.source_qualification(fields, ["INITIAL"])
+    assert observed["initialResult"] == "QUALIFIED"
+    assert observed["statisticsYear"] is None  # planned/created dates are not actual inspection
+    assert views.source_qualification(fields, ["INITIAL", "RECHECK"]) is None
+    assert views.source_qualification(fields, []) is None
+    fields["检查产品信息"][0]["产品质量现场检查情况"] = ""
+    assert views.source_qualification(fields, ["INITIAL"]) is None
+
+
+def test_saved_source_classification_is_read_only_until_applied_and_reuses_index(layout):
+    ws.upsert_case(layout, A, source={"projectIdentitySource": "DETAIL"})
+    path = layout.pending_case_dir(A) / "source-evidence.json"
+    write(
+        path,
+        {
+            "projectNo": A,
+            "updatedAt": NOW,
+            "records": {
+                "rwid": {
+                    "projectNo": A,
+                    "fields": native_qualified_fields(),
+                    "projectInspectionStages": ["INITIAL"],
+                },
+            },
+        },
+    )
+    before = layout.waterline_json.read_bytes()
+    assert views.classify_saved_details(layout)[0]["initialResult"] == "QUALIFIED"
+    assert layout.waterline_json.read_bytes() == before
+    assert views.index_history(layout, apply=True)["classificationChanges"][0]["applied"]
+    assert views.classify_saved_details(layout, apply=True) == []
+    row = views.ledger_view(layout)["cases"][0]
+    assert row["initialResult"] == "QUALIFIED"
+    assert row["stages"]["materialsCollected"] is False
+    assert row["stages"]["systemRegistered"] is False
+    assert views.scan_plan(layout)["pending"] == []
+    path.write_text("{}", encoding="utf-8")
+    assert views.ledger_view(layout)["cases"][0]["initialResult"] == "UNKNOWN"
+
+
+def test_saved_source_classification_does_not_discard_ambiguous_or_foreign_evidence(layout):
+    ws.upsert_case(layout, A, source={"projectIdentitySource": "DETAIL"})
+    proof = {
+        "projectNo": A,
+        "records": {
+            "first": {
+                "projectNo": A,
+                "fields": native_qualified_fields(),
+                "projectInspectionStages": ["INITIAL"],
+            },
+            "second": {
+                "projectNo": A,
+                "fields": native_qualified_fields(),
+                "projectInspectionStages": ["RECHECK"],
+            },
+        },
+    }
+    path = layout.pending_case_dir(A) / "source-evidence.json"
+    write(path, proof)
+    assert views.classify_saved_details(layout, apply=True) == []
+    proof["records"].pop("second")
+    proof["projectNo"] = B
+    write(path, proof)
+    assert views.classify_saved_details(layout, apply=True) == []

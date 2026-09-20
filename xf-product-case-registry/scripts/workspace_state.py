@@ -567,12 +567,13 @@ def upsert_case(
         prior_source = deepcopy(record.get("source") or {})
         _deep_merge(record, merged)
         # The window may shrink, but known document membership never shrinks with it.
-        for rwid, observation in (record.get("source", {}).get("observationsByRwid") or {}).items():
-            previous = prior_source.get("observationsByRwid", {}).get(rwid, {})
-            observation["documentFingerprints"] = sorted(
-                set(observation.get("documentFingerprints") or [])
-                | set(previous.get("documentFingerprints") or [])
-            )
+        for kind in ("observationsByRwid", "pendingObservationsByRwid"):
+            for rwid, observation in (record.get("source", {}).get(kind) or {}).items():
+                previous = prior_source.get(kind, {}).get(rwid, {})
+                observation["documentFingerprints"] = sorted(
+                    set(observation.get("documentFingerprints") or [])
+                    | set(previous.get("documentFingerprints") or [])
+                )
         new_state = merged.get("state")
         if isinstance(new_state, str) and new_state:
             for section in ("source", "local", "upload", "nasVerification"):
@@ -752,6 +753,13 @@ def export_waterline_xlsx(layout: BusinessLayout) -> Path:
             cell.font = Font(name="Arial", size=10, bold=cell.column == 1)
             cell.alignment = Alignment(vertical="top", wrap_text=True)
     info["A1"].font = Font(name="Arial", size=16, bold=True, color=navy)
+
+    if __package__:
+        from .ledger_views import add_ledger_sheets
+    else:
+        from ledger_views import add_ledger_sheets
+    add_ledger_sheets(workbook, layout)
+    sheet.sheet_state = "hidden"  # retain old checkpoint projection for compatibility
 
     target = layout.waterline_xlsx
     _validated_workspace_path(

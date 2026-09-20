@@ -2104,28 +2104,57 @@ def add_detail(
             # Preserve the accepted package/archive; capture only the new source observation.
             change_dir = capture_path.parent / "changes" / project_no
             change_dir.mkdir(parents=True, exist_ok=True)
-            change_path = change_dir / f"{record_key}-{_fingerprint(clean_detail)[7:19]}.json"
-            _write_json(
-                change_path,
-                {
-                    "schemaVersion": "SourceChangeV1",
-                    "projectNo": project_no,
-                    "rwid": record_key,
-                    "observedAt": captured,
-                    "fields": clean_detail,
-                },
-            )
+            new_documents = [
+                a
+                for a in record.get("sourceAppearances", [])
+                if document_fingerprint(a)
+                not in set(old_observation.get("documentFingerprints", []))
+            ]
+            change_key = _fingerprint({"fields": clean_detail, "documents": observed_docs})[7:]
+            change_path = change_dir / f"{record_key}-{change_key[:12]}.json"
+            change_evidence = {
+                "schemaVersion": "SourceChangeV1",
+                "projectNo": project_no,
+                "rwid": record_key,
+                "observedAt": captured,
+                "fields": clean_detail,
+                "baseArchivedWorkspace": completed_record.get("archive", {}).get("workspacePath"),
+                "newDocumentAppearances": new_documents,
+                "documentFingerprints": observed_docs,
+                "detailBusinessFingerprint": _business_detail_fingerprint(clean_detail),
+            }
+            if not change_path.exists():
+                _write_json(change_path, change_evidence)
+            else:
+                prior_evidence = _json_input(change_path, "来源差异证据")
+                if {k: v for k, v in prior_evidence.items() if k != "observedAt"} != {
+                    k: v for k, v in change_evidence.items() if k != "observedAt"
+                }:
+                    raise SourceIntakeError("来源差异证据身份或内容变化，拒绝覆盖")
             record["sourceChangePending"] = True
+            change_binding = {
+                "evidencePath": str(change_path.relative_to(layout.root)),
+                "evidenceSha256": _sha256(change_path),
+                "newDocumentCount": len(new_documents),
+            }
+            changes = {
+                "changePending": True,
+                "lastObservedAt": captured,
+                "batchId": batch_id,
+                "pendingObservationsByRwid": {record_key: observation},
+                "changeEvidencePath": change_binding["evidencePath"],
+                "changeEvidenceByFingerprint": {change_key: change_binding},
+            }
+            if isinstance(clean_detail.get("initialInspection"), dict):
+                if __package__:
+                    from .ledger_views import qualification
+                else:
+                    from ledger_views import qualification
+                changes["pendingClassification"] = {**qualification(clean_detail), **change_binding}
             _maybe_waterline(
                 layout,
                 project_no,
-                source={
-                    "changePending": True,
-                    "lastObservedAt": captured,
-                    "batchId": batch_id,
-                    "pendingObservationsByRwid": {record_key: observation},
-                    "changeEvidencePath": str(change_path.relative_to(layout.root)),
-                },
+                source=changes,
             )
         else:
             record["skippedAsUnchanged"] = True
@@ -2361,13 +2390,13 @@ def add_detail(
     ]
     if normalized_dates:
         source_fields["latestDocumentCreatedAt"] = max(normalized_dates)
-    if isinstance(clean_detail.get("initialInspection"), dict):
-        # Structured initial-product evidence only; keyword tags cannot classify a case.
-        if __package__:
-            from .ledger_views import qualification
-        else:
-            from ledger_views import qualification
-        classification = qualification({"initialInspection": clean_detail["initialInspection"]})
+    # Only typed initial results or exact structured, initial-only source checks.
+    if __package__:
+        from .ledger_views import source_qualification
+    else:
+        from ledger_views import source_qualification
+    classification = source_qualification(clean_detail, project_stages)
+    if classification is not None:
         source_fields["classification"] = {
             **classification,
             "evidencePath": str(evidence_path.relative_to(layout.root)),

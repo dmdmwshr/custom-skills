@@ -49,6 +49,10 @@ def reconcile(
             )
             if snapshot:
                 api.validate_case_import_state(snapshot, project)
+                brigade_code = snapshot["case"]["brigade"].get("code")
+                api.require_identity_scope(identity, {"case": {"brigadeCode": brigade_code}})
+                if record.get("brigadeCode") and record["brigadeCode"] != brigade_code:
+                    raise api.RegistryError("服务器与本地来源索引大队不一致")
                 if state and snapshot["case"]["brigade"].get("code") != state["brigadeCode"]:
                     raise api.RegistryError("服务器与本地案卷大队不一致")
                 if state.get("caseId") and state["caseId"] != snapshot["case"]["id"]:
@@ -60,9 +64,19 @@ def reconcile(
                 "observedAt": api.utc_now(),
                 "snapshotDigest": snapshot["snapshotDigest"] if snapshot else None,
             }
+            if snapshot:
+                observation["qualification"] = views.snapshot_qualification(snapshot)
             differences = []
             if bool(record.get("systemObservation", {}).get("exists")) != bool(snapshot):
                 differences.append("SYSTEM_REGISTRATION_OBSERVATION")
+            previous = record.get("systemObservation") or {}
+            if (
+                previous.get("snapshotDigest")
+                and previous["snapshotDigest"] != observation["snapshotDigest"]
+            ):
+                differences.append("SYSTEM_SNAPSHOT_CHANGED")
+            if snapshot and previous.get("qualification") != observation["qualification"]:
+                differences.append("INITIAL_CLASSIFICATION_OBSERVATION")
             if state and state["status"] != "VERIFIED":
                 job = api.get_import_job(
                     client,
@@ -118,13 +132,11 @@ def reconcile(
                     api.write_json(state_path, changed)
                 updates: dict = {"systemObservation": observation}
                 if snapshot:
-                    initial = next(
-                        (i for i in snapshot["inspections"] if i.get("stage") == "INITIAL_CHECK"),
-                        {},
-                    )
-                    updates["systemObservation"]["qualification"] = views.qualification(
-                        {"initialInspection": initial}
-                    )
+                    updates["brigadeCode"] = brigade_code
+                    if not record.get("unitName"):
+                        name = snapshot["case"].get("fields", {}).get("unitName", {}).get("value")
+                        if isinstance(name, str) and name.strip():
+                            updates["unitName"] = name
                 if changed.get("status") == "FINALIZED_UNVERIFIED":
                     updates.update(
                         state="UPLOADED_AWAITING_NAS",
