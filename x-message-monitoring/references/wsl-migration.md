@@ -1,12 +1,12 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-20.6）
+## 当前目录与恢复边界（步骤 WSL-2026-09-20.7）
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
 新鲜状态只读业务仓的 `PROJECT_HANDOFF.md` 与 `LINUX_FIXED_SESSION.md`；已接受的运行版本/指纹以实际current及其manifest为准。本页历史迁移授权不允许再次创建接替者、导入账本或恢复旧后端。源码与离线维护归开发任务，真实浏览器与周期归原owner，cc仅direct_feishu出站且入站silent_drop。
 
-用户已批准官方Playwright CLI接入现有隐藏Chrome，当前接口以业务仓 `HIDDEN_CHROME_CLI.md` 为准，覆盖旧native选择。原owner已实测CLI隐藏绑定、X登录、自有页关闭、release及临时工件清理；正式代码/配置已受控切换，但这些不代替当前CUA61、三人工轮及四真实周期。实时阶段只认唯一handoff，不以技能安装启用后端或heartbeat。用户授权直接接管时，先核对原维护任务已静止，开发可串行完成共享修复/发布，不反复微派发；原owner身份和业务内存仍不迁移或伪造。
+已接受的CLI接口以业务仓 `HIDDEN_CHROME_CLI.md` 为准；用户后续允许重新评估Linux隐藏MCP时，旧CLI选择不成为禁止使用MCP的永久规则。原owner已实测CLI隐藏绑定、X登录、自有页关闭、release及临时工件清理；后端是否实际切换只认唯一handoff及正式配置，不以普通MCP导航成功或技能安装替代采集适配、两DOM reader、当前CUA61、三人工轮和四真实周期。用户授权直接接管时，先核对原维护任务已静止，开发可串行完成共享修复/发布，不反复微派发；原owner身份和业务内存仍不迁移或伪造。
 
 ## 历史：一次 Linux 接替授权（2026-09-12）
 
@@ -87,6 +87,8 @@ CUA 的 Node 全局不保证包含计时器。按该模板显式 `import('node:t
 运行回执一旦发送路径/哈希即保留原文件；发现漏报只读 health 等事实时，写独立更正或收口回执说明字段变化、原哈希与新证据，不覆盖已发送文件。当前状态索引可更新，但不能用索引的新时间刷新原控制/selfTest成功或隐藏失败。
 
 V8已验证的预租约拒绝不能套用正常关闭：即使control在spawn前拒绝，旧guard也可能已经记录业务尝试。先保留真实摘要、检查runtime/control/adapter实际状态，不仅凭process_started=false推断preparation_safe。原分支无法正常收口时保持标记，由已获授权的开发维护者按中枢独立受审入口处理；不能由owner杀守卫或伪造finish。本次无acquire/lease/业务执行且adapter已closed的窄事故已实测“两阶段维护退役→原owner同CUA撤销证明→独立保字节/inode归档”，不推广到业务已执行或unknown。证据须绑定本启动实例/进程/发布/原标记，信号intent后不重试；具体入口与一次性pin仅放项目交接。撤销后的control.state可能被guard明确拒绝，旧已clear状态只能标为pre_retirement_audit；空页证明读实际ownedTabIds数组，不用缺字段默认零。错误抄录的hash保留原件、独立重算并明确关联，不静默改原审计。
+
+真实CLI unknown且账本已failed_closed/finish时，业务锁空闲并不证明浏览器可控。本机另一次已明确批准的维修验证了：精确退役旧broker/CLI执行器及已结束业务的guard，原owner同CUA证明runtime撤销与control拒绝，再保全旧unknown原件/请求日志并独立建立新paused代次；Chrome/桌面/CUA可保持不重启。此事故入口及intent不可重用，旧请求仍unknown，不补造完成回执。新代次正常resume与真实控制另验；收到明确批准后更新当前交接/维护提示词，不继续重复询问同一范围。
 
 正式账本的常规诊断使用原 fixed health；需要扩展只读核验时沿用官方 startup_guard，并复用原 `SQLiteStore(read_only=True)` 已通过静止签名检查的连接，不自行用裸 `mode=ro` 打开 WAL 库。只读连接也可能在退出后留下空 WAL/SHM，不能据此放宽原 health 或把它误报为浏览器故障。已经出现且独立确认无连接、owner idle、heartbeat 暂停及无运行 marker 时，可按明确维护授权使用业务仓已审计 `close_empty_wal_reader.py` 的空 WAL 正常关闭方法；它拒绝非空 WAL/活动锁/待收口，原生 rw/query_only 正常 close 后比对全表摘要并要求原 health 通过，无可写 Store 初始化、显式 checkpoint、手删旁车或业务行写入。此入口不是定时 health 的自动回退或重试，候选维护不切换生产 current。
 
