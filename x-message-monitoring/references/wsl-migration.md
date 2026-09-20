@@ -1,6 +1,8 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-20.10）
+## 当前目录与恢复边界（步骤 WSL-2026-09-20.11）
+
+用户最新内容标准是“完整一致，不必完全一样”。已有源码隔离及真实适配链合成测试验证model_semantic_v1可将同身份正文差异交给模型，接受/拒绝后再冻结，正常采集不强制点显示原文或跟随外链；尚需按项目handoff完成受控发布和真实业务验证。支持此接口的已接受发布在rawStream前读取contentReview(cycle,stream)，模型对每组before/after按上下文作equivalent/different/uncertain判断并用resolveContentReview提交具体依据；不按关键词、字符比例或批量固定答案自动通过。实际观察不改写，页面译文不冒充独立原文，必要判断依据进入full_analysis。新readPage发生变化时不能沿“reader未变”分支保留旧reader包。下文“正文不放宽”指含义与完整性，不是逐字匹配；身份、防重复和unknown结果仍独立核验。
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 

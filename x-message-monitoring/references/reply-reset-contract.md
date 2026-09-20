@@ -9,7 +9,7 @@
 1. 主帖按快速路径完成 Latest 搜索与必要全文核验。回复直接 `page(tab,cycle,"search")`，准确查询 `from:<account> filter:replies`，核验 Latest、登录账号、目标作者，读取至 ID 与 UTC instant 同时命中的水位，不访问 with_replies。
 2. 完整冻结回复候选 ID 序列在同一 CUA 宿主经固定标准输入客户端送 observation-fingerprint，直接使用本轮机器回执的 fingerprint，再调用用户已批准的 permalinkBurst，每调用最多八导航、四十秒；工作窗口三十五秒，剩余不足完整十五秒页面预算即返回未完成。唯一最小主会话区域的完整顶层链中，直接对象与回复必须相邻；对象可为主帖或别人的回复。外层主帖、回复、对象及上文均允许带引用卡，内嵌引用节点不能充当父或子。推荐、重复、身份/时间冲突、父子不相邻或正文不完整仍失败；明确广告也不能替代中间缺失成员。
 3. 作者自己的截断标记只由固定驱动点击该卡唯一展开控件，在同一十五秒预算内重读。身份、UTC、预览前缀及完整性必须一致；外层作者正文与引用文字分别保存，不能取第一段或拼接。
-   已证明唯一直接父子关系后，视口外截断父帖可从其已知永久链接补读自身全文，身份、UTC、标志和前缀严格一致，不选择新父对象或改变原关系。permalinkBurst 内部继续处理 pending_parent，兼容 permalinkBatch 默认两导航；contextBatch 的 pending_status_ids 仅续未完成项，每次仍最多两个永久链接。未完成不能冻结，失败后不重试。
+   已证明唯一直接父子关系后，视口外截断父帖可从其已知永久链接补读自身全文，保持身份、UTC和原关系。正文呈现不同但内容完整时由模型判断语义，不要求译文逐字符匹配预览。permalinkBurst 内部继续处理 pending_parent，兼容 permalinkBatch 默认两导航；contextBatch 的 pending_status_ids 仅续未完成项，每次仍最多两个永久链接。未完成不能冻结，失败后不重试。
 4. 新周期的草稿只在sendKept的payload内生成一次：主帖执行 `nodeRepl.write(await xMonStdin.sendKept("context-plan",{lease:xMonLease,payload:xMonDriver.draftStream(xMonCycle,"main")}))`，回复使用字面量"reply"。不独立draft、不使用临时草稿/响应变量或兼容send。context-plan只读验证、去重，返回XMonitorContextPlanV1；核对实际业务成功后，`applyContextPlan(xMonCycle,xMonStdin.kept(xMonLease,"context-plan").result.response)`原样应用完整response。只读其中本轮新项，历史锚点不补读、不分析。
 5. 新回复的直接对象和当前正文不足时，`contextBatch(tab,cycle,[至多两个新回复ID])` 每个 ID 沿可信父子边补一层，最多三层。足够时 `resolveContext(cycle,id,"sufficient")`；可信不可取得为 unavailable，三层用尽仍不足为 depth_limit。上文为 XReplyContextV2。不要把结构冲突或超时改成语义不足。
 6. 两流均执行 `quoteBatch(tab,cycle,"main"|"reply")` 至 ok=true、done=true；每次只补一个来源，最多涉及来源拥有帖和引用原帖两个永久链接，同一十五秒共享预算，工具上限四十秒。每个当前消息/直接对象/上文只补其直接一层引用，最多五个引用归属项；不追踪引用中的引用。后续补上文若增加引用，冻结前再完成 quoteBatch。同轮相同规范来源复用核验结果，依旧校验当前引用归属、预览、身份和时间。
@@ -24,7 +24,7 @@ XQuoteContextV1 为 `{schema_version:"XQuoteContextV1",quotes:[...]}`。每项�
 
 外链卡片只有可见 From/来自域名标签时，只能证明预览中完整根网址，且剩余作者正文必须与来源全文完全相同、来源自身卡片外链 href 唯一；不推定路径、查询、片段、截短网址或正文续篇，不解析短链目的地或访问外站。多个匹配、不同域名、任意标签、缺少范围证据或其他文字差异仍失败。链接表示证据仅在本轮内存，原帖全文、UTC/身份、引用指纹和冻结格式不改写；原身份、时间顺序与引用归属校验始终保留。
 
-WSL驱动3.0.44已真实验证一种窄布局差异：预览末尾纯文本截短X状态URL，来源唯一作者正文anchor实际href可解释协议、截短显示前缀、完整路径和终端省略标记，且所有非链接正文精确相等。保留来源全文，不能推广成删除任意链接尾巴；普通外链卡只有域名和t.co短链仍不足以证明完整路径。回复出现中文/英文差异时，保留同次位置/有限片段/码点并检查翻译显示来源，不做语义等价放行或把译文当原文。尚未取得对应DOM证明的诊断保持待验证。
+上述严格显示匹配是历史机械快路径，不是模型的能力边界。用户2026-09-20明确允许当前模型对翻译、排版和链接卡表示判断完整语义一致；不要求逐字相等，不把关闭翻译或点击原文作为采集前置。先保留同轮两份实际观察；数值、否定、对象、范围、时限、承诺及引用归属一致即可接受，实质变化或无法确认则保留不一致判断。未知链接目的地址不得说成已验证，但不应仅因未证明一个显示尾部的跳转路径就否定其他完整可信正文。页面正文保持原样，不制造未观察的原文。新流程是否可执行以实际发布接口为准；未安装时完成接入，不套用旧逐字限制反复扫描。
 
 unavailable 项只携带 unavailable_reason=quote_deleted/quote_unavailable；observed_permalink 只有实际可确认时才填写，否则为 null。不伪造正文或时间，不把无法访问的帖子列入采用的证据 ID。引用不可访问时，当前可信正文已足够可以独立判断相关；否则抑制为无法判断。结构错误不能使用 unavailable 降级。
 
