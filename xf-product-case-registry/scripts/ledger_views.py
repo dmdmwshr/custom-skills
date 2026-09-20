@@ -293,6 +293,15 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         and summary.get("created") is True
     )
     binding = record.get("systemObservation") or {}
+    if binding.get("observedAt") and state.get("finalizedAt"):
+        try:
+            if datetime.fromisoformat(binding["observedAt"]) < datetime.fromisoformat(
+                state["finalizedAt"]
+            ):
+                # An earlier absent/old snapshot cannot negate a later server finalize receipt.
+                binding = {}
+        except (ValueError, TypeError):
+            pass  # Unknown observation ordering remains conservative.
     registered = registered or bool(
         state.get("caseId")
         and state.get("status") == "VERIFIED"

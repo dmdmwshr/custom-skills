@@ -173,6 +173,30 @@ def test_body_proof_cannot_be_borrowed_from_another_project(layout):
     assert views.ledger_view(layout)["cases"][0]["stages"]["bodyVerified"] is False
 
 
+def test_older_absence_cannot_override_new_server_registration_receipt(layout):
+    add_case(layout, A, deep=True)
+    path = layout.work_case_dir(A) / "upload-state.json"
+    state = json.loads(path.read_text())
+    state["finalizedAt"] = "2099-02-20T02:00:00Z"
+    write(path, state)
+    ws.upsert_case(
+        layout,
+        A,
+        systemObservation={
+            "exists": False,
+            "observedAt": "2099-02-20T01:59:00Z",
+        },
+    )
+    row = views.ledger_view(layout)["cases"][0]
+    assert row["stages"]["systemRegistered"] is True
+    assert row["stages"]["bodyVerified"] is True
+    assert row["systemChanged"] is False
+    ws.upsert_case(layout, A, systemObservation={"observedAt": "2099-02-20T02:01:00Z"})
+    row = views.ledger_view(layout)["cases"][0]
+    assert row["stages"]["systemRegistered"] is False
+    assert row["stages"]["bodyVerified"] is False
+
+
 def test_source_material_gap_keeps_independent_verified_case_pending(layout):
     add_case(layout, A, archived=True, deep=True)
     ws.upsert_case(layout, A, source={"materialGaps": [{"document": "missing source PDF"}]})

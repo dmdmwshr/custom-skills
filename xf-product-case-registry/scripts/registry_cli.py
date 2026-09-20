@@ -39,7 +39,7 @@ else:
     from upload_transport import bounded_request, upload_request
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
-VERSION = "1.10.3"
+VERSION = "1.10.4"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
