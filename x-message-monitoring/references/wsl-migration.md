@@ -1,6 +1,6 @@
 # WSL 唯一固定会话与运行接口
 
-## 当前目录与恢复边界（步骤 WSL-2026-09-20.8）
+## 当前目录与恢复边界（步骤 WSL-2026-09-20.9）
 
 本机公共布局以 `/etc/codex-dev/paths.json` 为准，X正式源码根当前为 `/srv/workspaces/X-monitor`。原Desktop owner归入既有X-monitor业务项目，实际cwd须与受审Desktop目录精确一致；中枢notifications控制目录是独立出站职责，不因项目归属将owner迁入该目录。修复后用两次普通续接的默认pwd及产品环境证明持久生效，显式workdir或单次启动覆盖不算验收。保留原owner/heartbeat/模型，旧目录链接不重建，私有登记只经中枢受控事务更新。
 
@@ -9,6 +9,8 @@
 当前MCP接口以业务仓 `HIDDEN_CHROME_MCP.md` 为准；`HIDDEN_CHROME_CLI.md`仅为旧后端及共用接口历史。用户选择MCP后不再启动CLI采集轮。已完成固定MCP适配、跨层合成回归和受控安装，不等于实际页面/同CUA/业务通过；原CLI隐藏绑定、登录、单页留存及清理的历史验收不自动迁算MCP。后端和验收范围只认唯一handoff及正式配置，不以普通MCP导航或技能安装替代两个reader、当前CUA61、三人工轮和四真实周期。用户授权直接接管时，先核对原维护任务静止，开发串行完成共享修复/发布；原owner身份和业务内存不迁移或伪造。
 
 官方包装包版本不一定等于MCP initialize的serverInfo版本：本机0.0.80包装调用的固定core实际报告1.63.0，曾被错误包版本比较拒绝。固定运行时应分别校验包身份、协议报告及二进制hash，并加入真实官方程序的断网/隔离profile纯initialize/tools-list测试；只靠模拟服务返回预期版本会漏检。此元数据测试不能发送tools/call或代替实际页面验收。首次connect未返回adapter不证明没有残留worker；须独立回读共享控制，unknown不凭空页/无业务lease猜正常browserReleased。已定位的纯握手事故可按明确维修范围做新的精确退役/保全/修复，旧unknown不改为成功，不套用旧事件或重放连接。
+
+MCP预算必须覆盖官方工具包装层，不只固定页面动作：本机固定core的waitForCompletion在settle=0时仍可等待后台fetch或导航load。已用真实固定版本的包装函数、handler和结果格式在隔离事件夹具复现；只mock返回预期结果会漏检。控制修复需验证实际动作完成后才返回严格绑定回执、普通错误/附加错误/错request/迟到仍拒绝，并区分隔离通过、安装及真实页面验收。缺少当次primitive类型/底层原因的旧journal不能仅凭相似耗时认定同一根因，不能用新修复把旧unknown改known。
 
 ## 历史：一次 Linux 接替授权（2026-09-12）
 
@@ -90,7 +92,7 @@ CUA 的 Node 全局不保证包含计时器。按该模板显式 `import('node:t
 
 V8已验证的预租约拒绝不能套用正常关闭：即使control在spawn前拒绝，旧guard也可能已经记录业务尝试。先保留真实摘要、检查runtime/control/adapter实际状态，不仅凭process_started=false推断preparation_safe。原分支无法正常收口时保持标记，由已获授权的开发维护者按中枢独立受审入口处理；不能由owner杀守卫或伪造finish。本次无acquire/lease/业务执行且adapter已closed的窄事故已实测“两阶段维护退役→原owner同CUA撤销证明→独立保字节/inode归档”，不推广到业务已执行或unknown。证据须绑定本启动实例/进程/发布/原标记，信号intent后不重试；具体入口与一次性pin仅放项目交接。撤销后的control.state可能被guard明确拒绝，旧已clear状态只能标为pre_retirement_audit；空页证明读实际ownedTabIds数组，不用缺字段默认零。错误抄录的hash保留原件、独立重算并明确关联，不静默改原审计。
 
-真实CLI unknown且账本已failed_closed/finish时，业务锁空闲并不证明浏览器可控。本机另一次已明确批准的维修验证了：精确退役旧broker/CLI执行器及已结束业务的guard，原owner同CUA证明runtime撤销与control拒绝，再保全旧unknown原件/请求日志并独立建立新paused代次；Chrome/桌面/CUA可保持不重启。此事故入口及intent不可重用，旧请求仍unknown，不补造完成回执。新代次正常resume与真实控制另验；收到明确批准后更新当前交接/维护提示词，不继续重复询问同一范围。
+真实CLI/MCP unknown且账本已failed_closed/finish时，业务锁空闲并不证明浏览器可控。本机已明确授权的两类维修均实际验证：按各自新鲜精确事件、原失败/finish工具回执、owner idle/空队列及进程起点，退役旧broker/专属执行器和已结束业务guard；原owner同CUA证明runtime撤销与control拒绝后，才保全旧unknown原件/请求日志并独立建立新paused代次，Chrome/桌面/CUA不重启。事故入口和intent不可重用，未知不补造完成，旧页面登记也不恢复为新连接认领权。安装修复后无正文盘点实际窗口/标签归属；CUA自有标签为空不代表整实例空，不能自动补页。新代次正常resume、页面归属及真实控制分别验收；按当前明确维修范围推进，不套用旧事件或反复询问已授权常规步骤。
 
 正式账本的常规诊断使用原 fixed health；需要扩展只读核验时沿用官方 startup_guard，并复用原 `SQLiteStore(read_only=True)` 已通过静止签名检查的连接，不自行用裸 `mode=ro` 打开 WAL 库。只读连接也可能在退出后留下空 WAL/SHM，不能据此放宽原 health 或把它误报为浏览器故障。已经出现且独立确认无连接、owner idle、heartbeat 暂停及无运行 marker 时，可按明确维护授权使用业务仓已审计 `close_empty_wal_reader.py` 的空 WAL 正常关闭方法；它拒绝非空 WAL/活动锁/待收口，原生 rw/query_only 正常 close 后比对全表摘要并要求原 health 通过，无可写 Store 初始化、显式 checkpoint、手删旁车或业务行写入。此入口不是定时 health 的自动回退或重试，候选维护不切换生产 current。
 
