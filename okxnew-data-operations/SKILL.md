@@ -1,6 +1,6 @@
 ---
 name: okxnew-data-operations
-description: 巡检 OKXnew 数据模块的官方公开数据、分层运行水位和证据状态，并通过受控浏览器维护或补采 BLS、BEA、Federal Reserve、Census、DOL 已登记来源。用于数据缺口、监控、重试或定时采集；历史回测和冻结 runner 转交 okxnew-backtest-operations，不用于真实交易、账户或凭据。
+description: 维护 OKXnew 数据采集、仅采集恢复、金十优先宏观来源、现货与永续行情及分层覆盖证据。用于数据缺口、恢复部署、监控、重试或定时采集；按项目来源策略核验金十及明确缺口的补充源，历史回测和冻结 runner 转交 okxnew-backtest-operations，不用于真实交易、账户或交易凭据。
 metadata:
   x-custom-skill: true
   x-source-repo: dmdmwshr/custom-skills
@@ -12,18 +12,18 @@ metadata:
 
 ## 范围
 
-只处理当前 WSL 原生项目 `${CODEX_PROJECTS_ROOT:-$HOME/workspaces}/OKXnew`；正式业务运行根固定使用 `/var/lib/okxnew`，不能回退到 `/mnt/c` 下的旧 Windows 运行库。`/root/.local/share/OKXnew` 仅作为现有预复制、历史资料和开发回执入口，不是正式运行根；正式服务、采集、导入和模拟写入不得使用它。先读取项目 `AGENTS.md`、唯一 `PROJECT_PLAN.md`、`docs/WSL_RUNTIME.md` 和 runtime 配置，核对正式激活状态；尚未验收切换时不启动采集、导入或模拟写入。优先使用项目常驻数据链；BLS 发布日历固定由浏览器读取官方年度页，其他已登记宏观页面按产品状态作为备用采集面。浏览器不替代 OKX K 线后台，也不成为交易授权来源。历史下载、冻结计划和回测 runner 只做状态核验并转交 `$okxnew-backtest-operations`。
+只处理经主机配置解析的 OKXnew 原生项目；正式业务运行根使用项目已验收配置（当前 WSL 为 `/var/lib/okxnew`），不能回退到旧 Windows 或 HOME 运行库，也不重建旧兼容目录。先读取项目 `AGENTS.md`、唯一 `PROJECT_PLAN.md`、`docs/WSL_RUNTIME.md` 和 runtime 配置，核对正式激活状态；尚未验收切换时不启动第二写入者。优先使用项目常驻数据链。金十优先、现货研究或仅采集恢复任务先读 [金十与黄金数据恢复](references/jin10-data-recovery.md)；只有项目已登记的明确缺口才启用对应补充来源，不按因子分类自动开建多套官方采集。浏览器不替代 OKX K 线后台，也不成为交易授权来源。历史回测、冻结计划与既有 runner 改用 `$okxnew-backtest-operations`；独立增量采集不得改写其 job、锁或检查点。
 
-每次巡检前以 `/var/lib/okxnew/runtime-activation.json` 和项目 runtime 配置为唯一激活事实源，并用项目 `scripts/verify_linux_activation.py` 按正式运行根验证。激活回执缺失、`runtime_root` 不等于 `/var/lib/okxnew`、`activated` 不为 `true`，或停写/最终数据证据及哈希门禁未通过时，返回 `migration_not_activated` 并 fail closed；不得启动服务、采集、导入或模拟写入。
+每次巡检前分别核对初始 `runtime-activation.json`、当前 `runtime-release.json`、服务实际发布路径及模式，并用实际部署发布内的 `scripts/verify_linux_activation.py` 验证正式根。初始激活正确不能代替当前绑定一致；源仓脚本通过也不等于部署脚本通过。激活或证据未通过时返回 `migration_not_activated` 并失败关闭；有明确修复授权时保留恢复点、修正本次绑定并验收，不改写原迁移证据。
 
-本副本由 Windows 受管源仓的同名 Skill 迁入项目 `.agents/skills`，供 WSL 本项目独立发现和版本管理；不改写其他项目共用的 Windows Skill。参考资料中的旧 Windows 路径仅作历史示例：Linux 解释器使用项目 `.venv/bin/python`，开发长任务使用项目原生独立回执入口；不得调用 `.exe`、Windows 任务或旧宿主运行数据。浏览器能力不可用时保持 `browser_unavailable`，不以无头脚本替代原浏览器契约。
+唯一源码为 `dmdmwshr/custom-skills`，安装通过当前主机受管发布器；不恢复项目 `.agents/skills` 同名副本，不直接编辑安装目录，也不联动修改 Windows。Linux 使用项目 `.venv/bin/python` 和有资源上限、硬超时及真实退出码的独立 worker。公开 HTTP/API 采集与浏览器契约分别验证；浏览器未授权或未就绪时不自动调用浏览器，不把公开 API 成功冒充浏览器成功。
 
 始终保持以下边界：
 
-- 全部 live 线性 USDT 永续只维护 K 线和必要官方合约元数据；只有当前收藏进入附加市场数据、信息面、策略、计划、授权和模拟执行。
-- 只访问 OKX、BLS、BEA、Federal Reserve、Census、DOL 等计划已登记的官方公开来源；不读取 `.env`、密钥、Cookie、浏览器存储、账户、仓位或委托。
+- 采集范围与策略范围分开，以当前计划为准；新增现货保持独立产品身份、数量与成交量单位，不修改旧永续数据或冻结集合。`data_only` 下策略、派发、通知均不启用，收藏身份不代表策略授权。
+- 只访问计划已登记的金十、OKX 或明确缺口的补充来源；不读取 `.env`、交易密钥、Cookie、浏览器存储、账户、仓位或委托。已获授权的非交易采集凭据仅由既有受管服务载入，不输出凭据或带秘密 URL。
 - 不抓取 CME 经济日历，不采集 OPEC 报告正文，不调用正式盘或真实下单路径。
-- 自动巡检不修改源码、`PROJECT_PLAN.md`、systemd 单元、定时器或服务，不重启进程。需要工程修复时只报告证据和建议。
+- 自动只读巡检不修改源码、计划或服务。用户明确要求修复或部署时，可按现有受控流程完成范围内修改与验证；仅改本项目，不扩大到共享 cc/X、Windows、正式盘或外发。
 - 不把空响应、翻译后的页面文本或第三方镜像写成成功数据。
 
 ## 分层健康回读
@@ -49,9 +49,9 @@ metadata:
 
 ## 工作流
 
-1. 读取 `http://127.0.0.1:8100/api/v1/health` 和 `/api/v1/data/monitoring`，并按上面的 `favorites`、`all-market`、`strategy`、`simulation`、`history` 分层记录服务状态、七周期 K 线应有缺口、收藏专属产品、宏观日历/实际值水位、模拟回放和历史 runner 证据。每层同时记录四态证据状态、观察时间、覆盖起止和失败原因。
-2. 若 Web/API 不可用，标记 `service_unavailable` 并停止写入；不要自行启动或重启服务。
-3. BLS 日历只在每日刷新窗口、状态失败/陈旧或官方已发布下一年度日程时使用浏览器；不再尝试 BLS 日历 HTTP 直连。其他官方宏观产品最近成功仍在 24 小时内且状态健康时不重复启用浏览器，只有失败、陈旧或进入刷新窗口才读取并执行 [官方宏观浏览器采集](references/official-calendar-browser-fallback.md)。每个来源、日历与实际值子产品独立收口，一个子产品失败不得阻断其他来源。
+1. 读取项目当前接口（现为 `/api/v1/health`、`/api/v1/data/monitoring/v02`、`/api/v1/data/kline-inventory`）；黄金数据读取 `/api/v1/data/gold-research`。按上面五层分别记录观察时间、真实覆盖、缺口和原因。仅采集模式的策略/模拟执行标为明确禁用，不因旧候选存在判作本次运行。HTTP 200、旧盘点及“运行态尚未初始化”投影均不是当前采集成功。
+2. 若 Web/API 不可用，标记 `service_unavailable`。只读巡检不重启；已授权修复时先核对唯一写者、发布绑定和恢复点，再执行本次受控修复。
+3. 先按项目优先来源逐项核验；金十暂时超时、限流不等于缺失。下面官方浏览器步骤只适用于已明确登记为补充源且用户授权浏览器的产品；需要时读取 [官方宏观浏览器采集](references/official-calendar-browser-fallback.md)。BLS 年度页按原浏览器契约维护；其他产品近期健康则不重复采集，一个子产品失败不阻断其他来源。
 4. 浏览器捕获必须经项目 `okxnew.data.browser_capture` 从 UTF-8 标准输入校验并导入。导入器按路由固定请求方法、官方 URL、HTTP 200、媒体类型、带时区采集时间、正文标记、大小和 SHA-256，再复用来源专用解析器和 SQLite 只追加版本存储。
 5. BLS 官方年度页是当前发布日历的浏览器事实源：既有事件按统一类型、规范报告期和发布时间锚定稳定身份，改期只追加同一身份的新版本；只有明确晚于现有覆盖尾部的新年度事件可创建新身份，历史未匹配、一对多或歧义必须失败关闭。BLS 就业发布页仍只登记正文哈希并交叉核对。BEA、联储、Census、DOL 的网页/JSON 路由可在校验后写入各自日历产品；联储政策声明和 DOL 全国周度 XML 可写入实际值产品。
 6. BEA 与 Census 的公开发布网页只能作为发布证据，不能从标题、摘要或翻译后 DOM 推断完整实际值；两者结构化实际值由项目已配置的官方 API 短任务维护，本技能不读取或管理凭据。没有明确解析器与导入路由时不得自行扩展。
@@ -74,7 +74,7 @@ metadata:
 - `import_rejected`：路由、来源、状态、类型、哈希、时区或正文结构校验失败；不写数据库。
 - `identity_anchor_rejected`：BLS 年度页事件无法唯一锚定既有稳定身份，且不是明确的未来覆盖尾部；拒绝创建重复或猜测身份。
 - `corroboration_mismatch`：BLS 就业页与当前规范事件不一致；只保留证据哈希，不晋升、不覆盖。
-- `service_unavailable`：OKXnew Web/API 不可访问；只报告，不擅自重启。
+- `service_unavailable`：OKXnew Web/API 不可访问；只读任务只报告，明确修复任务按恢复点与唯一写者流程继续。
 - `missing`：计划需要的数据或证据当前不存在；不把零行、等待或旧快照当成成功。
 - `evidence_blocked`：身份、报告期、单位、覆盖、哈希、修订或时间语义存在不可安全消除的歧义；失败关闭。
 
