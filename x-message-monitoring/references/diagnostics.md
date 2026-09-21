@@ -9,3 +9,4 @@ heartbeat_collection_time_invalid 核对真实 preflight、collectedAt 和时钟
 登记中断的本地pending不等于外发unknown；通过已安装入口加锁只读回查实际grant和控制状态，再决定复用或生成新鲜证明。不要手动删除全局变量来重试。诊断保留终端异常码或受管校验点，不从traceback文件名提取错误、也不把通用身份拒绝直接猜成时钟或登录故障。
 真正 unknown 保留原请求/在途/守卫审计，停止依赖动作；已授权维修继续独立源码工作。恢复须基于新证据，不复制旧 grant、clear unknown 或套用已消费窗口。
 新增诊断需真实 driver/adapter/共享接口贯通测试；纯 mock 或离线成功不代表实机通过。原 owner 的有界新诊断不计业务周期，正常收尾后再做针对修复的一次真实验证。
+diagnoseQuote 专用于含直接引用的来源，不是普通回复/祖先链读取入口。普通回复的 quote_container_missing 不能证明上下文不可读；来源作者应与独立诊断cycle.account相符，但不得因此改业务账号。permalink_target_status_not_unique 可表示零个或多个有效身份，若回执未提供匹配数则不得猜测；引用预览作者与外层作者分开报告。诊断失败后 guard 停止，未执行的第二目标不算已观察；新诊断须有明确范围，不能为绕过停止标记盲重读。
