@@ -7,7 +7,7 @@
 
 1. 新进程按 [身份与加载](wsl-migration.md) 建立自己的证明；版本/进程未变则复用静态模块。当前 CUA 首次或客户端改变时 selfTest，61 项 exact_match=true；独立 Node 通过不替代此项。
 2. workflow 取得 health、唯一 heartbeat-acquire，保留原 lease 和账号/水位；正式定时用 scheduled，授权人工用 manual_validation。publish-pending 预检通过后才生成草稿，再 sync-receipts。
-3. adapter.connect/reuseTab 接回原物理 session/Page，driver 必须使用 adapter.driver，不是底层 runtime.driver。Google 资料与 X 登录不同：预期 X 登录 dmdmws，被监控作者来自本轮账号。
+3. adapter.connect/reuseTab 接回原物理 session/Page，driver 必须使用 adapter.driver，不是底层 runtime.driver。Google 资料、X 登录、被监控作者是三个字段；预期 X 登录读取项目部署绑定，被监控作者来自本轮账号。电脑环境已知正常重建时先用当地受管恢复入口重新建立并验证页面归属；不拿旧句柄当当前页面。
 4. 主帖 Latest 查询 from:<account> -filter:replies -filter:retweets。page 按 done 续未完成页及全文；context-plan 后仅新项补 quoteBatch。
 5. 回复 Latest 查询 from:<account> filter:replies，不访问 with_replies。完整搜索序列经 observation-fingerprint 后，permalinkBurst 使用同次机器指纹续未完成批次；直接父子关系必须可信。context-plan 后按需要补上文（至多三层）与直接引用（每项至多五个来源）。
 6. rawStream 前按 [判断契约](reply-reset-contract.md) 处理 contentReview；模型提交 equivalent/different/uncertain 及具体依据。不同/不确定不能冒充同义，也不统一自动放行。

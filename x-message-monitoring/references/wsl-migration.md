@@ -1,20 +1,21 @@
 # WSL 身份、受管加载与发布
 
-当前运行状态仅看业务仓 PROJECT_HANDOFF.md；本文不保存易过期的 PID/session/版本快照。源码 /srv/workspaces/X-monitor，运行 /srv/x-monitor/current，数据 /var/lib/x-monitor；公共路径按 /etc/codex-dev/paths.json 核对。
-唯一 owner 保持原任务 01a08fbf-89c7-7f81-bd74-d81ce4f2a60c、Luna/max、原两小时 x；中枢只 direct_feishu 出站、入站 silent_drop。
+当前运行状态和固定任务绑定看业务仓 PROJECT_HANDOFF.md；源码、发布、数据和管理入口读取当地项目部署说明。本文不保存用户名、UID、安装路径、任务ID或易过期的 PID/session/版本快照。中枢只沿已绑定出口投递，不从入站另建扫描者。
+
+Skill负责业务流程，项目负责业务实现，电脑环境负责浏览器及权限/服务生命周期。普通运行使用登记的非root用户；系统安装和必要特权操作通过环境受管入口完成。不同用户各自部署资料与凭据，配置可迁移不等于登录态可复制或另一用户已验收。
 
 ## 正常进程重建
 
-已接受的 hidden_cua_proof_ensure.py 是 root 受管入口。使用实际当前 CUA PID；已有证明沿 refresh 核验活进程/原官方回执/见证 FD，剩余不足四小时才续期。不要在普通轮带 --refresh。
-新 PID 没有证明时，原任务运行入口 --print-helper 提供的固定元数据代码一次，保留非秘密见证 FD，取得本次官方 cua_repl/js turn/call 回执；受管入口核验原任务、当前 boot/进程链/FD、无旧执行者/业务守卫/在途/unknown 后登记。不得复制旧 PID 文件、修改 task_id 环境或读取失败正文。保留 worker 时必须证明最后一次 park 与真实 session 对应且之后无活动。
+使用当地已接受的身份接续入口，实际当前 PID由官方运行环境读取，不硬编码。已有证明重新核验活进程和官方回执；正常续期由环境代码判断，不每轮人工刷新。
+新进程由原任务执行环境入口提供的固定元数据代码，取得新鲜官方工具回执；环境层核验任务、当前boot/进程及必要见证后登记。当前已验证官方 node_repl/js，也保留旧 cua_repl/js 回执兼容；不能从工具名称相似推定进程链相同。不得复制旧证明、修改 task_id 环境或读取失败正文。保留worker须证明已知停泊且之后无活动。
 已过期、身份漂移、结果未知或旧执行者仍活动不能当普通重建；先只读核对实际状态。候选未安装时完成受管部署，不调用不存在的 API。具体参数与首次启用状态见项目当前说明。
 
 ## 加载与页面
 
-只加载 current realpath 对应的已接受模块。公开 Node fs/vm、child_process、timers、Buffer/TextDecoder、URL、performance 按业务仓 LINUX_STARTUP_GUARD.md 注入；launch 返回立即保存，不能先后处理失败而丢失守卫。
+只加载部署入口指向的已接受模块。加载代码由项目当前 LINUX_STARTUP_GUARD.md 提供；遵循实际官方工具的模块能力，不为旧脚本切换或取消工具限制。launch 返回立即保存，不能先后处理失败而丢失守卫。
 固定 driver IIFE 返回对象，stdin/control IIFE 返回 factory；版本在 factory 核对。配对守卫连续覆盖准备到正常关闭，Python 正式入口另持同一共享锁，不自动删 marker。
 hidden_chrome_mcp_adapter.js 直接导出 connect；连接后使用 adapter.driver。一个物理 MCP 连接/真实工作页，逻辑客户端逐轮更换，reuseTab 不按标题或 URL 认领未知页，park 不执行物理关闭。
-页面丢失、浏览器重启、连接未知不自动新页或重连；真正人工接管先排空断开，普通查看不等于接管。绿色 Playwright·Hidden 是组名，不是额外页。
+正常重启由电脑环境负责已知停泊退役、服务就绪和新句柄核验；不是重新走历史维修。页面归属不明、仍在途或真正unknown不自动新页/重连；真正人工接管先排空断开，普通查看不等于接管。标签组名称不是额外页面。
 元数据通过、MCP 控制、X 登录和业务成功分别记录。正式仅 hidden_chrome_mcp，旧 CLI/native/日常扩展/Python/Windows 启动路径均不调用。
 
 ## 开发与发布
