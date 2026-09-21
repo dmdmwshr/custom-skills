@@ -13,7 +13,7 @@
 4. 主帖 Latest 查询 from:<account> -filter:replies -filter:retweets。page 按 done 续未完成页及全文；context-plan 后仅新项补 quoteBatch。
 5. 回复 Latest 查询 from:<account> filter:replies，不访问 with_replies。完整搜索序列经 observation-fingerprint 后，permalinkBurst 使用同次机器指纹续未完成批次；直接父子关系必须可信。context-plan 后按需要补上文（至多三层）。resolveContext(sufficient)只结算回复上文，不代替引用核验；自身、直接父文及已采用上文的直接引用都须经 quoteBatch 补齐（每项至多五个来源）。
 6. 两流 collect/rawStream 前分别确认 quoteBatch 返回 done=true；没有待引用项时它是无浏览器读取的纯完成检查。之后按 [判断契约](reply-reset-contract.md) 处理 contentReview；模型提交 equivalent/different/uncertain 及具体依据。不同/不确定不能冒充同义，也不统一自动放行。引用未补齐的本地拒绝不能算模型额度漏判。
-7. 各流分别 collect-stream → analysis-plan → 模型仅分析 analysis_items → scan-analysis → publish-pending。五项正文输入全用 sendKept；draft/raw 各只生成一次，后续直接使用 kept 原 payload。模型不得重建 collectedAt、水位或哈希。
+7. 各流分别 collect-stream → analysis-plan → 模型仅分析 analysis_items → scan-analysis → publish-pending。五项正文输入全用 sendKept；成功生成的 draft/raw 保留并只提交一次，发送前本地缺上下文可补齐后重新生成，后续直接使用 kept 原 payload。模型不得重建 collectedAt、水位或哈希。缺上下文待定项由代码保留水位，下一正常周期重新采集；不得把 deferred_status_count 大于零称为完整历史初始化完成。
 8. heartbeat-finish 完成两阶段终态，health 核对无锁/finish_pending=0；park、clearKept、control.clear、guard.close 由编排依据实际回执执行，清空动态事实但保留静态见证 FD。正常轮不物理断连、不开新页。
 
 workflow 尚未安装或接口不符时按当前 handoff 维护接入，不自己写替代 runner 或把候选当正式入口。

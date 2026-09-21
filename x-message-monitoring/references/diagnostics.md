@@ -1,6 +1,10 @@
 # 按需诊断
 
 先定位实际失败层：模型/字段、采集结构、浏览器控制、进程身份、账本或投递。不要因同一拒绝码不断加补丁或重跑整轮；先检查是否把显示差异错误当成内容变化。
+
+先看已安装 workflow.state().last.recovery、实际提交标记及 adapter 回执，再决定续行：未提交的字段/顺序错误可就地更正；已返回的目标提取失败由 driver 在同页有限刷新重读；仍无法解析的引用记 unresolved 并交给模型评估其余证据，不停止无关消息。not_unique 未提供数量时不猜零个或多个，也不选第一条冒充唯一身份。控制/外发 unknown 只对账，不能以通用 retry 重放。超过单次恢复预算时留待下一正常周期，不反复启动整轮。
+
+quote_context_incomplete 在 collect 发送前发生时，继续 quoteBatch 至 done、复核上下文后再 collect；不是重新发送请求。给用户报告时说明已尝试的恢复、剩余缺口和后续复评，而非仅粘贴拒绝码。诊断和模型结论分别留证。
 正文差异使用同轮 contentReview 完整上下文由模型判断。需要代码修复时保留同次比较的差异位置、有限片段/码点和身份元数据；不补读失败页或恢复已清正文。
 raw_html_rejected 可对同次 kept payload 调用 diagnosePayloadText 一次；它只读当前内存，不重新 draft/raw、发送或读 DOM。其他 probe/readiness/expander 证据直接保留本次回执，不能凭摘要遗漏再执行。
 heartbeat_collection_time_invalid 核对真实 preflight、collectedAt 和时钟；elapsed_ms 为负及 WSL Time jumped backwards 是真实时钟线索。已安装代码仅同请求最多一秒 monotonic 等待 UTC 追上，不能改时间、重投或扩大预算。
