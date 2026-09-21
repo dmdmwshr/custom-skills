@@ -5,7 +5,7 @@
 
 ## 顺序
 
-1. 新进程按 [身份与加载](wsl-migration.md) 建立自己的证明；版本/进程未变则复用静态模块。当前 CUA 首次或客户端改变时 selfTest，61 项 exact_match=true；独立 Node 通过不替代此项。
+1. 先按当地部署说明确认环境ready，再按 [身份与加载](wsl-migration.md) 建立当前进程证明；健康连接不重启，版本/进程未变则复用静态模块。当前 CUA 首次或客户端改变时 selfTest，61 项 exact_match=true；独立 Node 通过不替代此项。
 2. workflow 取得 health、唯一 heartbeat-acquire，保留原 lease 和账号/水位；正式定时用 scheduled，授权人工用 manual_validation。publish-pending 预检通过后才生成草稿，再 sync-receipts。
 3. adapter.connect/reuseTab 接回原物理 session/Page，driver 必须使用 adapter.driver，不是底层 runtime.driver。Google 资料、X 登录、被监控作者是三个字段；预期 X 登录读取项目部署绑定，被监控作者来自本轮账号。电脑环境已知正常重建时先用当地受管恢复入口重新建立并验证页面归属；不拿旧句柄当当前页面。
 4. 主帖 Latest 查询 from:<account> -filter:replies -filter:retweets。page 按 done 续未完成页及全文；context-plan 后仅新项补 quoteBatch。
@@ -20,6 +20,6 @@ workflow 尚未安装或接口不符时按当前 handoff 维护接入，不自�
 
 字段构造使用 [无 I/O helper](../scripts/analysis_fields.cjs) 的 aiRelevance/validateAnalyses，避免把 ai_related 写为 related。语义由模型决定；纯媒体记 media_only_not_inspected，不猜图像内容。
 主帖/回复独立，单流失败不回滚成功流。未终结流经 stream-failure 收口；已被 collect/scan 终结的不重复登记。后续投递/清理问题用 cycle-failure 保留首错；共同身份/路由失败停止依赖动作。
-sendKept 返回 ok 只证明传输，实际业务结果读取本次 kept。outcome_unknown=true 不重投、不补读、不清未知。代码在发送前拒绝的纯字段错误可就地更正，不重复已经完成的动作。
+sendKept 返回 ok 只证明传输，实际业务结果读取本次 kept。outcome_unknown=true 不重投、不补读、不清未知。代码在发送前拒绝的纯字段或本地清理参数错误，可凭仍有效的原对象与真实回执就地更正；不把所有异常升级为unknown，不重复已完成的浏览器或业务动作。维护preparationOnly的clear/close同样需要实际收口证据，不能无参数调用或手填成功。
 只有 finish 明确 heartbeat_complete=true、outcome=completed、notification_decision=DONT_NOTIFY 才静默；partial_failed 或缺失终态简短报告实际失败。平台存在不冒充用户已读。
 普通轮只保留最终周期 ID、两流结果、投递证据等级和未解决码，不携带正文/lease/长诊断到下一轮。
