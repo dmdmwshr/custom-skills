@@ -6,4 +6,4 @@
 - heartbeat-finish 为完成依据。XMonitorHeartbeatFinalizeV2 双流及本轮投递确定才 completed；部分成功 partial_failed，其余 failed_closed。独立已提交流不回滚。
 - 故障按首次、实质变化、持续满24小时、完整恢复去重；每个失败周期仍在原任务报告。
 - 业务保留每四个完整零可推送 scheduled 周期的唯一健康摘要；manual_validation 不计。失败/部分/本轮未知/新可推送会打断统计。这是产品功能，不是每次维修必须再等四轮的门槛。
-- 正常关闭释放本轮锁和事实，保留受管 MCP 页面。最终返回 DONT_NOTIFY 需机器 finish 明确允许；人工验收报告实际结果与证据等级。
+- 正常关闭释放本轮锁和事实，保留受管 Playwright 页面。最终返回 DONT_NOTIFY 需机器 finish 明确允许；人工验收报告实际结果与证据等级。
