@@ -13,10 +13,16 @@
 4. 主帖 Latest 查询 from:<account> -filter:replies -filter:retweets。page 按 done 续未完成页及全文；context-plan 后仅新项补 quoteBatch。
 5. 回复 Latest 查询 from:<account> filter:replies，不访问 with_replies。完整搜索序列经 observation-fingerprint 后，permalinkBurst 使用同次机器指纹续未完成批次；直接父子关系必须可信。context-plan 后按需要补上文（至多三层）。resolveContext(sufficient)只结算回复上文，不代替引用核验；自身、直接父文及已采用上文的直接引用都须经 quoteBatch 补齐（每项至多五个来源）。
 6. 两流 collect/rawStream 前分别确认 quoteBatch 返回 done=true；没有待引用项时它是无浏览器读取的纯完成检查。之后按 [判断契约](reply-reset-contract.md) 处理 contentReview；模型提交 equivalent/different/uncertain 及具体依据。不同/不确定不能冒充同义，也不统一自动放行。引用未补齐的本地拒绝不能算模型额度漏判。
-7. 各流分别 collect-stream → analysis-plan → 模型仅分析 analysis_items → scan-analysis → publish-pending。五项正文输入全用 sendKept；成功生成的 draft/raw 保留并只提交一次，发送前本地缺上下文可补齐后重新生成，后续直接使用 kept 原 payload。模型不得重建 collectedAt、水位或哈希。缺上下文待定项由代码保留水位，下一正常周期重新采集；不得把 deferred_status_count 大于零称为完整历史初始化完成。
+7. 已安装历史关联迁移时，两流分别 collect → archive，之后统一 correlation-plan → 分页 history-query → 模型 correlation-commit；函数及信封字段读项目 HISTORY_CORRELATION.md。完整观察持久化后可以推进采集水位，内容待定单独复评，不反复扫描已完整区间。未启用迁移的旧部署才用 analysis-plan/scan-analysis，不能两条路径各发一次。sendKept 保留机器原载荷，模型不得重建 collectedAt、水位或哈希；未提交观察不能从日志恢复。
 8. heartbeat-finish 完成两阶段终态，health 核对无锁/finish_pending=0；park、clearKept、control.clear、guard.close 由编排依据实际回执执行，清空动态事实并释放进程租约。正常轮不物理断连、不开新页。
 
 workflow 尚未安装或接口不符时按当前 handoff 维护接入，不自己写替代 runner 或把候选当正式入口。
+
+## 历史补缺与事件关联
+
+普通关联窗口由项目配置；当前项目采用前后七天，不限制停机补采。historyWindow(initial) 固定首次回看起止，不重置水位；incremental 沿原水位分段保存，所有双流范围完整才 historySettle。按 completed_streams 只续未完成流；已有完整观察可以带原指纹/观察时间复用覆盖，不能冒充新鲜页面。网站搜索日期条件可能不可靠，以实际发布时间边界验证，不能将数量上限或返回空页自动当作完成。
+
+计划固定证据版本与指纹，分页全部读完后提交，继续至剩余项完成或有依据地 deferred。回复/引用及未结束事件可跨普通窗口；无新证据/规则变化复用已有判断。先按语义区分事件，再分别判断相关性、时间确定性、可信度，不能靠同词或时间接近拼成重置承诺。旧通知映射事件基线，不因新模板重发；实质变更才增加通知版本。已证明过期的遗漏通过 history-summary 合并；日期未知不是已过期。无合格遗漏时不制造验收消息。
 
 ## 分析与失败
 

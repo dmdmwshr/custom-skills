@@ -1,6 +1,6 @@
 # 两流模型判断与额度契约
 
-模型只处理同轮机器计划中的新项、待定复评项及待复核观察，不从历史正文恢复事实。执行顺序见 [运行步骤](fast-path-runbook.md)，投递见 [回执与完成](heartbeat-and-delivery.md)。
+模型只处理机器计划固定版本的新项、相关历史及待复评证据。经完整性校验的冻结记录可作历史证据，标明原观察时间，不冒充本轮新鲜页面；日志、聊天摘要及旧发送请求不作事实来源。执行顺序见 [运行步骤](fast-path-runbook.md)，投递见 [回执与完成](heartbeat-and-delivery.md)。
 
 ## 事实与内容复核
 
@@ -12,12 +12,14 @@ XReplyContextV2、XQuoteContextV1 与 FrozenXMessageV5 的原事实指纹/历史
 
 ## 模型提交
 
+项目启用历史关联后，以 HISTORY_CORRELATION.md 的事件 assessment/timing 契约为准：完整正文长期保留，普通关联按发布时间窗口，明确关系和未结束事件可跨窗；身份冲突隔离证据，真正编辑追加观察版本，不覆盖旧判断。一个帖子的时间词可属于发布、社区活动或玩笑，不因另一个帖提过 reset 就关联。首次有根据的低可信度线索可通知；仅措辞/重复来源不更新。时间含上午/下午但缺时区时仍不得制造 UTC/北京时间。以下 ResetAnalysisV3 是未迁移调用方的兼容协议，不另起逐帖通知。
+
 先判断话题相关性，再判断具体承诺与时间，不能因日期指代模糊就直接抑制整条消息。结合可信直接对话确定是在回应 Codex 额度重置请求、但“周二”等表达可能指发布而非重置时，可提交 related=true、no_time、low/medium，具体说明歧义；不要凭作者身份把其他产品重置强行归为 Codex。可信度针对解读，并非账户已重置概率，不能伪造百分比。不同产品或完全缺乏额度话题证据仍可无关/待定。
 
 引用 resolution=unresolved 表示采集缺口，不是帖子删除，也不是可采用证据。先检查 warning 与已有可信正文；独立正文足够则继续判断，不足则 related=null、unassessed_reason=quote_read_incomplete。禁止将未核验引用 ID 写入 evidence_status_ids。此扩展只在项目已安装支持版本后使用。
 
 每条新项需要 chinese_translation、chinese_summary、full_analysis、reset_analysis。回复另需 ai_relevance；通知候选需要 reply_parent_chinese_translation。采用更早上文/引用的通知候选需要 reply_context_chinese_translations / quote_context_chinese_translations，格式为 {已核验状态ID:中文翻译}。
-模型依据只来自本轮可信上下文，不能覆盖事实或发明媒体内容。
+模型依据来自本轮可信上下文或计划核验过的历史版本，不能覆盖事实或发明媒体内容。
 
 ResetAnalysisV3 公共字段：
 - schema_version="ResetAnalysisV3"
@@ -42,6 +44,6 @@ AiRelevanceV1 只用于回复，键是 ai_related，**不是 related**：
 
 ## 处理与通知
 
-沿 codex_reset_only_v2（原 codex_reset_all_streams_quote_context_v1 数据兼容）分别入账。新版中，缺上下文或引用读取不全的待定项不写永久抑制记录，所属流水位保留，下一正常周期重新采集该区间；其他已处理消息继续去重，独立消息可以通知。纯媒体未读取仍保持明确披露。旧冻结记录不自动改写；用户明确要求干净初始化时，经备份由项目维护入口清除执行历史和去重，再按指定水位重新采集，不从旧正文重放。
+已迁移的完整观察独立归档，分析待定进入复评队列，采集去重与事件通知去重分离；历史读取失败仅影响依赖它的判断，其他充分证据继续处理。旧 codex_reset_only_v2 兼容协议仍保留原处理语义。纯媒体未读取明确披露。旧冻结记录不改写；普通关联升级不清历史、不重置水位、不重放旧通知。只有用户另外明确要求全新初始化，才走对应备份维护流程。
 通知分列当前消息、直接对象、采用上文/引用的页面正文、翻译、北京时间、规范链接与归属。无时间写明“未提供可推算时间”；公开帖子不能证明本账户已重置。
 语义弹性不覆盖身份、UTC、完整性、防重发或真实未知。真实失败按原流/周期终态收口，不恢复已清事实。
