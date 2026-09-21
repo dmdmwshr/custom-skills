@@ -27,6 +27,7 @@ workflow 尚未安装或接口不符时按当前 handoff 维护接入，不自�
 ## 分析与失败
 
 字段构造使用 [无 I/O helper](../scripts/analysis_fields.cjs) 的 aiRelevance/validateAnalyses，避免把 ai_related 写为 related。语义由模型决定；纯媒体记 media_only_not_inspected，不猜图像内容。
+可选祖先或引用所属页的已知只读超时，已验证项目版本会保留局部unavailable/unresolved，继续归档已核验根帖和直接父帖。缺口只限制依赖它的判断，不宣称帖子已删除；真正控制unknown仍由适配器单独锁存。修复前遇到整批失败不能手清driver状态；正常收尾、安装修复后重新观察尚未提交段，已经持久的区段按原指纹复用。
 主帖/回复独立，单流失败不回滚成功流。未终结流经 stream-failure 收口；已被 collect/scan 终结的不重复登记。后续投递/清理问题用 cycle-failure 保留首错；共同身份/路由失败停止依赖动作。
 sendKept 返回 ok 只证明传输，实际业务结果读取本次 kept。outcome_unknown=true 不重投、不补读、不清未知。代码在发送前拒绝的纯字段或本地清理参数错误，可凭仍有效的原对象与真实回执就地更正；不把所有异常升级为unknown，不重复已完成的浏览器或业务动作。维护preparationOnly的clear/close同样需要实际收口证据，不能无参数调用或手填成功。
 只有 finish 明确 heartbeat_complete=true、outcome=completed、notification_decision=DONT_NOTIFY 才静默；partial_failed 或缺失终态简短报告实际失败。平台存在不冒充用户已读。
