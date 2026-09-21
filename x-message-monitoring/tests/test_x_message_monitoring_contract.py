@@ -74,31 +74,22 @@ print('helper -> actual AiRelevanceV1 -> stream assembly -> isolated ledger -> f
         documents="\n".join(p.read_text(encoding="utf-8") for p in ROOT.rglob("*.md"))
         self.assertNotRegex(documents,r"globalThis\.\w+\s*=")
         fast=(ROOT/"references/fast-path-runbook.md").read_text(encoding="utf-8")
-        for entry in ("collect-stream","context-plan","reply-context-plan","quoteBatch","cycle-failure","analysis-plan","scan-analysis","stream-failure","heartbeat-finish","sync-receipts"):
+        for entry in ("collect-stream","context-plan","quoteBatch","cycle-failure","analysis-plan","scan-analysis","stream-failure","heartbeat-finish","sync-receipts"):
             self.assertIn(entry,fast)
         self.assertIn("manual_validation",fast)
         self.assertIn("partial_failed",fast)
         self.assertIn("-filter:replies -filter:retweets",fast)
         self.assertIn("media_only_not_inspected",fast)
-        legacy=(ROOT/"references/legacy-fact-transfer.md").read_text(encoding="utf-8")
-        self.assertIn("legacy-fact-transfer.md",fast)
-        for step in ("--input-framing chunks","XMonitorInputReadyV1","echo_disabled=true","write_stdin","Array.from"):
-            self.assertIn(step,legacy)
-        for step in ("packFacts","packFactsGzip","node:zlib","TextEncoder","diffFacts","XMonitorFactTransferV1","reply_base","reply_delta","context_items","heartbeat-finish"):
-            self.assertIn(step,legacy)
-        for step in ("desktop_stdin_client.js","node:child_process","selfTest","exact_match=true","outcome_unknown=true","input_frame_bytes","observation-fingerprint"):
+        self.assertFalse((ROOT/"references/legacy-fact-transfer.md").exists())
+        for step in ("cycle_workflow", "selfTest","exact_match=true","outcome_unknown=true","observation-fingerprint"):
             self.assertIn(step,fast)
         driver=BUSINESS/"scripts/desktop_monitor_driver.js"
         if driver.is_file():
             version=re.search(r"const version = '([0-9.]+)'",driver.read_text(encoding="utf-8")).group(1)
-            if os.name == "nt":
-                self.assertIn("驱动 "+version,fast)
-            else:
-                # Windows pins are not the Linux runtime contract.
-                self.assertIn("references/wsl-migration.md", skill)
-                linux = (ROOT/"references/wsl-migration.md").read_text(encoding="utf-8")
-                self.assertIn("实际", linux)
-                self.assertRegex(version, r"^[0-9]+\.[0-9]+\.[0-9]+$")
+            self.assertIn("references/wsl-migration.md", skill)
+            linux = (ROOT/"references/wsl-migration.md").read_text(encoding="utf-8")
+            self.assertIn("实际", linux)
+            self.assertRegex(version, r"^[0-9]+\.[0-9]+\.[0-9]+$")
         self.assertIn("15 秒",fast)
         self.assertIn("40 秒",fast)
         contract=(ROOT/"references/reply-reset-contract.md").read_text(encoding="utf-8")

@@ -1,55 +1,9 @@
-# 授权维护诊断（普通 heartbeat 不加载）
+# 按需诊断
 
-3.0.30仅修正会话成员的未完成等待，失败时保留readiness_evidence的conversation_members_presence、段数、刷新次数及预算。沿用同次回执，不因诊断再读失败页面或猜成员身份；主帖引用及HTML拒绝仍按下方规则定位。
-
-步骤2026-09-11.8的正式手动维护验收，首次context-plan提交可直接使用下列形态（主帖改用字面量"main"）。这是一个输入请求及其同次纯内存诊断，响应变量在块内先声明；已知HTML拒绝时立即回传有界标记对象，再按原规则登记本流失败。不会再次生成草稿、提交或读页面。普通定时轮保持诊断关闭。
-
-```javascript
-{
-  const response = await xMonStdin.sendKept("context-plan",{lease:xMonLease,payload:xMonDriver.draftStream(xMonCycle,"reply")});
-  nodeRepl.write(response);
-  if (response.entry_error === "raw_html_rejected") {
-    nodeRepl.write(xMonDriver.diagnosePayloadText(xMonStdin.kept(xMonLease,"context-plan").payload));
-  }
-}
-```
-
-一次诊断输出已经得到后不重复调用；清理前向维护任务转达该有界对象，不只概括拒绝码。新运行必须先读当前快速路径与上下文契约；诊断工厂加载成功不等于已读正式步骤。收口后先clearKept再清理lease，不从已清理周期恢复输入。
-
-3.0.29在原有最多16个可见链接的同次抽取中，只增加title/aria-label两个公开提示属性的安全元数据：存在/长度，以及值本身为完整HTTP(S)网址时去除查询、片段、用户信息后的最多256字符路径和截短/查询/片段标记。不回传非网址标签原文、不读取data-*或其他隐藏数据，不解析短链、不访问外站。仅用于全新诊断确认来源是否公开提供完整路径，普通周期与引用接受条件不变；一对象一次、最多两导航，清理前完整回传这些有界元数据。
-
-客户端1.1.0的sendKept会在返回前保存真实结果。若元数据entry_error=raw_html_rejected，仅对xMonStdin.kept(xMonLease,"context-plan").payload（或本次实际失败动作对应payload）调用一次diagnosePayloadText；该快照来自实际序列化输入，不重新draft/raw或重投。主帖/回复分别按本次action核对，清理后不可取回。当前诊断回执中的允许差异片段及网址显示字段应在清理前一并回传，而不只概括为“截短网址”；保持既有48/64/96字符上限，不输出完整正文、HTML或原异常。
-
-3.0.27真实展开失败已回传唯一父帖、单控件、可用视口内几何，以及click和snapshot_refresh之后的expanded_text_readiness/detached。3.0.28只更换该等待的定位对象，正文/身份接受条件不变。后续失败在清理前回传本次方法已有的有界expander_evidence、probe_evidence等对象，不追加DOM读取、不恢复失败页。所有浏览器方法直接输出回执，避免动作完成后未声明变量遮蔽结果；首次HTML拒绝仍按下一段仅检查本次实际提交对象。
-
-3.0.27维护验收仅在首次入口raw_html_rejected后，对本次实际提交且仍在内存的XCollectedStreamV1信封调用一次diagnosePayloadText(rejectedEnvelope)。它只检查原对象内存，不再次读取DOM、调用入口、draft/raw或改写正文。使用入口同一标记正则，最多4096节点、200万字符、四个命中；只返回已验证身份、固定字段类别、长度/位置、标记类别、最多32字符标签名及属性存在等布尔值。不返回括号片段、属性值、正文、HTML、存储或任意字段名；原拒绝与冻结条件保持，元数据不进入失败payload/timings，清理后不恢复失败对象。未命中或截短如实回报，不据此判定原错误不存在。
-
-3.0.25实际首个拒绝为container_not_rendered、box_visible=true、visibility_api_available=false，说明新增原生接口未被控制层提供，不能据css_visible=false判定实际隐藏。3.0.26使用快速路径中的有界祖先样式兼容；同次维护诊断可附固定visibility_protocol、最多32的style_nodes_checked和容器nodeType/tagName/childNodes、图片complete/naturalWidth/currentSrc类型存在布尔值，不含实际属性内容/任意样式/异常原文。仍只用全新最多四页搜索定位，首错停止；普通周期不含该对象，正式业务另起周期。
-
-3.0.25仅在DiagnosticCycle的同次空正文失败中附standalone_emoji_evidence：固定failure_gate、容器/图片/正文树render_stage、box_visible/visibility_api_available/css_visible布尔值及最多33的tree_nodes_checked（第33即超限）。这复用独立表情原接受检查，普通周期没有该对象；不返回alt、正文、实际currentSrc、任意节点名、HTML或存储，不额外读页或放宽接受条件。原固定任务仅一次全新最多四页search诊断，首错停止，关闭自有标签和清理动态事实；无lease/冻结/入账/发送，不接续3.0.24失败流。正式验收另起新周期。
-
-3.0.24依据新诊断核验的abs.twimg.com来源，增加独立作者表情的严格读取；具体接受条件见快速路径，既有非空正文和历史冻结不变。这是对单次DOM中真实Unicode表示的读取，不以计数或资源路径单独接受正文。原失败诊断仍只回传有界元数据，不补读失败页。[Twemoji上游说明](https://github.com/twitter/twemoji)记录了用图片替换Unicode表情、alt保留原Unicode以及SVG文件名使用码点的表示方式；实际X域名取自本次受限诊断。
-
-驱动3.0.23仅在全新DiagnosticCycle的同次空正文失败中增加inline_image_sources，最多四项：src属性存在/长度、解析结果、公开HTTP协议/主机、最多160字符且去除查询/片段/用户信息的路径，以及截短/查询/片段/用户信息存在标志。不返回alt、正文、完整地址、数据URL或存储。普通周期不返回这些资源字段，32张内嵌图片计数上限与失败条件保持；只用于确认未匹配的资源格式，不能据元数据接受作者内容。
-
-驱动3.0.22的card_content_evidence在同一次DOM抽取中补充作者正文textContent长度和可见性，以及最多32张作者正文内图片的可见数、alt总长度、标准X表情资源数和alt码点匹配数。只回传计数/布尔值，不返回alt、图片地址、正文、HTML或存储，也不接受空正文。头像和内嵌引用不属于该正文范围。
-
-已授权维护可用全新createDiagnosticCycle与当前health执行一次有界搜索定位：仅page(tab,cycle,"search")，最多四页，每次CUA仍一个固定page，首错或第四页结束后关闭自有标签并清理动态事实。沿用15秒页面、40秒调用、20分钟周期预算，不取得租约、冻结、collect/scan或发送，不再次调用失败流；该诊断不能充当正式双流或复扫验收。
-
-驱动 3.0.21 的搜索正文缺失回执 card_content_evidence 只复用该次抽取的作者/ID/UTC、作者与全部正文节点数、作者正文长度、自身媒体/引用/转发标志和自身展开控件数；没有正文或额外读取。可区分空作者正文与内嵌引用文字，但不能据此接受空正文、补造作者内容或直接确认真实故障原因。失败仍不续读、不冻结、不推进；定位对象仅回传工具上下文，不混入正式失败载荷或计时字段。
-
-驱动 3.0.17 仅在已授权维护显式启用差异诊断时，补充外链卡片标签及引用正文中网址 span 的可见文字，每项最多 96 字符，去除查询/片段并标注是否完整。此有限公开事实只进入工具上下文，不写普通日志、文件或账本；默认诊断和普通周期不返回这些文字，引用接受条件保持。用户已批准八导航仅用于回复永久链接核验；当前诊断仍每调用最多两个永久链接。
-
-仅当前用户已授权维护时，由原固定任务使用当前固定驱动执行。只读诊断不能代替正式验收；不 acquire、冻结、collect、scan 或发送，不恢复旧失败事实，不新建任务或浏览器通道。
-
-1. `createDiagnosticCycle` 使用当前 health 的账号、时区及水位，只操作本轮自有标签。`diagnoseQuote(tab,cycle,{author,statusId,permalink})` 的外层身份必须已有可信证据；每诊断周期最多两个外层，每个只调用一次。每次最多两个永久链接、共享 15 秒页面预算、工具 40 秒和周期 20 分钟上限。局部失败可检查另一个已授权外层，共同身份/登录故障停止后续。
-2. 默认仅返回来源身份、时间、长度和耗时等元数据。维护显式传 `{includeMismatchExcerpt:true}` 时，只有 `quote_source_preview_mismatch` 可从本次已经观察的文字返回首个差异处预览最多 48 字符、来源最多 64 字符。`quote_text_context` 是有界公开事实工具上下文，禁止写普通日志、正文文件或账本；默认诊断和普通 quoteBatch 仍无失败正文。
-3. `quote_evidence` 指明本次实际外层与预览身份；`quote_match_evidence` 只记录长度、首个差异类别、换行及空白前缀比较，比较不通过仍失败。`probe_evidence` 只记录规范公开页面类型/身份、主列/顶层卡片/时间链接与不可用提示计数，不读取查询串、正文、HTML、存储或异常原文。
-   驱动 3.0.16 仅诊断周期在原页面抽取时保留各范围最后最多十六项可见链接元数据。显式差异诊断的 `quote_link_evidence` 只返回链接数量、标签/角色、去查询串公开路径、尾部匹配、同 href 比较和来源自身引用身份；不输出链接正文或查询串、不递归读取来源的引用。普通周期不生成该载荷，不改变原接受条件或追加页面读取。
-4. 主列或目标初始缺失时先刷新一次AX；目标缺失时的页面诊断在就绪等待前完成。3.0.20在同页原始十五秒总预算内最多五个三秒短段，短段未就绪时刷新当前状态；最终页面失败后不补读、不导航或等待重试。readiness_evidence只含段数、刷新次数、时间和固定操作类别。`ordering_evidence`记录首个逆序对、首次出现页号及本页位置，不排序或改写序列消除歧义。
-5. 无链接引用只用本次唯一卡内可见几何及命中测试确认的非交互落点，通过当前 `Tab.click([x,y])` 点击一次，排除媒体、链接、按钮和作者头部。位置及诊断不是引用可信证据；跳转后仍核验作者、ID、UTC、全文、预览和时间顺序。
-6. 尾部网址表示的接受条件见 [引用事实契约](reply-reset-contract.md)。相同链接、其余正文、身份和时间都必须符合，不能凭差异片段推测或放宽。`preview_match=same_own_outgoing_url` 只表示这项显示差异已核验。
-7. 结束后关闭并核对本轮标签不存在，清理诊断事实，回读无锁及水位保持。诊断不能 raw/draft 冻结或计入双流/复扫；正式验收另起全新周期。
-   先回传诊断结果后，按快速路径的明确终态条件最多一次原生上下文重整；保留已经结束/已回传标记，不能整理后重跑诊断或重复回传正文。
-
-故障历史、测试与发布证据在业务项目 `OPTIMIZATION_ACCEPTANCE.md`，只按具体需要读取相关段落。旧字典/gzip/跨工具标准输入搬运见 [历史事实传递](legacy-fact-transfer.md)，不用于当前正常轮次。
+先定位实际失败层：模型/字段、采集结构、浏览器控制、进程身份、账本或投递。不要因同一拒绝码不断加补丁或重跑整轮；先检查是否把显示差异错误当成内容变化。
+正文差异使用同轮 contentReview 完整上下文由模型判断。需要代码修复时保留同次比较的差异位置、有限片段/码点和身份元数据；不补读失败页或恢复已清正文。
+raw_html_rejected 可对同次 kept payload 调用 diagnosePayloadText 一次；它只读当前内存，不重新 draft/raw、发送或读 DOM。其他 probe/readiness/expander 证据直接保留本次回执，不能凭摘要遗漏再执行。
+heartbeat_collection_time_invalid 核对真实 preflight、collectedAt 和时钟；elapsed_ms 为负及 WSL Time jumped backwards 是真实时钟线索。已安装代码仅同请求最多一秒 monotonic 等待 UTC 追上，不能改时间、重投或扩大预算。
+新进程 proof 缺失按 [受管登记](wsl-migration.md)，不误报为 X 未登录。已返回的业务拒绝与超时/坏回执的控制 unknown 分开处理。
+真正 unknown 保留原请求/在途/守卫审计，停止依赖动作；已授权维修继续独立源码工作。恢复须基于新证据，不复制旧 grant、clear unknown 或套用已消费窗口。
+新增诊断需真实 driver/adapter/共享接口贯通测试；纯 mock 或离线成功不代表实机通过。原 owner 的有界新诊断不计业务周期，正常收尾后再做针对修复的一次真实验证。

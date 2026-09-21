@@ -1,78 +1,43 @@
-# 两流上下文、引用与额度契约（驱动3.0.30 / 客户端1.1.0 / 步骤2026-09-11.9）
+# 两流模型判断与额度契约
 
-执行、客户端传输及 Luna/max 上下文整理见 [固定快速路径](fast-path-runbook.md)。已授权维护的失败诊断见 [按需参考](diagnostics.md)，普通轮次不加载诊断与旧传递流程。
+模型只处理同轮机器计划中的新项及待复核观察，不重分析历史。执行顺序见 [运行步骤](fast-path-runbook.md)，投递见 [回执与完成](heartbeat-and-delivery.md)。
 
-本页定义新分流周期：主帖和回复统一只推送 Codex 额度重置相关的新内容。旧 ResetAnalysisV1/V2、XReplyContextV1 与 Frozen V1–V4 保留历史原义，不重新分类已发送、已抑制或投递未知记录。AI 功能发布、其他产品额度重置等无关内容仍入账、去重和推进水位。
+## 事实与内容复核
 
-## 一次冻结前的步骤
+主帖使用非回复/非转发 Latest 搜索；回复直接 Latest 搜索及永久链接确认唯一相邻父子链。ID、作者、UTC、直接父关系、完整性均可信才进入分析。水位以 ID＋UTC instant 同时匹配，不能跳过未完成项。
+直接对象/上文/引用各自保留作者、时间、页面正文及链接；引用文字不混入外层正文，引用作者的承诺不变成外层作者承诺。上下文最多三层，够用即停；每项最多五个直接引用来源，不递归引用。
+浏览器展开和导航由固定驱动处理；模型不重写 selector 或重读失败页面。rawStream 前读取 contentReview，同轮两份完整实际观察可按语义接受翻译、换行、链接卡显示差异，不要求逐字相同。核对数值、否定、对象、范围、时限、承诺和引用归属，逐项 resolveContentReview 为 equivalent/different/uncertain 并给具体依据；不批量固定答案、不删除字符凑相同。
+页面文字原样保存，译文不冒充独立原文。未知非关键链接跳转路径不升级为正文错误，但也不声称目的地已经核验。
+XReplyContextV2、XQuoteContextV1 与 FrozenXMessageV5 的原事实指纹/历史哈希保持。quote_deleted/quote_unavailable 必须有实际证据，不能将超时、身份冲突或缺卡伪装 unavailable。不可访问引用不列入采用证据；其余可信正文足够时可独立判断。
 
-1. 主帖按快速路径完成 Latest 搜索与必要全文核验。回复直接 `page(tab,cycle,"search")`，准确查询 `from:<account> filter:replies`，核验 Latest、登录账号、目标作者，读取至 ID 与 UTC instant 同时命中的水位，不访问 with_replies。
-2. 完整冻结回复候选 ID 序列在同一 CUA 宿主经固定标准输入客户端送 observation-fingerprint，直接使用本轮机器回执的 fingerprint，再调用用户已批准的 permalinkBurst，每调用最多八导航、四十秒；工作窗口三十五秒，剩余不足完整十五秒页面预算即返回未完成。唯一最小主会话区域的完整顶层链中，直接对象与回复必须相邻；对象可为主帖或别人的回复。外层主帖、回复、对象及上文均允许带引用卡，内嵌引用节点不能充当父或子。推荐、重复、身份/时间冲突、父子不相邻或正文不完整仍失败；明确广告也不能替代中间缺失成员。
-3. 作者自己的截断标记只由固定驱动点击该卡唯一展开控件，在同一十五秒预算内重读。身份、UTC、预览前缀及完整性必须一致；外层作者正文与引用文字分别保存，不能取第一段或拼接。
-   已证明唯一直接父子关系后，视口外截断父帖可从其已知永久链接补读自身全文，保持身份、UTC和原关系。正文呈现不同但内容完整时由模型判断语义，不要求译文逐字符匹配预览。permalinkBurst 内部继续处理 pending_parent，兼容 permalinkBatch 默认两导航；contextBatch 的 pending_status_ids 仅续未完成项，每次仍最多两个永久链接。未完成不能冻结，失败后不重试。
-4. 新周期的草稿只在sendKept的payload内生成一次：主帖执行 `nodeRepl.write(await xMonStdin.sendKept("context-plan",{lease:xMonLease,payload:xMonDriver.draftStream(xMonCycle,"main")}))`，回复使用字面量"reply"。不独立draft、不使用临时草稿/响应变量或兼容send。context-plan只读验证、去重，返回XMonitorContextPlanV1；核对实际业务成功后，`applyContextPlan(xMonCycle,xMonStdin.kept(xMonLease,"context-plan").result.response)`原样应用完整response。只读其中本轮新项，历史锚点不补读、不分析。
-5. 新回复的直接对象和当前正文不足时，`contextBatch(tab,cycle,[至多两个新回复ID])` 每个 ID 沿可信父子边补一层，最多三层。足够时 `resolveContext(cycle,id,"sufficient")`；可信不可取得为 unavailable，三层用尽仍不足为 depth_limit。上文为 XReplyContextV2。不要把结构冲突或超时改成语义不足。
-6. 两流均执行 `quoteBatch(tab,cycle,"main"|"reply")` 至 ok=true、done=true；每次只补一个来源，最多涉及来源拥有帖和引用原帖两个永久链接，同一十五秒共享预算，工具上限四十秒。每个当前消息/直接对象/上文只补其直接一层引用，最多五个引用归属项；不追踪引用中的引用。后续补上文若增加引用，冻结前再完成 quoteBatch。同轮相同规范来源复用核验结果，依旧校验当前引用归属、预览、身份和时间。
-7. 引用卡不提供链接时，只点击当前唯一外层对象内已核验的引用块，读取实际跳转地址，不猜状态 ID。来源正文截断时只展开已核验原帖自己的唯一控件。明确删除/不可用按可见证据记录；没有这种正面证据的缺卡、超时、截断和身份冲突仍失败。
-8. 补读结束后，每流仅在sendKept("collect-stream",...)的payload内一次rawStream(xMonCycle,"main"或"reply")。analysis-plan直接取kept(xMonLease,"collect-stream").payload；scan-analysis的collected直接取kept(xMonLease,"analysis-plan").payload。不得独立raw、修改事实或重建collectedAt。XQuoteContextV1与XReplyContextV2均参与采集指纹、分析绑定和FrozenXMessageV5完整性校验。两阶段finish、标签关闭且无在途请求后，先clearKept(xMonLease)，再清理lease及本轮其他动态事实。
+## 模型提交
 
-## 引用事实
+每条新项需要 chinese_translation、chinese_summary、full_analysis、reset_analysis。回复另需 ai_relevance；通知候选需要 reply_parent_chinese_translation。采用更早上文/引用的通知候选需要 reply_context_chinese_translations / quote_context_chinese_translations，格式为 {已核验状态ID:中文翻译}。
+模型依据只来自本轮可信上下文，不能覆盖事实或发明媒体内容。
 
-XQuoteContextV1 为 `{schema_version:"XQuoteContextV1",quotes:[...]}`。每项记录 quoted_by_status_id、quoted_by_permalink、resolution、observed_permalink。verified 项携带 status：引用原帖自己的 status_id、author_handle、created_at、permanent_url、original_text、status_kind、is_media_only、is_quote、is_retweet、is_promoted、text_complete。引用作者与外层作者分开，链接、时间、完整性均须真实核验。
+ResetAnalysisV3 公共字段：
+- schema_version="ResetAnalysisV3"
+- subject_product=codex/other/unknown
+- related=true/false/null
+- reasoning：本轮具体判断依据
+- evidence_status_ids：最多十个不重复的已核验ID。主帖至少自己；回复至少自己和直接对象；采用引用时同时列它及引用它的外层来源。
 
-无链接引用只通过当前唯一卡内几何及命中测试确认的非交互落点点击，排除媒体、链接、按钮、作者头部；仍核验实际跳转与来源事实。预览默认严格匹配完整来源正文的前缀。尾部可见网址锚点与来源自身具有相同完整 href 时可兼容显示差异。3.0.18 另允许唯一非交互网址 span：完整网址须与来源作者正文的完全相同 href 对应；缩短的 x.com/账号/status 链接须对应来源作者正文内唯一规范状态链接，排除时间、媒体、引用和其他分区链接。去掉尾部网址显示后，剩余非空正文仍严格匹配完整来源前缀。
+分支：
+- 相关且无时间：related=true、subject_product=codex、estimate_precision=no_time、confidence=low/medium/high；完全省略时间表达、范围与锚。进展、延期、规则和明确否认都可相关。
+- 相关且可推算：estimate_precision=exact/range_only，加 time_expression、possible_range_beijing、time_anchor_status_id、time_zone_basis；exact 另需 most_likely_beijing。时间锚必须确实含被解释表达，根据该帖发布时间及真实时区线索换算北京时间。
+- 无关：related=false，仅公共五键；不带置信度、时间或未评估原因。只讨论 Grok/其他产品重置归 other，AI 功能发布也不等于 Codex 额度重置。
+- 无法判断：related=null，增加 unassessed_reason=insufficient_context/context_depth_limit/context_unavailable/media_only_not_inspected/parent_media_only_not_inspected/quote_unavailable/quote_media_only_not_inspected；与实际事实匹配，主帖不使用父帖/上文深度理由。
 
-外链卡片只有可见 From/来自域名标签时，只能证明预览中完整根网址，且剩余作者正文必须与来源全文完全相同、来源自身卡片外链 href 唯一；不推定路径、查询、片段、截短网址或正文续篇，不解析短链目的地或访问外站。多个匹配、不同域名、任意标签、缺少范围证据或其他文字差异仍失败。链接表示证据仅在本轮内存，原帖全文、UTC/身份、引用指纹和冻结格式不改写；原身份、时间顺序与引用归属校验始终保留。
+AiRelevanceV1 只用于回复，键是 ai_related，**不是 related**：
+- true/false：{schema_version:"AiRelevanceV1",ai_related:false,reasoning:"本轮模型依据"}
+- null：{schema_version:"AiRelevanceV1",ai_related:null,unassessed_reason:"context_unavailable"}
 
-上述严格显示匹配是历史机械快路径，不是模型的能力边界。用户2026-09-20明确允许当前模型对翻译、排版和链接卡表示判断完整语义一致；不要求逐字相等，不把关闭翻译或点击原文作为采集前置。先保留同轮两份实际观察；数值、否定、对象、范围、时限、承诺及引用归属一致即可接受，实质变化或无法确认则保留不一致判断。未知链接目的地址不得说成已验证，但不应仅因未证明一个显示尾部的跳转路径就否定其他完整可信正文。页面正文保持原样，不制造未观察的原文。新流程是否可执行以实际发布接口为准；未安装时完成接入，不套用旧逐字限制反复扫描。
+示例仅表示形态，不是默认判断。额度相关必然 AI 相关，反向不成立。
+使用 [纯内存字段构造器](../scripts/analysis_fields.cjs) 的 aiRelevance(判断,依据) 及 validateAnalyses(analyses,stream)；无 I/O，不替模型决定。它在尚未发送前发现拼写问题可就地更正；已经提交后不能据此重投。
+纯媒体且未读取：reset related=null，回复 AI 也 null；翻译/摘要/分析注明“未读取媒体内容”。图文中可信作者正文可读不算纯媒体，通知不能依赖未读取的媒体。
 
-unavailable 项只携带 unavailable_reason=quote_deleted/quote_unavailable；observed_permalink 只有实际可确认时才填写，否则为 null。不伪造正文或时间，不把无法访问的帖子列入采用的证据 ID。引用不可访问时，当前可信正文已足够可以独立判断相关；否则抑制为无法判断。结构错误不能使用 unavailable 降级。
+## 处理与通知
 
-## 模型提交的分析对象
-
-两流的新项必需 chinese_translation、chinese_summary、full_analysis、reset_analysis。回复另需 ai_relevance；通知候选必需 reply_parent_chinese_translation。采用更早上文的通知候选需 reply_context_chinese_translations，采用引用的通知候选需 quote_context_chinese_translations，均为 `{已核验状态ID:中文翻译}`，键不得来自未核验来源。模型不能覆盖可见事实。
-
-ResetAnalysisV3 的完整无时间示例：
-
-```json
-{
-  "schema_version": "ResetAnalysisV3",
-  "subject_product": "codex",
-  "related": true,
-  "reasoning": "当前消息结合独立标注的可信来源，明确讨论 Codex 额度重置进展。",
-  "evidence_status_ids": ["当前消息ID", "直接对象ID", "采用的引用ID"],
-  "estimate_precision": "no_time",
-  "confidence": "high"
-}
-```
-
-示例 ID 仅表示字段位置，实际为机器计划中的十进制 ID。主帖证据至少含自己；回复至少含自己与直接对象；采用的上文和引用全部列入，最多十项且不重复。引用证据必须同时包含至少一个可见引用它的外层来源，不能凭单独引用推断作者承诺。subject_product 只允许 codex/other/unknown；related=true 必须为 codex，仅讨论 Grok 或其他产品重置属于无关。
-
-- **相关无时间**：上述共同五键加 estimate_precision=no_time、confidence=low/medium/high，完全省略时间表达、范围和时间锚。进展、延期、规则、“尚未重置”“不会统一重置”等明确否认也可相关。
-- **相关可推算时间**：estimate_precision=exact/range_only，加 time_expression、possible_range_beijing、time_anchor_status_id、time_zone_basis；exact 另需 most_likely_beijing，range_only 省略它。时间锚必须是采用的已核验来源，确实包含所解释的时间表达；依据该帖发布时间及真实时区线索换算北京时间，不把外层“谢谢”当时间来源，不改账号时区配置。
-- **无关**：共同五键中 related=false，不带时间、置信度或未评估原因。AI 功能发布可以 ai_related=true，同时额度无关。明确不是 Codex 的产品归 other。
-- **无法判断**：共同五键中 related=null，另加 unassessed_reason：insufficient_context、context_depth_limit、context_unavailable、media_only_not_inspected、parent_media_only_not_inspected、quote_unavailable、quote_media_only_not_inspected。原因必须与实际采集事实相符；主帖不使用父对象或上文深度原因。
-
-AiRelevanceV1 只适用于回复，判定键是 `ai_related`，不是 ResetAnalysisV3 的 `related`。true/false 的完整形态为 `{schema_version:"AiRelevanceV1",ai_related:false,reasoning:"本轮模型依据"}`；null 为 `{schema_version:"AiRelevanceV1",ai_related:null,unassessed_reason:"context_unavailable"}`。示例判定不是默认答案。额度相关必然 AI 相关，反向不成立。当前消息纯媒体时 reset 为 null；回复 AI 也为 null，翻译、摘要及完整分析均包含“未读取媒体内容”。图文中可信作者正文可读时不属于纯媒体；通知不能依赖未读取的引用媒体或父对象媒体。
-
-为避免同名字段混用，在当前CUA公开Node环境锁前加载本Skill的 [纯内存字段构造器](../scripts/analysis_fields.cjs)，例如通过现有createRequire将其绑定为`xMonAnalysisFields`。新回复使用`xMonAnalysisFields.aiRelevance(本轮模型判断的true/false/null, 本轮具体依据或未评估原因码)`组装ai_relevance。它没有I/O、浏览器/账本操作或语义推断，不保存事实，不把失败轮正文带到下一轮。
-
-scan-analysis的payload内将analyses设为`xMonAnalysisFields.validateAnalyses(xMonAnalyses, 当前流名)`，返回原对象，不改模型结论/正文；保持collected取同轮analysis-plan的kept载荷。纯内存字段检查先于sendKept求值，拼写错误在尚未发送时可就地更正，不重读页面或重新冻结。真实sendKept已经提交并被入口拒绝后，仍按实际终态收口，不用本地检查绕过未知、重新提交或恢复失败事实。它只检查此易混字段形态，其他事实、ID、UTC、完整性和业务核验仍由原入口负责。
-
-账本创建投递前执行 codex_reset_only_v2 两流筛选，按流、策略及原因登记 notify/unrelated/unassessed。无关与无法判断冻结为已处理/已抑制并推进可信水位；后续不重分类、不补发。通知分列当前消息、直接对象和采用的上文/引用的原文、翻译、北京时间、规范链接，标明引用归属；无时间依据明确写“未提供可推算时间”。公开帖子不能证明本账户已经重置。
-
-## 异常与完成
-
-- 未终止的流发生采集/上下文/翻译分析失败，用 stream-failure（account、stream、stage、failure_code）；collect/scan 已登记失败则不覆盖。特别是scan-analysis返回已知entry_rejected时，先保留其kept错误并核对原health该流终态；已failed_closed不再补stream-failure，也不重投分析。主帖与回复独立提交。
-- 已终止流又有其他阶段失败，或投递/回执/标签关闭/收口失败，用 cycle-failure 追加。stream 为 main/reply/both/cycle；stage 采用 browser、identity、search、navigation、surface、target、members、parent、context、watermark、collect、analysis、translation、scan、ledger、publish、receipt、cleanup、finish、budget。仅用脱敏稳定错误码，不写异常原文、正文或凭据。
-- 全轮保留首错并汇总全部阶段、完成部分、最近成功和投递证据。故障按首次、类别/范围实质变化、满二十四小时一次、完整恢复一次去重；已认领或未知提醒不改写、不重发。
-- 双流成功及本轮投递确定才报告恢复。sync-receipts 仅认证 GET，不因登记/传输接受制造送达证据；下一原 heartbeat 识别上轮缺失完成回执，不建重试任务。
-- 新策略生效后独立重新累计四轮完整、零可推送的 scheduled 周期，摘要分别列主帖和回复无关/无法判断数量。manual_validation 不计数；可推送内容、失败和本轮投递未知清零。旧非 AI 数量及旧摘要状态保留原义。
-
-## 发布与验收
-
-依赖锁检查、Python 编译和全量 unittest、实际 node --test tests/test_desktop_driver.cjs 与 Skill 检查必须通过。包含新引用/两流筛选、迁移保留历史、两次复扫零重复、4/8/12 轮摘要和现有消费者纯解析；离线测试不访问 X、不发送飞书。
-
-业务提交后等生产锁空闲，备份原库并显式 migrate-ledger，回读 codex_reset_all_streams_quote_context_v1 和历史行未改写。发布 Skill 后仅在原固定任务完成一轮真实双流及两次连续复扫；保持原自动化和发送路由。
-
-有本轮新通知时按授权在本轮自有飞书网页标签只读核验唯一原目标的时间和内容，不要求先取得 transport_accepted；无法唯一确认目标则停止，不探索其他聊天、不通过 UI 发送或重发、不将人工观察写成机器送达。缺乏可见证据如实报告。
+沿 codex_reset_only_v2（原 codex_reset_all_streams_quote_context_v1 数据兼容）分别入账。无关/无法判断冻结为已处理/已抑制并推进可信水位，不重分类历史。
+通知分列当前消息、直接对象、采用上文/引用的页面正文、翻译、北京时间、规范链接与归属。无时间写明“未提供可推算时间”；公开帖子不能证明本账户已重置。
+语义弹性不覆盖身份、UTC、完整性、防重发或真实未知。真实失败按原流/周期终态收口，不恢复已清事实。
