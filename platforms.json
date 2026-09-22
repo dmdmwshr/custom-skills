@@ -9,7 +9,8 @@
     "codex-local-state-diagnostics",
     "okxnew-backtest-operations",
     "okxnew-data-operations",
-    "personal-memory-on-demand"
+    "personal-memory-on-demand",
+    "macro-strategy-data-operations"
   ],
   "notes": "This is enforced by the managed publisher, not a native Codex frontmatter filter. Support declarations do not prove business dependencies or real-host validation. Windows-only entries describe current delivered workflows, not portability of every helper.",
   "skills": {
@@ -362,7 +363,9 @@
     },
     "xf-expert-review": {
       "category": "business_specific",
-      "execution_platforms": ["windows"],
+      "execution_platforms": [
+        "windows"
+      ],
       "managed_wsl": false,
       "validation": {
         "windows": "word_and_excel_review_materials_verified_20260920",
@@ -435,6 +438,20 @@
         "linux": "not_supported_by_current_workflow"
       },
       "dependencies": "Pinned official Playwright CLI, Node.js, installed Chrome/Edge Playwright extension, and per-user local runtime mapping. No resident MCP."
+    },
+    "macro-strategy-data-operations": {
+      "category": "business_specific",
+      "execution_platforms": [
+        "linux",
+        "wsl"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "runtime_verified_2026_09_22",
+        "linux": "runtime_unverified",
+        "windows": "not_supported_by_current_workflow"
+      },
+      "dependencies": "Independent macro-strategy project, documented bounded systemd worker and source registry; no legacy OKXnew runtime dependencies."
     }
   }
 }
