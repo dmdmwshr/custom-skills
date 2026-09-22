@@ -34,3 +34,9 @@ workflow 尚未安装或接口不符时按当前 handoff 维护接入，不自�
 sendKept 返回 ok 只证明传输，实际业务结果读取本次 kept。outcome_unknown=true 不重投、不补读、不清未知。代码在发送前拒绝的纯字段或本地清理参数错误，可凭仍有效的原对象与真实回执就地更正；不把所有异常升级为unknown，不重复已完成的浏览器或业务动作。维护preparationOnly的clear/close同样需要实际收口证据，不能无参数调用或手填成功。
 只有 finish 明确 heartbeat_complete=true、outcome=completed、notification_decision=DONT_NOTIFY 才静默；partial_failed 或缺失终态简短报告实际失败。平台存在不冒充用户已读。
 普通轮只保留最终周期 ID、两流结果、投递证据等级和未解决码，不携带正文/lease/长诊断到下一轮。
+
+## 清水位后重新部署
+
+用户明确要求清理水位时，先核对实际清理范围并保留新鲜配对备份；仅清水位默认保留历史事实、已发送去重和未知回执。首次七天窗口必须按本次重置代次区分，不能复用旧初始化的完成游标；窗口完成再建立正常增量水位。新会话、cc-connect所有者、共享Playwright登记与原heartbeat目标须一致，保持单执行者，业务验收前定时暂停。
+
+用户可见事件类型、流名和状态使用中文，内部协议枚举保持不变；不要将 x_reply_detected、main/reply、partial_failed 等原始值直接当作显示标签。诊断确需代码时放在中文解释之后。重部署不等于已验收，待复评项也不等于采集失败，分别给出证据。

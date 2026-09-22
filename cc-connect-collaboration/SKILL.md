@@ -100,7 +100,7 @@ metadata:
 
 ## 创建或绑定一条固定会话
 
-本节只适用于默认 `cc_connect_fixed_session`。`desktop_owner_outbound_only` 必须复用已指定的唯一 Desktop 任务；它不创建、迁移、重绑或激活新的固定会话。
+本节只适用于默认 `cc_connect_fixed_session`。`desktop_owner_outbound_only` 默认复用唯一 Desktop 任务；用户明确要求重新部署/更换时，按[桌面专属模式的授权换代](references/desktop-owner-outbound-only.md)操作，不套用本节双向会话迁移。
 
 1. 先在公开控制登记表准备一条路由：业务项目、职责、目标业务仓、中枢工作目录、状态和会话策略。公开表只放脱敏别名，绝不写真实会话标识或平台用户标识。
 2. 在中枢项目创建对应控制目录，并写清该职责能做什么、必须回到哪个业务仓读取规则、以及与其他职责发生文件冲突时如何停下。
