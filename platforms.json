@@ -429,15 +429,16 @@
     "playwright-browser-control": {
       "category": "platform_specific",
       "execution_platforms": [
-        "windows"
+        "windows",
+        "wsl"
       ],
-      "managed_wsl": false,
+      "managed_wsl": true,
       "validation": {
         "windows": "chrome_edge_extension_cli_0_1_21_verified",
-        "wsl": "not_supported_by_current_workflow",
+        "wsl": "project_browser_v2_native_groups_reuse_cleanup_verified",
         "linux": "not_supported_by_current_workflow"
       },
-      "dependencies": "Pinned official Playwright CLI, Node.js, installed Chrome/Edge Playwright extension, and per-user local runtime mapping. No resident MCP."
+      "dependencies": "Windows: pinned official Playwright CLI extension and per-user runtime mapping. WSL: locally published ProjectBrowserV2 managed MCP lifecycle and registered project; do not mix backends."
     },
     "macro-strategy-data-operations": {
       "category": "business_specific",

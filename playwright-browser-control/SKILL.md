@@ -1,6 +1,6 @@
 ---
 name: playwright-browser-control
-description: 在 Windows 通过官方 Playwright CLI 和浏览器扩展控制已登录的 Chrome 或 Edge；用于日常网页操作、采集和页面验收，默认 Chrome、Edge 按需，支持命名会话、连接诊断及自有标签清理。
+description: 按实际主机通过受管 Playwright 控制 Chrome 或 Edge；WSL 使用项目唯一连接、规范原生分组、页面复用与主动清理契约，Windows 使用官方 CLI 扩展入口。用于网页操作、页面验收和连接生命周期管理。
 metadata:
   x-custom-skill: true
   x-source-repo: dmdmwshr/custom-skills
@@ -8,9 +8,11 @@ metadata:
 
 # Playwright 浏览器控制
 
-使用微软官方 CLI 扩展连接，复用指定浏览器配置。Windows 日常浏览器操作优先此入口；现有 Codex 官方插件保留，不自动回退。不迁移有独立驱动或固定会话约定的业务项目。
+先核对真实执行主机、系统、用户和授权浏览器资料。WSL 读取 [WSL 项目管理入口](references/wsl-project-browser.md)，使用本机已发布契约；不要运行下方 Windows 包装器。Windows 按下方官方 CLI 扩展流程复用指定资料；Windows 流程不因 WSL 发布自动迁移。现有插件和业务驱动按用户授权及本机契约衔接，不因技能边界拒绝已授权适配。
 
-## 入口与会话
+CLI 可通过持久 daemon 复用连接，不能把命令进程退出等同连接退出。MCP 也不自动保证跨任务复用，仍需受管后台、唯一项目身份及页面恢复验证。两种方式不得同时控制同项目页面。
+
+## Windows 入口与会话
 
 在任务的工作目录运行 `scripts/browser_cli.py`。脚本使用 Python 标准库，从 `%LOCALAPPDATA%/CodexBrowser/playwright/runtime.json` 读取本机固定的 Node、CLI 入口及浏览器映射。
 
