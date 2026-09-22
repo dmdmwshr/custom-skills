@@ -10,7 +10,8 @@
     "okxnew-backtest-operations",
     "okxnew-data-operations",
     "personal-memory-on-demand",
-    "macro-strategy-data-operations"
+    "macro-strategy-data-operations",
+    "playwright-browser-control"
   ],
   "notes": "This is enforced by the managed publisher, not a native Codex frontmatter filter. Support declarations do not prove business dependencies or real-host validation. Windows-only entries describe current delivered workflows, not portability of every helper.",
   "skills": {
