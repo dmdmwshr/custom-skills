@@ -30,6 +30,10 @@ metadata:
 
 浏览器验证使用当前主机登记的受管 Playwright 入口：各项目独立官方会话与原生页面组，共用统一控制租约。具体配置、临时目录、下载位置和部署约束按主机 host-baseline 的浏览器说明回读，不在业务技能复制绑定值；不另建并行控制者。
 
+已迁移ProjectBrowserV2的WSL项目只引用主机唯一契约；用一次持久入口完成attach、page-ensure、业务操作、page-release和显式finish，之后退出入口再等collector。页面默认临时，WGC下一轮无同页复用需求，不强留连接页或旧CLI生命周期。先正常退役旧CLI并确认无在途/daemon退出，再锁内精确切本项目backend，保持原collector；真实组名、groupId与页面原生身份须有回执。
+
+新页首份tabId可能尚为空，按契约inventory补读，不能猜。顶层成功或cleanupPending=false不等于关闭：核对release.closed、目标页消失、finish各清理类别、精确finish请求对应的状态及owner/pending释放。所有业务页已确认关闭后，主机finish可能出现已验证的空连接换代；保留业务阶段和终态两份原生身份，不把正常终态变化误判成下载失败或重放click。业务阶段身份改变仍停止对账，EOF仅best-effort不当验收。
+
 WGC 官方下载在扩展模式下可能没有可靠的download或response完成事件，但文件已进入浏览器默认下载目录。点击后按已知文件名、操作时间、稳定大小和目标目录核对完整文件及哈希，不把等待事件作为唯一完成依据。原始调用回执先保存；未知pending先对账，即使文件已完成也不能伪造成功回执或直接重点击。必要连接退役、恢复及页面清理由主机统一控制层执行，业务项目只声明用途和留存。全球季度 Central Bank and Other Institutions 与月度已报告储备变动口径不同，不能互相替代；当前修订版本也不是历史vintage。
 
 已使用的 FRED 公开 CSV 下载不要求 API Key；ALFRED 网页下载与 FRED/ALFRED API 认证是不同入口，分别验证。不能从网页可读推定 API 已授权、全部 vintage 齐全或历史从未配置过 Key；网页下载、实际取得文件与点时覆盖分别报告。
@@ -61,6 +65,8 @@ ALFRED按来源版本身份独立存储，避免整份历史A→B重导又追加
 从已提交源码和锁文件构建独立不可变 release，校验安装包字节、manifest、非 root 账号、配置/数据根与只读绑定。既有发布升级必须核对 expected-current，保留原 release 和新增数据；部署脚本的阶段回执决定能否接续，不能从非零退出推定尚未切换。
 
 变更systemd单元时核对旧/新精确哈希并备份；尤其simple→notify后，回退旧代码须一并恢复匹配的单元及配置，否则旧代码不发READY会卡在启动。回退只恢复本次目标，不删新增表、数据、版本或持久退避。
+
+浏览器更新器可独立从精确Git archive与锁文件发布，校验安装源码和manifest后原子切专属updater入口；只读公开代码按实际执行用户授予最小目录通行权限。适配更新器不必重启未变的collector，分别回读两个组件版本/PID和回退点；构建缓存发布验证后按本轮精确路径清理。
 
 停止 target 返回后，子服务可能仍在 deactivating；有界等到它们 inactive/MainPID0，再核对 Result。API 正常 SIGTERM 与采集正常退出都须结合实际 Result 判断。停止后无写者且 WAL 不存在/为空时，稳定数据库可用 mode=ro&immutable=1 读取，避免只读挂载上的 WAL 辅助文件创建；运行中的库不能用 immutable 绕过 WAL。
 
