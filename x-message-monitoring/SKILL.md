@@ -14,7 +14,7 @@ metadata:
 
 - 普通周期：读 [运行步骤](references/fast-path-runbook.md) 与 [模型判断契约](references/reply-reset-contract.md)；版本未变且上下文仍在则复用，不每轮重读。
 - 新进程或发布：另读 [身份、受管加载与发布](references/wsl-migration.md)。
-- 用户已授权每轮换代时：按业务项目 SESSION_ROTATION.md 的持久请求续接，业务终态并释放资源后新建空白后继、换绑原调度及所有者、核验后归档旧任务。初始化只就绪，不采集或再次换代；同一业务周期不重复创建。不要fork旧上下文或清除账本断点。
+- 用户已授权每轮换代时：按业务项目 SESSION_ROTATION.md 的持久请求续接，业务终态并释放资源后新建空白后继、换绑原调度及所有者、核验后归档旧任务。初始化只就绪，不采集或再次换代；启动还要比较最后终结业务周期与已换代周期：发现漏换代先补办，不能只查未完成请求；无新业务的初始化不得反复轮换。同一业务周期不重复创建。不要fork旧上下文或清除账本断点。
 - 实际失败：只读 [维护诊断](references/diagnostics.md) 对应内容；投递问题参考 [回执与完成](references/heartbeat-and-delivery.md)。
 - 主机或路径不明确时才读 [主机核对](references/host-platform.md)。
 
