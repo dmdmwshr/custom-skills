@@ -7,16 +7,18 @@
 
 ## 顺序
 
-1. 先按 [身份与加载](wsl-migration.md) 核对实际任务、项目登记及唯一执行租约；健康连接不重启，版本/进程未变则复用静态模块。当前进程首次或客户端改变时 selfTest，61 项 exact_match=true；独立 Node 通过不替代此项。
-2. workflow 取得 health、唯一 heartbeat-acquire，保留原 lease 和账号/水位；正式定时用 scheduled，授权人工用 manual_validation。publish-pending 预检通过后才生成草稿，再 sync-receipts。
+1. 每次唤醒先执行业务项目受管 bootstrap ensure；已有账本保留，部署缺失的恢复不等于清水位。再按 [身份与加载](wsl-migration.md) 核对实际任务、项目登记及唯一执行租约；健康连接不重启，版本/进程未变则复用静态模块。当前进程首次或客户端改变时 selfTest，61 项 exact_match=true；独立 Node 通过不替代此项。
+2. 已接受 workflow 1.4.0 起使用无参数 `createCycle()`，从 `health.browser_identity.expected_authenticated_account` 取得预期 X 登录；不把 `health.accounts[0].account` 监控作者传入登录参数。旧版接口以已安装版本为准，不能缺字段时猜账号。workflow 取得 health、唯一 heartbeat-acquire，保留原 lease 和账号/水位；正式定时用 scheduled，授权人工用 manual_validation。publish-pending 预检通过后才生成草稿，再 sync-receipts。
 3. 受管 connectPlaywright/reuseTab 按当地唯一契约接回本项目登记连接/原生组/页面，driver 必须使用 adapter.driver，不是底层 runtime.driver。Google 资料、X 登录、被监控作者是三个字段；预期 X 登录读取项目部署绑定，被监控作者来自本轮账号。电脑环境已知正常重建时先用当地受管恢复入口重新建立并验证页面归属；不拿旧句柄当当前页面。
 4. 主帖 Latest 查询 from:<account> -filter:replies -filter:retweets。page 按 done 续未完成页及全文；context-plan 后仅新项补 quoteBatch。
-5. 回复 Latest 查询 from:<account> filter:replies，不访问 with_replies。完整搜索序列经 observation-fingerprint 后，permalinkBurst 使用同次机器指纹续未完成批次；直接父子关系必须可信。context-plan 后按需要补上文（至多三层）。resolveContext(sufficient)只结算回复上文，不代替引用核验；自身、直接父文及已采用上文的直接引用都须经 quoteBatch 补齐（每项至多五个来源）。
-6. 两流 collect/rawStream 前分别确认 quoteBatch 返回 done=true；没有待引用项时它是无浏览器读取的纯完成检查。之后按 [判断契约](reply-reset-contract.md) 处理 contentReview；模型提交 equivalent/different/uncertain 及具体依据。不同/不确定不能冒充同义，也不统一自动放行。引用未补齐的本地拒绝不能算模型额度漏判。
+5. 回复 Latest 查询 from:<account> filter:replies，不访问 with_replies。完整搜索序列经 observation-fingerprint 后，permalinkBurst 使用同次机器指纹续未完成批次；直接父子关系必须可信。context-plan 后按需要补上文（至多三层）。`resolveContext(statusId, resolution)` 只结算回复上文，不代替引用核验；自身、直接父文及已采用上文的直接引用都须经 quoteBatch 补齐（每项至多五个来源）。
+6. 两流 collect/rawStream 前分别确认 quoteBatch 返回 done=true；没有待引用项时它是无浏览器读取的纯完成检查。之后按 [判断契约](reply-reset-contract.md) 处理 contentReview；模型提交 equivalent/different/uncertain 及具体依据。引用卡预览可能省略后半段：应核对它已表达的内容与核验后的完整来源是否相容，不因省略本身判 different；真实矛盾判 different，证据不足判 uncertain。不同/不确定不能冒充同义，也不统一自动放行。引用未补齐的本地拒绝不能算模型额度漏判。
 7. 已安装历史关联迁移时，两流分别 collect → archive，之后统一 correlation-plan → 分页 history-query → 模型 correlation-commit；函数及信封字段读项目 HISTORY_CORRELATION.md。完整观察持久化后可以推进采集水位，内容待定单独复评，不反复扫描已完整区间。未启用迁移的旧部署才用 analysis-plan/scan-analysis，不能两条路径各发一次。sendKept 保留机器原载荷，模型不得重建 collectedAt、水位或哈希；未提交观察不能从日志恢复。
 8. heartbeat-finish 完成两阶段终态，health 核对无锁/finish_pending=0；park、clearKept、control.clear、guard.close 由编排依据实际回执执行，清空动态事实并释放进程租约。正常轮不物理断连、不开新页。
 
 workflow 尚未安装或接口不符时按当前 handoff 维护接入，不自己写替代 runner 或把候选当正式入口。
+
+每个异步 workflow/adapter 方法都应 `await` 并处理拒绝，一次工具调用推进一个有界步骤；外层期限须覆盖该步骤预算与收尾，不在单次调用内循环整窗。workflow 1.4.0 的 `resolveContext` 和 `resolveContexts([{statusId, resolution}, ...])` 是同步局部判断，后者整批预校验后应用；旧式 `await resolveContext(...)` 仍兼容。它们不执行浏览器操作或续租；模型分析批次间仍按需 `await keepAlive()`。局部 rejection observer 防止遗漏处理导致执行器崩溃，但 Promise 仍拒绝，`lastRejection` 不是成功或可重放凭据。
 
 ## 历史补缺与事件关联
 
