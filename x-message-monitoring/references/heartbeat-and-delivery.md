@@ -2,6 +2,8 @@
 
 - 原 direct_feishu 通道与原目标不变；scan 只创建幂等意图。同步只沿受控认证 GET，不从 UI 重发。
 - 已登记、transport_accepted、平台原消息存在、网页可见及用户已读是不同证据。XMonitorPlatformReceiptV1 按原意图/应用/目标/内容/时间核对，仅追加证明，不改写旧周期或手写 delivered。
+- 网关保留的 `delivery_unverified / transport_accepted` 与业务账本 `delivered` 可以并存：先读取原键附加的平台证明，不能只看 transport state。对历史指定键，用项目受管只读 `verification_summary(..., only_key=原键)` 判断平台是否已经核实；查询不发送、不补建意图。平台已核实但浏览器失联时报告“平台已核实；网页可见性待验”，不能报发送失败或重发。累计账本统计、当前同步新增数量、本轮业务通知与生命周期告警分别说明；业务通知为0不代表没有恢复/故障消息。
+- 新通知模板的人类可读时间按项目规则显示到分钟，保留时区；来源原文/译文、内部UTC事实、签名与冻结哈希不做全局秒数替换。历史已冻结通知继续按兼容验证路径核对，不重新渲染或为了格式更新重发。
 - 真实 unknown 不重发、不新建键；历史积压单列，不为了 health 变绿重放。本轮通知未定则报告，不把 notifiable=0 当作没有系统提醒。
 - heartbeat-finish 为完成依据。XMonitorHeartbeatFinalizeV2 双流及本轮投递确定才 completed；部分成功 partial_failed，其余 failed_closed。独立已提交流不回滚。
 - 故障按首次、实质变化、持续满24小时、完整恢复去重；每个失败周期仍在原任务报告。
