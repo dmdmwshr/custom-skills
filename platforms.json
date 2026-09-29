@@ -454,6 +454,19 @@
         "windows": "not_supported_by_current_workflow"
       },
       "dependencies": "Independent macro-strategy project, documented bounded systemd worker and source registry; no legacy OKXnew runtime dependencies."
+    },
+    "xf-product-standards": {
+      "category": "business_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "windows": "isolated_tests_and_local_library_audit",
+        "linux": "runtime_unverified",
+        "wsl": "not_supported_by_current_workflow"
+      },
+      "dependencies": "Python with PyMuPDF; configured catalog root and browser CLI; official standards websites. No scheduled task."
     }
   }
 }

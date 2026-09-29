@@ -1,0 +1,4 @@
+interface:
+  display_name: "消防产品标准目录维护"
+  short_description: "按三种消防产品目录核对官网标准状态，补齐PDF并维护分类、关联与历史版本"
+  default_prompt: "使用 $xf-product-standards 核对并维护本机消防产品国标、行标资料库，保留三套目录和未完成断点。"
