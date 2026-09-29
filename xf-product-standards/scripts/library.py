@@ -168,6 +168,8 @@ def render(root,data):
                 replacement=s.get('replacement_note','')
                 lines.append('<div><b>'+esc(code)+'</b>　'+esc(status)+'　'+local+'　'+official+'<br><small>'+esc(s.get('title',''))+'；实施：'+esc(s.get('implemented') or '待核实')+'；核对：'+esc(s.get('checked_at','')[:10] or '未完成')+('</small><br><small>'+esc(s.get('download_note','')) if not matched else '')+('</small><br><small>'+esc(replacement) if replacement else '')+'</small></div>')
             if not lines:lines=['<span class="missing">'+esc(p.get('review_state','适用标准待核实'))+'</span>']
+            elif p.get('review_state') not in ['已匹配','本次检索未查到适用国标或行标']:
+                lines.insert(0,'<div class="missing">'+esc(p.get('review_state','适用标准待核实'))+'</div>')
             note=p.get('note','')
             if p.get('review_state') and p['review_state']!='已匹配':note+=' '+p['review_state']
             if p.get('source_refs'):note+=' 原目录标准：'+p['source_refs']
@@ -179,7 +181,7 @@ def render(root,data):
             elif src.get('url'):sources.append(anchor(src['url'],src['title']))
         count=len({j['standard'] for j in data['placements'] if j.get('catalog')==cat['id']})
         note=f'<p>核对基准日：{esc(data["as_of"])}　产品条目：{len(products)}　已保存不同标准：{count}</p><p>'+anchor('../目录导航.html','返回总目录')+'</p><div class="note">'+esc(cat.get('note',''))+'<br>目录依据：'+'；'.join(sources)+'</div>'
-        script='<script>function filter(){const q=document.getElementById("q").value.toLowerCase();document.querySelectorAll("tbody tr").forEach(r=>r.hidden=!r.innerText.toLowerCase().includes(q))}</script>'
+        script='<script>function filter(){const q=document.getElementById("q").value.toLowerCase();document.querySelectorAll("tbody tr").forEach(r=>r.hidden=!r.textContent.toLowerCase().includes(q))}</script>'
         doc=page(cat['title'],note+'<input id="q" placeholder="搜索产品、标准号、状态、未取得或待核实" oninput="filter()"><table><thead><tr><th width="18%">分类</th><th width="29%">产品</th><th>适用标准与文件</th></tr></thead><tbody>'+''.join(row_html)+'</tbody></table>'+script)
         (folder/'产品与标准目录.html').write_text(doc,encoding='utf-8')
         stats.append((cat,len(products),count))
