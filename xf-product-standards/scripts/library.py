@@ -109,7 +109,7 @@ def build(root,data):
             if key not in jobs:
                 display=s.get('display_name') or p['name']
                 if s['status']=='废止':relative=Path('99_历史标准')/cat['folder']/category/filename(display,s)
-                else:relative=Path(cat['folder'])/category/('参考标准' if key[3] else folder)/filename(display,s)
+                else:relative=Path(cat['folder'])/category/(Path('参考标准')/folder if key[3] else Path(folder))/filename(display,s)
                 dst=safe(root,relative)
                 if dst.exists() and digest(dst)!=s['sha256']:raise ValueError('已有文件内容冲突：'+str(relative))
                 jobs[key]=dict(standard=code,path=str(relative),sha256=s['sha256'],source=src,target=dst,catalog=p['catalog'],category=category)
@@ -184,7 +184,7 @@ def render(root,data):
         (folder/'产品与标准目录.html').write_text(doc,encoding='utf-8')
         stats.append((cat,len(products),count))
     cards=''.join('<div class="card"><h2>'+anchor(quote(c['folder']+'/产品与标准目录.html'),c['title'])+'</h2><p>'+str(n)+'个产品条目<br>'+str(k)+'份不同标准已保存</p></div>' for c,n,k in stats)
-    registry_ids={s for p in data['products'] for s in p.get('standard_ids',[])}
+    registry_ids={s for p in data['products'] for s in p.get('standard_ids',[])+p.get('reference_ids',[])}
     present={j['standard'] for j in data['placements']};missing=len(registry_ids-present)
     pending=sum(p.get('review_state') not in ['已匹配','本次检索未查到适用国标或行标'] for p in data['products'])
     body='<p>核对基准日：'+esc(data['as_of'])+'。三种目录分别维护，同一标准在各目录保留完整PDF。</p>'+cards+'<div class="note">已保存不同标准：'+str(len(present))+'；标准副本：'+str(len(data['placements']))+'；已列编号但未取得PDF：'+str(missing)+'；适用关系待核实产品条目：'+str(pending)+'。<br>“未取得PDF”不等于没有标准；未完成官网查询的条目保留待核实标记。仅官网明确废止的版本进入历史目录。<br>查找缺件：进入对应产品目录后搜索“PDF未取得”或“待核实”。</div><p>'+anchor('99_%E5%8E%86%E5%8F%B2%E6%A0%87%E5%87%86/','打开历史标准目录')+'</p>'

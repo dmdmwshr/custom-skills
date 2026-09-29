@@ -54,5 +54,13 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(p.read_bytes(),b'changed')
     def test_path_escape_rejected(self):
         with self.assertRaises(ValueError):lib.safe(self.root,'../outside')
+    def test_future_reference_keeps_status_and_missing_count(self):
+        self.standard('GB 501-2030','即将实施','2031-01-01')
+        self.standard('GB 502-2030','即将实施','2031-01-01',pdf=False)
+        self.product('a',[]);self.data['products'][0]['reference_ids']=['GB 501-2030','GB 502-2030']
+        result=lib.build(self.root,self.data)
+        self.assertFalse(result['errors']);self.assertEqual(result['copies'],1)
+        self.assertIn('02_待生效国标',self.data['placements'][0]['path'])
+        self.assertIn('已列编号但未取得PDF：1',(self.root/'目录导航.html').read_text('utf-8'))
 
 if __name__=='__main__':unittest.main()
