@@ -158,6 +158,7 @@ def render(root,data):
             lines=[]
             for code in dict.fromkeys(p.get('standard_ids',[])+p.get('reference_ids',[])):
                 s=data['standards'][code];status=s.get('status','待核实')
+                if status=='即将实施':status='待生效（官网：即将实施）'
                 if not s.get('verified'):status+='（待核实）'
                 if code in p.get('reference_ids',[]):status+='；参考资料'
                 official=anchor(s['official_url'],'官网') if s.get('official_url') else ''
