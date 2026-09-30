@@ -94,4 +94,57 @@ class LibraryTests(unittest.TestCase):
         lib.atomic_json(self.root/lib.META,data)
         self.assertTrue(lib.audit(self.root,True)['errors'])
 
+    def test_coverage_counts_shared_versions_multivolume_and_reference_separately(self):
+        for code in ['GB 601-2029','GB 602-2029','GB 603-2029']:self.standard(code)
+        self.standard('GB 601-2030','即将实施','2031-01-01',pdf=False)
+        self.product('a',['GB 601-2029','GB 601-2029','GB 601-2030'])
+        self.product('a',['GB 601-2029','GB 602-2029'])
+        self.data['products'][0]['reference_ids']=['GB 603-2029']
+        result=lib.build(self.root,self.data);c=result['catalogs'][0]
+        self.assertEqual(c['products'],2)
+        self.assertEqual(c['current_product'],dict(versions=2,pdfs=2,missing_codes=[]))
+        self.assertEqual(c['current_associations'],3)
+        self.assertEqual(c['current_standards_shared_across_products'],1)
+        self.assertEqual(c['current_standards_per_product'],{1:1,2:1})
+        self.assertEqual(c['current_pdf_coverage']['complete'],2)
+        self.assertEqual(c['future_product']['missing_codes'],['GB 601-2030'])
+        self.assertEqual(c['reference']['pdfs'],1)
+
+    def test_coverage_needs_valid_copy_in_product_catalog_and_category(self):
+        self.standard('GB 701-2029');self.standard('GB 702-2029')
+        for cat in ['a','b']:self.product(cat,['GB 701-2029'])
+        self.product('a',['GB 701-2029','GB 702-2029'])
+        self.data['products'][-1]['category']='另一分类'
+        lib.build(self.root,self.data)
+        for j in self.data['placements']:
+            if j['catalog']=='a' and j['standard']=='GB 701-2029':
+                (self.root/j['path']).write_bytes(b'broken')
+        result=lib.audit(self.root,True);a,b=result['catalogs']
+        self.assertTrue(result['errors'])
+        self.assertEqual(a['current_pdf_coverage']['no_pdf'],1)
+        self.assertEqual(a['current_pdf_coverage']['partial'],1)
+        self.assertEqual(a['current_product']['pdfs'],1)
+        self.assertEqual(b['current_pdf_coverage']['complete'],1)
+
+    def test_pending_applicability_and_no_standard_are_not_complete(self):
+        self.standard('GB 801-2029')
+        self.product('a',['GB 801-2029'])
+        self.data['products'][-1]['review_state']='仅列试验方法，专门产品标准待核实'
+        self.product('a',[])
+        self.data['products'][-1]['review_state']='本次检索未查到适用国标或行标'
+        self.data['products'][-1]['reference_ids']=['GB 801-2029']
+        result=lib.build(self.root,self.data);c=result['catalogs'][0]
+        self.assertEqual(c['current_pdf_coverage']['complete'],0)
+        self.assertEqual(c['current_pdf_coverage']['pending_applicability'],1)
+        self.assertEqual(c['current_pdf_coverage']['no_current_standard'],1)
+        self.assertEqual(c['no_standard_found_products'],1)
+
+    def test_resume_link_is_available_only_for_missing_file(self):
+        s=self.standard('GB 901-2029',pdf=False)
+        s['resume_urls']=['https://example.com/standard/901']
+        self.product('a',['GB 901-2029'])
+        self.assertFalse(lib.build(self.root,self.data)['errors'])
+        text=(self.root/'01_A/产品与标准目录.html').read_text('utf-8')
+        self.assertIn('https://example.com/standard/901',text)
+
 if __name__=='__main__':unittest.main()

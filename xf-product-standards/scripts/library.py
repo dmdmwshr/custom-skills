@@ -197,8 +197,50 @@ def relocation_check(root):
         result=audit(dest,True)
         result['relocation_verified']=not result['errors']
         return result
+def catalog_coverage(data,available):
+    """Count relationships separately from versions and valid local copies.
+
+    Callers supply available placements; a copy in another catalog/category
+    cannot satisfy a product's local link. Reference files never fill coverage.
+    """
+    standards=data['standards'];reports=[]
+    for cat in data['catalogs']:
+        products=[p for p in data['products'] if p['catalog']==cat['id']]
+        copies=[j for j in available if j.get('catalog')==cat['id']]
+        slots={(j.get('category'),j['standard']) for j in copies}
+        present={j['standard'] for j in copies}
+        current=set();future=set();references=set();all_codes=set()
+        relations=Counter();distribution=Counter();coverage=Counter()
+        for p in products:
+            ids=set(p.get('standard_ids',[]));refs=set(p.get('reference_ids',[]))
+            current_ids={c for c in ids if standards.get(c,{}).get('status')=='现行'}
+            future_ids={c for c in ids if standards.get(c,{}).get('status')=='即将实施'}
+            current.update(current_ids);future.update(future_ids);references.update(refs)
+            all_codes.update(ids|refs);relations.update(current_ids);distribution[len(current_ids)]+=1
+            found={c for c in current_ids if (p['category'],c) in slots}
+            if p.get('review_state') not in ['已匹配','本次检索未查到适用国标或行标']:
+                state='pending_applicability'
+            elif not current_ids:state='no_current_standard'
+            elif found==current_ids:state='complete'
+            elif found:state='partial'
+            else:state='no_pdf'
+            coverage[state]+=1
+        def versions(codes):
+            return dict(versions=len(codes),pdfs=len(codes&present),missing_codes=sorted(codes-present))
+        reports.append(dict(catalog=cat['id'],title=cat['title'],products=len(products),
+            copies=len(copies),unique_pdfs=len(present),standard_versions=len(all_codes),
+            missing_codes=sorted(all_codes-present),current_product=versions(current),
+            future_product=versions(future),reference=versions(references),
+            current_pdf_coverage={k:coverage[k] for k in ['complete','partial','no_pdf','no_current_standard','pending_applicability']},
+            current_associations=sum(relations.values()),
+            current_standards_shared_across_products=sum(n>1 for n in relations.values()),
+            current_standards_per_product=dict(sorted(distribution.items())),
+            no_standard_found_products=sum(p.get('review_state')=='本次检索未查到适用国标或行标' for p in products)))
+    return reports
+
 def render(root,data):
     esc=html.escape;stats=[]
+    coverage={c['catalog']:c for c in catalog_coverage(data,[j for j in data['placements'] if safe(root,j['path']).is_file()])}
     for cat in data['catalogs']:
         folder=safe(root,cat['folder']);folder.mkdir(parents=True,exist_ok=True)
         products=[p for p in data['products'] if p['catalog']==cat['id']]
@@ -214,6 +256,8 @@ def render(root,data):
                 matched=[j for j in data['placements'] if j['standard']==code and j.get('catalog')==cat['id'] and j.get('category')==p['category']]
                 local=' '.join(anchor(quote(os.path.relpath(root/j['path'],folder).replace('\\','/')),'打开PDF') for j in matched)
                 if not local:local='<span class="missing">PDF未取得</span>'
+                if not matched and s.get('resume_urls'):
+                    local+='<br><small>续办：'+'；'.join(anchor(url,'下载入口'+str(i+1)) for i,url in enumerate(dict.fromkeys(s['resume_urls'])))+'</small>'
                 replacement=s.get('replacement_note','')
                 lines.append('<div><b>'+esc(code)+'</b>　'+esc(status)+'　'+local+'　'+official+'<br><small>'+esc(s.get('title',''))+'；实施：'+esc(s.get('implemented') or '待核实')+'；核对：'+esc(s.get('checked_at','')[:10] or '未完成')+('</small><br><small>'+esc(s.get('download_note','')) if not matched else '')+('</small><br><small>'+esc(replacement) if replacement else '')+'</small></div>')
             if not lines:lines=['<span class="missing">'+esc(p.get('review_state','适用标准待核实'))+'</span>']
@@ -229,7 +273,11 @@ def render(root,data):
             if src.get('path'):sources.append(anchor(quote(os.path.relpath(safe(root,src['path']),folder).replace('\\','/')),src['title']))
             elif src.get('url'):sources.append(anchor(src['url'],src['title']))
         count=len({j['standard'] for j in data['placements'] if j.get('catalog')==cat['id']})
-        note=f'<p>核对基准日：{esc(data["as_of"])}　产品条目：{len(products)}　已保存不同标准：{count}</p><p>'+anchor('../目录导航.html','返回总目录')+'</p><div class="note">'+esc(cat.get('note',''))+'<br>目录依据：'+'；'.join(sources)+'</div>'
+        cs=coverage[cat['id']];cp=cs['current_product'];fp=cs['future_product'];rp=cs['reference'];pc=cs['current_pdf_coverage']
+        numbers=f'现行产品标准：{cp["versions"]}份，已存{cp["pdfs"]}份；待生效产品标准：{fp["versions"]}份，已存{fp["pdfs"]}份；参考标准：{rp["versions"]}份，已存{rp["pdfs"]}份。'
+        numbers+=f'<br>产品现行PDF覆盖：齐全{pc["complete"]}项、部分缺件{pc["partial"]}项、无PDF{pc["no_pdf"]}项、尚无现行标准对应{pc["no_current_standard"]}项、适用性待核实{pc["pending_applicability"]}项。'
+        numbers+=f'<br>产品与标准不是一一对应：现行适用关系{cs["current_associations"]}条，去重后{cp["versions"]}份标准，其中{cs["current_standards_shared_across_products"]}份由多个产品条目共用。参考资料和待生效版本不计入现行覆盖。'
+        note=f'<p>核对基准日：{esc(data["as_of"])}　产品条目：{len(products)}　已保存不同标准：{count}</p><div class="note">'+numbers+'</div><p>'+anchor('../目录导航.html','返回总目录')+'</p><div class="note">'+esc(cat.get('note',''))+'<br>目录依据：'+'；'.join(sources)+'</div>'
         script='<script>function filter(){const q=document.getElementById("q").value.toLowerCase();document.querySelectorAll("tbody tr").forEach(r=>r.hidden=!r.textContent.toLowerCase().includes(q))}</script>'
         doc=page(cat['title'],note+'<input id="q" placeholder="搜索产品、标准号、状态、未取得或待核实" oninput="filter()"><table><thead><tr><th width="18%">分类</th><th width="29%">产品</th><th>适用标准与文件</th></tr></thead><tbody>'+''.join(row_html)+'</tbody></table>'+script)
         (folder/'产品与标准目录.html').write_text(doc,encoding='utf-8')
@@ -249,11 +297,12 @@ def render(root,data):
 
 def audit(root,links=False):
     root=Path(root).resolve();data=json.loads((root/META).read_text(encoding='utf-8'));errors=[]
-    hashes=defaultdict(set)
+    hashes=defaultdict(set);available=[]
     for p in data.get('placements',[]):
         f=safe(root,p['path'])
         if not f.is_file():errors.append('缺文件：'+p['path'])
         elif digest(f)!=p['sha256']:errors.append('内容变化：'+p['path'])
+        else:available.append(p)
         hashes[p['standard']].add(p['sha256'])
         s=data['standards'].get(p['standard'],{})
         try:
@@ -267,7 +316,7 @@ def audit(root,links=False):
         for f in [root/'目录导航.html']+[safe(root,c['folder'])/'产品与标准目录.html' for c in data['catalogs']]:
             if not f.exists():errors.append('缺索引：'+str(f))
         errors.extend(check_portable_links(root,data)['errors'])
-    return dict(products=len(data['products']),standards=len(data['standards']),copies=len(data.get('placements',[])),unique_pdfs=len({p['standard'] for p in data.get('placements',[])}),errors=errors)
+    return dict(products=len(data['products']),standards=len(data['standards']),copies=len(data.get('placements',[])),unique_pdfs=len({p['standard'] for p in data.get('placements',[])}),catalogs=catalog_coverage(data,available),errors=errors)
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('command',choices=['audit','validate','build','relocate-check']);parser.add_argument('--root');parser.add_argument('--registry');parser.add_argument('--config')
