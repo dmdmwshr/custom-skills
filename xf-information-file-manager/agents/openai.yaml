@@ -1,0 +1,4 @@
+interface:
+  display_name: "信息化文件管理"
+  short_description: "分类留存信息化历史文件，同步实时汇编、命名排序和逐次更新记录"
+  default_prompt: "使用 $xf-information-file-manager 归档新增信息化文件，同步实时汇编并生成本次更新说明。"

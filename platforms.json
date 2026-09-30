@@ -455,6 +455,19 @@
       },
       "dependencies": "Independent macro-strategy project, documented bounded systemd worker and source registry; no legacy OKXnew runtime dependencies."
     },
+    "xf-information-file-manager": {
+      "category": "business_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "windows": "runtime_verified_2026_09_30_with_eight_tests_and_initial_archive_alignment",
+        "linux": "runtime_unverified",
+        "wsl": "not_supported_by_current_workflow"
+      },
+      "dependencies": "Python 3.12+ standard library; configured information archive root. Source reading uses available local Office/PDF tools. No scheduled task, external upload, or book assembly."
+    },
     "xf-product-standards": {
       "category": "business_specific",
       "execution_platforms": [
