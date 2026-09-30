@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import date
 from urllib.parse import quote, unquote, urlparse
 from collections import Counter, defaultdict
+from html.parser import HTMLParser
 import argparse, hashlib, html, json, os, re, shutil, tempfile
 
 META = Path('.标准维护/registry.json')
@@ -148,6 +149,54 @@ def build(root,data):
 STYLE='''body{font-family:"Microsoft YaHei",sans-serif;color:#233747;margin:30px auto;padding:0 24px;max-width:1500px;line-height:1.7}h1{font-size:26px}h2{font-size:19px}a{color:#17639b}table{width:100%;border-collapse:collapse;font-size:13px}td,th{border:1px solid #d5dfe7;padding:9px;vertical-align:top;text-align:left}th{background:#e7f0f7;position:sticky;top:0}tr:nth-child(even){background:#f7f9fb}.note{background:#edf4f8;padding:15px;margin:15px 0}.missing{color:#a45413}input,select{padding:9px;margin:12px 8px 15px 0;font-size:14px}.cards{display:flex;gap:18px;flex-wrap:wrap}.card{border:1px solid #d5dfe7;border-radius:8px;padding:20px;flex:1;min-width:250px}small{color:#617080}details{margin:8px 0}@media print{input,select{display:none}th{position:static}tr{break-inside:avoid}}'''
 def page(title,body):return '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>'+html.escape(title)+'</title><style>'+STYLE+'</style><h1>'+html.escape(title)+'</h1>'+body+'</html>'
 def anchor(url,label):return '<a href="'+html.escape(url,quote=True)+'">'+html.escape(label)+'</a>'
+
+class LinkParser(HTMLParser):
+    def __init__(self):
+        super().__init__();self.links=[];self.has_base=False
+    def handle_starttag(self,tag,attrs):
+        if tag=='base':self.has_base=True
+        for key,value in attrs:
+            if value and key in {'href','src','poster','data','action'}:self.links.append(value)
+
+def check_portable_links(root,data):
+    """Check every delivered HTML and all active metadata paths after relocation."""
+    root=Path(root).resolve();errors=[];count=0
+    for f in root.rglob('*.html'):
+        parser=LinkParser();parser.feed(f.read_text(encoding='utf-8-sig'))
+        if parser.has_base:errors.append('HTML不能设置base地址：'+str(f.relative_to(root)))
+        for href in parser.links:
+            count+=1;u=urlparse(href)
+            if u.scheme in {'http','https'} and u.hostname not in {'localhost','127.0.0.1','::1'}:continue
+            if u.scheme or u.netloc or href.startswith(('/', '\\')) or '\\' in href:
+                errors.append('非便携链接：'+str(f.relative_to(root))+' -> '+href);continue
+            if not u.path:continue
+            p=(f.parent/unquote(u.path)).resolve()
+            if not p.is_relative_to(root) or not p.exists():errors.append('失效或越界链接：'+href)
+    paths=[s['source_file'] for s in data['standards'].values() if s.get('source_file')]
+    paths += [s['path'] for c in data['catalogs'] for s in c.get('sources',[]) if s.get('path')]
+    paths += [p['path'] for p in data.get('placements',[])]
+    paths += [f for p in data['products'] for f in p.get('local_files',[])]
+    for rel in paths:
+        try:
+            if not safe(root,rel).exists():errors.append('维护数据引用不存在：'+rel)
+        except ValueError:errors.append('维护数据须使用库内相对路径：'+rel)
+    return dict(html_files=len(list(root.rglob('*.html'))),links=count,errors=errors)
+
+def relocation_check(root):
+    """Read-only source check: copy the complete tree to another path and audit."""
+    root=Path(root).resolve()
+    before=audit(root,True)
+    if before['errors']:return before
+    for p in root.rglob('*'):
+        if p.is_symlink() or (hasattr(p,'is_junction') and p.is_junction()):
+            before['errors'].append('打包资料不能依赖链接或联接：'+str(p.relative_to(root)))
+    if before['errors']:return before
+    with tempfile.TemporaryDirectory(prefix='xf-portable-') as tmp:
+        dest=Path(tmp)/'移动后的资料库 中文 空格'
+        shutil.copytree(root,dest)
+        result=audit(dest,True)
+        result['relocation_verified']=not result['errors']
+        return result
 def render(root,data):
     esc=html.escape;stats=[]
     for cat in data['catalogs']:
@@ -189,7 +238,13 @@ def render(root,data):
     registry_ids={s for p in data['products'] for s in p.get('standard_ids',[])+p.get('reference_ids',[])}
     present={j['standard'] for j in data['placements']};missing=len(registry_ids-present)
     pending=sum(p.get('review_state') not in ['已匹配','本次检索未查到适用国标或行标'] for p in data['products'])
-    body='<p>核对基准日：'+esc(data['as_of'])+'。三种目录分别维护，同一标准在各目录保留完整PDF。</p>'+cards+'<div class="note">已保存不同标准：'+str(len(present))+'；标准副本：'+str(len(data['placements']))+'；已列编号但未取得PDF：'+str(missing)+'；适用关系待核实产品条目：'+str(pending)+'。<br>“未取得PDF”不等于没有标准；未完成官网查询的条目保留待核实标记。仅官网明确废止的版本进入历史目录。<br>查找缺件：进入对应产品目录后搜索“PDF未取得”或“待核实”。</div><p>'+anchor('99_%E5%8E%86%E5%8F%B2%E6%A0%87%E5%87%86/','打开历史标准目录')+'</p>'
+    history=root/'99_历史标准';history.mkdir(exist_ok=True)
+    entries=[j for j in data['placements'] if Path(j['path']).parts[0]=='99_历史标准']
+    history_body='<p>'+anchor('../目录导航.html','返回总目录')+'</p>'
+    history_body+=('<ul>'+''.join('<li>'+anchor(quote(os.path.relpath(root/j['path'],history).replace('\\','/')),j['standard'])+'</li>' for j in entries)+'</ul>') if entries else '<p>当前没有归档的废止标准。仅官网确认废止的既有版本进入本目录。</p>'
+    (history/'历史标准目录.html').write_text(page('历史标准目录',history_body),encoding='utf-8')
+    body='<p>核对基准日：'+esc(data['as_of'])+'。三种目录分别维护，同一标准在各目录保留完整PDF。</p>'+cards+'<div class="note">已保存不同标准：'+str(len(present))+'；标准副本：'+str(len(data['placements']))+'；已列编号但未取得PDF：'+str(missing)+'；适用关系待核实产品条目：'+str(pending)+'。<br>“未取得PDF”不等于没有标准；未完成官网查询的条目保留待核实标记。仅官网明确废止的版本进入历史目录。<br>查找缺件：进入对应产品目录后搜索“PDF未取得”或“待核实”。</div><p>'+anchor(quote('99_历史标准/历史标准目录.html'),'打开历史标准目录')+'</p>'
+    if data.get('last_maintenance_at'):body+='<p>最近维护：'+esc(data['last_maintenance_at'])+'；各标准官网核对日期见对应条目。</p>'
     (root/'目录导航.html').write_text(page('消防产品标准资料库',body),encoding='utf-8')
 
 def audit(root,links=False):
@@ -209,18 +264,13 @@ def audit(root,links=False):
     for code,values in hashes.items():
         if len(values)>1:errors.append('同编号副本内容不一致：'+code)
     if links:
-        files=[root/'目录导航.html']+[safe(root,c['folder'])/'产品与标准目录.html' for c in data['catalogs']]
-        for f in files:
-            if not f.exists():errors.append('缺索引：'+str(f));continue
-            for href in re.findall(r'href="([^"]+)"',f.read_text(encoding='utf-8')):
-                href=html.unescape(href)
-                if urlparse(href).scheme or href.startswith('#'):continue
-                p=(f.parent/unquote(href.split('#')[0])).resolve()
-                if not p.is_relative_to(root) or not p.exists():errors.append('失效链接：'+href)
+        for f in [root/'目录导航.html']+[safe(root,c['folder'])/'产品与标准目录.html' for c in data['catalogs']]:
+            if not f.exists():errors.append('缺索引：'+str(f))
+        errors.extend(check_portable_links(root,data)['errors'])
     return dict(products=len(data['products']),standards=len(data['standards']),copies=len(data.get('placements',[])),unique_pdfs=len({p['standard'] for p in data.get('placements',[])}),errors=errors)
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('command',choices=['audit','validate','build']);parser.add_argument('--root');parser.add_argument('--registry');parser.add_argument('--config')
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('command',choices=['audit','validate','build','relocate-check']);parser.add_argument('--root');parser.add_argument('--registry');parser.add_argument('--config')
     a=parser.parse_args()
     if not a.root:
         conf=Path(a.config) if a.config else Path(os.environ.get('LOCALAPPDATA',Path.home()/'.config'))/'FireProductStandards/config.json'
@@ -229,6 +279,7 @@ def main():
     if a.command=='build':
         if not a.registry:parser.error('build需要--registry')
         result=build(a.root,json.loads(Path(a.registry).read_text(encoding='utf-8')))
+    elif a.command=='relocate-check':result=relocation_check(a.root)
     else:result=audit(a.root,a.command=='validate')
     print(json.dumps(result,ensure_ascii=False,indent=2))
     if result['errors']:raise SystemExit(1)

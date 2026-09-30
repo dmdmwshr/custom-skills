@@ -1,4 +1,4 @@
-import copy,json,tempfile,unittest
+import copy,json,tempfile,unittest,zipfile
 from pathlib import Path
 import fitz
 import library as lib
@@ -62,5 +62,36 @@ class LibraryTests(unittest.TestCase):
         self.assertFalse(result['errors']);self.assertEqual(result['copies'],1)
         self.assertIn('02_待生效国标',self.data['placements'][0]['path'])
         self.assertIn('已列编号但未取得PDF：1',(self.root/'目录导航.html').read_text('utf-8'))
+
+    def test_zip_extract_and_relocate_are_independent_of_original(self):
+        self.standard('GB/T 401-2029');self.product('a',['GB/T 401-2029'])
+        lib.build(self.root,self.data)
+        source=self.root/'01_A/目录 原件.html'
+        source.write_text('<a href="产品与标准目录.html">目录</a>',encoding='utf-8')
+        archive=self.base/'资料包.zip'
+        with zipfile.ZipFile(archive,'w') as z:
+            for p in self.root.rglob('*'):
+                if p.is_file():z.write(p,p.relative_to(self.root))
+        relocated=self.base/'解压 后 空格'
+        with zipfile.ZipFile(archive) as z:z.extractall(relocated)
+        self.root.rename(self.base/'原位置已不存在')
+        self.assertFalse(lib.audit(relocated,True)['errors'])
+        self.assertTrue(lib.relocation_check(relocated)['relocation_verified'])
+
+    def test_absolute_links_in_source_html_and_metadata_are_rejected(self):
+        self.standard('GB 401-2029');self.product('a',['GB 401-2029'])
+        lib.build(self.root,self.data)
+        extra=self.root/'01_A/原件.html'
+        for url in ['file:///C:/foo.pdf','C:/foo.pdf','/foo.pdf','http://localhost:8080/foo.pdf','//server/share','../%2e%2e/outside.pdf']:
+            extra.write_text('<a href="'+url+'">坏链接</a>',encoding='utf-8')
+            self.assertTrue(lib.audit(self.root,True)['errors'],url)
+        extra.write_text('<base href="https://example.com/">',encoding='utf-8')
+        self.assertTrue(lib.audit(self.root,True)['errors'])
+        extra.write_text('<a href="https://std.samr.gov.cn/">官网</a>',encoding='utf-8')
+        self.assertFalse(lib.audit(self.root,True)['errors'])
+        data=json.loads((self.root/lib.META).read_text('utf-8'))
+        data['standards']['GB 401-2029']['source_file']=str(self.root/data['placements'][0]['path'])
+        lib.atomic_json(self.root/lib.META,data)
+        self.assertTrue(lib.audit(self.root,True)['errors'])
 
 if __name__=='__main__':unittest.main()
