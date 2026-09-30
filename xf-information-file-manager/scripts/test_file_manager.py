@@ -134,5 +134,71 @@ class ManagerTests(unittest.TestCase):
         toc = content.split('最新文件目录', 1)[1]
         self.assertEqual(1, len([line for line in toc.splitlines() if line.startswith('1、')]))
 
+    def test_void_single_file_and_cancellation_are_different(self):
+        d = self.document('OLD', '废止办法', 'old', included=False)
+        d['status'] = '已作废'
+        e = self.document('KEEP', '取消收录但未废止', 'keep', included=False)
+        fm.apply(self.root, self.manifest(d, e))
+        saved = fm.load(self.root / fm.RECORDS[0])
+        old, keep = saved['documents']
+        self.assertTrue(Path(old['members'][0]['archive_path']).name.startswith('【作废】'))
+        self.assertFalse(Path(keep['members'][0]['archive_path']).name.startswith('【作废】'))
+        self.assertEqual(d['members'][0]['sha256'], fm.digest(self.root / old['members'][0]['archive_path']))
+        self.assertNotIn('【作废】', old['title'])
+        self.assertFalse(fm.apply(self.root, saved)['changed'])
+
+    def test_replaced_folder_marked_and_attachments_preserved(self):
+        d = self.document('OLD', '旧办法', 'old', included=False)
+        d.update(status='已替代', replaced_by=['NEW'])
+        attachment = self.root / '附件1.docx'; attachment.write_bytes(b'keep attachment')
+        d['members'].append(dict(source=attachment.name, sha256=fm.digest(attachment), role='attachment',
+                                 name=attachment.name, in_compilation=False))
+        new = self.document('NEW', '新办法', 'new')
+        fm.apply(self.root, self.manifest(d, new))
+        saved = fm.load(self.root / fm.RECORDS[0]); old, latest = saved['documents']
+        a, b = [Path(m['archive_path']) for m in old['members']]
+        self.assertTrue(a.parent.name.startswith('【作废】'))
+        self.assertTrue(a.name.startswith('【作废】'))
+        self.assertEqual(a.parent, b.parent)
+        self.assertEqual('附件1.docx', b.name)
+        self.assertEqual(b'keep attachment', (self.root / b).read_bytes())
+        self.assertFalse(Path(latest['members'][0]['archive_path']).name.startswith('【作废】'))
+        self.assertIsNone(old['members'][0]['compilation_path'])
+
+    def test_void_mark_needs_evidence_and_replacement_target(self):
+        d = self.document(included=False); d.update(status='已作废', evidence='')
+        with self.assertRaisesRegex(ValueError, '明确依据'): fm.make_plan(self.root, self.manifest(d))
+        d.update(status='已替代', evidence='用户明确说明')
+        with self.assertRaisesRegex(ValueError, '关联新版本'): fm.make_plan(self.root, self.manifest(d))
+
+    def test_protected_relocation_preserves_hashes_and_tracks_new_specials(self):
+        fm.apply(self.root, self.manifest(self.document()))
+        m = fm.load(self.root / fm.RECORDS[0])
+        old_prefix = fm.COLLECTION + '/固定专项'; new_prefix = '9、专项/原固定专项'
+        (self.root / new_prefix).parent.mkdir()
+        (self.root / old_prefix).rename(self.root / new_prefix)
+        new_file = self.root / '9、专项/另一个专项/资料.txt'
+        new_file.parent.mkdir(); new_file.write_bytes(b'new special')
+        m['protected_relocations'] = {old_prefix: new_prefix}
+        fm.apply(self.root, m)
+        saved = fm.load(self.root / fm.RECORDS[0])
+        self.assertNotIn('protected_relocations', saved)
+        self.assertIn(new_prefix + '/原件.txt', saved['protected_files'])
+        self.assertIn(new_file.relative_to(self.root).as_posix(), saved['protected_files'])
+        transaction = fm.load(self.root / saved['transaction'] / 'transaction.json')
+        self.assertEqual({old_prefix: new_prefix}, transaction['protected_relocations'])
+        self.assertFalse(fm.apply(self.root, saved)['changed'])
+
+    def test_protected_relocation_does_not_accept_changed_or_lost_files(self):
+        fm.apply(self.root, self.manifest(self.document()))
+        m = fm.load(self.root / fm.RECORDS[0])
+        old_prefix = fm.COLLECTION + '/固定专项'; new_prefix = '9、专项/原固定专项'
+        (self.root / new_prefix).parent.mkdir()
+        (self.root / old_prefix).rename(self.root / new_prefix)
+        (self.root / new_prefix / '原件.txt').write_bytes(b'changed bytes')
+        m['protected_relocations'] = {old_prefix: new_prefix}
+        with self.assertRaisesRegex(ValueError, '内容变化'): fm.apply(self.root, m)
+        self.assertEqual(b'changed bytes', (self.root / new_prefix / '原件.txt').read_bytes())
+
 
 if __name__ == '__main__': unittest.main()

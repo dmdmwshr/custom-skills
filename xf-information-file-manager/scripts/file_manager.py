@@ -21,6 +21,8 @@ LEVELS = ['国家局', '总队', '支队', '国家', '省', '市', '其他']
 BUSINESS = ['综合管理及总体指导', '组织职责', '规划立项', '预算经费', '采购审计',
             '建设实施', '评审验收与档案', '运行维护', '绩效评价', '停用退出', '网络安全', '数据管理', '其他']
 STATUSES = ['现行', '历史留存', '征求意见稿', '已作废', '已替代', '待核实', '临时材料']
+VOID_STATUSES = {'已作废', '已替代'}
+VOID_PREFIX = '【作废】'
 MGMT = '归档管理'
 RECORDS = [MGMT + '/文件台账.json', MGMT + '/当前目录.txt', MGMT + '/待核实事项.txt']
 
@@ -83,9 +85,29 @@ def protected(root):
     if collection.exists():
         paths += [p.relative_to(root).as_posix() for p in collection.iterdir()
                   if p.is_dir() and p.name != '0、文件汇编实时更新版本']
-    if (root / '9、信息化流程梳理').exists():
-        paths.append('9、信息化流程梳理')
+    paths += [p.relative_to(root).as_posix() for p in root.iterdir()
+              if p.is_dir() and p.name.startswith('9、')]
     return scan(root, paths)
+
+
+def verify_protected_history(root, recorded, current, relocations=None):
+    """Accept explicitly recorded path relocations only when every old byte is preserved."""
+    relocations = relocations or {}
+    for old, new in relocations.items():
+        safe(root, old); safe(root, new)
+        if not any(p == old or p.startswith(old + '/') for p in recorded):
+            raise ValueError('迁移映射没有对应历史文件：' + old)
+    mapped = set()
+    for old, sha in recorded.items():
+        matches = [prefix for prefix in relocations if old == prefix or old.startswith(prefix + '/')]
+        if len(matches) > 1:
+            raise ValueError('专项迁移映射重叠：' + old)
+        new = relocations[matches[0]] + old[len(matches[0]):] if matches else old
+        if new in mapped:
+            raise ValueError('专项迁移目标重复：' + new)
+        mapped.add(new)
+        if current.get(new) != sha:
+            raise ValueError('既有固定文件缺失或内容变化：' + new)
 
 
 def name(s):
@@ -99,6 +121,10 @@ def stem(d):
     title = d['title']
     suffix = d.get('number') or d.get('date')
     return name(f"[{d['level']}][{d['topic']}] {title}" + (f'（{suffix}）' if suffix else ''))
+
+
+def archive_stem(d):
+    return (VOID_PREFIX if d['status'] in VOID_STATUSES else '') + stem(d)
 
 
 def sort_key(d):
@@ -132,6 +158,10 @@ def validate(root, manifest):
             raise ValueError('汇编缺少主文：' + d['id'])
         if d['included'] and d['status'] in ('已作废', '已替代'):
             raise ValueError('已作废或替代文件不得留在实时汇编：' + d['id'])
+        if d['status'] in VOID_STATUSES and not d.get('evidence', '').strip():
+            raise ValueError('标记作废必须记录明确依据：' + d['id'])
+        if d['status'] == '已替代' and not d.get('replaced_by'):
+            raise ValueError('标记已替代必须关联新版本：' + d['id'])
         seen_members = set()
         for m in d['members']:
             if m['role'] not in ('main', 'attachment'):
@@ -182,7 +212,7 @@ def layout(root, manifest):
                 for m in d['members']: m['compilation_path'] = None
                 continue
             selected = live_members if is_live else d['members']
-            prefix = f"{numbers[d['id']]}、{s}" if is_live else s
+            prefix = f"{numbers[d['id']]}、{s}" if is_live else archive_stem(d)
             base = LIVE + '/' + SECTIONS[d['section'] - 1] if is_live else ARCHIVES[d['archive_category'] - 1]
             folder = live_multi if is_live else multi
             desired = {}
@@ -332,12 +362,12 @@ def apply(root, manifest):
         frozen = protected(root)
         if old:
             old_frozen = old.get('protected_files', {})
-            if any(frozen.get(p) != h for p, h in old_frozen.items()):
-                raise ValueError('既有固定文件已变化，先核对来源，不覆盖既有基线')
+            verify_protected_history(root, old_frozen, frozen, manifest.get('protected_relocations'))
         version = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         transaction = safe(root, MGMT + '/事务/' + version); transaction.mkdir(parents=True)
         record = {'version': version, 'phase': 'preparing', 'before': plan['before'],
                   'after': plan['after'], 'protected_files': frozen, 'records': record_snapshot(root),
+                  'protected_relocations': manifest.get('protected_relocations', {}),
                   'version_note': LIVE + '/版本变更说明/' + version + '_更新说明.txt'}
         save(transaction / 'transaction.json', record)
         try:
@@ -368,6 +398,7 @@ def apply(root, manifest):
                     m['source'] = m['archive_path']
             out.update(version=version, previous_version=old.get('version') if old else None,
                        transaction=transaction.relative_to(root).as_posix(), protected_files=frozen)
+            out.pop('protected_relocations', None)
             result = check(root, out, frozen)
             save(root / RECORDS[0], out)
             txt(root / RECORDS[1], directory(out))
