@@ -124,9 +124,15 @@ class ManagerTests(unittest.TestCase):
         m['documents'].append(self.document('D2', '新管理办法', 'new'))
         result = fm.apply(self.root, m)
         content = (self.root / result['report']).read_text(encoding='utf-8-sig')
-        self.assertIn('新增入编：\n[支队][管理] 新管理办法', content)
-        self.assertIn('移出实时汇编（原件继续分类留档）：\n[支队][管理] 管理办法', content)
-        self.assertIn('后继：[支队][管理] 新管理办法', content)
+        self.assertIn('第一部分——新增——[支队][管理] 新管理办法', content)
+        self.assertIn('第一部分——[支队][管理] 管理办法', content)
+        self.assertIn('已由[支队][管理] 新管理办法', content)
+        self.assertIn('最新文件目录\n\n第一部分  消防内部文件', content)
+        self.assertNotIn(fm.LIVE, content)
+        self.assertNotIn('.doc', content)
+        self.assertNotIn('日期待核实', content)
+        toc = content.split('最新文件目录', 1)[1]
+        self.assertEqual(1, len([line for line in toc.splitlines() if line.startswith('1、')]))
 
 
 if __name__ == '__main__': unittest.main()

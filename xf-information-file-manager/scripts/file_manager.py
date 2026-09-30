@@ -219,14 +219,11 @@ def make_plan(root, manifest):
 
 
 def directory(manifest):
-    lines = ['信息化实时汇编当前目录', '排序：机构层级 → 业务类别 → 发文时间（新到旧）', '']
+    lines = ['最新文件目录', '']
     for sec, label in enumerate(SECTIONS, 1):
-        lines += [label]
+        lines += ['第' + '一二三'[sec - 1] + '部分  ' + label.split('、', 1)[1]]
         for d in sorted((d for d in manifest['documents'] if d['included'] and d['section'] == sec), key=sort_key):
             lines += [f"{d['sequence']}、{d['canonical_name']}"]
-            for m in d['members']:
-                if m.get('compilation_path'):
-                    lines += ['    ' + m['role'].replace('attachment', '附件').replace('main', '主文') + '：' + m['compilation_path']]
         lines += ['']
     return '\n'.join(lines) + '\n'
 
@@ -240,6 +237,7 @@ def readable_issues(manifest):
 
 
 def report(manifest, plan, version, previous, prior=None):
+    """Reader-facing brief notes and book-style TOC; audit detail stays in the ledger."""
     titles = {d['id']: stem(d) for d in manifest['documents']}
     if prior:
         previously_included = {d['id'] for d in prior['documents'] if d['included']}
@@ -248,27 +246,32 @@ def report(manifest, plan, version, previous, prior=None):
         previously_included = {d['id'] for d in manifest['documents']
                                if any(m['sha256'] in live_hashes and m['role'] == 'main' for m in d['members'])}
     now_included = {d['id'] for d in manifest['documents'] if d['included']}
-    lines = [f'版本：{version}', f'上一版本：{previous or "整理前基线（未追溯虚构历史版本）"}',
-             f"文书 {len(manifest['documents'])} 件；入编 {sum(d['included'] for d in manifest['documents'])} 件。",
-             '', '一、核实的业务变化', '新增入编：']
-    lines += [titles[i] for i in sorted(now_included - previously_included)] or ['无']
-    lines += ['移出实时汇编（原件继续分类留档）：']
-    lines += [titles[i] for i in sorted(previously_included - now_included)] or ['无']
-    lines += ['本次处理说明：'] + (manifest.get('changes') or ['无新增业务说明'])
-    lines += ['', '二、新增位置（包括补齐历史留档、移动后的新位置）']
-    lines += list(plan['added']) or ['无']
-    lines += ['', '三、旧位置移出及对应的新位置（原始内容保存在分类档案）']
-    by_hash = {}
-    for p, h in plan['after'].items(): by_hash.setdefault(h, []).append(p)
-    for p, h in plan['removed'].items():
-        lines += [p + '\n  → ' + '\n  → '.join(by_hash.get(h, ['未收录：需核实']))]
-    if not plan['removed']: lines += ['无']
-    lines += ['', '四、文书状态、替代关系与依据']
-    for d in manifest['documents']:
-        if d['status'] in ('已作废', '已替代') or d.get('replaced_by'):
-            lines += [d['canonical_name'] + '：' + d['status'] + '；后继：' + '；'.join(titles[i] for i in d.get('replaced_by', [])) + '；依据：' + d.get('evidence', '')]
-    lines += ['', '五、更新后完整目录（含主文和附件路径）', directory(manifest), '六、待核实事项']
-    lines += readable_issues(manifest) or ['无']
+    notes = list(manifest.get('changes') or [])
+    if not notes:
+        old_docs = {d['id']: d for d in prior['documents']} if prior else {}
+        for d in sorted(manifest['documents'], key=lambda d: (d['section'], sort_key(d))):
+            prefix = '第' + '一二三'[d['section'] - 1] + '部分——'
+            if d['id'] in now_included - previously_included:
+                notes.append(prefix + '新增——' + titles[d['id']])
+            elif d['id'] in previously_included - now_included:
+                reason = '文件已作废' if d['status'] == '已作废' else '移出汇编'
+                if d.get('replaced_by'):
+                    reason += '；已由' + '、'.join(titles[i] for i in d['replaced_by']) + '替代'
+                notes.append(prefix + titles[d['id']] + '——' + reason + '，旧件留档。')
+            elif d['id'] in now_included & previously_included and d['id'] in old_docs:
+                before = old_docs[d['id']]
+                old_members = {m['sha256'] for m in before['members'] if m.get('compilation_path')}
+                new_members = {m['sha256'] for m in d['members'] if m.get('compilation_path')}
+                if old_members != new_members:
+                    notes.append(prefix + titles[d['id']] + '——更新主文或附件。')
+                elif (before.get('sequence'), before['section'], stem(before)) != (d.get('sequence'), d['section'], stem(d)):
+                    notes.append(prefix + titles[d['id']] + f"——现列第{d['sequence']}项。")
+        if not notes:
+            notes = ['本次完成分类归档或目录整理，最新目录见下。']
+    heading = '文件更新说明'
+    if re.match(r'^\d{8}', version):
+        heading += f'（{version[:4]}年{int(version[4:6])}月{int(version[6:8])}日）'
+    lines = [heading, ''] + notes + ['', directory(manifest).rstrip()]
     return '\n'.join(lines) + '\n'
 
 
