@@ -113,5 +113,20 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.frozen, fm.protected(self.root))
         self.assertFalse((self.root / fm.RECORDS[0]).exists())
 
+    def test_readable_report_distinguishes_current_changes(self):
+        d = self.document(); m = self.manifest(d); m['issues'] = ['D1：日期待核实']
+        fm.apply(self.root, m)
+        previous = fm.load(self.root / fm.RECORDS[0])
+        issues = (self.root / fm.RECORDS[2]).read_text(encoding='utf-8-sig')
+        self.assertIn('管理办法', issues); self.assertNotIn('D1：', issues)
+        m = copy.deepcopy(previous)
+        m['documents'][0].update(included=False, status='已替代', replaced_by=['D2'])
+        m['documents'].append(self.document('D2', '新管理办法', 'new'))
+        result = fm.apply(self.root, m)
+        content = (self.root / result['report']).read_text(encoding='utf-8-sig')
+        self.assertIn('新增入编：\n[支队][管理] 新管理办法', content)
+        self.assertIn('移出实时汇编（原件继续分类留档）：\n[支队][管理] 管理办法', content)
+        self.assertIn('后继：[支队][管理] 新管理办法', content)
+
 
 if __name__ == '__main__': unittest.main()

@@ -462,7 +462,7 @@
       ],
       "managed_wsl": false,
       "validation": {
-        "windows": "runtime_verified_2026_09_30_with_eight_tests_and_initial_archive_alignment",
+        "windows": "runtime_verified_2026_09_30_with_nine_tests_and_initial_archive_alignment",
         "linux": "runtime_unverified",
         "wsl": "not_supported_by_current_workflow"
       },

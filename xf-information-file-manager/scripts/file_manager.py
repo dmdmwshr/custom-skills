@@ -231,10 +231,30 @@ def directory(manifest):
     return '\n'.join(lines) + '\n'
 
 
-def report(manifest, plan, version, previous):
+def readable_issues(manifest):
+    titles = {d['id']: stem(d) for d in manifest['documents']}
+    pattern = '|'.join(re.escape(k) for k in sorted(titles, key=len, reverse=True))
+    return [re.sub(r'(?:' + pattern + r')(?=$|[：；、，。\s])',
+                   lambda match: titles[match.group()], line)
+            for line in manifest.get('issues', [])] if pattern else manifest.get('issues', [])
+
+
+def report(manifest, plan, version, previous, prior=None):
+    titles = {d['id']: stem(d) for d in manifest['documents']}
+    if prior:
+        previously_included = {d['id'] for d in prior['documents'] if d['included']}
+    else:
+        live_hashes = {h for p, h in plan['before'].items() if p.startswith(LIVE + '/')}
+        previously_included = {d['id'] for d in manifest['documents']
+                               if any(m['sha256'] in live_hashes and m['role'] == 'main' for m in d['members'])}
+    now_included = {d['id'] for d in manifest['documents'] if d['included']}
     lines = [f'版本：{version}', f'上一版本：{previous or "整理前基线（未追溯虚构历史版本）"}',
              f"文书 {len(manifest['documents'])} 件；入编 {sum(d['included'] for d in manifest['documents'])} 件。",
-             '', '一、核实的业务变化'] + (manifest.get('changes') or ['无新增业务说明'])
+             '', '一、核实的业务变化', '新增入编：']
+    lines += [titles[i] for i in sorted(now_included - previously_included)] or ['无']
+    lines += ['移出实时汇编（原件继续分类留档）：']
+    lines += [titles[i] for i in sorted(previously_included - now_included)] or ['无']
+    lines += ['本次处理说明：'] + (manifest.get('changes') or ['无新增业务说明'])
     lines += ['', '二、新增位置（包括补齐历史留档、移动后的新位置）']
     lines += list(plan['added']) or ['无']
     lines += ['', '三、旧位置移出及对应的新位置（原始内容保存在分类档案）']
@@ -246,9 +266,9 @@ def report(manifest, plan, version, previous):
     lines += ['', '四、文书状态、替代关系与依据']
     for d in manifest['documents']:
         if d['status'] in ('已作废', '已替代') or d.get('replaced_by'):
-            lines += [d['canonical_name'] + '：' + d['status'] + '；后继：' + ','.join(d.get('replaced_by', [])) + '；依据：' + d.get('evidence', '')]
+            lines += [d['canonical_name'] + '：' + d['status'] + '；后继：' + '；'.join(titles[i] for i in d.get('replaced_by', [])) + '；依据：' + d.get('evidence', '')]
     lines += ['', '五、更新后完整目录（含主文和附件路径）', directory(manifest), '六、待核实事项']
-    lines += manifest.get('issues') or ['无']
+    lines += readable_issues(manifest) or ['无']
     return '\n'.join(lines) + '\n'
 
 
@@ -348,8 +368,8 @@ def apply(root, manifest):
             result = check(root, out, frozen)
             save(root / RECORDS[0], out)
             txt(root / RECORDS[1], directory(out))
-            txt(root / RECORDS[2], '\n'.join(out.get('issues') or ['无']) + '\n')
-            txt(root / record['version_note'], report(out, plan, version, out['previous_version']))
+            txt(root / RECORDS[2], '\n'.join(readable_issues(out) or ['无']) + '\n')
+            txt(root / record['version_note'], report(out, plan, version, out['previous_version'], old))
             save(transaction / '版本台账.json', out)
             record.update(phase='committed', result=result); save(transaction / 'transaction.json', record)
             return {'changed': True, 'version': version, 'report': record['version_note'], **result}
