@@ -37,6 +37,9 @@ def _parts() -> dict[str, bytes]:
         "word/settings.xml": (
             "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"
         ),
+        "word/webSettings.xml": (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml"
+        ),
         "docProps/core.xml": "application/vnd.openxmlformats-package.core-properties+xml",
     }
     for name, content_type in types.items():
@@ -69,6 +72,7 @@ def _parts() -> dict[str, bytes]:
         (
             ("styles.xml", "styles"),
             ("settings.xml", "settings"),
+            ("webSettings.xml", "webSettings"),
             ("media/image1.gif", "image"),
         ),
         1,
@@ -91,6 +95,7 @@ def _parts() -> dict[str, bytes]:
         ).encode(),
         "word/styles.xml": f'<w:styles xmlns:w="{word_namespace}"/>'.encode(),
         "word/settings.xml": f'<w:settings xmlns:w="{word_namespace}"/>'.encode(),
+        "word/webSettings.xml": f'<w:webSettings xmlns:w="{word_namespace}"/>'.encode(),
         "docProps/core.xml": (
             b'<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/'
             b'package/2006/metadata/core-properties"/>'
