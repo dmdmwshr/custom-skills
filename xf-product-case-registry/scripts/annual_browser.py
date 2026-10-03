@@ -23,12 +23,15 @@ else:
 
 
 LIST_READER = r"""() => {
+  if(document.visibilityState==='hidden')return {ready:false,reason:'SOURCE_DOCUMENT_HIDDEN'};
   const visible=e=>!!e?.offsetWidth&&!!e?.offsetHeight;
   const form=[...document.querySelectorAll('.avue-view form')].find(visible);
   const table=[...document.querySelectorAll('.elx-table')].filter(visible);
   const pagers=[...document.querySelectorAll('.el-pagination')].filter(visible);
   if(!form||table.length!==1||pagers.length!==1) return {ready:false,reason:'CONTAINER_NOT_READY'};
-  if([...document.querySelectorAll('#nprogress,.el-loading-mask')].some(visible))
+  const activeProgress=e=>visible(e)&&getComputedStyle(e).visibility!=='hidden'&&
+    Number(getComputedStyle(e).opacity)>0;
+  if([...document.querySelectorAll('#nprogress,.el-loading-mask')].some(activeProgress))
     return {ready:false,reason:'BUSY'};
   const pager=pagers[0], model=table[0].__vue__?.tableFullData;
   if(!Array.isArray(model)) return {ready:false,reason:'TABLE_MODEL_UNAVAILABLE'};
@@ -38,7 +41,9 @@ LIST_READER = r"""() => {
   if(!count||!size||!pageNumber) return {ready:false,reason:'PAGER_NOT_READY'};
   const totalCount=Number(count[1]),pageSize=Number(size[1]);
   if(model.some((r,i)=>Number(r.ROW_ID)!==(pageNumber-1)*pageSize+i+1))
-    return {ready:false,reason:'PAGER_CHANGED_BUT_ROWS_OLD'};
+    return {ready:false,reason:'PAGER_CHANGED_BUT_ROWS_OLD',pageNumber,pageSize,totalCount,
+      observedFirstRowId:Number(model[0]?.ROW_ID??0),
+      observedLastRowId:Number(model.at(-1)?.ROW_ID??0),visibilityState:document.visibilityState};
   const items=model.map((r,index)=>({rwid:String(r.ID??'').trim(),
     unitName:String(r.DWMC??'').trim(),
     sourceOrganization:String(r['$ZGDWID']??'').trim(),
@@ -47,13 +52,13 @@ LIST_READER = r"""() => {
   const main=table[0].querySelector('.elx-table--main-wrapper');
   const headers=[...(main?.querySelector('thead tr')?.cells??[])].map(e=>e.innerText.trim());
   const nameIndex=headers.indexOf('单位名称');
-  const names=[...(main?.querySelectorAll('.body--wrapper tbody tr')??[])]
-    .map(r=>r.cells[nameIndex]?.innerText.trim());
+  const rendered=[...(main?.querySelectorAll('.body--wrapper tbody tr')??[])]
+    .map(r=>({name:r.cells[nameIndex]?.innerText.trim(),xid:r.getAttribute('data-rowid')}));
   const expected=Math.max(0,Math.min(pageSize,totalCount-(pageNumber-1)*pageSize));
   const displayed=s=>String(s??'').replace(/\s+/g,' ').trim();
   if(nameIndex<0||items.length!==expected||items.some(r=>!r.rwid||!r.unitName)||
-     (totalCount>0&&(!names.length||names.some(n=>
-       !items.some(r=>displayed(r.unitName)===displayed(n))))))
+     (totalCount>0&&(!rendered.length||rendered.some(row=>!row.xid||
+       !model.some(r=>String(r._XID)===row.xid&&displayed(r.DWMC)===displayed(row.name))))))
     return {ready:false,reason:'VISIBLE_ROWS_MISMATCH'};
   const date=form.querySelector(':scope > .el-col > div > .el-date-editor');
   const dates=[...(date?.querySelectorAll('input')??[])].map(e=>e.value);
@@ -73,11 +78,14 @@ LIST_READER = r"""() => {
 
 
 IDENTITY_READER = r"""() => {
+  if(document.visibilityState==='hidden')return {ready:false,reason:'SOURCE_DOCUMENT_HIDDEN'};
   const visible=e=>!!e?.offsetWidth&&!!e?.offsetHeight;
   const [route,query]=location.hash.split('?');
   const rwid=new URLSearchParams(query??'').get('RWID');
   if(route!=='#/xfjd/projectDetail'||!rwid)return {ready:false};
-  if([...document.querySelectorAll('#nprogress,.el-loading-mask')].some(visible))
+  const activeProgress=e=>visible(e)&&getComputedStyle(e).visibility!=='hidden'&&
+    Number(getComputedStyle(e).opacity)>0;
+  if([...document.querySelectorAll('#nprogress,.el-loading-mask')].some(activeProgress))
     return {ready:false};
   const projects=[...document.querySelectorAll('span')].filter(e=>visible(e)&&
     /^项目编号[：:]\s*\d{8}[A-Z]\d{9}$/.test(e.textContent.trim()));
@@ -112,6 +120,8 @@ class Session:
         code = (
             "async page => {if(!page.url().startsWith('http://180.101.229.94:11888/')"
             "||page.url().includes('#/login'))throw new Error('SOURCE_SESSION_CHANGED');"
+            "if(await page.evaluate(()=>document.visibilityState)==='hidden')"
+            "throw new Error('SOURCE_DOCUMENT_HIDDEN');"
             "return await (" + code + ")(page);}"
         )
         result = subprocess.run(
@@ -141,12 +151,19 @@ class Session:
         return json.JSONDecoder().raw_decode(result.stdout.split(marker, 1)[1])[0]
 
     def read_list(self, expected_page: int | None = None) -> dict:
-        return self.run(
+        readiness = "const value=(" + LIST_READER + ")();return value.ready"
+        if expected_page is not None:
+            readiness += f"&&value.pageNumber==={expected_page}"
+        value = self.run(
             "async page => {const read=" + LIST_READER + ";"
-            "await page.waitForFunction(()=>("
-            + LIST_READER
-            + ")().ready,null,{timeout:45000,polling:300});"
+            "try{await page.waitForFunction(()=>{" + readiness
+            + "||value.reason==='SOURCE_DOCUMENT_HIDDEN';},null,{timeout:45000,polling:300});}"
+            "catch(error){const observed=await page.evaluate(read);"
+            "return {waiting:true,observation:{...observed,ready:false,"
+            "reason:observed.reason??'PAGE_NOT_COMMITTED'}};}"
             "const first=await page.evaluate(read); const second=await page.evaluate(read);"
+            "if(first.reason==='SOURCE_DOCUMENT_HIDDEN'||second.reason==='SOURCE_DOCUMENT_HIDDEN')"
+            "return {waiting:true,observation:second};"
             "if(!first.ready||JSON.stringify(first)!==JSON.stringify(second))"
             "throw new Error('LIST_NOT_STABLE');"
             + (
@@ -156,10 +173,19 @@ class Session:
             )
             + "return second;}"
         )
+        if value.get("waiting"):
+            error = source.SourceIntakeError(
+                "列表尚未提交：" + value["observation"].get("reason", "LIST_NOT_STABLE")
+            )
+            error.observation = value["observation"]
+            raise error
+        return value
 
-    def configure(self, category: str) -> None:
+    def configure(self, category: str, *, year: int | None = None) -> None:
         if category not in coverage.TASK_CATEGORIES:
             raise source.SourceIntakeError("未知的来源任务类别")
+        if year is not None and year != coverage.execution_year():
+            raise source.SourceIntakeError("历史年度续跑须保留原日期；本年快捷项不能替代旧批次")
         self.run(
             "async page => {await page.getByRole('menubar').getByText("
             + json.dumps(category)
@@ -206,21 +232,132 @@ class Session:
             "await page.keyboard.press('Enter');await page.getByText('50条/页',{exact:true})"
             ".evaluate(e=>e.click());}return {pageSizeSelected:true};}"
         )
-        check_filters(self.read_list(), coverage.execution_year(), category)
+        check_filters(self.read_list(), year or coverage.execution_year(), category)
 
     def page_to(self, target: int, current: dict | None = None) -> dict:
         current = current or self.read_list()
-        while current["pageNumber"] != target:
-            self.run(
-                "async page => {const pager=page.locator('.el-pagination:visible');"
-                f"const number=pager.locator('.el-pager').getByText('{target}',{{exact:true}});"
-                "if(await number.count()===1)await number.evaluate(e=>e.click());"
-                "else await pager.locator("
-                + json.dumps(".btn-next" if target > current["pageNumber"] else ".btn-prev")
-                + ").evaluate(e=>e.click());return {submitted:true};}"
+        if type(target) is not int or not 1 <= target <= current["totalPages"]:
+            raise source.SourceIntakeError("目标页码超出当前来源实际范围")
+        if current["pageNumber"] == target:
+            return current
+        self.run(
+            "async page => {const pager=page.locator('.el-pagination:visible');"
+            f"const number=pager.locator('.el-pager').getByText('{target}',{{exact:true}});"
+            "if(await number.count()===1)await number.evaluate(e=>e.click());"
+            "else {const input=pager.locator('.el-pagination__editor input');"
+            f"await input.fill('{target}');await input.press('Enter');}}"
+            "return {submitted:true};}"
+        )
+        return self.read_list(target)
+
+    def locate_known_case(
+        self, rwid: str, unit_name: str, source_order: int, *, year: int,
+        category: str, baseline_count: int, max_pages: int = 5,
+    ) -> dict:
+        """位置只是提示；原页、按新增量修正的页和近邻有界回读，不从第一页重扫。"""
+        if type(source_order) is not int or source_order < 1 or not 1 <= max_pages <= 10:
+            raise source.SourceIntakeError("已知单案定位缺少有效位置或分页预算")
+        current = self.read_list()
+        check_filters(current, year, category)
+        size, pages = current["pageSize"], current["totalPages"]
+        original = min(pages, (source_order - 1) // size + 1)
+        drift = max(0, current["totalCount"] - baseline_count)
+        shifted = min(pages, (source_order + drift - 1) // size + 1)
+        hints = [current["pageNumber"], original, shifted]
+        for distance in range(1, max_pages + 1):
+            hints.extend([shifted - distance, shifted + distance])
+        visited = []
+        for page_no in dict.fromkeys(p for p in hints if 1 <= p <= pages):
+            if len(visited) >= max_pages:
+                break
+            current = self.page_to(page_no, current)
+            check_filters(current, year, category)
+            visited.append(page_no)
+            matches = [row for row in current["items"] if row["rwid"] == rwid]
+            if len(matches) > 1:
+                raise source.SourceIntakeError("当前列表目标 RWID 不唯一，保留单案断点")
+            if matches:
+                if source._normalized_case_name(matches[0]["unitName"]) != (
+                    source._normalized_case_name(unit_name)
+                ):
+                    raise source.SourceIntakeError("当前列表 RWID 的单位与总账身份不一致")
+                return {"row": matches[0], "list": current, "visitedPages": visited,
+                        "baselineCount": baseline_count, "observedCount": current["totalCount"]}
+        raise source.SourceIntakeError(
+            f"SOURCE_KNOWN_CASE_NOT_FOUND：已核对 {len(visited)} 页；"
+            "只刷新相关类别身份，不重扫历史详情"
+        )
+
+    def open_case(self, rwid: str) -> dict:
+        """只发出一次详情动作；观察、截图和落盘分别继续，不捆绑返回动作。"""
+        return self.run(
+            "async page => {const target=" + json.dumps(rwid) + ";"
+            "const xid=await page.evaluate(target=>{"
+            "const tables=[...document.querySelectorAll('.elx-table')].filter(e=>"
+            "e.offsetWidth&&e.offsetHeight);if(tables.length!==1)"
+            "throw new Error('SOURCE_TABLE_NOT_UNIQUE');const t=tables[0],"
+            "data=t.__vue__.tableFullData,matches=data.filter(r=>String(r.ID)===target);"
+            "if(matches.length!==1)throw new Error('IDENTITY_TARGET_NOT_UNIQUE');"
+            "const row=matches[0],container=t.querySelector("
+            "'.elx-table--main-wrapper .elx-table--body-wrapper');"
+            "const height=container.querySelector('tbody tr')?.offsetHeight;"
+            "if(!height)throw new Error('ROW_HEIGHT_UNAVAILABLE');"
+            "container.scrollTop=data.indexOf(row)*height;"
+            "container.dispatchEvent(new Event('scroll'));return String(row._XID);},target);"
+            "const link=page.locator('.elx-table:visible .elx-table--main-wrapper "
+            ".body--wrapper tr[data-rowid=\"'+xid+'\"] span.url');"
+            "await link.waitFor({state:'visible',timeout:10000});"
+            "await link.evaluate(e=>e.click());return {submitted:true};}"
+        )
+
+    @staticmethod
+    def full_detail_reader() -> str:
+        module = Path(__file__).with_name("browser_source_capture.mjs").read_text(encoding="utf-8")
+        return "function currentDetailObservation() {" + module.split(
+            "function currentDetailObservation() {", 1
+        )[1].split("\nexport async function readSourceDetail", 1)[0]
+
+    def read_full_detail(self, rwid: str, project: str, unit_name: str) -> dict:
+        reader = self.full_detail_reader()
+        value = self.run(
+            "async page => {const read=" + reader + ";"
+            "try{await page.waitForFunction(()=>{const observed=(" + reader
+            + ")();return observed.ready||observed.reason==='SOURCE_DOCUMENT_HIDDEN';},"
+            "null,{timeout:45000,polling:300});}catch(error){"
+            "const observed=await page.evaluate(read);"
+            "return {waiting:true,observation:{...observed,ready:false,"
+            "reason:observed.reason??'SOURCE_DETAIL_NOT_READY'}};}"
+            "const first=await page.evaluate(read),second=await page.evaluate(read);"
+            "if(first.reason==='SOURCE_DOCUMENT_HIDDEN'||second.reason==='SOURCE_DOCUMENT_HIDDEN')"
+            "return {waiting:true,observation:second};"
+            "if(JSON.stringify(first)!==JSON.stringify(second))"
+            "throw new Error('SOURCE_DETAIL_NOT_STABLE');return second;}"
+        )
+        if value.get("waiting"):
+            error = source.SourceIntakeError(
+                "详情尚未提交：" + value["observation"].get("reason", "SOURCE_DETAIL_NOT_READY")
             )
-            current = self.read_list()
-        return current
+            error.observation = value["observation"]
+            raise error
+        if (
+            value["rwid"] != rwid or value["fields"]["项目编号"] != project
+            or source._normalized_case_name(value["fields"]["单位名称"])
+            != source._normalized_case_name(unit_name)
+        ):
+            raise source.SourceIntakeError("CASE_IDENTITY_CHAIN_MISMATCH：当前详情身份与目标不一致")
+        return value
+
+    def capture_detail_screenshot(self, screenshot: Path, observation: dict) -> None:
+        reader = self.full_detail_reader()
+        self.run(
+            "async page => {const expected=" + json.dumps(observation, ensure_ascii=False)
+            + ",read=" + reader + ";"
+            "if(JSON.stringify(await page.evaluate(read))!==JSON.stringify(expected))"
+            "throw new Error('SOURCE_DETAIL_CHANGED_BEFORE_SCREENSHOT');"
+            "await page.screenshot({path:" + json.dumps(str(screenshot)) + "});"
+            "if(JSON.stringify(await page.evaluate(read))!==JSON.stringify(expected))"
+            "throw new Error('SOURCE_DETAIL_CHANGED_DURING_SCREENSHOT');return {captured:true};}"
+        )
 
     def open_identity(self, rwid: str, screenshot: Path | None = None) -> dict:
         return self.run(
@@ -273,7 +410,9 @@ def check_filters(observation: dict, year: int, category: str | None = None) -> 
         raise source.SourceIntakeError("菜单类别与实际查询页面不一致，拒绝登记该清单")
     if observation["dates"] != [f"{year}-01-01", f"{year}-12-31"]:
         raise source.SourceIntakeError("本年日期未提交")
-    if not observation.get("dateFieldLabel") or any(observation["otherDates"]):
+    if observation.get("dateFieldLabel") not in {"创建时间", "创建日期"} or any(
+        observation["otherDates"]
+    ):
         raise source.SourceIntakeError("日期字段未确认或存在额外日期筛选")
     if not observation["lawEnforcementEmpty"]:
         raise source.SourceIntakeError("执法单位筛选未清空")

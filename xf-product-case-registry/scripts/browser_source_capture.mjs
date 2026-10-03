@@ -6,6 +6,7 @@ export { advanceSourceStage, saveSourceStageCheckpoint } from "./browser_stage.m
 
 /** Read only the current legal-document table. Never read session or request data. */
 function currentListObservation() {
+  if (document.visibilityState === "hidden") return { ready: false, reason: "SOURCE_DOCUMENT_HIDDEN" };
   const visible = (element) => !!element?.offsetWidth && !!element?.offsetHeight;
   if (/login|signin/i.test(location.pathname + location.hash) ||
       [...document.querySelectorAll('input[type="password"]')].some(visible)) {
@@ -41,7 +42,8 @@ function currentListObservation() {
   const totalCount = Number(totalMatch[1]);
   const pageSize = Number(sizeMatch[1]);
   const loading = [...document.querySelectorAll("[class*=loading],#nprogress")].some(
-    (element) => visible(element) && getComputedStyle(element).visibility !== "hidden",
+    (element) => visible(element) && getComputedStyle(element).visibility !== "hidden" &&
+      Number(getComputedStyle(element).opacity) > 0,
   );
   const items = records.map((record, index) => ({
     rwid: String(record.RWID ?? "").trim(),
@@ -184,6 +186,7 @@ export async function captureSourceListPage({ tab, cdp, evidenceDir, round, expe
 }
 
 function currentDetailObservation() {
+  if (document.visibilityState === "hidden") return { ready: false, reason: "SOURCE_DOCUMENT_HIDDEN" };
   const visible = (element) => !!element?.offsetWidth && !!element?.offsetHeight;
   if (/login|signin/i.test(location.pathname + location.hash) ||
       [...document.querySelectorAll('input[type="password"]')].some(visible)) {
@@ -230,7 +233,8 @@ function currentDetailObservation() {
   });
   fields.文书目录 = roots.map(cleanNode);
   const loading = [...document.querySelectorAll("[class*=loading],#nprogress")].some(
-    (el) => visible(el) && getComputedStyle(el).visibility !== "hidden",
+    (el) => visible(el) && getComputedStyle(el).visibility !== "hidden" &&
+      Number(getComputedStyle(el).opacity) > 0,
   );
   return {
     ready: !loading, busy: loading, reason: loading ? "SOURCE_LOADING" : null, rwid, fields,

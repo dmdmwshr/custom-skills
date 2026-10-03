@@ -18,7 +18,7 @@ metadata:
 | --- | --- |
 | 总账、来源年度、子集、指定批次、未完成断点 | [统一水位](references/unified-waterline.md)，ledger status、source coverage、source scan-plan |
 | 年度完整任务清单、身份缺口、来源不可用 | [年度基线](references/annual-baseline.md)，annual_browser.py |
-| 浏览器筛选、两轮列表、详情、下载 | [浏览器采集](references/browser-acquisition.md)，[查询方法](references/query-recipes.md) |
+| 浏览器筛选、两轮列表、详情、下载 | [浏览器采集](references/browser-acquisition.md)，[查询方法](references/query-recipes.md)；已知年度不合格案用 capture_source_case.py、package_source_case.py |
 | 明确要求历史年度通知书口径 | [年度执行](references/annual-unqualified.md)；保留原批次口径，不替代日常扫描 |
 | 清点、识别、拆分、字段和上传清单 | [本地格式](references/case-data-format.md)、[文书分类](references/document-classification.md)、[V2 Schema](references/CaseImportManifestV2.schema.json) |
 | 对账、上传、补录、逐份正文核验、归档 | [V2 工作流](references/api-workflow.md)，原系统无本地上传任务用 verify-existing |
@@ -30,7 +30,7 @@ metadata:
 2. 用 source coverage 和 source scan-plan 判断年度基线。未完成时先按来源“本年”、全部管辖单位、全部状态核对六类案卷任务清单，两轮稳定后逐项关联项目编号；历史文书标识数不能代替年度案卷数。来源不可用、类别缺失和身份缺口分别保留。年度基线完成后默认扫描执行日向前回推三个自然月创建的全部相关文书，支持跨年。所有筛选先在页面提交回读再保存证据，不使用计划值冒充实测值。
 3. 稳定清单先按 RWID 和历史项目身份对账。同一项目跨列表、跨批次合并；近期文书关联往年案时仍进入该案断点。指纹未变且已有有效完成证据，跳过详情、打包、识别和上传。超出窗口的已完成案且无变化线索不处理；未完成案保留，优先其中的不合格案。
 4. 仅新案、文书变化或未完成案进入详情。按“清单可见三元组 → RWID → 详情项目编号及单位”闭合身份；页码、行号、文件名和 staging 不能决定归属。初查任一产品有效结果不合格即入子集；抽样复检用最终结果；整改复查只决定案卷类型，统计年份用初查日期。合格案只登记最小索引，分类未知时补必要证据，不能以全文关键词或通知书存在替代判定。
-5. 需要完整材料的案卷逐案下载。详情身份连续两次一致，核对全部可下载叶子已选，建立本案基线，再点击一次打包。以 source await-download --attach 的唯一完整稳定 ZIP 回执确认收件；每案最多两次打包，重试及 Edge 流恢复严格按浏览器分支。原始包不可覆盖，工作根副本哈希通过后才清理同一下载临时副本。
+5. 需要完整材料的案卷逐案下载。详情身份连续两次一致，只选择当前案卷的可下载叶子，并核对包含折叠节点的完整选中集合，建立本案基线，再点击一次打包。以 source await-download --attach 的唯一完整稳定 ZIP 回执确认收件；每案最多两次打包，重试及 Edge 流恢复严格按浏览器分支。原始包不可覆盖，工作根副本哈希通过后才清理同一下载临时副本。
 6. inventory → ocr/split → compose → validate → upload --dry-run。先复用原文件摘要、电子文本和确认过的 OCR；仅处理新增或变化内容。默认逐文件 OCR，ocr --batch 仍需显式选择且关键语义一致。扫描件用本机 MinerU，外部 Zerox 需另有第三方传输授权。字段裁决留在 field-resolution.json，保留全部原件。
 7. 写入前按现有状态执行。ledger reconcile 默认仅报告服务器差异，--apply 只推进可证明的本地断点，不补传、不 finalize、不新建替代任务。新案按当前上传授权使用原 V6 任务；多案共用一次认证，批次最多 10 案。既有正式案先对账，仅确有缺失时按 supplement --plan 的缺失补录契约执行。不要重新完整导入历史案。
 8. 新完成案必须逐份取回正文并计算 SHA-256。verify 默认执行正文核验；用绑定文件身份、清单摘要和内容代际的 content-verification.json 续跑，只取未完成或变化文件。正文、正式目录、飞牛状态及无冲突结果全部满足后才归档。旧的 VERIFIED 不能自动升级为新版正文核验证据；保留历史完成，证据不足单列。

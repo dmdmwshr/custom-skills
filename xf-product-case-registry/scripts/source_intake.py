@@ -34,6 +34,11 @@ from typing import Any, NoReturn
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+if __package__:
+    from .office_package_guard import is_safe_docx_package
+else:
+    from office_package_guard import is_safe_docx_package
+
 try:  # 包导入与直接加载脚本两种方式都要可用。
     from .workspace_state import BusinessLayout, load_waterline, upsert_case
 except (ImportError, ModuleNotFoundError):  # pragma: no cover - 由独立加载测试覆盖行为
@@ -652,9 +657,11 @@ def record_download_baseline(
         raise SourceIntakeError("下载基线 RWID 不在已稳定清单中")
     if record.get("aliasOf"):
         raise SourceIntakeError(f"该 RWID 已合并，请使用主记录 {record['aliasOf']}")
-    if record.get("skippedAsUnchanged"):
+    collecting_annual = _material_collection_active(layout, state, record_key, record)
+    if record.get("skippedAsUnchanged") and not collecting_annual:
         raise SourceIntakeError("详情项目编号已在水位中完成并通过飞牛核验，无需下载案卷包")
-    if not record.get("detail"):
+    detail = record.get("collectionDetail") if collecting_annual else record.get("detail")
+    if not detail:
         raise SourceIntakeError("必须先进入详情读取项目编号并保存完整截图，才能建立下载基线")
     project_no = _require_project_no(
         str(record.get("projectNo") or (record.get("detail") or {}).get("projectNo") or "")
@@ -1340,6 +1347,102 @@ def _load_capture(layout: Any, batch_id: str) -> tuple[Path, dict[str, Any]]:
     return path, state
 
 
+def _material_collection_active(
+    layout: Any, state: dict[str, Any], rwid: str, record: dict[str, Any]
+) -> bool:
+    """年度最小索引只有显式、同案绑定的采集请求才能进入材料流程。"""
+
+    request = record.get("materialCollection")
+    if request is None:
+        return False
+    expected = {
+        "schemaVersion": "SourceMaterialCollectionV1",
+        "batchId": state["batchId"],
+        "rwid": rwid,
+        "projectNo": record.get("projectNo"),
+        "sourceRecordFingerprint": _record_equivalence(record),
+    }
+    if (
+        state.get("filters", {}).get("selectionMode") != "ANNUAL_CASE_BASELINE"
+        or not isinstance(request, dict)
+        or any(request.get(key) != value for key, value in expected.items())
+    ):
+        raise SourceIntakeError("年度材料采集请求与当前批次、RWID 或项目绑定不一致")
+    if _verified_completed_waterline(layout, str(record.get("projectNo") or "")):
+        raise SourceIntakeError("该项目已完成并通过飞牛核验，沿用原断点，不重新采集")
+    if load_waterline is not None:
+        if __package__:
+            from .ledger_views import describe
+        else:
+            from ledger_views import describe
+        project = str(record.get("projectNo") or "")
+        current = load_waterline(layout).get("cases", {}).get(project)
+        if not current or describe(layout, project, current)["initialResult"] != "UNQUALIFIED":
+            raise SourceIntakeError("项目当前初查结果已变化，保留采集请求并先核实分类")
+    return True
+
+
+def request_case_material_collection(
+    workspace: Any,
+    batch_id: str,
+    rwid: str,
+    project_no: str,
+    *,
+    requested_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """显式提升已知不合格单案；保留年度身份、跳过标记和所有原下载断点。"""
+
+    if __package__:
+        from . import source_coverage as coverage
+        from .ledger_views import describe
+    else:
+        import source_coverage as coverage
+        from ledger_views import describe
+    layout = _layout(workspace)
+    path, state = _load_capture(layout, batch_id)
+    key, project = _require_rwid(rwid), _require_project_no(project_no)
+    record = state.get("records", {}).get(key)
+    if (
+        state.get("filters", {}).get("selectionMode") != coverage.ANNUAL_MODE
+        or state.get("stableRounds", 0) < 2
+        or state.get("listResult") != "STABLE"
+        or coverage.query_evidence_issue(layout, state)
+    ):
+        raise SourceIntakeError("单案材料采集必须基于已核实类别的稳定年度清单")
+    if not record or record.get("aliasOf") or record.get("projectNo") != project:
+        raise SourceIntakeError("年度 RWID 与请求项目编号没有唯一可信绑定")
+    if any(
+        conflict.get("rwid") == key or key in conflict.get("rwids", [])
+        for conflict in state.get("conflicts", [])
+    ):
+        raise SourceIntakeError("当前案卷仍有未解决的来源冲突，保留原断点")
+    ledger = load_waterline(layout) if load_waterline else {"cases": {}}
+    bindings = coverage.identity_bindings(coverage.formal_captures(layout), ledger)
+    if bindings.get(key) != {project} or project not in ledger.get("cases", {}):
+        raise SourceIntakeError("年度身份与项目总账绑定不一致，拒绝提升")
+    if _verified_completed_waterline(layout, project):
+        raise SourceIntakeError("该项目已完成并通过飞牛核验，沿用原断点，不重新采集")
+    if describe(layout, project, ledger["cases"][project])["initialResult"] != "UNQUALIFIED":
+        raise SourceIntakeError("当前入口只提升已确认初查不合格案，待确认或合格案保留最小索引")
+    if record.get("materialCollection") is not None:
+        _material_collection_active(layout, state, key, record)
+        return state
+    requested = _timestamp(requested_at)
+    record["materialCollection"] = {
+        "schemaVersion": "SourceMaterialCollectionV1",
+        "batchId": batch_id,
+        "rwid": key,
+        "projectNo": project,
+        "sourceRecordFingerprint": _record_equivalence(record),
+        "requestedAt": requested,
+    }
+    state["materialRwids"] = list(dict.fromkeys([*state.get("materialRwids", []), key]))
+    _refresh_progress(state)
+    state["updatedAt"] = requested
+    _write_json(path, state)
+    return state
+
+
 def _is_acceptance_sample(state: dict[str, Any]) -> bool:
     return state.get("scope") == "acceptance"
 
@@ -1630,6 +1733,17 @@ def _refresh_progress(state: dict[str, Any]) -> None:
     acceptance = _is_acceptance_sample(state)
     selected = _selected_rwids(state)
     if state.get("filters", {}).get("selectionMode") == "ANNUAL_CASE_BASELINE":
+        material_records = [
+            state.get("records", {}).get(key, {}) for key in state.get("materialRwids", [])
+        ]
+        if material_records:
+            state["materialCollectionStatus"] = (
+                "READY_FOR_ORGANIZATION"
+                if all(record.get("package") for record in material_records)
+                else "PACKAGE_WAITING"
+                if all(record.get("collectionDetail") for record in material_records)
+                else "COLLECTING_DETAILS"
+            )
         state["status"] = (
             "NEEDS_MANUAL_REVIEW"
             if state.get("conflicts")
@@ -2270,7 +2384,8 @@ def add_detail(
         _write_json(capture_path, state)
         raise SourceIntakeError("详情项目编号与清单不一致，已转人工处理")
     captured = _timestamp(captured_at)
-    if state["filters"].get("selectionMode") == "ANNUAL_CASE_BASELINE":
+    annual_materials = _material_collection_active(layout, state, record_key, record)
+    if state["filters"].get("selectionMode") == "ANNUAL_CASE_BASELINE" and not annual_materials:
         if record.get("detail", {}).get("fields") == clean_detail:
             return state
         return _add_annual_identity(
@@ -2415,7 +2530,7 @@ def add_detail(
     for other_rwid, other_record in state["records"].items():
         if other_rwid == record_key:
             continue
-        other_detail = other_record.get("detail") or {}
+        other_detail = other_record.get("collectionDetail" if annual_materials else "detail") or {}
         other_project = other_record.get("projectNo") or other_detail.get("projectNo")
         if other_project != project_no or not other_detail:
             continue
@@ -2458,7 +2573,8 @@ def add_detail(
             canonical_record["package"] = alias_package
         if alias_of is None:
             alias_of = canonical
-    existing = record.get("detail")
+    detail_key = "collectionDetail" if annual_materials else "detail"
+    existing = record.get(detail_key)
     if existing and existing.get("fingerprint") != fingerprint:
         state.setdefault("conflicts", []).append(
             {"type": "DETAIL_CONFLICT", "rwid": record_key, "projectNo": project_no}
@@ -2537,6 +2653,7 @@ def add_detail(
     notice_query = state["filters"].get("selectionMode") in {
         "ANNUAL_RECTIFICATION_NOTICE",
         "RECENT_DOCUMENT_ACTIVITY",
+        "ANNUAL_CASE_BASELINE",
     }
     source_stages = [] if notice_query else list(record.get("inspectionStages") or ["INITIAL"])
     project_stages = (
@@ -2569,7 +2686,7 @@ def add_detail(
         record["aliasOf"] = alias_of
         state["actionRwids"] = [item for item in state.get("actionRwids", []) if item != record_key]
     record["projectNo"] = project_no
-    record["detail"] = detail_record
+    record[detail_key] = detail_record
     evidence_path, evidence = _load_evidence(layout, project_no, batch_id, state=state)
     if batch_id not in evidence["batchIds"]:
         evidence["batchIds"].append(batch_id)
@@ -2607,6 +2724,10 @@ def add_detail(
         "projectInspectionStages": project_stages,
         "sourceDocumentCount": len(record.get("sourceAppearances") or []) or 1,
     }
+    if annual_materials:
+        # Task-list appearances are identities, not observed legal documents.
+        source_fields.pop("sourceDocumentCount")
+        source_fields.pop("observationsByRwid")
     document_dates = [
         _find_first(
             a,
@@ -2620,7 +2741,7 @@ def add_detail(
                 "createtime",
             },
         )
-        for a in record.get("sourceAppearances", [])
+        for a in ([] if annual_materials else record.get("sourceAppearances", []))
     ]
     normalized_dates = [
         str(d)[:10] for d in document_dates if d and re.match(r"^\d{4}-\d{2}-\d{2}", str(d))
@@ -2800,7 +2921,11 @@ def inspect_zip_package(
                     if ratio > max_ratio:
                         raise SourceIntakeError("ZIP 压缩比超过 200，疑似压缩炸弹")
                     with source.open(info, "r") as member:
-                        if zipfile.is_zipfile(member):
+                        if zipfile.is_zipfile(member) and not is_safe_docx_package(
+                            member, filename=normalized, max_entries=max_entries,
+                            max_member_bytes=max_member_bytes, max_total_bytes=max_total_bytes,
+                            max_ratio=max_ratio,
+                        ):
                             raise SourceIntakeError("ZIP 包含嵌套 ZIP，需转人工处理")
                 members.append(
                     {
@@ -2874,7 +2999,13 @@ def safe_extract_package(
                 if member_written != info.file_size:
                     raise SourceIntakeError("ZIP 条目实际大小与目录声明不一致")
         for extracted_file in temporary.rglob("*"):
-            if extracted_file.is_file() and zipfile.is_zipfile(extracted_file):
+            if (
+                extracted_file.is_file() and zipfile.is_zipfile(extracted_file)
+                and not is_safe_docx_package(
+                    extracted_file, max_entries=max_entries, max_member_bytes=max_member_bytes,
+                    max_total_bytes=max_total_bytes, max_ratio=max_ratio,
+                )
+            ):
                 raise SourceIntakeError("ZIP 包含嵌套 ZIP，需转人工处理")
         os.rename(temporary, target)
     except Exception:
@@ -3016,6 +3147,17 @@ def _sync_attached_package(
     package: dict[str, Any],
 ) -> dict[str, Any]:
     evidence_path, evidence = _load_evidence(layout, project_no, batch_id, state=state)
+    classification = None
+    if load_waterline is not None and evidence_path.is_file():
+        ledger_source = (load_waterline(layout).get("cases") or {}).get(project_no, {}).get(
+            "source", {}
+        )
+        prior = ledger_source.get("classification") or {}
+        if (
+            prior.get("evidencePath") == str(evidence_path.relative_to(layout.root))
+            and prior.get("evidenceSha256") == _sha256(evidence_path)
+        ):
+            classification = dict(prior)
     if batch_id not in evidence["batchIds"]:
         evidence["batchIds"].append(batch_id)
     evidence_record = evidence["records"].setdefault(record_key, {"projectNo": project_no})
@@ -3025,6 +3167,9 @@ def _sync_attached_package(
     evidence_record["package"] = package
     evidence["updatedAt"] = package["attachedAt"]
     _write_json(evidence_path, evidence)
+    if classification is not None:
+        # Package metadata changes the file digest, not its original finding/date.
+        classification["evidenceSha256"] = _sha256(evidence_path)
 
     record = state["records"][record_key]
     record["projectNo"] = project_no
@@ -3055,6 +3200,7 @@ def _sync_attached_package(
                 "packageRelativePath": package["relativePath"],
                 "downloadSelection": package["downloadSelection"],
                 "downloadDisposition": package.get("downloadDisposition"),
+                **({"classification": classification} if classification is not None else {}),
             },
             local={
                 "status": "PENDING_ORGANIZATION",
@@ -3110,8 +3256,11 @@ def attach_package(
         raise SourceIntakeError("案卷包 RWID 不在已稳定清单中")
     if record.get("aliasOf"):
         raise SourceIntakeError(f"该 RWID 已合并，请使用主记录 {record['aliasOf']}")
-    if record.get("skippedAsUnchanged"):
+    collecting_annual = _material_collection_active(layout, state, record_key, record)
+    if record.get("skippedAsUnchanged") and not collecting_annual:
         raise SourceIntakeError("详情项目编号已在水位中完成并通过飞牛核验，无需重新下载")
+    if collecting_annual and not record.get("collectionDetail"):
+        raise SourceIntakeError("年度材料采集必须先保存本案完整详情与截图")
     expected_project = record.get("projectNo") or (record.get("detail") or {}).get("projectNo")
     selected_project = _require_project_no(str(project_no or expected_project or "").upper())
     if expected_project and expected_project != selected_project:
@@ -3346,6 +3495,7 @@ __all__ = [
     "inspect_zip_package",
     "plan_tail_first_cursor",
     "record_download_baseline",
+    "request_case_material_collection",
     "safe_extract_package",
     "sanitize_source_url",
     "wait_for_download_candidate",
