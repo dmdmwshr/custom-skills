@@ -1,6 +1,6 @@
 ---
 name: x-message-monitoring
-description: 执行或维护 WSL X 消息监控；受管 Playwright 单页采集、模型语义与额度筛选、双流入账及飞书对账。用于 heartbeat、自部署恢复、排障和优化，按项目阶段串行执行，不创建并行扫描者。
+description: 执行或维护 WSL X 消息监控；受管 Playwright 单页采集、模型语义与额度筛选、双流入账及飞书对账。用于 heartbeat、自部署恢复、暂停保留、排障和优化，按项目阶段串行执行，不创建并行扫描者。
 metadata:
   x-custom-skill: true
   x-source-repo: dmdmwshr/custom-skills
@@ -12,8 +12,9 @@ metadata:
 
 ## 按任务加载
 
+- 用户明确暂停项目并保留文件：先读 [暂停与保留](references/wsl-migration.md#用户明确暂停与保留)，阻断原调度、专属执行者及自动恢复入口；暂停优先于下述周期、ensure 和换代续接，恢复须有新的用户指令。
 - 普通周期：读 [运行步骤](references/fast-path-runbook.md) 与 [模型判断契约](references/reply-reset-contract.md)；版本未变且上下文仍在则复用，不每轮重读。
-- 新进程、部署缺失或发布：先按业务项目 DEPLOYMENT_BOOTSTRAP.md 检查已安装轮换status并续原管理事务；无待续事务的现owner再用受管inspect/ensure恢复部署，再加载业务 runtime；另读 [身份、受管加载与发布](references/wsl-migration.md)。
+- 新进程、部署缺失或发布：确认没有仍有效的用户暂停后，先按业务项目 DEPLOYMENT_BOOTSTRAP.md 检查已安装轮换status并续原管理事务；无待续事务的现owner再用受管inspect/ensure恢复部署，再加载业务 runtime；另读 [身份、受管加载与发布](references/wsl-migration.md)。
 - 用户已授权每轮换代时：按业务项目 SESSION_ROTATION.md 的持久请求续接，业务终态并释放资源后新建空白后继、换绑原调度及所有者、核验后归档旧任务并通过confirm-archive回读实际产品归档；跨请求archive_pending也须在下一业务前补办，当前新owner补归档后同次正常heartbeat继续监控，只有退役旧owner结束；不能仅凭归档调用返回或completed阶段认为全闭环。初始化只就绪，不采集或再次换代；启动还要比较最后终结业务周期与已换代周期：发现漏换代先补办，不能只查未完成请求；无新业务的初始化不得反复轮换。同一业务周期不重复创建。产品创建照用 begin 返回的 create_spec（正式项目 local），立即登记真实 threadId 或持久 clientThreadId 回执；client ID 不冒充真实任务，未知只恢复原请求。维护重部署可按项目入口隔离 superseded 请求，保留创建未知，拒绝迟到候选切换，不宣称产品创建失败。不要fork旧上下文或清除账本断点。
 - 实际失败：只读 [维护诊断](references/diagnostics.md) 对应内容；投递问题参考 [回执与完成](references/heartbeat-and-delivery.md)。
 - 主机或路径不明确时才读 [主机核对](references/host-platform.md)。
