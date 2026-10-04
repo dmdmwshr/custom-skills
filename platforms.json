@@ -11,7 +11,8 @@
     "okxnew-data-operations",
     "personal-memory-on-demand",
     "macro-strategy-data-operations",
-    "playwright-browser-control"
+    "playwright-browser-control",
+    "server-traffic-sync"
   ],
   "notes": "This is enforced by the managed publisher, not a native Codex frontmatter filter. Support declarations do not prove business dependencies or real-host validation. Windows-only entries describe current delivered workflows, not portability of every helper.",
   "skills": {
@@ -480,6 +481,23 @@
         "wsl": "not_supported_by_current_workflow"
       },
       "dependencies": "Python with PyMuPDF; configured catalog root and browser CLI; official standards websites. No scheduled task."
+    },
+    "server-traffic-sync": {
+      "category": "business_specific",
+      "execution_platforms": [
+        "wsl",
+        "linux"
+      ],
+      "remote_payload_platforms": [
+        "linux"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "manual_cycle_with_login_recovery_and_downloads_verified; scheduled_trigger_not_yet_observed",
+        "linux": "runtime_unverified",
+        "windows": "not_supported_by_current_workflow"
+      },
+      "dependencies": "Authorized Codex in-app browser with imported login, server-traffic-sync project and its registered Meifu SSH/ingest. Use project runtime configuration; no CN2 operations."
     }
   }
 }
