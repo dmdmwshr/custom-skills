@@ -64,6 +64,14 @@ class BrowserLauncherTests(unittest.TestCase):
         self.assertNotIn('secret', clean)
         self.assertTrue(clean.endswith('[REDACTED])'))
 
+    def test_group_receipt_requires_actual_structured_native_result(self):
+        value = {'schema': 'BrowserGroupIdentityV1', 'naming_verified': True, 'group_id': 17}
+        output = '### Result\r\n' + json.dumps(value) + '\r\n### Ran Playwright code\r\n...'
+        self.assertEqual(cli.group_result(output), value)
+        for output in ['### Error\nTimeout', '### Result\n{"schema":"other"}']:
+            with self.assertRaises(ValueError):
+                cli.group_result(output)
+
 
 if __name__ == '__main__':
     unittest.main()

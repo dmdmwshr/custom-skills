@@ -9,6 +9,8 @@ import re
 import subprocess
 import sys
 
+from group_identity import identity
+
 
 def runtime_root() -> Path:
     return Path(os.environ['LOCALAPPDATA']) / 'CodexBrowser' / 'playwright'
@@ -80,10 +82,36 @@ def doctor(settings: dict, root: Path) -> dict:
     }
 
 
+def group_code(group_identity: dict, read_only: bool = False) -> str:
+    source = Path(__file__).with_name('group_metadata.js').read_text(encoding='utf-8')
+    data = json.dumps({'identity': group_identity, 'readOnly': read_only}, ensure_ascii=False)
+    return 'async bootstrap => {\n' + source + '\nreturn await groupMetadata(bootstrap,' + data + ');\n}'
+
+
+def group_result(output: str) -> dict:
+    marker = '### Result\n'
+    if marker not in output.replace('\r\n', '\n'):
+        raise ValueError('Group metadata was not returned; connection may still be active. Do not reconnect blindly.')
+    payload = output.replace('\r\n', '\n').split(marker, 1)[1]
+    value, _ = json.JSONDecoder().raw_decode(payload.lstrip())
+    if not isinstance(value, dict) or value.get('schema') != 'BrowserGroupIdentityV1':
+        raise ValueError('Unexpected group metadata; inspect this named session before continuing.')
+    return value
+
+
+def run_cli(command: list[str], env: dict, timeout: int, secrets: list[str]) -> tuple[int, str]:
+    result = subprocess.run(command, env=env, capture_output=True, encoding='utf-8',
+                            errors='replace', timeout=timeout, shell=False,
+                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    output = redact(result.stdout + result.stderr, secrets)
+    return result.returncode or (1 if '### Error' in output else 0), output
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--browser', choices=['chrome', 'edge'], default='chrome')
     parser.add_argument('--session', help='Task-specific name; browser prefix is added automatically')
+    parser.add_argument('--project', help='Visible project name; defaults to the current working directory name')
     parser.add_argument('--timeout', type=int, default=90, help='CLI wait limit in seconds; timeout means result unknown')
     parser.add_argument('command')
     parser.add_argument('arguments', nargs=argparse.REMAINDER)
@@ -102,18 +130,41 @@ def main() -> int:
             raise ValueError('--session is required for browser commands.')
         if args.timeout < 1:
             raise ValueError('--timeout must be positive.')
+        group_identity = identity(args.project or Path.cwd().name, args.session, args.browser)
+        metadata_command = args.command in {'group-name', 'group-info'}
+        if metadata_command and args.arguments:
+            raise ValueError('group-name/group-info take no extra arguments.')
+        effective_command = 'run-code' if metadata_command else args.command
+        effective_arguments = [group_code(group_identity, args.command == 'group-info')] if metadata_command else args.arguments
         command, env, secrets = prepare(settings, root, args.browser, args.session,
-                                        args.command, args.arguments, Path.cwd())
+                                        effective_command, effective_arguments, Path.cwd())
         # Official CLI hashes the nearest .playwright directory; without it unrelated
         # projects share the package-root namespace. Never overwrite an existing config.
         (Path.cwd() / '.playwright').mkdir(exist_ok=True)
-        result = subprocess.run(command, env=env, capture_output=True, encoding='utf-8',
-                                errors='replace', timeout=args.timeout, shell=False,
-                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-        output = redact(result.stdout + result.stderr, secrets)
-        print(output, end='' if output.endswith('\n') else '\n')
-        # Upstream may describe an action failure while returning exit status zero.
-        return result.returncode or (1 if '### Error' in output else 0)
+        code, output = run_cli(command, env, args.timeout, secrets)
+        if not metadata_command:
+            print(output, end='' if output.endswith('\n') else '\n')
+        if code:
+            if metadata_command:
+                print(output, end='' if output.endswith('\n') else '\n')
+            return code
+        if args.command == 'connect':
+            command, env, secrets = prepare(settings, root, args.browser, args.session,
+                                            'run-code', [group_code(group_identity)], Path.cwd())
+            code, output = run_cli(command, env, args.timeout, secrets)
+            if code:
+                print(output)
+                return code
+        if args.command == 'connect' or metadata_command:
+            receipt = group_result(output)
+            receipt_path = Path.cwd() / '.playwright' / 'groups' / f'{args.browser}-{args.session}.json'
+            receipt_path.parent.mkdir(exist_ok=True)
+            pending = receipt_path.with_suffix('.pending')
+            pending.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+            pending.replace(receipt_path)
+            print(json.dumps(receipt, ensure_ascii=False, indent=2))
+            return 0 if receipt['naming_verified'] or args.command == 'group-info' else 1
+        return code
     except subprocess.TimeoutExpired:
         print('RESULT_UNKNOWN: CLI wait expired. Read back this named session before repeating an action.', file=sys.stderr)
         return 124
