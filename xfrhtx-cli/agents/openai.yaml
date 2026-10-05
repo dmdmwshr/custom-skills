@@ -1,6 +1,6 @@
 interface:
   display_name: "消防融合通信"
-  short_description: "读取本地群聊和私聊，检索导出记录及附件，并指导在其他 Windows 电脑初始化"
-  default_prompt: "使用 $xfrhtx-cli 查询本机消防融合通信的群聊或个人聊天记录。"
+  short_description: "查询通讯录手机号、单位和职位，区分同名人员，检索导出聊天与附件并部署便携工具"
+  default_prompt: "使用 $xfrhtx-cli 查询本机消防融合通信的缓存通讯录或聊天记录，按单位区分同名人员。"
 policy:
   allow_implicit_invocation: true

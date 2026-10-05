@@ -8,7 +8,9 @@
 | 群聊列表 | `sessions --type group --json` |
 | 私聊列表 | `sessions --type user --json` |
 | 查会话 | `sessions <名称片段> --json` |
-| 查人名 | `contacts <姓名或标识> --json` |
+| 查通讯录 | `contacts <姓名或标识> --json` |
+| 按单位精确查人 | `contacts <姓名> --exact --unit <单位片段> --json` |
+| 查单位及职位 | `contacts --unit <单位片段> --position <职位片段> --json` |
 | 读会话 | `history <session_key> -n 50 --json` |
 | 本地检索 | `search <关键词> --chat <session_key> --since YYYY-MM-DD --until YYYY-MM-DD --json` |
 | 会话统计 | `stats <session_key> --json` |
@@ -19,6 +21,10 @@
 | 会话归档 | `export <session_key> --with-files --format md -o <新目录> --json` |
 
 `history`、`search`、`attachments` 可用 `--sender`、`--since`、`--until`、`--type group|user|all`、`--kind`、`--order asc|desc`。每页默认 50 条，上限 1000，下一页传回 `--cursor`；筛选条件和排序必须相同。查询默认降序，导出默认升序。只有明确需要时使用 `--include-nonnormal` 查看非正常状态占位条目。
+
+通讯录返回 `id`、`name`、`mobile`、`mobile_state`、`affiliations`。`mobile_state` 为 `available`、`masked`、`missing`，分别表示可读、已隐藏、未填写；可读不等于号码仍有效。每条单位归属包含 `department_id`、`department_path`、`unit_path`、`position_name`、`path_source` 和 `matches_filters`。仅用匹配归属解释单位和职位，保留其他归属。`path_source=organization_tree` 来自完整组织树，`profile_cache` 来自人员详情，`partial_tree` 为不完整层级。职位缺失为 `null`，不猜测。
+
+`contacts` 的 `query` 默认姓名片段匹配，`--exact` 按全名匹配，人员编号始终精确匹配；`--unit` 匹配层级中的单位或部门编号。每页 `-n 50`，上限 1000；下一页使用 `--offset <next_offset>`，保持其余筛选。`total` 是当前缓存的匹配总数，`has_more` 为后续页标记。分页不是固定快照，期间更新的通讯录由调用方按人员编号去重。同名结果不自动归并或任选第一位。
 
 个人会话 `session_key` 为 `USER:…`，群聊为 `GROUP:…`。这两个标识直接使用返回值，不按对方发言的 `sender_id` 拼造会话。同一会话中的自己发言可通过 `sent_by_self` 区分。
 

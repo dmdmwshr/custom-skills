@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 PS = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-ENTRY = shutil.which("xfrhtx")
+ENTRY = os.environ.get("XFRHTX_TEST_ENTRY") or shutil.which("xfrhtx")
 
 
 def quoted(value):
@@ -29,6 +29,26 @@ def invoke(options, arguments):
 
 @unittest.skipUnless(os.name == "nt", "Windows entry resolver")
 class RunnerTests(unittest.TestCase):
+    def test_relative_receipt_survives_directory_move(self):
+        with tempfile.TemporaryDirectory() as folder:
+            original = Path(folder) / "before"
+            original.mkdir()
+            stub = original / "entry.ps1"
+            stub.write_text("param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Rest)\nif($Rest[0] -eq '--version'){Write-Output 'xfrhtx 0.3.0';exit 0}\n@{ok=$true;data=@{arguments=$Rest}} | ConvertTo-Json -Depth 4 -Compress\nexit 0\n", encoding="utf-8")
+            (original / "installation.json").write_text(json.dumps({"installed": True, "entry_point": "entry.ps1"}), encoding="utf-8")
+            moved = Path(folder) / "moved"
+            original.rename(moved)
+            result = invoke({"InstallRoot": moved}, ["contacts", "姓名", "--unit", "示例 支队", "--json"])
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(json.loads(result.stdout)["data"]["arguments"], ["contacts", "姓名", "--unit", "示例 支队", "--json"])
+
+    def test_relative_receipt_cannot_escape_install_root(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "installation.json").write_text(json.dumps({"installed": True, "entry_point": "../elsewhere.exe"}), encoding="utf-8")
+            result = invoke({"InstallRoot": folder}, ["--version"])
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("outside", json.loads(result.stdout)["error"]["message"])
+
     @unittest.skipUnless(ENTRY, "Requires installed reader")
     def test_plain_version_passthrough(self):
         result = invoke({"EntryPoint": ENTRY}, ["--version"])

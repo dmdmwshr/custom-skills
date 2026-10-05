@@ -16,7 +16,17 @@ try {
         $receipt = Join-Path $stateDirectory 'installation.json'
         if (Test-Path -LiteralPath $receipt -PathType Leaf) {
             $entryInfo = [IO.File]::ReadAllText($receipt, [Text.Encoding]::UTF8) | ConvertFrom-Json
-            if ($entryInfo.installed -and (Test-Path -LiteralPath $entryInfo.entry_point -PathType Leaf)) { $EntryPoint = $entryInfo.entry_point }
+            $candidate = [string]$entryInfo.entry_point
+            if ($candidate -and -not [IO.Path]::IsPathRooted($candidate)) {
+                $base = [IO.Path]::GetFullPath($stateDirectory).TrimEnd('\') + '\'
+                $candidate = [IO.Path]::GetFullPath((Join-Path $base $candidate))
+                if (-not $candidate.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { throw 'Relative receipt entry is outside the installation.' }
+            }
+            if ($entryInfo.installed -and $candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { $EntryPoint = $candidate }
+        }
+        if (-not $EntryPoint -and $InstallRoot -and (Test-Path -LiteralPath (Join-Path $InstallRoot 'portable-manifest.json') -PathType Leaf)) {
+            $portable = Join-Path $InstallRoot 'xfrhtx.exe'
+            if (Test-Path -LiteralPath $portable -PathType Leaf) { $EntryPoint = $portable }
         }
         if (-not $EntryPoint -and $InstallRoot) { throw 'No initialized tool found at InstallRoot.' }
         if (-not $EntryPoint) {
@@ -29,11 +39,11 @@ try {
             if (Test-Path -LiteralPath $known -PathType Leaf) { $EntryPoint = $known }
         }
     }
-    if (-not $EntryPoint -or -not (Test-Path -LiteralPath $EntryPoint -PathType Leaf)) { throw 'xfrhtx is not initialized. Use scripts/initialize.ps1 when installation is authorized.' }
+    if (-not $EntryPoint -or -not (Test-Path -LiteralPath $EntryPoint -PathType Leaf)) { throw 'xfrhtx is not initialized. Initialize the separate tool as described in references/setup.md.' }
     if (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $EntryPoint) 'jmtoolkit.dll')) { throw 'EntryPoint identifies the GUI client, not the reader CLI.' }
     $version = & $EntryPoint --version 2>$null
     if ($LASTEXITCODE -ne 0 -or ($version -join '') -notmatch '^xfrhtx [0-9]+\.[0-9]+\.[0-9]+$') { throw 'EntryPoint is not a verified xfrhtx reader.' }
-    if ([version](($version -join '').Substring(7)) -lt [version]'0.2.0') { throw 'xfrhtx-reader 0.2.0 or newer is required; initialize the tool separately.' }
+    if ([version](($version -join '').Substring(7)) -lt [version]'0.3.0') { throw 'xfrhtx-reader 0.3.0 or newer is required; initialize the tool separately.' }
     if (-not $ToolArguments) { $ToolArguments = @('status', '--json') }
     & $EntryPoint @ToolArguments
     exit $LASTEXITCODE
