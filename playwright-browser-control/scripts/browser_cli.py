@@ -12,6 +12,7 @@ import time
 
 from group_identity import identity
 import execution_state as lifecycle
+import browser_audit
 from saved_groups import snapshot as saved_snapshot
 
 
@@ -140,6 +141,11 @@ def cleanup_code(function, value):
     return 'async bootstrap => {\n' + source + '\nreturn await ' + function + '(bootstrap,' + json.dumps(value, ensure_ascii=False) + ');\n}'
 
 
+def audit_code():
+    source = Path(__file__).with_name('native_browser_audit.js').read_text(encoding='utf-8')
+    return 'async bootstrap => {\n' + source + '\nreturn await captureNativeBrowserInventory(bootstrap);\n}'
+
+
 def release_status(code, output, session):
     if f"Browser '{session}' is not attached." in output:
         return 'already_not_attached'
@@ -151,7 +157,7 @@ def managed_main(args, root, settings):
     owner = lifecycle.conversation(args.conversation)
     path = lifecycle.receipt_path(cwd, args.browser, args.session)
     profile = profile_path(settings, args.browser)
-    if args.arguments and args.command in {'connect','disconnect','finish','status','group-info','group-name'}:
+    if args.arguments and args.command in {'connect','disconnect','finish','status','audit','group-info','group-name'}:
         raise ValueError('This management command takes no extra arguments.')
     with lifecycle.locked(path):
         receipt = lifecycle.read(path)
@@ -184,9 +190,9 @@ def managed_main(args, root, settings):
             raise ValueError('Connect first; history is not an active browser session.')
         elif receipt['state'] == 'completed':
             if args.command in {'finish','disconnect'}:
-                print(json.dumps(receipt, ensure_ascii=False, indent=2)); return 0
+                print(json.dumps({**receipt, 'reused_completed_receipt':True}, ensure_ascii=False, indent=2)); return 0
             raise ValueError('This execution is completed; connect creates fresh objects for the next execution.')
-        elif receipt['state'] in {'connecting','unknown','cleanup_pending'} and args.command != 'group-info':
+        elif receipt['state'] in {'connecting','unknown','cleanup_pending'} and args.command not in {'group-info','audit'}:
             raise ValueError('Execution requires readback; no business commands or blind reconnect are allowed.')
 
         def invoke(command, arguments=None):
@@ -195,22 +201,42 @@ def managed_main(args, root, settings):
             try:
                 code, output = run_cli(argv, env, args.timeout, secrets)
             except subprocess.TimeoutExpired:
-                receipt['state'] = 'unknown'; lifecycle.save(path, receipt)
+                receipt['state'] = 'unknown'; persist()
                 raise
             return code, output
 
         def metadata():
             safe_identity = {k:receipt[k] for k in ('schema','computer_name','environment','project_name','session_name','browser_name','title')}
-            code, output = invoke('run-code', [group_code(safe_identity, args.command == 'group-info')])
+            code, output = invoke('run-code', [group_code(safe_identity, args.command in {'group-info','audit'})])
             if code:
                 raise ValueError('Native group readback failed; keep this execution for inspection.')
             return group_result(output)
+
+        def persist():
+            lifecycle.save(path, receipt)
+            browser_audit.register(root, receipt, path)
+
+        def inspect_browser():
+            code, output = invoke('run-code', [audit_code()])
+            if code: raise ValueError('Native end-of-execution inventory failed; cleanup duty remains unverified.')
+            native = parse_result(output, 'NativeBrowserInventoryV1')
+            epoch = browser_audit.browser_epoch(args.browser, profile)
+            if receipt.get('browser_epoch') and epoch and receipt['browser_epoch'] != epoch:
+                raise ValueError('Browser process identity changed; preserve the original execution for reconciliation.')
+            if epoch: receipt['browser_epoch'] = epoch
+            persist()
+            report = browser_audit.classify(native, saved_groups(profile), receipt,
+                browser_audit.registry(root, receipt['profile_key']), epoch)
+            report['reconciled_own_history'] = browser_audit.complete_verified_own_history(root,receipt,report,epoch)
+            receipt['end_audit'] = report
+            persist()
+            return report
 
         try:
             if args.command == 'connect':
                 code, output = invoke('connect')
                 if code:
-                    receipt['state'] = 'unknown'; lifecycle.save(path, receipt)
+                    receipt['state'] = 'unknown'; persist()
                     print(output); return code
                 actual = metadata()
                 receipt.update(actual)
@@ -222,7 +248,7 @@ def managed_main(args, root, settings):
                     time.sleep(.2)
                 receipt['saved_group_ids'] = new
                 receipt['saved_group_status'] = 'bound' if new else 'not_saved_at_readback'
-                lifecycle.save(path, receipt)
+                persist()
                 if receipt.get('previous_cleanup'):
                     previous = receipt['previous_cleanup']
                     code, output = invoke('run-code', [cleanup_code('verifyNativeCleanup', previous['cleanup']['tab_ids'])])
@@ -232,7 +258,9 @@ def managed_main(args, root, settings):
                     previous['state'] = 'completed'; previous['completed_at'] = lifecycle.now()
                     previous['cleanup'].update(native_pages_status='verified_absent', saved_group_status='verified_absent')
                     lifecycle.archive(path, previous)
+                    browser_audit.register(root, previous, path)
                     receipt.pop('previous_cleanup'); lifecycle.save(path, receipt)
+                inspect_browser()
                 print(json.dumps(receipt, ensure_ascii=False, indent=2)); return 0
 
             actual = metadata()
@@ -241,19 +269,23 @@ def managed_main(args, root, settings):
                 raise ValueError('Group or page membership changed outside this execution; inspect exact objects before cleanup.')
             if args.command in {'group-info','group-name'}:
                 print(json.dumps(receipt, ensure_ascii=False, indent=2)); return 0
+            if args.command == 'audit':
+                print(json.dumps(inspect_browser(), ensure_ascii=False, indent=2)); return 0
             if args.command in {'finish','disconnect'}:
                 receipt['owned_tab_ids'] = actual['native_tab_ids']
+                inspect_browser()
+                receipt['end_audit']['native_snapshot_phase'] = 'before_own_cleanup'
                 current = saved_groups(profile)
                 receipt['saved_group_ids'] = sorted(set(receipt['saved_group_ids']) | {gid for gid,g in current.items()
                     if gid not in receipt['saved_baseline_ids'] and g['title'] == receipt['title']})
-                receipt['state'] = 'closing'; lifecycle.save(path, receipt)
+                receipt['state'] = 'closing'; persist()
                 code, output = invoke('run-code', [cleanup_code('executionCleanup', receipt)])
                 if code:
-                    receipt['state'] = 'unknown'; lifecycle.save(path, receipt); print(output); return code
+                    receipt['state'] = 'unknown'; persist(); print(output); return code
                 cleanup = parse_result(output, 'BrowserCleanupV1')
                 receipt['cleanup'] = cleanup
                 if not cleanup['scheduled']:
-                    receipt['state'] = 'active'; lifecycle.save(path, receipt)
+                    receipt['state'] = 'active'; persist()
                     print(json.dumps(receipt, ensure_ascii=False, indent=2)); return 1
                 # Native IDs become detached before their tabs close. Empty CLI pages
                 # alone do not prove closure; the next fresh execution checks exact IDs.
@@ -272,7 +304,14 @@ def managed_main(args, root, settings):
                     cleanup['connection_release'] = 'not_attempted'
                 receipt['state'] = 'cleanup_pending'
                 receipt['finished_at'] = lifecycle.now()
-                lifecycle.save(path, receipt); lifecycle.archive(path, receipt)
+                receipt['end_audit']['post_cleanup_saved'] = {'captured_at':lifecycle.now(),
+                    'own_saved_records_absent':cleanup['saved_group_status']=='verified_absent',
+                    'remaining_saved_records':len(current),
+                    'saved_without_local_marker':sum(not g.get('hasLocalGroupId') for g in current.values())}
+                receipt['end_audit']['end_duties'] = {'native_inventory':'verified',
+                    'previous_residuals_checked':True,'connection_release':cleanup['connection_release'],
+                    'last_native_helper':'pending_next_native_readback'}
+                persist(); lifecycle.archive(path, receipt)
                 print(json.dumps(receipt, ensure_ascii=False, indent=2))
                 return 0 if cleanup['saved_group_status'] == 'verified_absent' and cleanup['connection_release'] != 'unverified' else 1
             if args.command == 'tab-close' and len(receipt['owned_tab_ids']) <= 1:
@@ -280,18 +319,19 @@ def managed_main(args, root, settings):
             code, output = invoke(args.command, args.arguments)
             print(output, end='' if output.endswith('\n') else '\n')
             if code:
-                receipt['state'] = 'unknown'; lifecycle.save(path, receipt); return code
+                receipt['state'] = 'unknown'; persist(); return code
             after = metadata()
             if (after['group_id'] != receipt['group_id'] or after['connection_id'] != receipt['connection_id']
                     or args.command not in {'tab-new','run-code'} and not set(after['native_tab_ids']).issubset(receipt['owned_tab_ids'])):
-                receipt['state'] = 'unknown'; lifecycle.save(path, receipt)
+                receipt['state'] = 'unknown'; persist()
                 raise ValueError('Unexpected native objects after the command; ownership was not expanded.')
             receipt['owned_tab_ids'] = after['native_tab_ids']
-            lifecycle.save(path, receipt)
+            persist()
             return 0
         except (ValueError, OSError):
             if receipt['state'] in {'connecting','closing','active'}:
                 receipt['state'] = 'unknown'; lifecycle.save(path, receipt)
+                browser_audit.register(root, receipt, path)
             raise
 
 

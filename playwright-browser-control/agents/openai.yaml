@@ -1,4 +1,4 @@
 interface:
   display_name: "Playwright 浏览器控制"
-  short_description: "按主机使用受管 Playwright，统一项目分组、连接复用与页面清理"
+  short_description: "按主机使用受管 Playwright，每次结束巡检残留并清理自有组与页面"
   default_prompt: "使用 $playwright-browser-control 在指定浏览器中完成网页操作并回读结果。"
