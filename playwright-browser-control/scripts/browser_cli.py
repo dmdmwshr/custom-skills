@@ -140,6 +140,12 @@ def cleanup_code(function, value):
     return 'async bootstrap => {\n' + source + '\nreturn await ' + function + '(bootstrap,' + json.dumps(value, ensure_ascii=False) + ');\n}'
 
 
+def release_status(code, output, session):
+    if f"Browser '{session}' is not attached." in output:
+        return 'already_not_attached'
+    return 'detached' if code == 0 else 'unverified'
+
+
 def managed_main(args, root, settings):
     cwd = Path.cwd()
     owner = lifecycle.conversation(args.conversation)
@@ -162,6 +168,8 @@ def managed_main(args, root, settings):
             if receipt and receipt['state'] == 'cleanup_pending':
                 if not receipt.get('cleanup', {}).get('scheduled') or any(g in baseline for g in receipt['saved_group_ids']):
                     raise ValueError('Previous cleanup is incomplete; do not recreate its business operation.')
+                if receipt['cleanup'].get('connection_release') not in {'detached','already_not_attached'}:
+                    raise ValueError('Previous connection release is unverified; inspect its exact physical session.')
                 prior = receipt
             elif receipt:
                 lifecycle.archive(path, receipt)
@@ -249,16 +257,24 @@ def managed_main(args, root, settings):
                     print(json.dumps(receipt, ensure_ascii=False, indent=2)); return 1
                 # Native IDs become detached before their tabs close. Empty CLI pages
                 # alone do not prove closure; the next fresh execution checks exact IDs.
+                # An unsaved group may already be absent; let the native timer run
+                # before detaching so its ownership check can still succeed.
+                time.sleep(3)
                 for _ in range(30):
                     time.sleep(.2)
                     current = saved_groups(profile)
                     if not any(g in current for g in receipt['saved_group_ids']) and not any(g['title']==receipt['title'] for g in current.values()):
                         cleanup['saved_group_status'] = 'verified_absent'; break
+                if cleanup['saved_group_status'] == 'verified_absent':
+                    release_code, release_output = invoke('disconnect')
+                    cleanup['connection_release'] = release_status(release_code, release_output, receipt['cli_session'])
+                else:
+                    cleanup['connection_release'] = 'not_attempted'
                 receipt['state'] = 'cleanup_pending'
                 receipt['finished_at'] = lifecycle.now()
                 lifecycle.save(path, receipt); lifecycle.archive(path, receipt)
                 print(json.dumps(receipt, ensure_ascii=False, indent=2))
-                return 0 if cleanup['saved_group_status'] == 'verified_absent' else 1
+                return 0 if cleanup['saved_group_status'] == 'verified_absent' and cleanup['connection_release'] != 'unverified' else 1
             if args.command == 'tab-close' and len(receipt['owned_tab_ids']) <= 1:
                 raise ValueError('Use finish to delete the final group before closing its final tab.')
             code, output = invoke(args.command, args.arguments)

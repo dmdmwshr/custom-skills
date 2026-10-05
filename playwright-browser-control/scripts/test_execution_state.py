@@ -53,5 +53,10 @@ class ExecutionTests(unittest.TestCase):
     def test_unavailable_saved_store_never_means_clean(self):
         with self.assertRaises(ValueError): cli.saved_groups(self.cwd)
 
+    def test_release_receipt_is_scoped_to_the_exact_physical_session(self):
+        self.assertEqual(cli.release_status(0,'detached','chrome-own'),'detached')
+        self.assertEqual(cli.release_status(1,"Browser 'chrome-own' is not attached.",'chrome-own'),'already_not_attached')
+        self.assertEqual(cli.release_status(1,"Browser 'chrome-other' is not attached.",'chrome-own'),'unverified')
+
 
 if __name__ == '__main__': unittest.main()
