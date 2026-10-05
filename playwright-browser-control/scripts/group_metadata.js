@@ -1,6 +1,14 @@
 // Executed by the pinned official CLI in this connection's existing context.
 async function groupMetadata(bootstrap, input) {
   const context = bootstrap.context();
+  if (!context.__codexExecutionDownloads) {
+    Object.defineProperty(context, '__codexExecutionDownloads', {value:{pages:new Set(),pending:new Set()}});
+  }
+  const guard=context.__codexExecutionDownloads;
+  for(const page of context.pages?.() || []) if(!guard.pages.has(page)) {
+    guard.pages.add(page);
+    page.on('download',download=>{guard.pending.add(download);download.failure().then(()=>guard.pending.delete(download)).catch(()=>{});});
+  }
   const status = await context.newPage();
   try {
     await status.goto('chrome-extension://mmlmfjhmonkocbjadbfplnigmagldckm/status.html',
@@ -21,6 +29,7 @@ async function groupMetadata(bootstrap, input) {
       return {...identity, group_id: verified.id, window_id: verified.windowId,
         connection_id: connections[0].id, actual_title: verified.title,
         naming_verified: verified.title === identity.title,
+        native_tab_ids: tabs.filter(t => t.id !== own.id).map(t => t.id),
         saved_group_status: 'not_checked'};
     }, input);
   } finally {

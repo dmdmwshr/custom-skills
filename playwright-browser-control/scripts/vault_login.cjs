@@ -80,7 +80,11 @@ function main() {
   });
   credential.password = '';
   // Never spawn a process with these arguments: this argv is memory-only.
-  process.argv = [process.execPath, runtime.cli_entry, '-s=' + request.browser + '-' + request.session, 'run-code', code];
+  const receipt = JSON.parse(fs.readFileSync(path.join(process.cwd(), '.playwright', 'groups', request.browser + '-' + request.session + '.json'), 'utf8'));
+  if (receipt.lifecycle_schema !== 'BrowserExecutionV1' || receipt.state !== 'active' ||
+      receipt.conversation_id !== process.env.CODEX_THREAD_ID || receipt.project_root !== process.cwd() ||
+      !/^[a-z0-9-]{1,48}$/.test(receipt.cli_session)) throw new Error('Active execution ownership mismatch');
+  process.argv = [process.execPath, runtime.cli_entry, '-s=' + receipt.cli_session, 'run-code', code];
   require(runtime.cli_entry);
 }
 

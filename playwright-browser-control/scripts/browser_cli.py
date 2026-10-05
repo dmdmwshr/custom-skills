@@ -8,8 +8,11 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
 from group_identity import identity
+import execution_state as lifecycle
+from saved_groups import snapshot as saved_snapshot
 
 
 def runtime_root() -> Path:
@@ -28,7 +31,7 @@ def redact(text: str, secrets: list[str]) -> str:
 
 
 def prepare(settings: dict, root: Path, browser: str, session: str,
-            command: str, arguments: list[str], cwd: Path) -> tuple[list[str], dict, list[str]]:
+            command: str, arguments: list[str], cwd: Path, physical_session: str | None = None) -> tuple[list[str], dict, list[str]]:
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,47}', session):
         raise ValueError('Session must be 1-48 lowercase letters, digits or hyphens.')
     if command in {'open', 'close', 'close-all', 'kill-all', 'delete-data', 'attach', 'detach', 'install', 'install-browser'}:
@@ -52,7 +55,7 @@ def prepare(settings: dict, root: Path, browser: str, session: str,
         'PLAYWRIGHT_MCP_OUTPUT_DIR': str(cwd / 'output' / 'playwright' / f'{browser}-{session}'),
         'PLAYWRIGHT_MCP_CONSOLE_LEVEL': 'error',
     })
-    args = [settings['node_executable'], settings['cli_entry'], f'-s={browser}-{session}']
+    args = [settings['node_executable'], settings['cli_entry'], '-s=' + (physical_session or f'{browser}-{session}')]
     if command == 'connect':
         if arguments:
             raise ValueError('connect takes no extra arguments; create a task-owned tab after connecting.')
@@ -107,11 +110,181 @@ def run_cli(command: list[str], env: dict, timeout: int, secrets: list[str]) -> 
     return result.returncode or (1 if '### Error' in output else 0), output
 
 
+def parse_result(output, schema):
+    normalized = output.replace('\r\n', '\n')
+    if '### Result\n' not in normalized:
+        raise ValueError('No cleanup receipt returned; inspect the same execution before repeating.')
+    value, _ = json.JSONDecoder().raw_decode(normalized.split('### Result\n', 1)[1].lstrip())
+    if not isinstance(value, dict) or value.get('schema') != schema:
+        raise ValueError('Unexpected cleanup receipt.')
+    return value
+
+
+def profile_path(settings, browser):
+    selected = settings['browsers'][browser]
+    if selected.get('profile_path'):
+        return Path(selected['profile_path'])
+    base = ('Google/Chrome/User Data' if browser == 'chrome' else 'Microsoft/Edge/User Data')
+    return Path(os.environ['LOCALAPPDATA']) / base / selected['profile_directory']
+
+
+def saved_groups(profile):
+    store = profile / 'Sync Data' / 'LevelDB'
+    if not (store / 'CURRENT').is_file():
+        raise ValueError('Saved-group store unavailable; cleanup cannot be declared verified.')
+    return saved_snapshot(store)
+
+
+def cleanup_code(function, value):
+    source = Path(__file__).with_name('group_cleanup.js').read_text(encoding='utf-8')
+    return 'async bootstrap => {\n' + source + '\nreturn await ' + function + '(bootstrap,' + json.dumps(value, ensure_ascii=False) + ');\n}'
+
+
+def managed_main(args, root, settings):
+    cwd = Path.cwd()
+    owner = lifecycle.conversation(args.conversation)
+    path = lifecycle.receipt_path(cwd, args.browser, args.session)
+    profile = profile_path(settings, args.browser)
+    if args.arguments and args.command in {'connect','disconnect','finish','status','group-info','group-name'}:
+        raise ValueError('This management command takes no extra arguments.')
+    with lifecycle.locked(path):
+        receipt = lifecycle.read(path)
+        if args.command == 'status':
+            print(json.dumps(receipt or {'state':'no_execution'}, ensure_ascii=False, indent=2))
+            return 0
+        prior = None
+        if receipt:
+            lifecycle.check_owner(receipt, cwd, profile, owner)
+        if args.command == 'connect':
+            if receipt and receipt['state'] not in {'completed','cleanup_pending'}:
+                raise ValueError('This execution is still active or unknown; finish or reconcile it before creating another.')
+            baseline = saved_groups(profile)
+            if receipt and receipt['state'] == 'cleanup_pending':
+                if not receipt.get('cleanup', {}).get('scheduled') or any(g in baseline for g in receipt['saved_group_ids']):
+                    raise ValueError('Previous cleanup is incomplete; do not recreate its business operation.')
+                prior = receipt
+            elif receipt:
+                lifecycle.archive(path, receipt)
+            group_identity = identity(args.project or cwd.name, args.session, args.browser)
+            receipt = lifecycle.fresh(group_identity, cwd, profile, owner)
+            receipt['title'] += ' · ' + receipt['execution_id'][:8]
+            receipt['saved_baseline_ids'] = list(baseline)
+            if prior:
+                receipt['previous_cleanup'] = prior
+            lifecycle.save(path, receipt)  # Intent precedes browser input.
+        elif not receipt:
+            raise ValueError('Connect first; history is not an active browser session.')
+        elif receipt['state'] == 'completed':
+            if args.command in {'finish','disconnect'}:
+                print(json.dumps(receipt, ensure_ascii=False, indent=2)); return 0
+            raise ValueError('This execution is completed; connect creates fresh objects for the next execution.')
+        elif receipt['state'] in {'connecting','unknown','cleanup_pending'} and args.command != 'group-info':
+            raise ValueError('Execution requires readback; no business commands or blind reconnect are allowed.')
+
+        def invoke(command, arguments=None):
+            argv, env, secrets = prepare(settings, root, args.browser, args.session, command,
+                                         arguments or [], cwd, receipt['cli_session'])
+            try:
+                code, output = run_cli(argv, env, args.timeout, secrets)
+            except subprocess.TimeoutExpired:
+                receipt['state'] = 'unknown'; lifecycle.save(path, receipt)
+                raise
+            return code, output
+
+        def metadata():
+            safe_identity = {k:receipt[k] for k in ('schema','computer_name','environment','project_name','session_name','browser_name','title')}
+            code, output = invoke('run-code', [group_code(safe_identity, args.command == 'group-info')])
+            if code:
+                raise ValueError('Native group readback failed; keep this execution for inspection.')
+            return group_result(output)
+
+        try:
+            if args.command == 'connect':
+                code, output = invoke('connect')
+                if code:
+                    receipt['state'] = 'unknown'; lifecycle.save(path, receipt)
+                    print(output); return code
+                actual = metadata()
+                receipt.update(actual)
+                receipt.update(owned_tab_ids=actual['native_tab_ids'], state='active')
+                for _ in range(10):
+                    current = saved_groups(profile)
+                    new = [gid for gid,g in current.items() if gid not in receipt['saved_baseline_ids'] and g['title'] == receipt['title']]
+                    if new: break
+                    time.sleep(.2)
+                receipt['saved_group_ids'] = new
+                receipt['saved_group_status'] = 'bound' if new else 'not_saved_at_readback'
+                lifecycle.save(path, receipt)
+                if receipt.get('previous_cleanup'):
+                    previous = receipt['previous_cleanup']
+                    code, output = invoke('run-code', [cleanup_code('verifyNativeCleanup', previous['cleanup']['tab_ids'])])
+                    checked = parse_result(output, 'BrowserCleanupReadbackV1') if not code else {'verified':False}
+                    if not checked['verified']:
+                        raise ValueError('Previous native pages remain; its cleanup stays pending and those pages are not reused.')
+                    previous['state'] = 'completed'; previous['completed_at'] = lifecycle.now()
+                    previous['cleanup'].update(native_pages_status='verified_absent', saved_group_status='verified_absent')
+                    lifecycle.archive(path, previous)
+                    receipt.pop('previous_cleanup'); lifecycle.save(path, receipt)
+                print(json.dumps(receipt, ensure_ascii=False, indent=2)); return 0
+
+            actual = metadata()
+            if (actual['group_id'] != receipt['group_id'] or actual['connection_id'] != receipt['connection_id']
+                    or not set(actual['native_tab_ids']).issubset(receipt['owned_tab_ids'])):
+                raise ValueError('Group or page membership changed outside this execution; inspect exact objects before cleanup.')
+            if args.command in {'group-info','group-name'}:
+                print(json.dumps(receipt, ensure_ascii=False, indent=2)); return 0
+            if args.command in {'finish','disconnect'}:
+                receipt['owned_tab_ids'] = actual['native_tab_ids']
+                current = saved_groups(profile)
+                receipt['saved_group_ids'] = sorted(set(receipt['saved_group_ids']) | {gid for gid,g in current.items()
+                    if gid not in receipt['saved_baseline_ids'] and g['title'] == receipt['title']})
+                receipt['state'] = 'closing'; lifecycle.save(path, receipt)
+                code, output = invoke('run-code', [cleanup_code('executionCleanup', receipt)])
+                if code:
+                    receipt['state'] = 'unknown'; lifecycle.save(path, receipt); print(output); return code
+                cleanup = parse_result(output, 'BrowserCleanupV1')
+                receipt['cleanup'] = cleanup
+                if not cleanup['scheduled']:
+                    receipt['state'] = 'active'; lifecycle.save(path, receipt)
+                    print(json.dumps(receipt, ensure_ascii=False, indent=2)); return 1
+                # Native IDs become detached before their tabs close. Empty CLI pages
+                # alone do not prove closure; the next fresh execution checks exact IDs.
+                for _ in range(30):
+                    time.sleep(.2)
+                    current = saved_groups(profile)
+                    if not any(g in current for g in receipt['saved_group_ids']) and not any(g['title']==receipt['title'] for g in current.values()):
+                        cleanup['saved_group_status'] = 'verified_absent'; break
+                receipt['state'] = 'cleanup_pending'
+                receipt['finished_at'] = lifecycle.now()
+                lifecycle.save(path, receipt); lifecycle.archive(path, receipt)
+                print(json.dumps(receipt, ensure_ascii=False, indent=2))
+                return 0 if cleanup['saved_group_status'] == 'verified_absent' else 1
+            if args.command == 'tab-close' and len(receipt['owned_tab_ids']) <= 1:
+                raise ValueError('Use finish to delete the final group before closing its final tab.')
+            code, output = invoke(args.command, args.arguments)
+            print(output, end='' if output.endswith('\n') else '\n')
+            if code:
+                receipt['state'] = 'unknown'; lifecycle.save(path, receipt); return code
+            after = metadata()
+            if (after['group_id'] != receipt['group_id'] or after['connection_id'] != receipt['connection_id']
+                    or args.command not in {'tab-new','run-code'} and not set(after['native_tab_ids']).issubset(receipt['owned_tab_ids'])):
+                receipt['state'] = 'unknown'; lifecycle.save(path, receipt)
+                raise ValueError('Unexpected native objects after the command; ownership was not expanded.')
+            receipt['owned_tab_ids'] = after['native_tab_ids']
+            lifecycle.save(path, receipt)
+            return 0
+        except (ValueError, OSError):
+            if receipt['state'] in {'connecting','closing','active'}:
+                receipt['state'] = 'unknown'; lifecycle.save(path, receipt)
+            raise
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--browser', choices=['chrome', 'edge'], default='chrome')
     parser.add_argument('--session', help='Task-specific name; browser prefix is added automatically')
     parser.add_argument('--project', help='Visible project name; defaults to the current working directory name')
+    parser.add_argument('--conversation', help='Real Codex conversation ID when CODEX_THREAD_ID is unavailable')
     parser.add_argument('--timeout', type=int, default=90, help='CLI wait limit in seconds; timeout means result unknown')
     parser.add_argument('command')
     parser.add_argument('arguments', nargs=argparse.REMAINDER)
@@ -130,41 +303,7 @@ def main() -> int:
             raise ValueError('--session is required for browser commands.')
         if args.timeout < 1:
             raise ValueError('--timeout must be positive.')
-        group_identity = identity(args.project or Path.cwd().name, args.session, args.browser)
-        metadata_command = args.command in {'group-name', 'group-info'}
-        if metadata_command and args.arguments:
-            raise ValueError('group-name/group-info take no extra arguments.')
-        effective_command = 'run-code' if metadata_command else args.command
-        effective_arguments = [group_code(group_identity, args.command == 'group-info')] if metadata_command else args.arguments
-        command, env, secrets = prepare(settings, root, args.browser, args.session,
-                                        effective_command, effective_arguments, Path.cwd())
-        # Official CLI hashes the nearest .playwright directory; without it unrelated
-        # projects share the package-root namespace. Never overwrite an existing config.
-        (Path.cwd() / '.playwright').mkdir(exist_ok=True)
-        code, output = run_cli(command, env, args.timeout, secrets)
-        if not metadata_command:
-            print(output, end='' if output.endswith('\n') else '\n')
-        if code:
-            if metadata_command:
-                print(output, end='' if output.endswith('\n') else '\n')
-            return code
-        if args.command == 'connect':
-            command, env, secrets = prepare(settings, root, args.browser, args.session,
-                                            'run-code', [group_code(group_identity)], Path.cwd())
-            code, output = run_cli(command, env, args.timeout, secrets)
-            if code:
-                print(output)
-                return code
-        if args.command == 'connect' or metadata_command:
-            receipt = group_result(output)
-            receipt_path = Path.cwd() / '.playwright' / 'groups' / f'{args.browser}-{args.session}.json'
-            receipt_path.parent.mkdir(exist_ok=True)
-            pending = receipt_path.with_suffix('.pending')
-            pending.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-            pending.replace(receipt_path)
-            print(json.dumps(receipt, ensure_ascii=False, indent=2))
-            return 0 if receipt['naming_verified'] or args.command == 'group-info' else 1
-        return code
+        return managed_main(args, root, settings)
     except subprocess.TimeoutExpired:
         print('RESULT_UNKNOWN: CLI wait expired. Read back this named session before repeating an action.', file=sys.stderr)
         return 124
