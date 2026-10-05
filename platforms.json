@@ -335,6 +335,19 @@
       "dependencies": "Check actual project, tools, authentication scope and service bindings before execution.",
       "note": "Runs on Windows against its scheduled tasks; WSL is the backup subject, not the execution host."
     },
+    "xfrhtx-cli": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "windows": "local_runtime_and_isolated_install_verified",
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "not_supported_by_current_workflow"
+      },
+      "dependencies": "Separately installed xfrhtx-reader 0.2.0+, native 64-bit Windows, and a compatible signed-in XFRHTX client. Tool source and runtime are not bundled with this Skill."
+    },
     "wx-cli": {
       "category": "platform_specific",
       "execution_platforms": [
