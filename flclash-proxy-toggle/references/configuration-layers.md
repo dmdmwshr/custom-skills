@@ -4,7 +4,7 @@
 
 本参考用于 Windows 桌面版 FlClash 的配置定位、持久化判断和安全维护。界面名称与数据库 schema 可能随版本变化；执行前必须结合当前安装的只读事实复核。
 
-官方依据于 2026-07-31 核对 FlClash 主仓库提交 `7c83185`：
+官方依据于 2026-10-06 核对 FlClash `v0.8.99`（发布提交 `68c71b8`）；本机安装版为 `0.8.99+2026100301`。此前 2026-07-31 的 `7c83185` 仅作历史记录：
 
 - 项目与桌面界面说明：<https://github.com/chen08209/FlClash>
 - 数据路径：`lib/common/path.dart`
@@ -13,6 +13,10 @@
 - Profile 覆写界面：`lib/views/profiles/overwrite/overwrite.dart`
 - 通用设置中的 external controller：`lib/views/config/general.dart`
 - 桌面入口：`lib/main.dart`
+- DNS 按键覆写与快速编辑：`lib/views/config/dns.dart`
+- [版本发布说明](https://github.com/chen08209/FlClash/releases/tag/v0.8.99)
+- [该版本配置合并](https://github.com/chen08209/FlClash/blob/v0.8.99/lib/common/task.dart)
+- [该版本数据库](https://github.com/chen08209/FlClash/blob/v0.8.99/lib/database/database.dart)
 
 这些是实现证据，不把内部文件格式提升为稳定公共 API。
 
@@ -31,7 +35,7 @@
 
 ### 2. 配置档案与覆写数据库
 
-官方当前使用 Drift/SQLite，数据库名为 `database.sqlite`，schemaVersion 当前为 2。官方注册的表包括：
+该版本使用 Drift/SQLite，数据库名为 `database.sqlite`，schemaVersion 为 10；本机只读 `PRAGMA user_version` 同为 10。这是版本快照，不是后续版本的固定契约。官方注册的表包括：
 
 - `profiles`：档案元数据、覆写类型、当前组名、`selected_map` 等；
 - `scripts`：脚本覆写；
@@ -39,6 +43,9 @@
 - `profile_rule_mapping`：档案与规则的映射、场景和顺序；
 - `proxy_groups`：自定义策略组；
 - `icon_records`：图标缓存记录。
+- `clash_providers`、`custom_proxies`：应用级 providers 与自定义代理。只查表结构和计数，不输出链接或节点内容。
+
+Profiles 显示名称列是 `label`，不是 `name`。查询前读取 `PRAGMA table_info`，不要套用旧列名；避免因某一列变化就丢弃全部可用诊断。
 
 Profile 覆写类型是：
 
@@ -67,6 +74,8 @@ Profile 覆写类型是：
 ### 4. 运行时生成配置
 
 官方 `makeRealProfileTask` 会把源 Profile、应用 PatchClashConfig、标准/脚本/自定义覆写、DNS 和系统设置合并，最后生成供核心使用的 `config.yaml`。例如源码会用应用补丁值覆盖 `external-controller`、端口、TUN、模式等字段。
+
+`v0.8.99` 的 DNS/NTP 已按被选中的键覆写。DNS 值在 `patchClashConfig.dns`，键集合在 `dns-override-keys`，开关为 `overrideDns`。只有 DNS 覆写启用，或源配置 DNS 未启用时，选中键才进入相应合并流程；源 DNS 未启用还会先补基线。偏好文件里存在某个 DNS 值，不代表它已生效。快速编辑会解析/验证并更新覆写键，修改前必须先看现有键集合。
 
 维护结论：
 
@@ -110,7 +119,7 @@ FlClashCore 实际加载的配置、当前策略组、连接和规则命中是�
 截至上述核对点：
 
 - 官方 README 只公开 Android 的 `START`、`STOP`、`TOGGLE` action。
-- Windows/Dart 入口是无参数 `main()`。
+- `v0.8.99` 的入口已改为 `main(List<String> args)`；当前入口只在 Linux 分支把参数交给初始链接处理。不能再用“main 无参数”作为结论依据。
 - 未发现官方文档化的 Windows 管理 CLI。
 
 因此：
@@ -127,7 +136,7 @@ FlClashCore 实际加载的配置、当前策略组、连接和规则命中是�
 
 - 仅监听本机回环；若当前版本允许非回环，默认不开放。
 - 密钥只从受保护本地事实读取并直接交给请求层，不输出到模型、日志或回复。
-- API 写操作必须有用户明确的精确目标。
+- API 写操作须在用户已授权的目标范围内；常规必要验证不逐项再次确认。
 - 它管理核心运行态，不是完整 FlClash Profile/数据库管理 API。
 - controller 未启用时，不得通过直接编辑生成文件后重启来“绕过”。
 
@@ -171,7 +180,7 @@ SQLite 不应用于：
 4. UI 无法完成且怀疑数据库异常：
    - 只读查明精确行和关系；
    - 报告恢复方案与并发风险；
-   - 等用户明确批准维护窗口；
+   - 检查既有授权是否覆盖该恢复方案；存在并发写或重大损失风险时，再一次性确认维护窗口；
    - 智能体不得自行暂停或关闭代理来制造维护窗口。
 
 5. 用户说“暂停代理”：

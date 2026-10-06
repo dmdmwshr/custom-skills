@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -13,9 +15,10 @@ import subprocess
 import sys
 import urllib.request
 from datetime import datetime, timezone
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 try:
     import winreg
@@ -41,6 +44,8 @@ DATABASE_TABLES = (
     "profile_rule_mapping",
     "proxy_groups",
     "icon_records",
+    "clash_providers",
+    "custom_proxies",
 )
 MAX_CONTROLLER_RESPONSE_BYTES = 2 * 1024 * 1024
 SENSITIVE_LABEL_PATTERN = re.compile(
@@ -88,23 +93,27 @@ def run_powershell(command: str) -> str:
         + command
     )
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    completed = subprocess.run(
-        [
-            str(SYSTEM_POWERSHELL),
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            command,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=creation_flags,
-    )
+    try:
+        completed = subprocess.run(
+            [
+                str(SYSTEM_POWERSHELL),
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creation_flags,
+            timeout=12,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
     return completed.stdout.strip()
 
 
@@ -262,6 +271,13 @@ def parse_preferences() -> tuple[dict[str, Any], int | None]:
             metadata["vpn_system_proxy"] = vpn.get("systemProxy")
         patch = item.get("patchClashConfig")
         if isinstance(patch, dict):
+            metadata["dns_override_enabled"] = item.get("overrideDns")
+            keys = patch.get("dns-override-keys")
+            if isinstance(keys, list):
+                metadata["dns_override_keys"] = [
+                    key for key in keys
+                    if isinstance(key, str) and re.fullmatch(r"[a-z][a-z0-9.-]{0,63}", key)
+                ]
             metadata["patch_external_controller"] = bool(
                 patch.get("external-controller")
                 not in (None, "", "0", "close", False)
@@ -412,7 +428,15 @@ def controller_base_url(value: str | None) -> str | None:
         port = parsed.port
     except ValueError:
         return None
-    if parsed.scheme not in {"http", "https"} or port is None:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or port is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
         return None
     if not is_loopback_host(parsed.hostname):
         return None
@@ -430,17 +454,26 @@ def controller_secret(config_text: str) -> str:
     return ""
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def controller_json(
-    base_url: str, path: str, secret: str
+    base_url: str, path: str, secret: str, *, timeout: float = 0.75
 ) -> tuple[dict[str, Any] | None, bool]:
+    # Authentication must never follow a redirect or a system proxy.
+    if controller_base_url(base_url) is None or not path.startswith("/") or path.startswith("//"):
+        return None, False
     headers = {"Accept": "application/json"}
     if secret:
         headers["Authorization"] = f"Bearer {secret}"
     request = urllib.request.Request(f"{base_url}{path}", headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=0.75) as response:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+        with opener.open(request, timeout=timeout) as response:
             payload = response.read(MAX_CONTROLLER_RESPONSE_BYTES + 1)
-    except OSError:
+    except (OSError, HTTPException):
         return None, False
     if len(payload) > MAX_CONTROLLER_RESPONSE_BYTES:
         return None, False
@@ -449,6 +482,149 @@ def controller_json(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None, False
     return (parsed if isinstance(parsed, dict) else None), isinstance(parsed, dict)
+
+
+def installed_app_versions() -> list[str]:
+    """Registry versions are installed-version evidence, not process-image evidence."""
+    if winreg is None:
+        return []
+    versions: set[str] = set()
+    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for branch in (
+            r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        ):
+            try:
+                with winreg.OpenKey(root, branch) as parent:
+                    for index in range(winreg.QueryInfoKey(parent)[0]):
+                        try:
+                            name = winreg.EnumKey(parent, index)
+                            with winreg.OpenKey(parent, name) as child:
+                                display = str(winreg.QueryValueEx(child, "DisplayName")[0])
+                                version = str(winreg.QueryValueEx(child, "DisplayVersion")[0])
+                                if display.startswith("FlClash") and re.fullmatch(r"[0-9A-Za-z.+_-]{1,64}", version):
+                                    versions.add(version)
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+    return sorted(versions)
+
+
+def runtime_summary(config_text: str, scalar: dict[str, str]) -> dict[str, Any]:
+    base = controller_base_url(scalar.get("external-controller"))
+    result: dict[str, Any] = {"state": "unavailable"}
+    if base is None:
+        return result
+    secret = controller_secret(config_text)
+    config, ok = controller_json(base, "/configs", secret)
+    if ok and config is not None:
+        tun = config.get("tun") or {}
+        result = {
+            "state": "available",
+            "mode": config.get("mode") if config.get("mode") in {"rule", "global", "direct"} else "unknown",
+            "tun": {
+                key: tun[key] for key in ("enable", "auto-route", "stack")
+                if key in tun and isinstance(tun[key], (str, bool))
+            } if isinstance(tun, dict) else {},
+        }
+        if result["tun"].get("enable") is True:
+            result["probe_warning"] = "noproxy_does_not_bypass_tun"
+    version, ok = controller_json(base, "/version", secret)
+    value = version.get("version") if ok and version else None
+    if isinstance(value, str) and re.fullmatch(r"[0-9A-Za-z.+_ -]{1,96}", value):
+        result["core_reported_version"] = value
+    return result
+
+
+def target_hostname(value: str) -> str:
+    """Accept one DNS name; never accept a URL, port, path, or query string."""
+    try:
+        host = value.strip().rstrip(".").encode("idna").decode("ascii").lower()
+        if len(host) > 253 or "." not in host:
+            raise ValueError
+        if any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", part) for part in host.split(".")):
+            raise ValueError
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            return host
+        raise ValueError
+    except (UnicodeError, ValueError):
+        raise argparse.ArgumentTypeError("仅接受一个完整域名，不接受 URL、IP、端口或路径。") from None
+
+
+def address_summary(values: Iterable[Any]) -> dict[str, Any]:
+    addresses = set()
+    for value in values:
+        try:
+            addresses.add(str(ipaddress.ip_address(value)))
+        except (ValueError, TypeError):
+            continue
+    ordered = sorted(addresses)
+    return {
+        "answer_count": len(ordered),
+        "answer_fingerprint": hashlib.sha256("\n".join(ordered).encode()).hexdigest() if ordered else None,
+        "contains_fake_ip_range": any(
+            ipaddress.ip_address(v) in ipaddress.ip_network("198.18.0.0/15")
+            for v in ordered if ipaddress.ip_address(v).version == 4
+        ),
+    }
+
+
+def matching_domain_rules(rules: Iterable[Any], host: str) -> list[dict[str, Any]]:
+    matches = []
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        kind, payload = rule.get("type"), str(rule.get("payload", "")).lower()
+        matched = (
+            kind == "Domain" and host == payload
+            or kind == "DomainSuffix" and (host == payload or host.endswith("." + payload))
+            or kind == "DomainKeyword" and payload and payload in host
+        )
+        if matched:
+            matches.append({"position": index + 1, "type": kind, "route_category": route_category([rule.get("proxy")])})
+    return matches[:30]
+
+
+def target_diagnostics(config_text: str, scalar: dict[str, str], host: str) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "target_host": host,
+        "scope": "explicit_dns_queries_and_redacted_runtime_observation",
+        "dns_answers_are_not_authoritative_verification": True,
+        "domain_rule_matches_are_not_actual_route_proof": True,
+    }
+    base = controller_base_url(scalar.get("external-controller"))
+    if base is None:
+        return {**result, "state": "controller_unavailable"}
+    secret = controller_secret(config_text)
+    dns = {}
+    for record_type in ("A", "AAAA"):
+        data, ok = controller_json(base, f"/dns/query?name={quote(host)}&type={record_type}", secret, timeout=4)
+        if not ok or data is None:
+            dns[record_type] = {"state": "unavailable"}
+            continue
+        answers = data.get("Answer") or []
+        summary = address_summary(a.get("data") for a in answers if isinstance(a, dict) and a.get("type") in (1, 28))
+        dns[record_type] = {"state": "received", "status": data.get("Status"), **summary}
+    result["core_dns"] = dns
+    rules, ok = controller_json(base, "/rules", secret)
+    if ok and rules and isinstance(rules.get("rules"), list):
+        result["matching_domain_rules"] = matching_domain_rules(rules["rules"], host)
+    connections, ok = controller_json(base, "/connections", secret)
+    observed: dict[str, int] = {}
+    if ok and connections and isinstance(connections.get("connections"), list):
+        for connection in connections["connections"]:
+            if not isinstance(connection, dict):
+                continue
+            metadata = connection.get("metadata") or {}
+            if isinstance(metadata, dict) and str(metadata.get("host", "")).lower().rstrip(".") == host:
+                category = route_category(connection.get("chains") or [])
+                observed[category] = observed.get(category, 0) + 1
+    result["matching_active_connection_routes"] = observed
+    result["actual_route_evidence"] = "observed_connections" if observed else "not_observed"
+    return result
 
 
 def route_category(values: Iterable[Any]) -> str:
@@ -676,6 +852,10 @@ def main() -> int:
         action="store_true",
         help="只读检查本机代理端口、运行时分流与连接归属，不发起外网探测。",
     )
+    parser.add_argument(
+        "--target-host", type=target_hostname,
+        help="主动查询指定域名的核心 DNS，并脱敏汇总候选规则和实际连接；可能触发外部 DNS 请求。",
+    )
     args = parser.parse_args()
 
     config_text = read_text(CONFIG_PATH)
@@ -689,6 +869,9 @@ def main() -> int:
             "message": "本脚本不会暂停、恢复、退出、重启或结束 FlClash。",
         },
         "processes": process_summary(),
+        "installed_app_versions": installed_app_versions(),
+        "installed_version_evidence": "uninstall_registry_not_running_image",
+        "core_runtime": runtime_summary(config_text, scalar),
         "windows_system_proxy_enabled": system_proxy_enabled(),
         "configuration_layers": {
             "application_preferences": preferences,
@@ -713,6 +896,8 @@ def main() -> int:
         result["connection_diagnostics"] = connectivity_diagnosis(
             config_text, scalar
         )
+    if args.target_host:
+        result["target_diagnostics"] = target_diagnostics(config_text, scalar, args.target_host)
     print(
         json.dumps(
             result,

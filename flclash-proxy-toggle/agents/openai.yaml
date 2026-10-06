@@ -1,4 +1,4 @@
 interface:
-  display_name: "FlClash 安全配置与连接排故"
-  short_description: "安全维护 FlClash、排查连接异常问题与分流路径"
-  default_prompt: "使用 $flclash-proxy-toggle 先只读诊断 FlClash 的本机代理端口、分流路径和运行状态；仅执行明确授权的变更。"
+  display_name: "FlClash 配置、DNS 与连接排故"
+  short_description: "定位代理、DNS 和网站故障，完成已授权的精确配置修复"
+  default_prompt: "使用 $flclash-proxy-toggle 核对当前版本、配置来源、实际分流与 DNS；先只读定位，再完成已授权的最小修复和回读。"
