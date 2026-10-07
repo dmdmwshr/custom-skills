@@ -12,7 +12,8 @@
     "personal-memory-on-demand",
     "macro-strategy-data-operations",
     "playwright-browser-control",
-    "server-traffic-sync"
+    "server-traffic-sync",
+    "linux-computer-control"
   ],
   "notes": "This is enforced by the managed publisher, not a native Codex frontmatter filter. Support declarations do not prove business dependencies or real-host validation. Windows-only entries describe current delivered workflows, not portability of every helper.",
   "skills": {
@@ -511,6 +512,20 @@
         "windows": "not_supported_by_current_workflow"
       },
       "dependencies": "Authorized Codex in-app browser with imported login, server-traffic-sync project and its registered Meifu SSH/ingest. Use project runtime configuration; no CN2 operations."
+    },
+    "linux-computer-control": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "wsl",
+        "linux"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "GTK Wayland AT-SPI and isolated X11 CLI verified 2026-10-07",
+        "linux": "runtime_unverified",
+        "windows": "not_supported_by_current_workflow"
+      },
+      "dependencies": "Host-verified linux-desktop MCP session launcher or managed agent-workspace-linux; browser operations remain Playwright-only."
     }
   }
 }
