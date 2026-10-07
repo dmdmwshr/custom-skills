@@ -1,4 +1,0 @@
-interface:
-  display_name: "CC-Connect 协作"
-  short_description: "管理双向固定会话、桌面专属出站、直接投递与移动路由"
-  default_prompt: "使用 $cc-connect-collaboration 先选择 cc_connect_fixed_session 或 desktop_owner_outbound_only，再管理 cc-connect 直接投递、固定会话、移动路由或跨项目衔接反馈；普通开发任务接力不使用此 Skill。"

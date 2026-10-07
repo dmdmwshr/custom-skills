@@ -1,7 +1,6 @@
 {
   "schema_version": 1,
   "managed_wsl_order": [
-    "cc-connect-collaboration",
     "feishu-operations",
     "x-message-monitoring",
     "codex-project-task-handoff",
@@ -51,21 +50,6 @@
       "managed_wsl": false,
       "validation": {
         "wsl": "not_supported_by_current_workflow",
-        "linux": "runtime_unverified",
-        "windows": "runtime_unverified_this_change"
-      },
-      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
-    },
-    "cc-connect-collaboration": {
-      "category": "business_specific",
-      "execution_platforms": [
-        "windows",
-        "linux",
-        "wsl"
-      ],
-      "managed_wsl": true,
-      "validation": {
-        "wsl": "source_and_discovery_previously_verified",
         "linux": "runtime_unverified",
         "windows": "runtime_unverified_this_change"
       },
