@@ -23,6 +23,8 @@ metadata:
 
 如果当前聊天没有暴露新 MCP 工具，已注册配置可供新客户端加载；不为此重启全部 app-server/MCP。可使用部署运行环境中的官方 Python `mcp.ClientSession` + `stdio_client(StdioServerParameters(command=入口))`，持续一个客户端完成 `initialize → list_tools → call_tool`。普通 shell 执行该入口时输出是 JSON-RPC，不是人类交互终端。工具返回文本 `Error:` 时即使 `isError=false` 也按失败处理。
 
+若 Flutter/Electron 仅暴露窗口外壳，且用户已授权本机正常 UI 操作，继续核对公开桌面接口，不因语义树缺失就停止。GNOME Wayland 上已有 Xwayland 窗口的已验证方法见 [原生 UI 补充路径](references/gnome-xwayland-ui.md)。这不授权浏览器控制、修改应用数据库或扩大远控输入权限。
+
 ### 已验证边界
 
 - 2026-10-07 WSL Ubuntu 26.04 / GNOME Wayland：GTK 原生窗口的语义树、完整中文输入、勾选、按钮、结果回读和关闭已验证。
