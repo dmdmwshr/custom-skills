@@ -1,0 +1,6 @@
+interface:
+  display_name: "pyweixin 微信界面工具"
+  short_description: "使用官方 pyweixin 控制 Windows 微信，核对能力并按授权补下载附件"
+  default_prompt: "使用 $pyweixin-rpa 核验本机微信工具状态，并完成当前授权的微信界面操作。"
+policy:
+  allow_implicit_invocation: true
