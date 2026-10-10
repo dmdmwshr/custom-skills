@@ -23,7 +23,9 @@ metadata:
 
 如果当前聊天没有暴露新 MCP 工具，已注册配置可供新客户端加载；不为此重启全部 app-server/MCP。可使用部署运行环境中的官方 Python `mcp.ClientSession` + `stdio_client(StdioServerParameters(command=入口))`，持续一个客户端完成 `initialize → list_tools → call_tool`。普通 shell 执行该入口时输出是 JSON-RPC，不是人类交互终端。工具返回文本 `Error:` 时即使 `isError=false` 也按失败处理。
 
-若 Flutter/Electron 仅暴露窗口外壳，且用户已授权本机正常 UI 操作，继续核对公开桌面接口，不因语义树缺失就停止。GNOME Wayland 上已有 Xwayland 窗口的已验证方法见 [原生 UI 补充路径](references/gnome-xwayland-ui.md)。这不授权浏览器控制、修改应用数据库或扩大远控输入权限。
+若 Flutter/Electron/Slint 未暴露语义控件，且用户已授权本机正常 UI 操作，继续核对进程与公开窗口接口；空语义树不证明应用未启动。GNOME Wayland 上已有 Xwayland 窗口的已验证方法见 [原生 UI 补充路径](references/gnome-xwayland-ui.md)。这不授权浏览器控制、修改应用数据库或扩大远控输入权限。
+
+配置型原生工具若提供公开配置文件，可先核对安装版本的实际 schema、备份后精确修改，再从程序回读；旧 Wiki 示例可能落后于发布版本。链接分流器属于原生工具，其配置验收可用已安装程序、隔离配置/缓存及捕获命令参数的替身目标，确认域名匹配、资料参数、未匹配回退和桌面启动项转交，避免为规则测试打开真实网站。该测试只证明分流命令，不证明网站登录；外部链接分流也不等同于浏览器地址栏或页面内跳转分流。原生设置窗口的截图与输入仍按目标窗口回读，不能以命令退出成功代替控件变化。
 
 ### 已验证边界
 
