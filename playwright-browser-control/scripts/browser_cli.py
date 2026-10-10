@@ -24,6 +24,63 @@ def read_settings(root: Path) -> dict:
     return json.loads((root / 'runtime.json').read_text(encoding='utf-8-sig'))
 
 
+def select_profile(settings: dict, browser: str, name: str | None) -> dict:
+    if name is None:
+        return settings
+    if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,47}', name):
+        raise ValueError('Profile name must be 1-48 lowercase letters, digits or hyphens.')
+    profile = settings.get('profiles', {}).get(browser, {}).get(name)
+    if not isinstance(profile, dict):
+        raise ValueError('Requested browser profile is not configured; the default is not substituted.')
+    selected = dict(profile)
+    channel = settings['browsers'][browser]['channel']
+    if selected.get('channel', channel) != channel or not selected.get('profile_directory'):
+        raise ValueError('Profile channel or directory is invalid.')
+    if bool(selected.get('token_file')) == bool(selected.get('secret_name')):
+        raise ValueError('Profile must have exactly one extension credential source.')
+    selected['channel'] = channel
+    result = dict(settings)
+    result['browsers'] = {**settings['browsers'], browser: selected}
+    result['_default_browsers'] = settings['browsers']
+    result['_selected_profile'] = name
+    return result
+
+
+def vault_credential(settings: dict, profile: dict, *, info: bool = False) -> str | bool:
+    executable = settings.get('vault_pwsh_executable')
+    if not executable or not Path(executable).is_file():
+        raise ValueError('Configured local PowerShell credential reader is unavailable.')
+    command = [executable, '-NoProfile', '-NonInteractive', '-File',
+               str(Path(__file__).with_name('Read-ExtensionCredential.ps1')),
+               '-Name', profile['secret_name'], '-Username', profile['credential_username']]
+    if info:
+        command.append('-Info')
+    try:
+        result = subprocess.run(command, capture_output=True, encoding='utf-8',
+                                errors='replace', timeout=20, shell=False,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except subprocess.TimeoutExpired as error:
+        raise ValueError('Local credential lookup timed out before any browser command.') from error
+    # The secret is carried only on a private local pipe. Never print child output.
+    if result.returncode:
+        raise ValueError('Local extension credential is unavailable or does not match this profile.')
+    if info:
+        return json.loads(result.stdout)['credential_present'] is True
+    token = result.stdout.strip()
+    if not token:
+        raise ValueError('Selected extension credential is empty.')
+    return token
+
+
+def credential_present(settings: dict, root: Path, profile: dict) -> bool:
+    if profile.get('secret_name'):
+        try:
+            return bool(vault_credential(settings, profile, info=True))
+        except (ValueError, OSError, KeyError):
+            return False
+    return bool(profile.get('token_file') and (root / profile['token_file']).is_file())
+
+
 def redact(text: str, secrets: list[str]) -> str:
     for value in secrets:
         if value:
@@ -40,9 +97,12 @@ def prepare(settings: dict, root: Path, browser: str, session: str,
     if any(a.startswith(('-s=', '--session', '--extension', '--cdp', '--endpoint', '--config')) for a in arguments):
         raise ValueError('Browser/session/connection configuration is owned by this launcher.')
     selected = settings['browsers'][browser]
+    profiles = list(settings['browsers'].values()) + list(settings.get('_default_browsers', {}).values())
     secrets = [(root / p['token_file']).read_text(encoding='utf-8').strip()
-               for p in settings['browsers'].values()]
-    token = (root / selected['token_file']).read_text(encoding='utf-8').strip()
+               for p in profiles if p.get('token_file')]
+    token = (vault_credential(settings, selected) if selected.get('secret_name') else
+             (root / selected['token_file']).read_text(encoding='utf-8').strip())
+    secrets.append(token)
     if not token:
         raise ValueError('Selected browser token is empty.')
     # Avoid inheriting another task/browser connection or caller-enabled secret logging.
@@ -80,8 +140,9 @@ def doctor(settings: dict, root: Path) -> dict:
         'expected_version': settings['expected_cli_version'],
         'installed_version': actual,
         'version_matches': actual == settings['expected_cli_version'],
+        'selected_profile': settings.get('_selected_profile', 'default'),
         'browsers': {name: {'channel': p['channel'], 'profile_directory': p['profile_directory'],
-                            'credential_present': (root / p['token_file']).is_file()}
+                            'credential_present': credential_present(settings, root, p)}
                      for name, p in settings['browsers'].items()},
     }
 
@@ -338,6 +399,7 @@ def managed_main(args, root, settings):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--browser', choices=['chrome', 'edge'], default='chrome')
+    parser.add_argument('--profile', help='Configured named browser profile; omitted means the existing default')
     parser.add_argument('--session', help='Task-specific name; browser prefix is added automatically')
     parser.add_argument('--project', help='Visible project name; defaults to the current working directory name')
     parser.add_argument('--conversation', help='Real Codex conversation ID when CODEX_THREAD_ID is unavailable')
@@ -348,7 +410,7 @@ def main() -> int:
     secrets: list[str] = []
     try:
         root = runtime_root()
-        settings = read_settings(root)
+        settings = select_profile(read_settings(root), args.browser, args.profile)
         status = doctor(settings, root)
         if args.command == 'doctor':
             print(json.dumps(status, ensure_ascii=False, indent=2))

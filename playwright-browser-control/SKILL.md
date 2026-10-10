@@ -47,6 +47,7 @@ python -X utf8 $browserTool --session task-name finish
 ```
 
 - `--session` 为本任务独有的 1–48 位小写字母、数字及连字符标签；`--project` 默认为当前目录。实际 conversation ID 来自当前 `CODEX_THREAD_ID`，缺失时用 `--conversation` 传递当前真实 ID，不冒用历史身份。
+- `--profile <名称>` 选择 runtime.json 中 `profiles.<浏览器>.<名称>` 登记的独立资料；同一执行每次保持该参数一致。不传时保留既有默认资料，未知名称直接拒绝，不回退到默认账号。资料映射只保存 channel、profile_directory、可选 profile_path 及凭据引用。扩展凭据可用既有受限 token_file，或 LocalVault 的 secret_name 与 credential_username；后者还需配置 vault_pwsh_executable。先用 `localvault-credentials` 保存 PSCredential，再以本机私有管道读入启动器；仅扩展令牌按官方协议注入 CLI 子进程环境，不写父进程、普通文件、命令参数或报告。网站密码继续遵循下述标准输入登录流程。
 - 同一次执行保持目录、浏览器及标签一致。每次 `connect` 创建新的实际 CLI 会话；已在用或未知执行不能重复 connect。`status` 读取管理回执，`group-info` 只读原生身份，`audit` 只读巡检当前资料中的组、页、连接及历史保存记录；`group-name` 仅用于当前合法执行。未知状态下 `audit` 不结算未知业务、不重放原动作。
 - 最新执行指针保存在 `.playwright/groups/<浏览器>-<标签>.json`，历史按 execution ID 单独归档。跨会话、目录或资料的调用被拒绝。旧版连接回执要先精确退役，不能作为新页面入口。
 - `doctor` 核对固定验收版本；版本漂移先核验升级，不每次安装 latest 或另装浏览器。凭证只由本地启动子进程读取并注入，输出脱敏；不回显凭证、Cookie、密码、认证头或网站存储。
