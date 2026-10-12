@@ -98,6 +98,11 @@ class DownloadError(RuntimeError):
     """Expected and user-actionable failure."""
 
 
+def no_window_creationflags() -> int:
+    """Hide console descendants on Windows without changing POSIX process behavior."""
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+
 class TransferUnavailable(DownloadError):
     """A retryable network failure that leaves resumable state intact."""
 
@@ -198,6 +203,7 @@ def process_is_running(process_id: int) -> bool:
                 encoding="utf-8",
                 errors="replace",
                 timeout=5,
+                creationflags=no_window_creationflags(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return True
@@ -599,6 +605,7 @@ def ssh_effective_config(host: str) -> dict[str, str]:
         capture_output=True,
         encoding="utf-8",
         errors="replace",
+        creationflags=no_window_creationflags(),
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
@@ -666,7 +673,12 @@ def run_remote(host: str, script: str) -> str:
         "-s",
     ]
     try:
-        result = subprocess.run(command, input=script.encode("utf-8"), capture_output=True)
+        result = subprocess.run(
+            command,
+            input=script.encode("utf-8"),
+            capture_output=True,
+            creationflags=no_window_creationflags(),
+        )
     except subprocess.TimeoutExpired as exc:
         raise TransferUnavailable(f"Meifu SSH 连接超时：{exc}") from exc
     if result.returncode != 0:
@@ -813,7 +825,12 @@ def sftp_reget(host: str, remote_path: str, local_path: Path) -> None:
         host,
     ]
     try:
-        result = subprocess.run(command, input=batch.encode("utf-8"), capture_output=True)
+        result = subprocess.run(
+            command,
+            input=batch.encode("utf-8"),
+            capture_output=True,
+            creationflags=no_window_creationflags(),
+        )
     except subprocess.TimeoutExpired as exc:
         raise TransferUnavailable(f"本机从 Meifu 续传分块超时：{exc}") from exc
     if result.returncode != 0:

@@ -45,6 +45,38 @@ def enqueue_args(root: Path, *, url: str = "https://example.com/file.bin") -> ar
 
 
 class GenericQueueTests(unittest.TestCase):
+    def test_short_windows_task_commands_are_hidden(self) -> None:
+        result = subprocess.CompletedProcess([], 0, "ok", "")
+        with patch.object(MODULE, "no_window_creationflags", return_value=0x08000000), patch.object(
+            MODULE.subprocess, "run", return_value=result
+        ) as run:
+            self.assertIs(MODULE.run_schtasks(["/Query", "/TN", MODULE.WINDOWS_TASK_FULL_NAME]), result)
+            self.assertEqual(run.call_args.kwargs["creationflags"], 0x08000000)
+
+    def test_queue_download_child_uses_hidden_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = enqueue_args(root)
+            self.invoke_silently(MODULE.enqueue, args)
+            lock = MODULE.create_queue_lock(args.queue, recover_stale=False, phase="test")
+            worker_args = argparse.Namespace(
+                queue=args.queue, control_file=root / "queue.control.json", log_file=args.log_file,
+                audit_log=args.audit_log, runtime_manifest=root / "runtime.json", downloader=SCRIPT,
+                python=Path(sys.executable), host="meifu", expected_hostname="192.0.2.1",
+                chunk_gib=2, remote_reserve_gib=8, local_reserve_gib=4, retry_delay_seconds=900,
+            )
+            with patch.object(MODULE, "runtime_preflight_error", return_value=None), patch.object(
+                MODULE, "no_window_creationflags", return_value=0x08000000
+            ), patch.object(MODULE.subprocess, "Popen") as spawn, patch.object(
+                MODULE, "wait_for_child", return_value=(0, False)
+            ):
+                spawn.return_value.pid = 12345
+                self.assertEqual(MODULE.run_queue_with_lock(worker_args, lock), 0)
+                self.assertEqual(spawn.call_count, 1)
+                self.assertEqual(spawn.call_args.kwargs["creationflags"], 0x08000000)
+                self.assertEqual(spawn.call_args.kwargs["stdin"], subprocess.DEVNULL)
+            self.assertEqual(MODULE.read_queue(args.queue)["entries"][0]["status"], "completed")
+
     def invoke_silently(self, callable_object, *args):
         with redirect_stdout(io.StringIO()):
             return callable_object(*args)

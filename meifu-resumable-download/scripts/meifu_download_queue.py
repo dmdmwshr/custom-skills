@@ -38,6 +38,7 @@ from download_via_meifu import (
     TEMPORARY_TRANSFER_EXIT_CODE,
     DownloadError,
     normalize_output_path,
+    no_window_creationflags,
     process_is_running as downloader_process_is_running,
     redact_urls,
     requested_output_path,
@@ -690,6 +691,7 @@ def stop_exact_child_tree(process_id: int, log_path: Path) -> None:
         capture_output=True,
         encoding="utf-8",
         errors="replace",
+        creationflags=no_window_creationflags(),
     )
     detail = (result.stdout + result.stderr).replace("\r", " ").replace("\n", " | ").strip()
     append_log(log_path, f"已请求结束当前队列子进程树：{detail[-700:]}")
@@ -1091,6 +1093,7 @@ def run_queue_with_lock(args: argparse.Namespace, lock: QueueLock) -> int:
                         stdout=log_handle,
                         stderr=subprocess.STDOUT,
                         close_fds=True,
+                        creationflags=no_window_creationflags(),
                     )
                     record_child_start(args, str(entry["id"]), process.pid)
                     exit_code, hard_stopped = wait_for_child(process, args.control_file, args.log_file)
@@ -1443,6 +1446,7 @@ def run_schtasks(arguments: list[str]) -> subprocess.CompletedProcess[str]:
             encoding="utf-8",
             errors="replace",
             timeout=15,
+            creationflags=no_window_creationflags(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise QueueError("无法调用 Windows 计划任务；未启动任何下载。") from exc

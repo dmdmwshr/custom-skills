@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import subprocess
 from unittest.mock import patch
 
 
@@ -22,6 +23,57 @@ SPEC.loader.exec_module(MODULE)
 
 
 class DownloadRequestTests(unittest.TestCase):
+    def test_hidden_child_flags_are_windows_only(self) -> None:
+        with patch.object(MODULE.os, "name", "nt"), patch.object(
+            MODULE.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True
+        ):
+            self.assertEqual(MODULE.no_window_creationflags(), 0x08000000)
+        with patch.object(MODULE.os, "name", "posix"):
+            self.assertEqual(MODULE.no_window_creationflags(), 0)
+
+    def test_ssh_and_sftp_receive_hidden_flags_without_transport_changes(self) -> None:
+        response = subprocess.CompletedProcess([], 0, stdout="hostname meifu\n", stderr="")
+        with patch.object(MODULE, "no_window_creationflags", return_value=0x08000000), patch.object(
+            MODULE.subprocess, "run", return_value=response
+        ) as run:
+            self.assertEqual(MODULE.ssh_effective_config("meifu"), {"hostname": "meifu"})
+            self.assertEqual(run.call_args.args[0], ["ssh", "-G", "meifu"])
+            self.assertEqual(run.call_args.kwargs["creationflags"], 0x08000000)
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            MODULE, "no_window_creationflags", return_value=0x08000000
+        ), patch.object(
+            MODULE.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"ok", b"")
+        ) as run:
+            self.assertEqual(MODULE.run_remote("meifu", "printf ok\n"), "ok")
+            self.assertEqual(run.call_args.kwargs["creationflags"], 0x08000000)
+            self.assertEqual(run.call_args.kwargs["input"], b"printf ok\n")
+            local = Path(temporary) / "中文 空格.part"
+            MODULE.sftp_reget("meifu", "/cache/000000.part", local)
+            self.assertEqual(run.call_args.kwargs["creationflags"], 0x08000000)
+            self.assertEqual(run.call_args.args[0][0], "sftp")
+            self.assertEqual(run.call_args.kwargs["input"].decode("utf-8"),
+                f'reget "/cache/000000.part" {MODULE.sftp_quote(local.as_posix())}\n')
+
+    @unittest.skipUnless(os.name == "nt", "Windows console lifecycle check")
+    def test_real_short_hidden_descendants_exit_and_restart_without_console(self) -> None:
+        # Standard-library-only child/grandchild: no network, queue, files, or model loads.
+        grandchild = "import ctypes,json;print(json.dumps({'console':ctypes.windll.kernel32.GetConsoleWindow()}))"
+        child = (
+            "import ctypes,json,subprocess,sys;"
+            f"result=subprocess.run([sys.executable,'-B','-c',{grandchild!r}],capture_output=True,text=True,"
+            f"creationflags={MODULE.no_window_creationflags()},timeout=10);"
+            "print(json.dumps({'console':ctypes.windll.kernel32.GetConsoleWindow(),"
+            "'child':json.loads(result.stdout),'exit':result.returncode}))"
+        )
+        for _ in range(2):
+            result = subprocess.run(
+                [sys.executable, "-B", "-c", child], capture_output=True, text=True,
+                creationflags=MODULE.no_window_creationflags(), timeout=15,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state = json.loads(result.stdout)
+            self.assertEqual(state, {"console": 0, "child": {"console": 0}, "exit": 0})
+
     def test_windows_safe_current_process_liveness_check(self) -> None:
         self.assertTrue(MODULE.process_is_running(os.getpid()))
 
@@ -34,9 +86,10 @@ class DownloadRequestTests(unittest.TestCase):
         )
         with patch.object(MODULE.os, "name", "nt"), patch.object(
             MODULE.subprocess, "run", return_value=result
-        ), patch.object(MODULE.os, "kill") as kill:
+        ) as run, patch.object(MODULE.os, "kill") as kill:
             self.assertTrue(MODULE.process_is_running(12345))
             kill.assert_not_called()
+            self.assertEqual(run.call_args.kwargs["creationflags"], MODULE.no_window_creationflags())
 
     def test_remote_cache_parent_is_posix(self) -> None:
         self.assertEqual(MODULE.remote_cache_parent(), "/root/.cache")
