@@ -32,7 +32,7 @@ description: 把普通网页或文章 URL 通过本机 summarize CLI 转为 Mark
 
 当前默认：
 
-- CLI：`summarize`
+- CLI：固定 summarize 0.25.2 与独立 Node 24.21.0；脚本读取 `references/local-config.json` 中的绝对入口，不依赖默认 Node 主版本
 - 配置：`C:\Users\12070\.summarize\config.json`
 - 输出目录：`D:\12070\Documents\workspaces\summarize-output`
 - 默认模式：总结模式，输出 Markdown 笔记
@@ -91,3 +91,5 @@ summarize "<URL>" --format md --markdown-mode readability --length long --plain 
 - 该 skill 当前默认目标是“生成总结版 Markdown 笔记”。
 - 用户只说“提取为笔记”“转成笔记”时，默认使用总结模式，不再默认输出原文 Markdown。
 - 只有用户明确要“全文提取”“原文 Markdown”时，才切回提取流程。
+
+本机固定入口已完成版本和真实网页正文提取验证；升级验收没有调用云模型。现有模型、凭据和输出目录保持。

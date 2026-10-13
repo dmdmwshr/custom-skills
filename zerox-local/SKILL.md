@@ -70,3 +70,7 @@ D:\Program_Files\zerox\bin\zerox-local.cmd --input "<绝对路径或URL>" --outp
 - 该本地封装已经把输出 Markdown 文件名改成输入文件名，优先读取该重命名后的文件。
 - 当前默认模型配置为 `gemini-3-flash`；如果端点恢复后仍要切模型，只修改 `.env.local` 的 `ZEROX_MODEL`。
 - 对短表单、验收模板、流程附件和常见制度文档，默认先相信 Zerox 结果，再决定是否需要备用方案复核。
+
+## 补充替补入口
+
+当前全局规则增加 `docling-local`：需要本地扫描识别、表格结构，或现有服务不可用、结果不佳时可采用；仅提取简单文字可用 `markitdown-local`。既有业务默认路线保持，用户明确指定时优先。具体入口和验收范围读取对应技能。

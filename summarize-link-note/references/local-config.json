@@ -13,5 +13,8 @@
     "如果后续要写入 Obsidian，再配合 obsidian-notes 和 obsidian-markdown",
     "浏览器扩展或插件 ID 不参与本 skill 的 CLI 配置",
     "如果用户明确要原文 Markdown，再切回 --extract --format md"
-  ]
+  ],
+  "node_path": "C:/Users/12070/.local/share/codex-tools/node24/node-v24.21.0-win-x64/node.exe",
+  "cli_path": "C:/Users/12070/.local/share/codex-tools/node24/node-v24.21.0-win-x64/node_modules/@steipete/summarize/dist/cli.js",
+  "tested_version": "0.25.2"
 }

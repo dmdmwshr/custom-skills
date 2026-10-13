@@ -1,0 +1,4 @@
+interface:
+  display_name: "MarkItDown 文本替补"
+  short_description: "快速提取文字 PDF 和 Office 正文，作为本地轻量转换替补"
+  default_prompt: "使用 $markitdown-local 提取这份文件的文字为 Markdown。"

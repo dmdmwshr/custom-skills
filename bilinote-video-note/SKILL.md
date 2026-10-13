@@ -1,6 +1,9 @@
 ---
 name: bilinote-video-note
-description: 把 B站或抖音视频通过本机 BiliNote 后端提取为知识笔记，并按固定结构写入 Obsidian。用户要求处理 bilibili、douyin、视频链接或使用 BiliNote 固定脚本时触发；普通网页、PDF 和 Office 文档不使用本 skill。
+description: 把 B站或抖音视频通过本机 BiliNote 后端提取为知识笔记，并按固定结构写入 Obsidian。用户要求处理 bilibili、douyin、视频链接或使用 BiliNote 固定脚本时触发；只下载视频使用 video-download；普通网页、PDF 和 Office 文档不使用本 skill。
+metadata:
+  x-custom-skill: true
+  x-source-repo: dmdmwshr/custom-skills
 ---
 
 # BiliNote Video Note
@@ -23,6 +26,8 @@ description: 把 B站或抖音视频通过本机 BiliNote 后端提取为知识�
   - `douyin`
 
 ## 不适用范围
+
+- 仅下载或保存视频、音频、字幕：使用 `video-download`，不触发本技能的转写、模型和笔记写入。
 
 - `youtube`
 - `kuaishou`

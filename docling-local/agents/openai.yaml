@@ -1,0 +1,4 @@
+interface:
+  display_name: "Docling 本地解析替补"
+  short_description: "离线解析中文扫描 PDF 与表格，保留页码和合并单元格来源"
+  default_prompt: "使用 $docling-local 本地解析这份 PDF 并核对表格和页码。"

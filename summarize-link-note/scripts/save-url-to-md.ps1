@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$InputUrl,
@@ -12,7 +12,12 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [Console]::OutputEncoding
 
-$outputDir = "D:\12070\Documents\workspaces\summarize-output"
+$configFile = Join-Path (Split-Path $PSScriptRoot -Parent) "references/local-config.json"
+$localConfig = Get-Content -LiteralPath $configFile -Raw -Encoding UTF8 | ConvertFrom-Json
+$outputDir = $localConfig.output_dir
+$nodeExecutable = $localConfig.node_path
+$cliExecutable = $localConfig.cli_path
+if (-not (Test-Path -LiteralPath $nodeExecutable) -or -not (Test-Path -LiteralPath $cliExecutable)) { throw "Configured summarize runtime is missing" }
 
 function Test-PdfInput {
     param([string]$Value)
@@ -75,7 +80,7 @@ New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 $fileName = New-SafeName -Url $InputUrl -PreferredName $OutputName
 $outputPath = Join-Path $outputDir $fileName
 
-$args = @(
+$summarizeArgs = @(
     $InputUrl,
     "--format", "md",
     "--markdown-mode", "readability",
@@ -85,7 +90,7 @@ $args = @(
     "--metrics", "off"
 )
 
-$content = & summarize @args
+$content = & $nodeExecutable $cliExecutable @summarizeArgs
 $exitCode = $LASTEXITCODE
 if ($exitCode -ne 0) {
     throw "summarize failed with exit code: $exitCode"

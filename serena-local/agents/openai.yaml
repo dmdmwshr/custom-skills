@@ -1,0 +1,4 @@
+interface:
+  display_name: "Serena 代码符号替补"
+  short_description: "按函数、类和引用关系检索代码，并在指定项目内完成局部修改"
+  default_prompt: "使用 $serena-local 查找这个函数的定义及调用引用。"

@@ -72,3 +72,7 @@ D:\Program_Files\MinerU-Docker\start-api.cmd
 - 不要再恢复或重装 `D:\Program_Files\MinerU` 本地 pipeline 安装作为默认方案。
 - 不要把本技能当成文档转 Markdown 的第一选择。
 - 不要在没有必要时同时启用 Zerox 和 MinerU 两条批处理链路。
+
+## 补充替补入口
+
+当前全局规则增加 `docling-local`：需要本地扫描识别、表格结构，或现有服务不可用、结果不佳时可采用；仅提取简单文字可用 `markitdown-local`。既有业务默认路线保持，用户明确指定时优先。具体入口和验收范围读取对应技能。

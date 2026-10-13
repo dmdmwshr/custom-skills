@@ -1,0 +1,4 @@
+interface:
+  display_name: "独立视频下载"
+  short_description: "仅下载视频、音频或字幕，不触发转写、云模型调用和笔记生成"
+  default_prompt: "使用 $video-download 把这个视频下载到指定目录。"

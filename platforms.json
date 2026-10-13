@@ -510,6 +510,58 @@
         "windows": "not_supported_by_current_workflow"
       },
       "dependencies": "Host-verified linux-desktop MCP session launcher or managed agent-workspace-linux; browser operations remain Playwright-only."
+    },
+    "docling-local": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "windows": "stable_entry_verified_20261013",
+        "wsl": "not_installed",
+        "linux": "not_installed"
+      },
+      "dependencies": "Pinned Windows runtime under USERPROFILE/.local/share/codex-tools; see SKILL.md."
+    },
+    "markitdown-local": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "windows": "stable_entry_verified_20261013",
+        "wsl": "not_installed",
+        "linux": "not_installed"
+      },
+      "dependencies": "Pinned Windows runtime under USERPROFILE/.local/share/codex-tools; see SKILL.md."
+    },
+    "serena-local": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "windows": "stable_entry_verified_20261013",
+        "wsl": "not_installed",
+        "linux": "not_installed"
+      },
+      "dependencies": "Pinned Windows runtime under USERPROFILE/.local/share/codex-tools; see SKILL.md."
+    },
+    "video-download": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "windows": "stable_entry_verified_20261013",
+        "wsl": "not_installed",
+        "linux": "not_installed"
+      },
+      "dependencies": "Pinned Windows runtime under USERPROFILE/.local/share/codex-tools; see SKILL.md."
     }
   }
 }
