@@ -1,6 +1,6 @@
 interface:
-  display_name: "信息化项目专家评审材料"
-  short_description: "依据最新模板生成评审意见与专家劳务表，核验历史资料、专家库和金额，保留原格式"
-  default_prompt: "使用 $xf-expert-review，按指定项目文件梳理评审阶段和专家人选，参考最新模板与老项目并核验专家库，生成所需评审意见 Word 和专家劳务表，信息冲突时停止确认。"
+  display_name: "信息化项目专家评审"
+  short_description: "制作评审材料和劳务汇总，完成报销后目录命名、备注保留、归档核对及台账同步"
+  default_prompt: "使用 $xf-expert-review，按本次要求制作评审材料、汇总劳务或整理已报销资料，保留当前手改、模板公式、项目备注和历史评审记录。"
 policy:
   allow_implicit_invocation: true
