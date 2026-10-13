@@ -64,7 +64,7 @@ function main() {
   const code = buildCode(request, credential);
   const runtime = JSON.parse(fs.readFileSync(path.join(process.env.LOCALAPPDATA, 'CodexBrowser/playwright/runtime.json'), 'utf8'));
   const actual = JSON.parse(fs.readFileSync(path.join(path.dirname(runtime.cli_entry), 'package.json'), 'utf8')).version;
-  if (actual !== runtime.expected_cli_version || actual !== '0.1.21') throw new Error('Pinned CLI version mismatch');
+  if (actual !== runtime.expected_cli_version || !['0.1.21', '0.1.22'].includes(actual)) throw new Error('Pinned CLI version mismatch');
   for (const key of Object.keys(process.env)) if (/^(DEBUG|PWTEST_|PLAYWRIGHT_MCP_|PLAYWRIGHT_CLI_)/.test(key)) delete process.env[key];
   process.env.NO_UPDATE_NOTIFIER = '1';
   let output = '';
