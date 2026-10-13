@@ -1,4 +1,4 @@
 interface:
-  display_name: "云服务器面板流量同步"
-  short_description: "定时读取供应商面板、更新订阅原生流量进度并保留诊断日志"
-  default_prompt: "使用 $server-traffic-sync 执行一轮面板流量同步，验证发布并完成页面清理。"
+  display_name: "Clash 配置与流量统一维护"
+  short_description: "维护规则节点、受控发布、面板流量与订阅余额阀门"
+  default_prompt: "使用 $server-traffic-sync，依据项目现行职责完成指定 Clash 配置或流量维护，验证发布并记录结果。"
