@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import subprocess
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -9,13 +9,11 @@ import pytest
 from pypdf import PdfReader, PdfWriter
 
 from scripts import ocr_runtime as ocr
+from scripts.mineru_v4 import OPTIONS
 
 
-def command_input(command):
-    if "-Path" in command:
-        return Path(command[command.index("-Path") + 1])
-    mount = next(item for item in command if item.endswith(":/work/input:ro"))
-    return Path(mount.removesuffix(":/work/input:ro"))
+def command_input(call):
+    return call["inputs"][0].parent if call["batch"] else call["inputs"][0]
 
 
 def make_pdf(path: Path, pages: int = 2) -> None:
@@ -26,20 +24,29 @@ def make_pdf(path: Path, pages: int = 2) -> None:
     writer.write(path)
 
 
-def make_output(input_path: Path, output: Path) -> None:
+def make_output(input_path: Path, output: Path, *, legacy=False) -> None:
     alias = input_path.stem
     pages = len(PdfReader(input_path).pages) if input_path.suffix == ".pdf" else 1
-    directory = output / alias / "hybrid_auto"
+    directory = output / alias / "standard"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "images").mkdir(exist_ok=True)
     (directory / "images" / "sample.jpg").write_bytes(b"fixture-image")
     (directory / f"{alias}.md").write_text("正文 ![](images/sample.jpg)", encoding="utf-8")
-    (directory / f"{alias}_middle.json").write_text(
-        json.dumps({"pdf_info": [{"page_idx": index} for index in range(pages)]}),
-        encoding="utf-8",
+    data = (
+        {"pdf_info": [{"page_idx": index} for index in range(pages)]}
+        if legacy
+        else {
+            "schema": "docvortex.middle",
+            "schema_version": "2.0",
+            "is_full_document": True,
+            "pages": [{"page_idx": index, "blocks": []} for index in range(pages)],
+        }
     )
-    (directory / f"{alias}_content_list.json").write_text("[]", encoding="utf-8")
-    make_pdf(directory / f"{alias}_origin.pdf", pages)
+    (directory / f"{alias}_middle.json").write_text(json.dumps(data), encoding="utf-8")
+    name = f"{alias}_content_list.json" if legacy else f"{alias}_structured_content.json"
+    contents = [] if legacy else {"is_full_document": True, "pages": data["pages"]}
+    (directory / name).write_text(json.dumps(contents), encoding="utf-8")
+    shutil.copyfile(input_path, directory / f"{alias}_origin{input_path.suffix}")
 
 
 class Rig:
@@ -52,7 +59,12 @@ class Rig:
         self.wrapper.write_text("# known wrapper", encoding="utf-8")
         self.powershell = root / "pwsh.exe"
         self.powershell.write_bytes(b"fixture")
-        self.profile = {"imageId": "sha256:" + "a" * 64, "options": ocr.OPTIONS.copy()}
+        self.profile = {
+            "imageId": "sha256:" + "a" * 64,
+            "options": OPTIONS.copy(),
+            "transport": ocr.TASK_SCHEMA,
+            "apiBase": "http://127.0.0.1:18000",
+        }
         self.relative = ["甲/记录.pdf", "乙/记录.pdf", "中文 空格/复查😀.pdf"]
         self.inventory: dict[str, Any] = {"sourceRoot": str(self.source), "files": []}
         for relative in self.relative:
@@ -68,14 +80,25 @@ class Rig:
                     "pageCount": 2,
                 }
             )
-        self.calls: list[list[str]] = []
+        self.calls: list[dict] = []
         monkeypatch.setattr(ocr, "engine_profile", lambda _wrapper: dict(self.profile))
-        monkeypatch.setattr(ocr, "run_process", self.run_process)
+        monkeypatch.setattr(ocr, "run_task", self.run_task)
 
-    def run_process(self, command, timeout, poll, output, image_id):
-        self.calls.append(command)
-        source = command_input(command)
-        for path in sorted(source.iterdir()) if source.is_dir() else [source]:
+    def record_call(self, inputs, attempt_path):
+        attempt = json.loads(attempt_path.read_text(encoding="utf-8"))
+        self.calls.append(
+            {
+                "inputs": inputs,
+                "batch": "BATCH" in attempt["executionMode"],
+                "resumed": bool(attempt.get("taskId")),
+            }
+        )
+        attempt.update(taskId="job_fixture", submissionState="SUBMITTED", taskStatus="completed")
+        ocr.write_json(attempt_path, attempt)
+
+    def run_task(self, inputs, timeout, poll, output, attempt_path, profile):
+        self.record_call(inputs, attempt_path)
+        for path in inputs:
             make_output(path, output)
         poll()
         return 0
@@ -108,11 +131,7 @@ def test_batch_uses_one_explicit_isolated_directory_and_reuses_verified_files(ri
     assert result["engineInvocations"] == 1 and result["completedFiles"] == 3
     call = rig.calls[0]
     input_dir = command_input(call)
-    assert call[:3] == ["docker", "run", "--rm"]
-    assert "MINERU_API_MAX_CONCURRENT_REQUESTS=1" in call
-    assert "MINERU_MODEL_SOURCE=local" in call
-    assert rig.profile["imageId"] in call
-    assert "--publish" not in call and "--detach" not in call
+    assert call["batch"] is True and call["resumed"] is False
     assert input_dir.is_relative_to(rig.work)
     assert len(list(input_dir.iterdir())) == 3
     assert len({path.stem for path in input_dir.iterdir()}) == 3
@@ -126,7 +145,7 @@ def test_batch_uses_one_explicit_isolated_directory_and_reuses_verified_files(ri
 def test_per_file_mode_remains_available_and_duplicate_selection_is_deduplicated(rig):
     result = rig.run(batch=False, selected=rig.relative + [rig.relative[0]])
     assert result["engineInvocations"] == 3
-    assert all(command_input(call).is_file() and "-NoBuild" in call for call in rig.calls)
+    assert all(command_input(call).is_file() and not call["batch"] for call in rig.calls)
 
 
 def test_subset_does_not_discard_other_verified_mappings(rig):
@@ -137,34 +156,33 @@ def test_subset_does_not_discard_other_verified_mappings(rig):
 
 
 def test_partial_batch_and_interruption_resume_only_unconfirmed_files(rig, monkeypatch):
-    def partial(command, timeout, poll, output, image_id):
-        rig.calls.append(command)
-        input_dir = command_input(command)
-        make_output(sorted(input_dir.iterdir())[0], output)
+    def partial(inputs, timeout, poll, output, attempt_path, profile):
+        rig.record_call(inputs, attempt_path)
+        make_output(sorted(inputs)[0], output)
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(ocr, "run_process", partial)
+    monkeypatch.setattr(ocr, "run_task", partial)
     with pytest.raises(KeyboardInterrupt):
         rig.run()
     index = rig.index()
     assert index["status"] == "CANCELLED" and len(index["mappings"]) == 1
     assert len(index["pending"]) == 2
     confirmed = index["mappings"][0]
-    monkeypatch.setattr(ocr, "run_process", rig.run_process)
+    monkeypatch.setattr(ocr, "run_task", rig.run_task)
     result = rig.run()
-    assert result["cachedFiles"] == 1 and result["engineInvocations"] == 1
-    assert len(list(command_input(rig.calls[-1]).iterdir())) == 2
+    assert result["cachedFiles"] == 1 and result["resumedTasks"] == 1
+    assert result["engineInvocations"] == 0 and rig.calls[-1]["resumed"]
+    assert len(rig.calls[-1]["inputs"]) == 3
     assert confirmed in rig.index()["mappings"]
 
 
 def test_nonzero_exit_preserves_success_and_does_not_retry_in_same_call(rig, monkeypatch):
-    def partial(command, timeout, poll, output, image_id):
-        rig.calls.append(command)
-        source = command_input(command)
-        make_output(next(source.iterdir()), output)
+    def partial(inputs, timeout, poll, output, attempt_path, profile):
+        rig.record_call(inputs, attempt_path)
+        make_output(inputs[0], output)
         return 1
 
-    monkeypatch.setattr(ocr, "run_process", partial)
+    monkeypatch.setattr(ocr, "run_task", partial)
     with pytest.raises(ocr.OcrError, match="未完整"):
         rig.run()
     assert len(rig.calls) == 1 and len(rig.index()["mappings"]) == 1
@@ -189,17 +207,18 @@ def test_damaged_cached_output_recomputes_only_affected_file(rig, damage):
     else:
         (markdown.parent / "images" / "sample.jpg").write_bytes(b"different-image")
     result = rig.run()
-    assert result["cachedFiles"] == 2 and result["engineInvocations"] == 1
+    assert result["cachedFiles"] == 2 and result["resumedTasks"] == 1
+    assert result["engineInvocations"] == 0
     assert rig.index()["mappings"][0]["sourceRelativePath"] == relative
     assert rig.index()["mappings"][0]["outputDir"] != mapping["outputDir"]
 
 
 def test_markdown_alone_never_counts_as_success(rig, monkeypatch):
-    def incomplete(command, timeout, poll, output, image_id):
+    def incomplete(inputs, timeout, poll, output, attempt_path, profile):
         (output / "result.md").write_text("nonempty", encoding="utf-8")
         return 0
 
-    monkeypatch.setattr(ocr, "run_process", incomplete)
+    monkeypatch.setattr(ocr, "run_task", incomplete)
     with pytest.raises(ocr.OcrError, match="未完整"):
         rig.run()
     assert rig.index()["mappings"] == []
@@ -273,29 +292,50 @@ def test_project_lock_is_released_after_exception(rig):
         pass
 
 
-def test_cancel_cleanup_targets_only_its_unique_output_mount(tmp_path, monkeypatch):
-    owned, other = "a" * 12, "b" * 12
-    calls = []
-    output = tmp_path / "unique-result"
+def test_verified_legacy_cache_is_reused_without_relabeling_or_engine_run(rig):
+    rig.run(selected=rig.relative[:1])
+    mapping = rig.index()["mappings"][0]
+    item = ocr.validate_sources(rig.inventory, rig.relative[:1], None)[0]
+    directory = rig.output / "legacy"
+    make_output(rig.source / item["relative"], directory, legacy=True)
+    # Historical MinerU used the stable hash alias rather than source basename.
+    middle = next(directory.glob("**/*_middle.json"))
+    parent = middle.parent
+    for path in list(parent.iterdir()):
+        if path.is_file():
+            path.rename(parent / path.name.replace(Path(item["relative"]).stem, item["alias"], 1))
+    legacy = {
+        "imageId": "sha256:" + "b" * 64,
+        "wrapperSha256": "sha256:" + "c" * 64,
+        "options": ocr.LEGACY_OPTIONS.copy(),
+    }
+    mapping.update(
+        outputDir=directory.relative_to(rig.work).as_posix(),
+        engineProfile=legacy,
+        artifacts=ocr.artifact_snapshot(directory, item["alias"], item["pages"]),
+    )
+    assert mapping["artifacts"]
+    index = rig.index()
+    index["mappings"] = [mapping]
+    ocr.write_json(rig.work / "ocr-result.json", index)
+    result = rig.run(selected=rig.relative[:1])
+    assert result["cachedFiles"] == result["legacyCachedFiles"] == 1
+    assert len(rig.calls) == 1 and rig.index()["mappings"][0] == mapping
 
-    def run(command, **kwargs):
-        calls.append(command)
-        if command[1] == "ps":
-            value = owned + "\n" + other
-        elif command[1] == "inspect":
-            value = json.dumps(
-                [
-                    {
-                        "Type": "bind",
-                        "Destination": "/work/output",
-                        "Source": str(output if command[-1] == owned else tmp_path / "other"),
-                    }
-                ]
-            )
-        else:
-            value = ""
-        return subprocess.CompletedProcess(command, 0, value, "")
 
-    monkeypatch.setattr(ocr.subprocess, "run", run)
-    ocr.stop_owned_container(output, "sha256:" + "f" * 64)
-    assert [command[-1] for command in calls if command[1] == "stop"] == [owned]
+def test_invalid_current_schema_does_not_fall_back_to_legacy(rig):
+    rig.run()
+    mapping = rig.index()["mappings"][0]
+    directory = rig.work / mapping["outputDir"]
+    middle = next(directory.glob("**/*_middle.json"))
+    middle.write_text(
+        json.dumps(
+            {
+                "schema": "wrong",
+                "schema_version": "2.0",
+                "pdf_info": [{"page_idx": 0}, {"page_idx": 1}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert ocr.artifact_snapshot(directory, middle.name.removesuffix("_middle.json"), 2) is None

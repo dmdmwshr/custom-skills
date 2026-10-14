@@ -1,9 +1,4 @@
-"""Local MinerU execution, content-bound per-file checkpoints and bounded progress.
-
-The existing Docker image and recognition settings remain unchanged. Batch mode
-uses its native one-request queue to avoid submission timeouts during cold start.
-No credentials, remote OCR, business uploads, or business waterline updates live here.
-"""
+"""Local MinerU 4 execution, content-bound receipts and resumable task polling."""
 
 from __future__ import annotations
 
@@ -15,7 +10,6 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import sys
 import time
 import uuid
@@ -27,8 +21,15 @@ from urllib.parse import unquote
 
 from pypdf import PdfReader
 
+if __package__:
+    from .mineru_v4 import TASK_SCHEMA, engine_profile, run_task
+    from .mineru_v4 import MinerUV4Error as OcrError
+else:
+    from mineru_v4 import TASK_SCHEMA, engine_profile, run_task
+    from mineru_v4 import MinerUV4Error as OcrError
+
 SCHEMA = "OcrResultV1"
-OPTIONS = {
+LEGACY_OPTIONS = {
     "backend": "hybrid-auto-engine",
     "method": "auto",
     "lang": "ch",
@@ -36,10 +37,6 @@ OPTIONS = {
     "formula": True,
 }
 REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-
-
-class OcrError(RuntimeError):
-    pass
 
 
 def utc_now() -> str:
@@ -130,24 +127,6 @@ def project_lock(work: Path):
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
 
-def engine_profile(wrapper: Path) -> dict[str, Any]:
-    try:
-        result = subprocess.run(
-            ["docker", "image", "inspect", "mineru:latest", "--format", "{{.Id}}"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=20,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise OcrError("无法核对本机 MinerU 镜像版本") from error
-    image_id = result.stdout.strip()
-    if result.returncode != 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
-        raise OcrError("本机 MinerU 镜像版本不可核实，不使用旧缓存")
-    return {"imageId": image_id, "wrapperSha256": file_hash(wrapper), "options": OPTIONS.copy()}
-
-
 def validate_sources(
     inventory: dict[str, Any],
     selected: list[str],
@@ -224,19 +203,32 @@ def artifact_snapshot(directory: Path, alias: str, pages: int) -> list[dict[str,
             return None
         middle_path = safe_path(candidates[0], directory)
         parent = middle_path.parent
+        middle = json.loads(middle_path.read_text(encoding="utf-8"))
+        current = "schema" in middle
+        if current and (
+            middle.get("schema") != "docvortex.middle"
+            or middle.get("schema_version") != "2.0"
+            or middle.get("is_full_document") is not True
+        ):
+            return None
+        origins = (
+            list(parent.glob(f"{alias}_origin.*")) if current else [parent / f"{alias}_origin.pdf"]
+        )
+        if len(origins) != 1 or origins[0].suffix not in {".pdf", ".png", ".jpg"}:
+            return None
         required = [
             middle_path,
             parent / f"{alias}.md",
-            parent / f"{alias}_content_list.json",
-            parent / f"{alias}_origin.pdf",
+            parent
+            / (f"{alias}_structured_content.json" if current else f"{alias}_content_list.json"),
+            origins[0],
         ]
         if any(
             not safe_path(path, directory).is_file() or path.stat().st_size == 0
             for path in required
         ):
             return None
-        middle = json.loads(middle_path.read_text(encoding="utf-8"))
-        page_data = middle.get("pdf_info")
+        page_data = middle.get("pages" if current else "pdf_info")
         if not isinstance(page_data, list) or len(page_data) != pages:
             return None
         if [page.get("page_idx") for page in page_data if isinstance(page, dict)] != list(
@@ -244,13 +236,32 @@ def artifact_snapshot(directory: Path, alias: str, pages: int) -> list[dict[str,
         ):
             return None
         contents = json.loads(required[2].read_text(encoding="utf-8"))
-        if not isinstance(contents, list):
+        if current:
+            if (
+                not isinstance(contents, dict)
+                or contents.get("is_full_document") is not True
+                or not isinstance(contents.get("pages"), list)
+                or [page.get("page_idx") for page in contents["pages"] if isinstance(page, dict)]
+                != list(range(pages))
+                or any(not isinstance(page.get("blocks"), list) for page in page_data)
+            ):
+                return None
+        elif not isinstance(contents, list):
             return None
-        if len(PdfReader(str(required[3])).pages) != pages:
+        if origins[0].suffix == ".pdf" and len(PdfReader(str(origins[0])).pages) != pages:
+            return None
+        if origins[0].suffix != ".pdf" and pages != 1:
             return None
         markdown = required[1].read_text(encoding="utf-8")
         if not markdown.strip():
             return None
+        if current:
+            for asset in parent.glob("**/images/**/*"):
+                asset = safe_path(asset, parent)
+                if asset.is_file():
+                    if not asset.stat().st_size:
+                        return None
+                    required.append(asset)
         image_refs = re.findall(r"!\[[^\]]*\]\(([^)]+)\)", markdown)
         image_refs += re.findall(r"<img\b[^>]*\bsrc=[\"\x27]([^\"\x27]+)", markdown, re.I)
         for reference in image_refs:
@@ -283,7 +294,7 @@ def cached_mapping_valid(
 ) -> bool:
     if (
         mapping.get("sourceSha256") != item["sha256"]
-        or mapping.get("engineProfile") != profile
+        or not compatible_cached_profile(mapping.get("engineProfile"), profile)
         or mapping.get("sourceRelativePath") != item["relative"]
         or mapping.get("pageCount") != item["pages"]
     ):
@@ -291,95 +302,31 @@ def cached_mapping_valid(
     try:
         directory = safe_path(work / relative_path(mapping["outputDir"]), output)
         snapshot = artifact_snapshot(directory, item["alias"], item["pages"])
-        return snapshot is not None and snapshot == mapping.get("artifacts")
+        if snapshot is None or snapshot != mapping.get("artifacts"):
+            return False
+        if mapping.get("engineProfile", {}).get("transport") == TASK_SCHEMA:
+            origin = next((entry for entry in snapshot if "_origin." in entry["relativePath"]), {})
+            return origin.get("sha256") == item["sha256"]
+        return True
     except (KeyError, TypeError, OcrError):
         return False
 
 
-def _mount_source_key(value: str) -> str:
-    value = value.replace("\\", "/").rstrip("/")
-    prefix = "/run/desktop/mnt/host/"
-    if value.startswith(prefix) and len(value) > len(prefix) + 1:
-        tail = value[len(prefix) :]
-        value = tail[0] + ":/" + tail[2:]
-    return value.casefold() if os.name == "nt" else value
-
-
-def stop_owned_container(output_dir: Path, image_id: str) -> None:
-    """Only stop a container with this invocation's unique /work/output bind mount."""
-    result = subprocess.run(
-        ["docker", "ps", "-q", "--filter", f"ancestor={image_id}"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=15,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise OcrError("本次 OCR 容器退出状态无法确认")
-    for container in result.stdout.split():
-        if not re.fullmatch(r"[0-9a-f]{12,64}", container):
-            raise OcrError("本次 OCR 容器标识无法确认")
-        inspected = subprocess.run(
-            ["docker", "inspect", "--format", "{{json .Mounts}}", container],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=15,
-            check=False,
+def compatible_cached_profile(previous: Any, current: dict[str, Any]) -> bool:
+    if previous == current:
+        return True
+    # Keep separately identified, fully hashed MinerU 3 receipts as historical
+    # results. Never relabel their engine or fabricate a schema-2.0 document.
+    return (
+        isinstance(previous, dict)
+        and current.get("transport") == TASK_SCHEMA
+        and set(previous) == {"imageId", "wrapperSha256", "options"}
+        and previous["options"] == LEGACY_OPTIONS
+        and all(
+            isinstance(previous[key], str) and re.fullmatch(r"sha256:[0-9a-f]{64}", previous[key])
+            for key in ("imageId", "wrapperSha256")
         )
-        if inspected.returncode != 0:
-            continue  # The short-lived container may already have exited.
-        mounts = json.loads(inspected.stdout)
-        if any(
-            mount.get("Type") == "bind"
-            and mount.get("Destination") == "/work/output"
-            and _mount_source_key(mount.get("Source", "")) == _mount_source_key(str(output_dir))
-            for mount in mounts
-        ):
-            stopped = subprocess.run(
-                ["docker", "stop", "--time", "10", container],
-                capture_output=True,
-                timeout=20,
-                check=False,
-            )
-            if stopped.returncode != 0:
-                raise OcrError("本次 OCR 容器未确认停止，保留断点")
-
-
-def run_process(
-    command: list[str], timeout: float, on_poll: Any, output_dir: Path, image_id: str
-) -> int:
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    process = subprocess.Popen(
-        command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags
     )
-    started = time.monotonic()
-    try:
-        while process.poll() is None:
-            on_poll()
-            if time.monotonic() - started >= timeout:
-                raise OcrError("OCR 运行超时；已校验文件保留，未完成文件不自动重试")
-            time.sleep(0.25)
-        return int(process.returncode)
-    except BaseException:
-        if process.poll() is None:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    capture_output=True,
-                    timeout=15,
-                    check=False,
-                )
-            else:
-                process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        stop_owned_container(output_dir, image_id)
-        raise
 
 
 def run_ocr(
@@ -400,12 +347,57 @@ def run_ocr(
     if not math.isfinite(timeout) or timeout <= 0:
         raise OcrError("OCR 超时必须是正数")
     items = validate_sources(inventory, selected, allowed_roots)
-    if not wrapper.is_file() or not powershell.is_file():
-        raise OcrError("MinerU 或 PowerShell 7 入口不存在")
+    # Signature compatibility: PowerShell is no longer invoked for recognition.
     with project_lock(work):
         profile = engine_profile(wrapper)
         output.mkdir(parents=True, exist_ok=True)
         return _run_locked(work, output, items, wrapper, powershell, profile, timeout, batch)
+
+
+def task_groups(work, output, pending, profile, batch):
+    remaining = {item["relative"]: item for item in pending}
+    groups = []
+    for run_dir in sorted(output.glob("run-*")):
+        run_dir = safe_path(run_dir, output)
+        path = run_dir / "attempt.json"
+        if not path.is_file():
+            continue
+        try:
+            attempt = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise OcrError("OCR 原请求记录损坏；保留断点，不猜测或重发") from error
+        if not isinstance(attempt, dict):
+            raise OcrError("OCR 原请求记录无效；保留断点")
+        if attempt.get("schemaVersion") != TASK_SCHEMA:
+            continue
+        if attempt.get("workDir") != str(work) or not isinstance(attempt.get("inputs"), list):
+            raise OcrError("OCR 原任务与当前工作区不一致")
+        matched = []
+        for entry in attempt["inputs"]:
+            if not isinstance(entry, dict):
+                raise OcrError("OCR 原任务输入记录无效")
+            item = remaining.get(entry.get("relative"))
+            if item is not None and _input_receipt(item) == entry:
+                matched.append(item)
+        if not matched:
+            continue
+        if attempt.get("engineProfile") != profile:
+            if attempt.get("submissionState") and attempt.get("taskStatus") not in {
+                "completed",
+                "partial",
+                "failed",
+                "canceled",
+            }:
+                raise OcrError("MinerU 原任务未结束且引擎已变化；保留断点")
+            continue
+        groups.append((matched, run_dir, attempt["inputs"]))
+        for item in matched:
+            del remaining[item["relative"]]
+    left = list(remaining.values())
+    groups.extend(
+        (group, None, group) for group in ([left] if batch and left else [[item] for item in left])
+    )
+    return groups
 
 
 def _run_locked(
@@ -465,7 +457,14 @@ def _run_locked(
         "runStats": {
             "selectedFiles": len(items),
             "cachedFiles": cached_count,
+            "legacyCachedFiles": sum(
+                1
+                for item in items
+                if item["relative"] in completed
+                and mappings[item["relative"]]["engineProfile"] != profile
+            ),
             "engineInvocations": 0,
+            "resumedTasks": 0,
             "batch": batch,
         },
     }
@@ -504,26 +503,35 @@ def _run_locked(
     # receipts survive process exit; damaged/lost receipts require re-recognition.
     checkpoint()
     pending = [item for item in items if item["relative"] not in completed]
-    groups = [pending] if batch and pending else [[item] for item in pending]
     try:
-        for group in groups:
-            run_dir = output / ("run-" + uuid.uuid4().hex)
-            input_dir, directory = run_dir / "input", run_dir / "result"
-            input_dir.mkdir(parents=True)
+        for group, run_dir, task_inputs in task_groups(work, output, pending, profile, batch):
+            if run_dir is None:
+                run_dir = output / ("run-" + uuid.uuid4().hex)
+                input_dir = run_dir / "input"
+                input_dir.mkdir(parents=True)
+                attempt = {
+                    "workDir": str(work),
+                    "engineProfile": profile,
+                    "inputs": [_input_receipt(item) for item in group],
+                    "startedAt": utc_now(),
+                    "schemaVersion": TASK_SCHEMA,
+                    "executionMode": "V4_BATCH_API" if batch else "V4_SINGLE_FILE_API",
+                }
+                write_json(run_dir / "attempt.json", attempt)
+                for item in group:
+                    target = input_dir / item["inputName"]
+                    shutil.copyfile(item["source"], target)
+                    if file_hash(target) != item["sha256"]:
+                        raise OcrError("OCR 隔离输入副本哈希不一致")
+            else:
+                input_dir = safe_path(run_dir / "input", run_dir)
+                attempt = json.loads((run_dir / "attempt.json").read_text(encoding="utf-8"))
+            directory = run_dir / ("result-" + uuid.uuid4().hex)
             directory.mkdir()
-            attempt = {
-                "workDir": str(work),
-                "engineProfile": profile,
-                "inputs": [_input_receipt(item) for item in group],
-                "startedAt": utc_now(),
-                "executionMode": "BATCH_SINGLE_QUEUE" if batch else "EXISTING_WRAPPER",
-            }
-            write_json(run_dir / "attempt.json", attempt)
-            for item in group:
-                target = input_dir / item["inputName"]
-                shutil.copyfile(item["source"], target)
-                if file_hash(target) != item["sha256"]:
-                    raise OcrError("OCR 隔离输入副本哈希不一致")
+            if attempt.get("taskId"):
+                result["runStats"]["resumedTasks"] += 1
+            elif not attempt.get("submissionState"):
+                result["runStats"]["engineInvocations"] += 1
             snapshots: dict[str, list[dict[str, Any]]] = {}
             last_scan = float("-inf")
 
@@ -557,76 +565,29 @@ def _run_locked(
                     )
                     last_progress = now
 
-            source_arg = input_dir if batch else input_dir / group[0]["inputName"]
-            command = [
-                str(powershell),
-                "-NoProfile",
-                "-File",
-                str(wrapper),
-                "-Path",
-                str(source_arg),
-                "-Output",
-                str(directory),
-                "-Backend",
-                OPTIONS["backend"],
-                "-Method",
-                OPTIONS["method"],
-                "-Lang",
-                OPTIONS["lang"],
-                "-NoBuild",
-            ]
-            if batch:
-                # MinerU 3.1.4's default concurrent submissions can hit its internal
-                # 60-second POST timeout while the first model is warming up.
-                # Use its supported queue setting, not a patched engine or service.
-                command = [
-                    "docker",
-                    "run",
-                    "--rm",
-                    "--gpus",
-                    "all",
-                    "--ipc",
-                    "host",
-                    "-e",
-                    "MINERU_MODEL_SOURCE=local",
-                    "-e",
-                    "MINERU_API_MAX_CONCURRENT_REQUESTS=1",
-                    "-v",
-                    f"{input_dir.as_posix()}:/work/input:ro",
-                    "-v",
-                    f"{directory.as_posix()}:/work/output",
-                    profile["imageId"],
-                    "mineru",
-                    "-p",
-                    "/work/input",
-                    "-o",
-                    "/work/output",
-                    "-b",
-                    OPTIONS["backend"],
-                    "-m",
-                    OPTIONS["method"],
-                    "-l",
-                    OPTIONS["lang"],
-                    "-t",
-                    "true",
-                    "-f",
-                    "true",
-                ]
-            result["runStats"]["engineInvocations"] += 1
             checkpoint()
             try:
                 if engine_profile(wrapper) != profile:
                     raise OcrError("本机 MinerU 版本或入口已变化，本次停止")
-                code = run_process(
-                    command, timeout * len(group), poll, directory, profile["imageId"]
+                code = run_task(
+                    [input_dir / item["inputName"] for item in task_inputs],
+                    timeout * len(group),
+                    poll,
+                    directory,
+                    run_dir / "attempt.json",
+                    profile,
                 )
             finally:
+                try:
+                    unchanged = engine_profile(wrapper) == profile
+                except OcrError:
+                    unchanged = False
+                if not unchanged:
+                    for item in group:
+                        completed.discard(item["relative"])
+                        mappings.pop(item["relative"], None)
+                    raise OcrError("识别期间 MinerU 版本或入口未确认一致，结果不进入缓存")
                 poll(finished=True)
-            if engine_profile(wrapper) != profile:
-                for item in group:
-                    completed.discard(item["relative"])
-                    mappings.pop(item["relative"], None)
-                raise OcrError("识别期间 MinerU 版本或入口发生变化，结果不进入缓存")
             if code != 0 or any(item["relative"] not in completed for item in group):
                 raise OcrError("MinerU 本次未完整完成；已校验文件已保存，未完成文件不自动重试")
         result["status"] = "COMPLETED"

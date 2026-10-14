@@ -567,13 +567,12 @@ def test_mineru_uses_explicit_sources_and_records_mapping(
         lambda _wrapper: {"imageId": "sha256:" + "a" * 64},
     )
 
-    def successful_run(command, timeout, poll, destination, image_id):
-        calls.append(command)
-        source_path = Path(command[command.index("-Path") + 1])
-        make_output(source_path, destination)
+    def successful_run(inputs, timeout, poll, destination, attempt_path, profile):
+        calls.append(inputs)
+        make_output(inputs[0], destination)
         return 0
 
-    monkeypatch.setattr(ocr_runtime, "run_process", successful_run)
+    monkeypatch.setattr(ocr_runtime, "run_task", successful_run)
     ocr_command(
         argparse.Namespace(
             work_dir=str(work),
@@ -582,11 +581,11 @@ def test_mineru_uses_explicit_sources_and_records_mapping(
             timeout=10,
         )
     )
-    assert len(calls) == 2 and all(command[-1] == "-NoBuild" for command in calls)
+    assert len(calls) == 2 and all(len(inputs) == 1 for inputs in calls)
     assert len(read_json(work / "ocr-result.json")["mappings"]) == 2
     monkeypatch.setattr(
         ocr_runtime,
-        "run_process",
+        "run_task",
         lambda *_args, **_kwargs: 0,
     )
     with pytest.raises(RegistryError, match="未完整"):
