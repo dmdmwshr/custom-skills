@@ -162,7 +162,9 @@ def build_request(args: argparse.Namespace) -> RequestSpec:
                   **({"source_id": source} if source else {})},
         )
     if operation == "archive-retry":
-        return RequestSpec(operation, "POST", "/chat-archives/retry-failed", body=_compact({"source_id": source, "limit": args.limit}))
+        return RequestSpec(operation, "POST", "/chat-archives/retry-failed", body=_compact({
+            "confirm": "RETRY_FAILED_ARCHIVES", "source_id": source, "limit": args.limit,
+        }))
     raise ValueError(f"不支持的操作：{operation}")
 
 

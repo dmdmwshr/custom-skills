@@ -121,6 +121,26 @@ class MemoryApiMappingTests(unittest.TestCase):
         self.assertEqual(result["result"], {"status": "queued"})
         self.assertEqual(opener.timeouts[-1], memory_api.ARCHIVE_REBUILD_TIMEOUT_SECONDS)
 
+    def test_archive_retry_satisfies_server_confirmation_and_source_scope(self) -> None:
+        opener = FakeOpener([
+            {"status": "ready"},
+            {"status": "healthy", "graphiti": {"reachable": True},
+             "models": {"embedding_available": True, "primary_available": True}},
+            {"status": "requeued", "requeued": 2},
+        ])
+        result = memory_api.run(
+            memory_api.parse_args(["archive-retry", "--source", "wsl-one", "--limit", "2"]),
+            opener=opener,
+        )
+        request = opener.requests[-1]
+        self.assertEqual(request.method, "POST")
+        self.assertEqual(urlparse(request.full_url).path, "/api/chat-archives/retry-failed")
+        self.assertEqual(json.loads(request.data), {
+            "confirm": "RETRY_FAILED_ARCHIVES", "source_id": "wsl-one", "limit": 2,
+        })
+        self.assertEqual(result["result"]["requeued"], 2)
+        self.assertEqual(opener.timeouts[-1], memory_api.ARCHIVE_REBUILD_TIMEOUT_SECONDS)
+
     def test_utf8_console_configuration(self) -> None:
         stdout = Mock()
         stderr = Mock()
