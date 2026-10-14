@@ -141,6 +141,18 @@ class MemoryApiMappingTests(unittest.TestCase):
         self.assertEqual(result["result"]["requeued"], 2)
         self.assertEqual(opener.timeouts[-1], memory_api.ARCHIVE_REBUILD_TIMEOUT_SECONDS)
 
+    def test_full_archive_scan_waits_for_complete_scan_receipt(self) -> None:
+        opener = FakeOpener([
+            {"status": "ready"},
+            {"status": "healthy", "graphiti": {"reachable": True},
+             "models": {"embedding_available": True, "primary_available": True}},
+            {"status": "queued", "discovered_sessions": 1356, "enqueued": 0},
+        ])
+        result = memory_api.run(memory_api.parse_args(["archive-scan", "--all"]), opener=opener)
+        self.assertEqual(result["result"]["discovered_sessions"], 1356)
+        self.assertEqual(opener.timeouts[-1], memory_api.ARCHIVE_SCAN_TIMEOUT_SECONDS)
+        self.assertEqual(opener.timeouts[:2], [memory_api.DEFAULT_TIMEOUT_SECONDS] * 2)
+
     def test_utf8_console_configuration(self) -> None:
         stdout = Mock()
         stderr = Mock()

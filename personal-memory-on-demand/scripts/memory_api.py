@@ -21,6 +21,7 @@ API_ROOT = "http://127.0.0.1:5175/api"
 urlopen = build_opener(ProxyHandler({}), HTTPSHandler(context=ssl.create_default_context())).open
 DEFAULT_TIMEOUT_SECONDS = 20
 ARCHIVE_REBUILD_TIMEOUT_SECONDS = 120
+ARCHIVE_SCAN_TIMEOUT_SECONDS = 3600
 
 
 class MemoryApiError(RuntimeError):
@@ -254,6 +255,7 @@ def run(args: argparse.Namespace, *, opener: Callable[..., Any] = urlopen) -> di
             opener=opener,
             api_root=api_root,
             timeout=(
+                ARCHIVE_SCAN_TIMEOUT_SECONDS if args.operation == "archive-scan" else
                 ARCHIVE_REBUILD_TIMEOUT_SECONDS
                 if args.operation in {"archive-rebuild", "archive-retry", "inventory-scan"}
                 else DEFAULT_TIMEOUT_SECONDS
