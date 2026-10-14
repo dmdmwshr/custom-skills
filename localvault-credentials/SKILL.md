@@ -5,7 +5,7 @@ description: 管理本机 LocalVault 中由 SecretManagement 和 SecretStore 保
 
 # LocalVault 凭据管理
 
-执行平台：本技能当前交付流程为 Windows。先核对实际目标主机、原生依赖及用户配置；Linux/WSL 不安装或执行 Windows 分支。平台名称指执行端，不因被管理对象是 WSL 而改变。独立远程载荷须另核对目标系统。本次 Windows 分支未实机验收。
+执行平台：Windows。先核对本机依赖及用户配置；WSL/Linux 不直接套用此入口，远程载荷须单独核验。安装、发现和业务验收按目标平台分别报告，以对应记录及当前实测为准。
 
 使用本技能管理当前 Windows 用户下的 `LocalVault`。密钥库是本机加密保存凭据的 PowerShell 存储，不是浏览器密码管理器，也不会自动连接 Codex 内置浏览器。
 

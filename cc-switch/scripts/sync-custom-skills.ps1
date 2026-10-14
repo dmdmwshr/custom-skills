@@ -522,7 +522,7 @@ try:
                             enabled_gemini, enabled_opencode, installed_at, updated_at,
                             enabled_hermes, enabled_grokbuild
                         )
-                        values (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 1, ?, ?, 0, 0)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 0, 0, ?, ?, 0, 0)
                         """,
                         (
                             skill_id,
