@@ -1,7 +1,7 @@
 {
   "version": 3,
   "source_directory": "E:\\文件夹\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板",
-  "generated_at": "2026-08-27T01:49:52Z",
+  "generated_at": "2026-10-14T00:58:33Z",
   "templates": [
     {
       "id": "T01",
@@ -61,7 +61,7 @@
       "reserved": true,
       "original_name": "X月消防产品监督统计表.xls",
       "source_path": "E:\\文件夹\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板\\月通报模板\\X月消防产品监督统计表.xls",
-      "sha256": "E6ADAC65CB2AEE6DE47785D21FEB414BE43CFD2B3A96A5F00C095AD7B67983DF"
+      "sha256": "A5EE12E04313636E5189501CD752A3D979C7C9DCE9C4AEAF008A7F11D8B4CD3C"
     },
     {
       "id": "T11",

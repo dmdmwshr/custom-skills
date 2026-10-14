@@ -231,7 +231,7 @@
     "product_stats_required_counts": {
       "brigade_column": 1,
       "target_column": 2,
-      "pending_columns": "B:J",
+      "pending_columns": "B:K",
       "value": "（{staff_count}）",
       "pending_style": "spreadsheet_pending_style"
     }
@@ -255,7 +255,8 @@
     "manual_review_columns": {
       "H": "光伏、锂离子电池等相关企业与消防处置力量配备次数需人工核对。",
       "I": "网售消防产品检查次数需人工核对，按总次数（检查出不合格次数）填写。",
-      "J": "维修后的灭火器检查次数需人工核对，按总次数（检查出不合格次数）填写。"
+      "J": "维修后的灭火器检查次数需人工核对，按总次数（检查出不合格次数）填写。",
+      "K": "加油、加气站点消防产品检查次数需人工核对，按总次数（检查出不合格次数）填写。"
     }
   },
   "personal_stats_rules": {

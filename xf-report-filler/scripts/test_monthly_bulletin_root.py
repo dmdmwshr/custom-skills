@@ -38,7 +38,7 @@ class MonthlyBulletinRootTests(unittest.TestCase):
         self.assertEqual(root.parse_staff_count("江阴大队12人"), 12)
         self.assertEqual(root.parse_staff_count("经开大队6人"), 6)
         self.assertEqual(root.product_stats_pending_value(8), "（8）")
-        self.assertEqual(root.product_stats_pending_columns(), list("BCDEFGHIJ"))
+        self.assertEqual(root.product_stats_pending_columns(), list("BCDEFGHIJK"))
 
     def test_timeliness_text_matches_may_style(self):
         text = root.product_timeliness_text(["6月底前完成1起消防产品行政处罚案件"], required_count=12, actual_count=7)
@@ -197,7 +197,7 @@ class MonthlyBulletinRootTests(unittest.TestCase):
 
     def test_audit_product_stats_marks_new_columns_for_manual_review(self):
         stats = {
-            brigade: {"row": 1, "columns": {column: {"value": "0次", "count": 0} for column in "BCDEFGHIJ"}}
+            brigade: {"row": 1, "columns": {column: {"value": "0次", "count": 0} for column in "BCDEFGHIJK"}}
             for brigade in root.BRIGADE_ORDER
         }
         result = root.audit_product_stats(stats, {})
@@ -205,6 +205,34 @@ class MonthlyBulletinRootTests(unittest.TestCase):
         manual_warnings = [item for item in result["warnings"] if item.get("message") == "消防产品监督统计表列需人工核对"]
         self.assertTrue(any(item["column"] == "I" for item in manual_warnings))
         self.assertTrue(any(item["column"] == "J" for item in manual_warnings))
+        self.assertTrue(any(item["column"] == "K" for item in manual_warnings))
+
+    def test_legacy_stats_missing_k_is_manual_warning(self):
+        stats = {brigade: {"row": 1, "columns": {c: {"value": "0次", "count": 0} for c in "BCDEFGHIJ"}}
+                 for brigade in root.BRIGADE_ORDER}
+        result = root.audit_product_stats(stats, {})
+        self.assertTrue(any(x.get('type') == 'product_stats_missing_manual_column' and x.get('column') == 'K'
+                            for x in result['warnings']))
+        self.assertTrue(all('K' not in s['columns'] for s in stats.values()))
+
+    def test_pending_k_preserves_manual_value_and_skips_legacy_blank_header(self):
+        for has_k in (True, False):
+            with self.subTest(has_k=has_k):
+                cells = {}
+                def cell(r, c):
+                    return cells.setdefault((r,c), SimpleNamespace(Value=None))
+                for c in range(2, 11 + int(has_k)):
+                    cell(1,c).Value = 'header'
+                cell(3,1).Value = '梁溪大队'
+                cell(3,11).Value = '7次（2次）' if has_k else None
+                sheet = SimpleNamespace(Cells=cell, Name='Sheet1', UsedRange=SimpleNamespace(Rows=SimpleNamespace(Count=3)))
+                workbook = SimpleNamespace(Worksheets=lambda n:sheet, Save=lambda:None, Close=lambda **kw:None)
+                excel = SimpleNamespace(Workbooks=SimpleNamespace(Open=lambda p:workbook), Quit=lambda:None)
+                with patch.object(root,'excel_com',return_value=excel), patch.object(root,'excel_mark_pending') as mark:
+                    changed = root.mark_pending_product_stats('fake.xls',{'梁溪大队':8})
+                self.assertEqual('K3' in [x['cell'] for x in changed], has_k)
+                self.assertEqual(cell(3,11).Value, '7次（2次）' if has_k else None)
+                self.assertEqual(mark.call_count, 10 if has_k else 9)
 
     def test_timeliness_uses_product_stats_required_and_actual_count(self):
         stats = {
