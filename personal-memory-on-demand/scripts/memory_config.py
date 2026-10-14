@@ -60,7 +60,7 @@ def resolve(explicit_url: str | None = None, explicit_config: str | None = None)
         api_path += "/api"
     host_file = Path("/etc/codex-dev/paths.json")
     managed = json.loads(host_file.read_text(encoding="utf-8")) if host_file.is_file() else {}
-    project_default = Path.home() / "Desktop/项目开发" if host == "windows" else Path.home() / "workspaces"
+    project_default = Path("D:/12070/Documents/workspaces") if host == "windows" else Path.home() / "workspaces"
     codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
     project_root = Path(os.environ.get("MEMORY_PROJECT_ROOT") or config.get("project_root") or os.environ.get("CODEX_PROJECTS_ROOT") or managed.get("project_root") or project_default).expanduser()
     archive_root = Path(os.environ.get("MEMORY_ARCHIVE_ROOT") or config.get("archive_root") or codex_home / "archived_sessions").expanduser()

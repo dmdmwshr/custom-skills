@@ -42,7 +42,7 @@ metadata:
 
 ## 当前补下载项目
 
-项目：`C:\Users\12070\Desktop\项目开发\微信消息自动拉取备份`。
+项目：`D:\12070\Documents\workspaces\业务工作\微信消息自动拉取备份`。
 
 读取项目 `AGENTS.md`、配置和 `docs/WINDOWS_TASK_CATALOG.md`，使用项目 `.venv` 与既有入口。范围是普通文件、图片和视频，每天 22:00；附件只保留在微信原生目录，进度保存在忽略的 `runtime/`。不调用 `save_chatfiles`、`export_videos`、`save_media` 来完成补下载，它们会导出或另存附件。
 
