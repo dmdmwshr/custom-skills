@@ -1,78 +1,66 @@
 ---
 name: mineru-local
-description: 仅在 Zerox 转 Markdown 效果不佳或用户明确指定时，使用 D:\Program_Files\MinerU-Docker 的 Docker MinerU 处理长篇文档、密集表格或 hybrid-auto-engine 兜底。不得使用已退役的本地 pipeline 安装。
+description: 仅在 Zerox 转 Markdown 效果不佳或用户明确指定时，使用 D:/Program_Files/MinerU-Docker 的 Docker MinerU 4 处理中文扫描件、长篇文档和密集表格；默认 standard 档位。不得使用已退役的本地 pipeline 安装。
+metadata:
+  x-custom-skill: true
+  x-source-repo: dmdmwshr/custom-skills
 ---
 
-# MinerU Local
+# MinerU Docker 文档解析
 
-执行平台：本技能当前交付流程为 Windows。先核对实际目标主机、原生依赖及用户配置；Linux/WSL 不安装或执行 Windows 分支。平台名称指执行端，不因被管理对象是 WSL 而改变。独立远程载荷须另核对目标系统。本次 Windows 分支未实机验收。
+执行平台：Windows，实际解析在本机 Docker 的 Linux 容器内完成。先核对目标主机、Docker、显卡和固定入口；本技能不代表 Linux/WSL 执行端已交付。2026-10-14 已完成本机 MinerU 4.0.12 正式切换，三份自制中文 PDF 与 CSV 的实际转换验收。
 
-当前这不是默认主流程，而是 Zerox 之后的备份方案。
+## 路由与固定入口
 
-## 适用范围
+1. 文档转 Markdown 仍优先 zerox-local；用户指定 MinerU，或 Zerox 结果不佳时使用本技能。
+2. 根目录：D:/Program_Files/MinerU-Docker。
+3. 一次性转换：run-mineru-docker.cmd 或 run-mineru-docker.ps1。中文和空格路径加引号。
+4. 常驻 API：start-api.cmd，端口 18000；可选网页界面沿用 start-gradio.cmd，端口 7860，此入口同时启用 API。
+5. stop-all.cmd 只停止本配置服务并保留容器。网页界面和独立 OpenAI 兼容服务不是默认启动项，本轮没有完成其界面交互验收。
+6. 不恢复 D:/Program_Files/MinerU 的旧本地 pipeline 安装。
 
-- Docker 备份目录：`D:\Program_Files\MinerU-Docker`
-- 固定包装脚本：
-  - `D:\Program_Files\MinerU-Docker\run-mineru-docker.cmd`
-  - `D:\Program_Files\MinerU-Docker\run-mineru-docker.ps1`
-  - `D:\Program_Files\MinerU-Docker\start-api.cmd`
-  - `D:\Program_Files\MinerU-Docker\start-gradio.cmd`
-  - `D:\Program_Files\MinerU-Docker\stop-all.cmd`
-- 固定服务端口：
-  - API：`18000`
-  - Gradio：`7860`
+## 正式版本与验收范围
 
-## 使用规则
+- 固定镜像：mineru:4.0.12-20261014；MinerU 4.0.12、vLLM 0.21.0+cu129、PyTorch 2.11.0+cu129。
+- 显卡：NVIDIA GeForce RTX 5080；真实显卡运算及 vLLM 底层组件加载已通过。
+- standard：中文文字层 PDF、扫描 PDF、合并表格 PDF 均通过；已核对编号、中文内容、单位数值、三列合并表头和单页结构。
+- flash：原生 CSV 经中文和空格路径的命令入口、正式 API 转换通过。
+- 未进行长文档吞吐量、所有格式、basic/advanced 档位或训练能力的全面验收。
 
-1. 默认不要主动使用本技能；文档转 Markdown 优先走 `zerox-local`。
-2. 默认使用 `hybrid-auto-engine`，并开启表格识别。
-3. 不再使用 `D:\Program_Files\MinerU` 本地安装，也不要再走 `pipeline` 本地路线。
-4. 在 Windows 下遇到中文路径、空格路径时，优先用 `run-mineru-docker.ps1` 或 `run-mineru-docker.cmd`。
+普通 vLLM 0.21.0 包曾在实际解析时缺少 CUDA 13 库，现用官方 CUDA 12.9 包解决。包版本检查和普通模块导入不能替代底层组件及真实解析测试。原失败任务、原 3.1.4 容器已保留，不能为让状态好看而清除或重放。
 
-## 原因
+## 一次性转换
 
-- Zerox 在短表单、验收模板、流程附件上通常更稳，应作为默认主流程。
-- Docker 版 MinerU 更适合长篇预算标准和正文夹大量表格的 PDF，作为高精度备份更合理。
-- 当前 Docker 方案已和宿主机本地安装解耦，不需要保留旧的本地 pipeline 配置。
-
-## 当前备份结论
-
-- Docker 镜像：`mineru:latest`
-- 已验证显卡：`NVIDIA GeForce RTX 5080`
-- 已验证 `hybrid-auto-engine` 可成功输出 Markdown
-- 当前健康检查：`http://127.0.0.1:18000/health`
-
-## 关于后端
-
-- `hybrid-auto-engine`：默认推荐，高精度备份方案。
-- `vlm-auto-engine`：可选，仅在用户明确要求时测试。
-- `pipeline`：已退役，不再作为当前环境的推荐路径。
-
-## 推荐命令
-
-```powershell
+~~~powershell
 D:\Program_Files\MinerU-Docker\run-mineru-docker.cmd -Path "输入文件或目录" -Output "输出目录"
-```
+~~~
 
-启动常驻 API：
+默认使用 standard、自动识别文字、解析全部页、输出 Markdown。包装脚本调用 mineru-kit parse；不要换成默认页数不同的文档库命令入口。
 
-```powershell
-D:\Program_Files\MinerU-Docker\start-api.cmd
-```
+- -Tier：flash、basic、standard、advanced；本机 PDF 默认用已验收的 standard，原生 CSV 可用 flash。
+- -Format：markdown、middle_json、zip。
+- -Pages：PDF 可指定从 1 开始的范围，如 1-5,8；默认 all。原生文件整本解析，不传页码参数；包装脚本已正确处理默认全篇情形。
+- -Method：默认 auto，按需要选 txt 或 ocr。
+- 已有固定镜像时直接复用；只有镜像缺失或明确指定 -Rebuild 才构建。-NoBuild 禁止自动构建，不能与 -Rebuild 同时使用。
+- 旧 -Backend hybrid-auto-engine / vlm-auto-engine 分别提示迁移到 standard / advanced，不保证与旧模式质量完全等效。旧 pipeline 和 -Lang 明确报错；4.x 自动识别语言。
 
-## 排查顺序
+输入按只读方式挂载。为本次结果使用清晰、独立的输出目录，保留原文件和已有产物；失败先核对具体错误及已生成结果，不盲目重复整批转换。
 
-1. 先确认 `zerox-local` 是否已经满足需求，不要直接回退到 MinerU。
-2. 再看 Docker API 是否健康：
-   - `Invoke-WebRequest http://127.0.0.1:18000/health`
-3. 再用 `run-mineru-docker` 运行。
+## API 与输出兼容
 
-## 不要做的事
+当前健康检查：http://127.0.0.1:18000/v1/health。成功状态为 ok，版本应为 4.0.12。
 
-- 不要再恢复或重装 `D:\Program_Files\MinerU` 本地 pipeline 安装作为默认方案。
-- 不要把本技能当成文档转 Markdown 的第一选择。
-- 不要在没有必要时同时启用 Zerox 和 MinerU 两条批处理链路。
+新版使用官方 /v1/tasks 提交和查询任务，/v1/tasks/{task_id}/result 下载结果。提交结果未知时先查原任务；已失败的业务任务不能未经授权重新提交。根路径 /health、/file_parse 等旧接口不可当作新版兼容入口，不自行加桥接服务。
 
-## 补充替补入口
+已实际回读 Markdown、middle_json、structured_content 和 ZIP。结构化文档按实际 pages 等字段读取，不能沿用旧 pdf_info、_backend 字段假设。完整迁移说明见[官方 4.0 文档](https://github.com/opendatalab/MinerU/blob/mineru-4.0.12-released/docs/zh/reference/migration_4.md)。
 
-当前全局规则增加 `docling-local`：需要本地扫描识别、表格结构，或现有服务不可用、结果不佳时可采用；仅提取简单文字可用 `markitdown-local`。既有业务默认路线保持，用户明确指定时优先。具体入口和验收范围读取对应技能。
+## 资源与排障
+
+1. 先核对实际容器、固定镜像和 /v1/health，再区分上传、排队、模型加载、解析及结果下载。健康成功不等于模型推理成功。
+2. 本机 API 并发为 1，模型按需加载；第一次解析可能包含加载、即时编译和预热。不要仅凭界面进度停留认定失败。
+3. standard 解析前核对共享显卡占用，避免常驻 API 与临时 CLI 同时加载两套模型。资源不足先回读任务和占用，不擅自关闭 Ollama、ComfyUI 或其他用户服务。
+4. 已验证基础镜像、官方引擎文件和重建说明在根目录及 releases/4.0.12；以根目录 README 和本次维护记录为准。恢复按配置差异和精确原容器执行，保全切换后新结果，不全局清理 Docker 或覆盖旧数据。
+
+## 其他替补
+
+需要本地扫描识别、表格结构，或现有服务不可用、结果不佳时可读 docling-local；简单文字提取可读 markitdown-local。既有业务默认路线保持，用户明确指定时优先。
