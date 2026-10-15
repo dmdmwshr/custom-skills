@@ -21,7 +21,7 @@ PLAN_VERSION = "ImportUploadPlanV1"
 CHUNK_SIZE = 1048576
 SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 DECIMAL = re.compile(r"(?:0|[1-9][0-9]*)\Z")
-MAX_BYTES = 104857600
+MAX_BYTES = 300 * 1024 * 1024
 FIXED_CAPABILITIES = {
     "chunkSizeBytes": CHUNK_SIZE,
     "sessionIdleTtlSeconds": 86400,

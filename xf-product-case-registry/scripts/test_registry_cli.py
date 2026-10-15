@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -3433,6 +3434,36 @@ def test_deep_download_streams_and_enforces_size_limit(monkeypatch: pytest.Monke
             {"Origin": "https://registry.example", "X-CSRF-Token": TEST_CSRF},
             "file:one",
         )
+
+
+@pytest.mark.parametrize("has_length", [True, False])
+@pytest.mark.parametrize("extra_byte", [False, True])
+def test_deep_download_300_mib_boundary_streamed_without_large_buffer(
+    has_length: bool, extra_byte: bool,
+) -> None:
+    block = bytes(1024 * 1024)
+    expected = hashlib.sha256()
+    for _ in range(300):
+        expected.update(block)
+
+    class Body(httpx.SyncByteStream):
+        def __iter__(self):
+            yield from (block for _ in range(300))
+            if extra_byte:
+                yield b"!"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers = {"Content-Length": str(314572800 + int(extra_byte))} if has_length else {}
+        return httpx.Response(200, headers=headers, stream=Body())
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        args = (client, "https://registry.example", "file-id", "sha256:" + expected.hexdigest(),
+                {"Origin": "https://registry.example", "X-CSRF-Token": TEST_CSRF}, "file:one")
+        if extra_byte:
+            with pytest.raises(RegistryError, match="大小限制"):
+                cli.download_verified_file(*args)
+        else:
+            cli.download_verified_file(*args)
 
 
 def test_deep_download_non_recall_conflict_is_not_hash_mismatch() -> None:

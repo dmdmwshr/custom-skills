@@ -210,6 +210,27 @@ def test_parse_capabilities_returns_validated_capability_projection():
     assert parsed == value
 
 
+def test_300_mib_capability_and_plan_respect_file_job_and_legacy_limits():
+    maximum = 314572800
+    caps = chunks.parse_capabilities(
+        capabilities(maxFileBytes=str(maximum), maxJobBytes=str(maximum))
+    )
+    assert caps is not None
+    assert chunks.make_upload_plan(projection(size=maximum), caps)["files"][0]["sizeBytes"] == str(
+        maximum
+    )
+    with pytest.raises(chunks.ChunkProtocolError, match="大小"):
+        chunks.make_upload_plan(projection(size=maximum + 1), caps)
+    with pytest.raises(chunks.ChunkProtocolError, match="任务限额"):
+        chunks.make_upload_plan(
+            projection(size=maximum) + projection("second.pdf", size=1, ref="file:two"), caps
+        )
+    with pytest.raises(chunks.ChunkProtocolError, match="服务端"):
+        chunks.make_upload_plan(projection(size=104857601), capabilities())
+    with pytest.raises(chunks.ChunkProtocolError, match="已支持范围"):
+        chunks.parse_capabilities(capabilities(maxFileBytes=str(maximum + 1)))
+
+
 def test_validate_session_accepts_contiguous_resume_and_returns_original_dict(tmp_path: Path):
     data = b"resume-fixture"
     path = tmp_path / "fixture.pdf"
