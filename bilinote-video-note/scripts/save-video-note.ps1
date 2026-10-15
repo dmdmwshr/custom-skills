@@ -209,7 +209,7 @@ function Normalize-Title {
     param([string]$Title, [string]$Fallback)
 
     $value = if ([string]::IsNullOrWhiteSpace($Title)) { $Fallback } else { $Title }
-    $value = $value.Trim()
+    $value = [regex]::Replace($value.Trim(), '\s+', ' ')
     $value = $value.Trim('“', '”', '"', "'")
     if ([string]::IsNullOrWhiteSpace($value)) {
         return $Fallback
@@ -430,6 +430,10 @@ try {
         if ((Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash.ToLowerInvariant() -ne $resume.TranscriptSha256) {
             throw '原转写缓存已变化，恢复结果未验收。'
         }
+        $audioCache = Join-Path ([string]$config.backend_result_dir) "$($resume.TaskId)_audio.json"
+        if ((Get-FileHash -LiteralPath $audioCache -Algorithm SHA256).Hash.ToLowerInvariant() -ne $resume.AudioSha256) {
+            throw '原音频缓存已变化，恢复结果未验收。'
+        }
     }
 
     $audioMeta = $result.audio_meta
@@ -542,7 +546,7 @@ try {
         "{{provider_id}}"        = $effectiveProvider
         "{{model_name}}"         = $effectiveModel
         "{{task_id}}"            = $taskId
-        "{{attachments_dir}}"    = $attachmentsDir
+        "{{attachments_dir}}"    = $attachmentsDir.Replace('\', '/')
         "{{generated_at}}"       = $generatedAt
         "{{title}}"              = $title
         "{{source_url_markdown}}"= "[原始视频链接](<$canonicalUrl>)"

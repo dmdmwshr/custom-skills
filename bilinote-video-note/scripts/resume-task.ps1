@@ -44,5 +44,6 @@ function Resolve-VideoNoteResume {
     Write-JsonFile -Path (Join-Path $EvidenceDirectory 'manifest.json') -Value $manifest
     [pscustomobject]@{TaskId=$task; UploadedPath=$uploaded; Status=[string]$state.status;
         TranscriptSha256=(Get-FileHash -LiteralPath $transcriptPath -Algorithm SHA256).Hash.ToLowerInvariant();
+        AudioSha256=(Get-FileHash -LiteralPath $audioPath -Algorithm SHA256).Hash.ToLowerInvariant();
         EvidenceDirectory=$EvidenceDirectory}
 }
