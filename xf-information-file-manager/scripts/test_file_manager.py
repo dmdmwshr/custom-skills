@@ -200,5 +200,99 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '内容变化'): fm.apply(self.root, m)
         self.assertEqual(b'changed bytes', (self.root / new_prefix / '原件.txt').read_bytes())
 
+    def short_name_candidate(self, current):
+        candidate = copy.deepcopy(current)
+        candidate['documents'][0]['short_title'] = '国家局19号文'
+        planned, _ = fm.layout(self.root, candidate)
+        mappings = {}
+        for old_doc, new_doc in zip(current['documents'], planned['documents']):
+            for old, new in zip(old_doc['members'], new_doc['members']):
+                for key in ('archive_path', 'compilation_path'):
+                    if old.get(key) and old[key] != new[key]:
+                        mappings[old[key]] = new[key]
+                        if Path(old[key]).parent != Path(new[key]).parent:
+                            mappings[Path(old[key]).parent.as_posix()] = Path(new[key]).parent.as_posix()
+        candidate['snapshot_relocations'] = mappings
+        return candidate
+
+    def long_document(self):
+        d = self.document(title='关于印发' + '综合性消防救援信息化建设管理' * 6 + '的通知')
+        d['number'] = '消防〔2026〕19号'
+        other = self.root / '另一个格式.pdf'; other.write_bytes(b'pdf alternative')
+        d['members'].append(dict(source=other.name, sha256=fm.digest(other), role='main',
+                                 name='', in_compilation=False))
+        return d
+
+    def test_short_title_preserves_official_metadata_and_future_names(self):
+        d = self.long_document()
+        fm.apply(self.root, self.manifest(d))
+        current = fm.load(self.root / fm.RECORDS[0])
+        candidate = self.short_name_candidate(current)
+        result = fm.apply(self.root, candidate)
+        saved = fm.load(self.root / fm.RECORDS[0]); latest = saved['documents'][0]
+        self.assertEqual(d['title'], latest['title'])
+        self.assertEqual(d['number'], latest['number'])
+        self.assertEqual(d['id'], latest['id'])
+        self.assertEqual('[支队][管理] 国家局19号文', latest['canonical_name'])
+        self.assertNotIn('snapshot_relocations', saved)
+        transaction = self.root / saved['transaction']
+        record = fm.load(transaction / 'transaction.json')
+        for part in ('before', 'replaced'):
+            self.assertEqual(record['before'], fm.scan_snapshot(transaction / part, record['snapshot_relocations']))
+            self.assertTrue(all(len(p.name.encode('utf-8')) <= 255 for p in (transaction / part).rglob('*')))
+        self.assertTrue(fm.check(self.root, saved, self.frozen)['verified'])
+        self.assertFalse(fm.apply(self.root, saved)['changed'])
+        self.assertIn('国家局19号文', (self.root / result['report']).read_text(encoding='utf-8-sig'))
+
+    def test_short_name_failure_recovers_logical_original_snapshot(self):
+        fm.apply(self.root, self.manifest(self.long_document()))
+        before = fm.scan(self.root, fm.MANAGED)
+        records = fm.record_snapshot(self.root)
+        candidate = self.short_name_candidate(fm.load(self.root / fm.RECORDS[0]))
+        with patch.object(fm, 'txt', side_effect=OSError('injected record write failure')):
+            with self.assertRaisesRegex(RuntimeError, '执行失败'):
+                fm.apply(self.root, candidate)
+        failed = [p for p in (self.root / fm.MGMT / '事务').iterdir()
+                  if fm.load(p / 'transaction.json')['phase'] == 'failed'][0]
+        self.assertTrue(fm.recover(self.root, failed.relative_to(self.root).as_posix())['recovered'])
+        self.assertEqual(before, fm.scan(self.root, fm.MANAGED))
+        self.assertEqual(records, fm.record_snapshot(self.root))
+        self.assertTrue(fm.check(self.root, fm.load(self.root / fm.RECORDS[0]), self.frozen)['verified'])
+
+    def test_committed_storage_migration_preserves_original_record_and_bytes(self):
+        fm.apply(self.root, self.manifest(self.long_document()))
+        current = fm.load(self.root / fm.RECORDS[0])
+        current['documents'][0]['evidence'] += '；新增核对说明'
+        fm.apply(self.root, current)
+        current = fm.load(self.root / fm.RECORDS[0])
+        rel = current['transaction']; transaction = self.root / rel
+        old_record_hash = fm.digest(transaction / 'transaction.json')
+        old_record = fm.load(transaction / 'transaction.json')
+        mappings = self.short_name_candidate(current)['snapshot_relocations']
+        result = fm.migrate_storage(self.root, rel, mappings)
+        record = fm.load(transaction / 'transaction.json')
+        self.assertTrue(result['changed'])
+        self.assertEqual('committed', record['phase'])
+        self.assertEqual(old_record['before'], record['before'])
+        migration = fm.load(transaction / record['storage_migrations'][0])
+        self.assertEqual(old_record_hash, fm.digest(transaction / migration['original_record']))
+        for part in ('before', 'replaced'):
+            self.assertEqual(old_record['before'], fm.scan_snapshot(transaction / part, mappings))
+            self.assertTrue(all(len(p.name.encode('utf-8')) <= 255 for p in (transaction / part).rglob('*')))
+        self.assertFalse(fm.migrate_storage(self.root, rel, mappings)['changed'])
+
+    def test_snapshot_mapping_rejects_collisions_and_unrelated_targets(self):
+        fm.apply(self.root, self.manifest(self.long_document()))
+        current = fm.load(self.root / fm.RECORDS[0])
+        candidate = self.short_name_candidate(current)
+        paths = list(candidate['snapshot_relocations'])
+        candidate['snapshot_relocations'][paths[0]] = '9、专项/不应移动.doc'
+        with self.assertRaisesRegex(ValueError, '受管目录'):
+            fm.make_plan(self.root, candidate)
+        candidate = self.short_name_candidate(current)
+        candidate['snapshot_relocations'][paths[0]] += '.other'
+        with self.assertRaisesRegex(ValueError, '内容相同的新布局'):
+            fm.make_plan(self.root, candidate)
+
 
 if __name__ == '__main__': unittest.main()

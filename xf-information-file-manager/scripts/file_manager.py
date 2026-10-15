@@ -117,7 +117,9 @@ def name(s):
     return s
 
 
-def stem(d):
+def stem(d, use_short=True):
+    if use_short and d.get('short_title'):
+        return name(f"[{d['level']}][{d['topic']}] {d['short_title']}")
     title = d['title']
     suffix = d.get('number') or d.get('date')
     return name(f"[{d['level']}][{d['topic']}] {title}" + (f'（{suffix}）' if suffix else ''))
@@ -130,7 +132,7 @@ def archive_stem(d):
 def sort_key(d):
     date = d.get('date', '')
     return (LEVELS.index(d['level']), BUSINESS.index(d['business']),
-            -int(date.replace('-', '')) if date else 0, stem(d), d['id'])
+            -int(date.replace('-', '')) if date else 0, stem(d, use_short=False), d['id'])
 
 
 def validate(root, manifest):
@@ -141,6 +143,8 @@ def validate(root, manifest):
         if not d.get('id') or d['id'] in ids:
             raise ValueError('文书 id 缺失或重复')
         ids.add(d['id'])
+        if 'short_title' in d and (not isinstance(d['short_title'], str) or not d['short_title'].strip()):
+            raise ValueError('短名必须为非空文字：' + d['id'])
         if (d['level'] not in LEVELS or d['business'] not in BUSINESS
                 or d['status'] not in STATUSES or d['archive_category'] not in range(1, 6)
                 or d['section'] not in range(1, 4)):
@@ -240,6 +244,12 @@ def make_plan(root, manifest):
     validate(root, manifest)
     out, files = layout(root, manifest)
     before = scan(root, MANAGED); after = {p: v['sha256'] for p, v in files.items()}
+    relocations = manifest.get('snapshot_relocations', {})
+    validate_snapshot_relocations(root, before, relocations)
+    for rel, sha in before.items():
+        destination = relocated(rel, relocations)
+        if destination != rel and after.get(destination) != sha:
+            raise ValueError('备份短名映射必须对应内容相同的新布局：' + rel)
     archive_after = {h for p, h in after.items() if p.split('/')[0] in ARCHIVES}
     if not set(before.values()).issubset(archive_after):
         raise ValueError('新布局遗漏旧档案或实时版内容，禁止执行；先将原件纳入分类留档')
@@ -309,6 +319,120 @@ def record_snapshot(root):
     return {p: digest(root / p) if (root / p).exists() else None for p in RECORDS}
 
 
+def relocated(rel, relocations):
+    matches = [p for p in relocations if rel == p or rel.startswith(p + '/')]
+    prefix = max(matches, key=len) if matches else None
+    return relocations[prefix] + rel[len(prefix):] if prefix else rel
+
+
+def validate_snapshot_relocations(root, before, relocations):
+    if not isinstance(relocations, dict) or len(set(relocations.values())) != len(relocations):
+        raise ValueError('备份路径映射无效或目标重复')
+    reverse = {new: old for old, new in relocations.items()}
+    for old, new in relocations.items():
+        safe(root, old); safe(root, new)
+        if old == new or not any(p == old or p.startswith(old + '/') for p in before):
+            raise ValueError('备份映射没有对应原件：' + old)
+        if not any(old.startswith(p + '/') and new.startswith(p + '/') for p in MANAGED):
+            raise ValueError('备份映射不得跨受管目录：' + old)
+        if relocated(str(PurePosixPath(old).parent), relocations) != str(PurePosixPath(new).parent):
+            raise ValueError('备份映射必须明确保留父子关系：' + old)
+        if any(len(part.encode('utf-8')) > 255 for part in PurePosixPath(new).parts):
+            raise ValueError('备份映射目标名称仍然过长：' + new)
+    folded = set()
+    for rel in before:
+        new = relocated(rel, relocations)
+        if new.casefold() in folded or relocated(new, reverse) != rel:
+            raise ValueError('备份映射碰撞或不可逆：' + rel)
+        folded.add(new.casefold())
+
+
+def copy_snapshot(source, target, relocations=None):
+    relocations = relocations or {}
+    for prefix in MANAGED:
+        folder = safe(source, prefix)
+        for p in [folder] + sorted(folder.rglob('*')):
+            rel = p.relative_to(source).as_posix(); safe(source, rel)
+            destination = safe(target, relocated(rel, relocations))
+            if p.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(p, destination)
+
+
+def scan_snapshot(snapshot, relocations=None):
+    reverse = {new: old for old, new in (relocations or {}).items()}
+    logical = {}
+    for physical, sha in scan(snapshot, MANAGED).items():
+        rel = relocated(physical, reverse)
+        if rel in logical:
+            raise ValueError('备份逻辑路径重复：' + rel)
+        logical[rel] = sha
+    return logical
+
+
+def rename_snapshot(snapshot, relocations):
+    steps = []
+    for old, new in sorted(relocations.items(), key=lambda item: len(PurePosixPath(item[0]).parts), reverse=True):
+        source = safe(snapshot, old)
+        destination = source.with_name(PurePosixPath(new).name)
+        if not source.exists() or destination.exists():
+            raise ValueError('备份改名源缺失或目标已存在：' + old)
+        steps.append((source, destination))
+    for source, destination in steps:
+        source.rename(destination)
+
+
+def migrate_storage(root, rel, relocations):
+    """Rename committed snapshot storage while retaining logical history and recovery."""
+    transaction = safe(root, rel)
+    if not transaction.is_relative_to(safe(root, MGMT + '/事务')):
+        raise ValueError('不是本业务事务目录')
+    lock = safe(root, MGMT + '/.执行锁')
+    fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY); os.close(fd)
+    try:
+        record_path = transaction / 'transaction.json'; record = load(record_path)
+        if record['phase'] != 'committed':
+            raise ValueError('只允许整理已完成事务，不触碰失败断点')
+        current = record.get('snapshot_relocations', {})
+        validate_snapshot_relocations(root, record['before'], relocations)
+        for part in ('before', 'replaced'):
+            if scan_snapshot(transaction / part, current) != record['before']:
+                raise ValueError('历史事务快照缺失或内容变化：' + part)
+        for path, sha in record['records'].items():
+            if sha and digest(transaction / 'before' / path) != sha:
+                raise ValueError('历史管理记录内容变化：' + path)
+        if current:
+            if current != relocations:
+                raise ValueError('历史事务已有不同存储映射，停止覆盖')
+            return {'changed': False, 'transaction': rel, 'verified': True}
+        version = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        prior = 'transaction_before_storage_migration_' + version + '.json'
+        shutil.copy2(record_path, transaction / prior)
+        receipt_path = transaction / ('storage_migration_' + version + '.json')
+        receipt = {'phase': 'preparing', 'logical_version': record['version'],
+                   'original_record': prior, 'original_record_sha256': digest(record_path),
+                   'relocations': relocations, 'completed_parts': []}
+        save(receipt_path, receipt)
+        try:
+            for part in ('before', 'replaced'):
+                rename_snapshot(transaction / part, relocations)
+                if scan_snapshot(transaction / part, relocations) != record['before']:
+                    raise ValueError('历史事务改名后校验失败：' + part)
+                receipt['completed_parts'].append(part); save(receipt_path, receipt)
+            record['snapshot_relocations'] = relocations
+            record.setdefault('storage_migrations', []).append(receipt_path.name)
+            save(record_path, record)
+            receipt['phase'] = 'committed'; save(receipt_path, receipt)
+            return {'changed': True, 'transaction': rel, 'snapshots': 2, 'verified': True}
+        except Exception as exc:
+            receipt.update(phase='failed', error=str(exc)); save(receipt_path, receipt)
+            raise RuntimeError('存储整理失败，保留现场：' + str(receipt_path)) from exc
+    finally:
+        lock.unlink()
+
+
 def check(root, manifest, frozen=None):
     validate(root, manifest)
     recalculated, layout_files = layout(root, manifest)
@@ -338,7 +462,7 @@ def check(root, manifest, frozen=None):
 
 def semantic(manifest):
     value = copy.deepcopy(manifest)
-    for k in ('version', 'previous_version', 'transaction', 'protected_files'): value.pop(k, None)
+    for k in ('version', 'previous_version', 'transaction', 'protected_files', 'snapshot_relocations'): value.pop(k, None)
     value.pop('changes', None)
     for d in value['documents']:
         for m in d['members']:
@@ -368,6 +492,7 @@ def apply(root, manifest):
         record = {'version': version, 'phase': 'preparing', 'before': plan['before'],
                   'after': plan['after'], 'protected_files': frozen, 'records': record_snapshot(root),
                   'protected_relocations': manifest.get('protected_relocations', {}),
+                  'snapshot_relocations': manifest.get('snapshot_relocations', {}),
                   'version_note': LIVE + '/版本变更说明/' + version + '_更新说明.txt'}
         save(transaction / 'transaction.json', record)
         try:
@@ -377,12 +502,11 @@ def apply(root, manifest):
                 target = stage / rel; target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(safe(root, info['source']), target)
                 if digest(target) != info['sha256']: raise ValueError('暂存校验失败：' + rel)
-            for prefix in MANAGED:
-                shutil.copytree(safe(root, prefix), backup / prefix)
+            copy_snapshot(root, backup, record['snapshot_relocations'])
             for rel, sha in record['records'].items():
                 if sha:
                     p = backup / rel; p.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(root / rel, p)
-            if scan(backup, MANAGED) != plan['before']:
+            if scan_snapshot(backup, record['snapshot_relocations']) != plan['before']:
                 raise ValueError('备份校验失败')
             if scan(root, MANAGED) != plan['before'] or protected(root) != frozen or record_snapshot(root) != record['records']:
                 raise ValueError('执行前文件被其他进程修改')
@@ -392,6 +516,10 @@ def apply(root, manifest):
                 retained.parent.mkdir(parents=True, exist_ok=True)
                 target.rename(retained)
                 (stage / prefix).rename(target)
+            if record['snapshot_relocations']:
+                rename_snapshot(transaction / 'replaced', record['snapshot_relocations'])
+                if scan_snapshot(transaction / 'replaced', record['snapshot_relocations']) != plan['before']:
+                    raise ValueError('保留现场存储映射校验失败')
             for d in out['documents']:
                 for m in d['members']:
                     m['sources'] = sorted(set(m.get('sources', []) + [m['source']]))
@@ -399,6 +527,7 @@ def apply(root, manifest):
             out.update(version=version, previous_version=old.get('version') if old else None,
                        transaction=transaction.relative_to(root).as_posix(), protected_files=frozen)
             out.pop('protected_relocations', None)
+            out.pop('snapshot_relocations', None)
             result = check(root, out, frozen)
             save(root / RECORDS[0], out)
             txt(root / RECORDS[1], directory(out))
@@ -424,7 +553,7 @@ def recover(root, rel):
         raise ValueError('仅支持恢复已进入写入阶段的失败事务')
     if protected(root) != record['protected_files']:
         raise ValueError('固定目录已变化，停止恢复并核对')
-    if scan(transaction / 'before', MANAGED) != record['before']:
+    if scan_snapshot(transaction / 'before', record.get('snapshot_relocations')) != record['before']:
         raise ValueError('备份损坏，停止恢复')
     current = scan(root, MANAGED)
     for p, h in current.items():
@@ -435,7 +564,8 @@ def recover(root, rel):
         target = safe(root, prefix)
         if target.exists():
             hold = evidence / prefix; hold.parent.mkdir(parents=True, exist_ok=True); target.rename(hold)
-        shutil.copytree(transaction / 'before' / prefix, target)
+    reverse = {new: old for old, new in record.get('snapshot_relocations', {}).items()}
+    copy_snapshot(transaction / 'before', root, reverse)
     for rel, sha in record['records'].items():
         target = safe(root, rel)
         if target.exists():
@@ -458,6 +588,9 @@ def main():
     for command in ('preview', 'apply'):
         sub.add_parser(command).add_argument('--manifest', required=True)
     sub.add_parser('recover').add_argument('--transaction', required=True)
+    storage = sub.add_parser('migrate-storage')
+    storage.add_argument('--transaction', required=True)
+    storage.add_argument('--relocations', required=True)
     args = parser.parse_args(); root = Path(args.root).resolve()
     if not root.is_dir(): raise ValueError('业务根目录不存在')
     if args.command == 'inventory':
@@ -466,6 +599,8 @@ def main():
         manifest = load(root / RECORDS[0]); result = check(root, manifest, manifest.get('protected_files'))
     elif args.command == 'recover':
         result = recover(root, args.transaction)
+    elif args.command == 'migrate-storage':
+        result = migrate_storage(root, args.transaction, load(args.relocations))
     elif args.command == 'preview':
         out, files, plan = make_plan(root, load(args.manifest))
         result = {'documents': len(out['documents']), 'included': sum(d['included'] for d in out['documents']),
