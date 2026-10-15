@@ -296,3 +296,41 @@ def gaps_acknowledged(source_state: dict[str, Any]) -> bool:
         and disposition.get("acknowledgedAt")
         and disposition.get("materialGapsSha256") == _digest(gaps)
     )
+
+
+def relocated_original_bindings(
+    layout: Any, source_state: dict[str, Any], previous: Path, archived: Path
+) -> dict[str, Any]:
+    """Relocate exact evidence references after a verified move, keeping receipt bytes."""
+    changes: dict[str, Any] = {}
+    for key, binding in (source_state.get("manualIntakes") or {}).items():
+        old_path = layout.root / binding["evidencePath"]
+        if not old_path.is_relative_to(previous):
+            continue
+        new_path = archived / old_path.relative_to(previous)
+        if source._sha256(new_path) != binding["evidenceSha256"]:
+            raise ws.WorkspaceStateError("归档后的手动交件回执摘要不一致")
+        changes.setdefault("manualIntakes", {})[key] = {
+            **binding,
+            "evidencePath": new_path.relative_to(layout.root).as_posix(),
+            "status": "ARCHIVED_PRIMARY",
+            "archivedOriginalPath": str(archived),
+        }
+    for field in ("packageRelativePath", "screenshotRelativePath"):
+        value = source_state.get(field)
+        if value and (layout.root / value).is_relative_to(previous):
+            path = archived / (layout.root / value).relative_to(previous)
+            if not path.is_file():
+                raise ws.WorkspaceStateError("归档后的手动原件不存在")
+            changes[field] = path.relative_to(layout.root).as_posix()
+    classification = source_state.get("classification") or {}
+    evidence = classification.get("evidencePath")
+    if evidence and (layout.root / evidence).is_relative_to(previous):
+        new_path = archived / (layout.root / evidence).relative_to(previous)
+        if source._sha256(new_path) != classification.get("evidenceSha256"):
+            raise ws.WorkspaceStateError("归档后的分类证据摘要不一致")
+        changes["classification"] = {
+            **classification,
+            "evidencePath": new_path.relative_to(layout.root).as_posix(),
+        }
+    return changes

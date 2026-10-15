@@ -165,3 +165,23 @@ def test_archive_retains_source_gaps_in_receipt(pair):
     assert receipt["sourceIssuesRetained"] is True
     assert receipt["sourceMaterialGaps"] == [{"document": "missing"}]
     assert ws.load_waterline(layout)["cases"][PROJECT]["source"]["materialGaps"]
+
+
+def test_archived_manual_pair_reuses_moved_receipt(pair):
+    layout, review = pair
+    original = accept_pair(layout, review)
+    layout.work_case_dir(PROJECT).mkdir()
+    result = ws.archive_verified_case(
+        layout,
+        PROJECT,
+        upload_status="VERIFIED",
+        verification={"status": "VERIFIED", "caseId": "case", "filesVerified": 1},
+        manifest_sha256="sha256:" + "a" * 64,
+        package_sha256=review["packageSha256"],
+    )
+    replay = accept_pair(layout, review)
+    assert replay["status"] == "REUSED"
+    assert Path(replay["evidencePath"]).parent == Path(result["archivedOriginal"])
+    assert not Path(original["evidencePath"]).exists()
+    source = ws.load_waterline(layout)["cases"][PROJECT]["source"]
+    assert (layout.root / source["packageRelativePath"]).is_file()

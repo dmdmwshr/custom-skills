@@ -1251,9 +1251,9 @@ def archive_verified_case(
     with _waterline_lock(layout):
         source_state = load_waterline(layout).get("cases", {}).get(project, {}).get("source") or {}
         if __package__:
-            from .manual_intake import gaps_acknowledged
+            from .manual_intake import gaps_acknowledged, relocated_original_bindings
         else:
-            from manual_intake import gaps_acknowledged
+            from manual_intake import gaps_acknowledged, relocated_original_bindings
         retained_source_issues = gaps_acknowledged(source_state)
         if source_state.get("materialGaps") and not retained_source_issues:
             raise WorkspaceStateError("来源材料仍有明确缺口，保留已核验断点，暂不归档")
@@ -1386,6 +1386,9 @@ def archive_verified_case(
                     "completedAt": verified_at,
                     "lastSeenAt": verified_at,
                     "errorSummary": None,
+                    "source": relocated_original_bindings(
+                        layout, source_state, pending_source, completed_target
+                    ),
                     "archive": {
                         "generation": generation,
                         "originalPath": str(completed_target),
