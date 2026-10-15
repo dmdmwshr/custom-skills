@@ -32,6 +32,7 @@ metadata:
 - `youtube`
 - `kuaishou`
 - `local`
+- 任意本地素材不由本技能接收；已核验抖音下载回执的媒体复用是下述窄例外，归档来源仍是抖音。
 - 需要浏览器自动化才能完成的站点流程
 - 用户明确要求手工重写整篇内容，而不是复用 BiliNote 输出
 
@@ -75,6 +76,8 @@ pwsh -ExecutionPolicy Bypass -File "C:\Users\12070\.cc-switch\skills\自建skill
 ```powershell
 -Platform "bilibili|douyin" -ProviderId "<provider_id>" -ModelName "<model_name>"
 ```
+
+抖音网页解析不兼容时，可先沿 `video-download` 或视频链接收存项目入口下载并完成文件验收，再为同一原始链接追加 `-VerifiedDownloadReceipt <完成下载的JSON回执>`。脚本复核来源、编号、文件大小及 SHA-256，将该视频通过本机 BiliNote 原有上传接口交给同一转写/总结链路；不改全局模型与配置。后端处理平台真实记录为 local，Obsidian 归档仍按原始 douyin 编号和标题，附件记录媒体摘要与回执来源。不能伪造回执或用别的视频替代来源。可用 `-ProgressReceiptPath <本任务回执路径>` 保存后端任务编号和阶段；未知或失败先读原状态，不重复提交。
 
 3. 固定脚本会完成以下动作：
    - 识别平台

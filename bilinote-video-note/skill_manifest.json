@@ -1,6 +1,6 @@
 {
   "skill_name": "bilinote-video-note",
-  "skill_version": "1.0.0",
+  "skill_version": "1.1.0",
   "x-custom-skill": true,
   "x-managed-by": "cc-switch",
   "x-source-repo": "dmdmwshr/custom-skills",
@@ -17,6 +17,7 @@
     "references/video-note-template.md",
     "references/skill-doc-template.md",
     "scripts/bn.ps1",
-    "scripts/save-video-note.ps1"
+    "scripts/save-video-note.ps1",
+    "scripts/verified-media.ps1"
   ]
 }

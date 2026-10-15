@@ -10,7 +10,11 @@ param(
     [string]$ProviderId,
 
     [Parameter(Mandatory = $false)]
-    [string]$ModelName
+    [string]$ModelName,
+
+    [string]$VerifiedDownloadReceipt,
+
+    [string]$ProgressReceiptPath
 )
 
 Set-StrictMode -Version Latest
@@ -22,6 +26,9 @@ $script:SkillName = "bilinote-video-note"
 $script:SkillRoot = Split-Path -Parent $PSScriptRoot
 $script:ConfigPath = Join-Path $script:SkillRoot "references\local-config.json"
 $script:TemplatePath = Join-Path $script:SkillRoot "references\video-note-template.md"
+. (Join-Path $PSScriptRoot 'verified-media.ps1')
+$taskId = $null
+$verifiedMedia = $null
 
 function Read-JsonFile {
     param([string]$Path)
@@ -335,6 +342,9 @@ try {
     }
 
     $backendBaseUrl = [string]$config.backend_base_url
+    if ($VerifiedDownloadReceipt) {
+        $verifiedMedia = Resolve-VerifiedVideoMedia -ReceiptPath $VerifiedDownloadReceipt -VideoUrl $VideoUrl -Platform $effectivePlatform
+    }
     $health = Invoke-JsonApi -Uri "$backendBaseUrl/api/sys_health" -Method "GET"
     if ($health.code -ne 0) {
         throw "BiliNote 后端健康检查失败：$($health.msg)"
@@ -353,12 +363,21 @@ try {
         video_understanding = [bool]$config.default_request.video_understanding
     }
 
+    if ($verifiedMedia) {
+        $payload.video_url = Send-VerifiedVideoMedia -Media $verifiedMedia -BackendBaseUrl $backendBaseUrl
+        $payload.platform = 'local'
+        $payload.extras = '原始来源为抖音公开视频。标题：' + $verifiedMedia.Title + '；来源：https://www.douyin.com/video/' + $verifiedMedia.SourceId + '。以视频实际内容为依据，不把文件名当成内容。'
+    }
+
     $createResponse = Invoke-JsonApi -Uri "$backendBaseUrl/api/generate_note" -Method "POST" -Body $payload
     if ($createResponse.code -ne 0 -or -not $createResponse.data.task_id) {
         throw "发起任务失败：$($createResponse.msg)"
     }
 
     $taskId = [string]$createResponse.data.task_id
+    if ($ProgressReceiptPath) {
+        Write-JsonFile -Path $ProgressReceiptPath -Value ([ordered]@{task_id=$taskId; status='submitted'; processing_platform=$payload.platform; source_url=$VideoUrl; uploaded_path=if($verifiedMedia){$payload.video_url}else{$null}})
+    }
     $timeoutSeconds = [int]$config.timeout_seconds
     $pollIntervalSeconds = [int]$config.poll_interval_seconds
     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
@@ -372,6 +391,9 @@ try {
 
         $finalStatus = $statusResponse
         $taskState = [string]$statusResponse.data.status
+        if ($ProgressReceiptPath) {
+            Write-JsonFile -Path $ProgressReceiptPath -Value ([ordered]@{task_id=$taskId; status=$taskState; processing_platform=$payload.platform; source_url=$VideoUrl; uploaded_path=if($verifiedMedia){$payload.video_url}else{$null}})
+        }
         if ($taskState -eq "SUCCESS") {
             break
         }
@@ -389,8 +411,8 @@ try {
     }
 
     $audioMeta = $result.audio_meta
-    $sourceId = Get-SourceId -AudioMeta $audioMeta -Url $VideoUrl
-    $title = Normalize-Title -Title ([string]$audioMeta.title) -Fallback $sourceId
+    $sourceId = if($verifiedMedia){$verifiedMedia.SourceId}else{Get-SourceId -AudioMeta $audioMeta -Url $VideoUrl}
+    $title = Normalize-Title -Title $(if($verifiedMedia){$verifiedMedia.Title}else{[string]$audioMeta.title}) -Fallback $sourceId
     $safeTitle = ConvertTo-SafeFileName -Text $title
 
     $noteRoot = [string]$config.note_roots.$effectivePlatform
@@ -432,6 +454,9 @@ try {
         attachments_dir     = $attachmentsDir
         backend_result_path = $backendResultPath
         backend_status_path = $backendStatusPath
+        processing_platform = $payload.platform
+        verified_media_sha256 = if($verifiedMedia){$verifiedMedia.Sha256}else{$null}
+        verified_media_receipt = if($verifiedMedia){$verifiedMedia.ReceiptPath}else{$null}
     }
     Write-JsonFile -Path $contextJsonPath -Value $context
 
@@ -528,7 +553,7 @@ try {
         success             = $false
         platform            = if ([string]::IsNullOrWhiteSpace($Platform)) { $null } else { $Platform }
         source_id           = $null
-        task_id             = $null
+        task_id             = $taskId
         note_path           = $null
         attachments_dir     = $null
         backend_result_path = $null
