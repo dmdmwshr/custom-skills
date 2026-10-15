@@ -51,7 +51,8 @@ metadata:
 当前固定约定：
 
 - BiliNote 后端：`http://127.0.0.1:8483`
-- 默认模型：`openai / gpt-5.4`
+- 默认供应商：BiliNote 已登记的 `codex-local`，复用本机 `127.0.0.1:8787/v1` 兼容接口；原 OpenAI 供应商保留。
+- 默认模型：读取 `model_roles_file` 中的 `strong` 角色；显式 `-ModelName` 优先，中央文件不存在时兼容原 `default_request.model_name`。
 - 正文与附件分离存放
 - `8001` 不参与本 skill
 
@@ -78,6 +79,8 @@ pwsh -ExecutionPolicy Bypass -File "C:\Users\12070\.cc-switch\skills\自建skill
 ```
 
 抖音网页解析不兼容时，可先沿 `video-download` 或视频链接收存项目入口下载并完成文件验收，再为同一原始链接追加 `-VerifiedDownloadReceipt <完成下载的JSON回执>`。脚本复核来源、编号、文件大小及 SHA-256，将该视频通过本机 BiliNote 原有上传接口交给同一转写/总结链路；不改全局模型与配置。后端处理平台真实记录为 local，Obsidian 归档仍按原始 douyin 编号和标题，附件记录媒体摘要与回执来源。不能伪造回执或用别的视频替代来源。可用 `-ProgressReceiptPath <本任务回执路径>` 保存后端任务编号和阶段；未知或失败先读原状态，不重复提交。
+
+用户明确授权恢复已经提交的任务时，可追加 `-ResumeProgressReceiptPath <原进度回执>`、同一 `-VerifiedDownloadReceipt` 和新的 `-ProgressReceiptPath`。入口核实同一来源、上传媒体摘要、后端 FAILED/SUCCESS、完整转写与音频缓存；在新回执旁保存原失败状态及缓存哈希，再通过后端已有 `task_id` 恢复总结，已有 SUCCESS 只回读。原进度和原业务失败回执保持；处理中、未知状态或基线已存在时停止，不重复上传、下载或转写。不能用此入口改写另一视频的任务。
 
 3. 固定脚本会完成以下动作：
    - 识别平台

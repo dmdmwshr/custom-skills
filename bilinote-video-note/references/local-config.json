@@ -2,6 +2,7 @@
   "skill_name": "bilinote-video-note",
   "backend_base_url": "http://127.0.0.1:8483",
   "backend_result_dir": "D:\\Program_Files\\BiliNote-releases\\2.4.5\\backend\\note_results",
+  "model_roles_file": "%USERPROFILE%/.config/ai-models.json",
   "supported_platforms": [
     "bilibili",
     "douyin"
@@ -13,8 +14,9 @@
     "screenshot": false,
     "video_understanding": false,
     "format": [],
-    "provider_id": "openai",
-    "model_name": "gpt-5.4"
+    "provider_id": "859650d5-fbee-4018-9760-5e12136f0a47",
+    "model_name": "gpt-5.4",
+    "model_role": "strong"
   },
   "poll_interval_seconds": 5,
   "timeout_seconds": 1800,
@@ -50,7 +52,7 @@
   "notes": [
     "正文笔记与附件目录分离保存。",
     "默认只支持 bilibili 和 douyin。",
-    "默认模型固定为 openai/gpt-5.4，但允许调用时覆盖。",
+    "默认模型从中央模型文件的 strong 角色读取；中央文件不存在时兼容原 model_name，显式 ModelName 参数优先。",
     "source_id 优先取 audio_meta.video_id，取不到时回退到规范化 URL 哈希。",
     "转写全文与任务 JSON 不直接写入正文。"
   ]

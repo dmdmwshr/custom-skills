@@ -14,7 +14,9 @@ param(
 
     [string]$VerifiedDownloadReceipt,
 
-    [string]$ProgressReceiptPath
+    [string]$ProgressReceiptPath,
+
+    [string]$ResumeProgressReceiptPath
 )
 
 Set-StrictMode -Version Latest
@@ -27,6 +29,8 @@ $script:SkillRoot = Split-Path -Parent $PSScriptRoot
 $script:ConfigPath = Join-Path $script:SkillRoot "references\local-config.json"
 $script:TemplatePath = Join-Path $script:SkillRoot "references\video-note-template.md"
 . (Join-Path $PSScriptRoot 'verified-media.ps1')
+. (Join-Path $PSScriptRoot 'model-role.ps1')
+. (Join-Path $PSScriptRoot 'resume-task.ps1')
 $taskId = $null
 $verifiedMedia = $null
 
@@ -335,11 +339,7 @@ try {
         $ProviderId.Trim()
     }
 
-    $effectiveModel = if ([string]::IsNullOrWhiteSpace($ModelName)) {
-        [string]$config.default_request.model_name
-    } else {
-        $ModelName.Trim()
-    }
+    $effectiveModel = Resolve-VideoNoteModel -Config $config -ExplicitModel $ModelName
 
     $backendBaseUrl = [string]$config.backend_base_url
     if ($VerifiedDownloadReceipt) {
@@ -363,18 +363,34 @@ try {
         video_understanding = [bool]$config.default_request.video_understanding
     }
 
-    if ($verifiedMedia) {
+    $resume = $null
+    if ($ResumeProgressReceiptPath) {
+        if (-not $ProgressReceiptPath -or [IO.Path]::GetFullPath($ResumeProgressReceiptPath) -eq [IO.Path]::GetFullPath($ProgressReceiptPath)) {
+            throw '恢复必须使用新的进度回执路径，保留原失败回执。'
+        }
+        $resume = Resolve-VideoNoteResume -ProgressPath $ResumeProgressReceiptPath -VideoUrl $VideoUrl -Media $verifiedMedia `
+            -ResultDirectory ([string]$config.backend_result_dir) -EvidenceDirectory (Join-Path (Split-Path -Parent $ProgressReceiptPath) 'resume-baseline')
+        $payload.video_url = $resume.UploadedPath
+        $payload.platform = 'local'
+        $payload.task_id = $resume.TaskId
+        $payload.extras = '原始来源为抖音公开视频。标题：' + $verifiedMedia.Title + '；来源：https://www.douyin.com/video/' + $verifiedMedia.SourceId + '。以视频实际内容为依据，不把文件名当成内容。'
+    } elseif ($verifiedMedia) {
         $payload.video_url = Send-VerifiedVideoMedia -Media $verifiedMedia -BackendBaseUrl $backendBaseUrl
         $payload.platform = 'local'
         $payload.extras = '原始来源为抖音公开视频。标题：' + $verifiedMedia.Title + '；来源：https://www.douyin.com/video/' + $verifiedMedia.SourceId + '。以视频实际内容为依据，不把文件名当成内容。'
     }
 
-    $createResponse = Invoke-JsonApi -Uri "$backendBaseUrl/api/generate_note" -Method "POST" -Body $payload
-    if ($createResponse.code -ne 0 -or -not $createResponse.data.task_id) {
-        throw "发起任务失败：$($createResponse.msg)"
+    if ($resume -and $resume.Status -eq 'SUCCESS') {
+        $taskId = $resume.TaskId
+    } else {
+        if ($ProgressReceiptPath) {
+            Write-JsonFile -Path $ProgressReceiptPath -Value ([ordered]@{task_id=if($resume){$resume.TaskId}else{$null}; status='submitting'; processing_platform=$payload.platform; source_url=$VideoUrl; uploaded_path=if($verifiedMedia){$payload.video_url}else{$null}; model_name=$effectiveModel})
+        }
+        $createResponse = Invoke-JsonApi -Uri "$backendBaseUrl/api/generate_note" -Method "POST" -Body $payload
+        if ($createResponse.code -ne 0 -or -not $createResponse.data.task_id) { throw "发起任务失败：$($createResponse.msg)" }
+        $taskId = [string]$createResponse.data.task_id
+        if ($resume -and $taskId -ne $resume.TaskId) { throw '恢复返回了其他任务编号，结果未验收。' }
     }
-
-    $taskId = [string]$createResponse.data.task_id
     if ($ProgressReceiptPath) {
         Write-JsonFile -Path $ProgressReceiptPath -Value ([ordered]@{task_id=$taskId; status='submitted'; processing_platform=$payload.platform; source_url=$VideoUrl; uploaded_path=if($verifiedMedia){$payload.video_url}else{$null}})
     }
@@ -408,6 +424,12 @@ try {
     $result = $finalStatus.data.result
     if ($null -eq $result) {
         throw "任务完成，但未返回 result。"
+    }
+    if ($resume) {
+        $cache = Join-Path ([string]$config.backend_result_dir) "$($resume.TaskId)_transcript.json"
+        if ((Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash.ToLowerInvariant() -ne $resume.TranscriptSha256) {
+            throw '原转写缓存已变化，恢复结果未验收。'
+        }
     }
 
     $audioMeta = $result.audio_meta
@@ -457,6 +479,8 @@ try {
         processing_platform = $payload.platform
         verified_media_sha256 = if($verifiedMedia){$verifiedMedia.Sha256}else{$null}
         verified_media_receipt = if($verifiedMedia){$verifiedMedia.ReceiptPath}else{$null}
+        resumed_from_progress = if($resume){$ResumeProgressReceiptPath}else{$null}
+        resume_evidence_directory = if($resume){$resume.EvidenceDirectory}else{$null}
     }
     Write-JsonFile -Path $contextJsonPath -Value $context
 
