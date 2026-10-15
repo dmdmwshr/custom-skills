@@ -16,7 +16,12 @@ import browser_audit
 from saved_groups import snapshot as saved_snapshot
 
 
-def runtime_root() -> Path:
+def runtime_root(explicit: str | None = None) -> Path:
+    if explicit is not None:
+        root = Path(explicit)
+        if not root.is_absolute() or not (root / 'runtime.json').is_file():
+            raise ValueError('Explicit runtime root must be an existing absolute managed directory.')
+        return root.resolve()
     return Path(os.environ['LOCALAPPDATA']) / 'CodexBrowser' / 'playwright'
 
 
@@ -404,12 +409,13 @@ def main() -> int:
     parser.add_argument('--project', help='Visible project name; defaults to the current working directory name')
     parser.add_argument('--conversation', help='Real Codex conversation ID when CODEX_THREAD_ID is unavailable')
     parser.add_argument('--timeout', type=int, default=90, help='CLI wait limit in seconds; timeout means result unknown')
+    parser.add_argument('--runtime-root', help='Existing managed runtime directory for a background process outside the desktop package')
     parser.add_argument('command')
     parser.add_argument('arguments', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     secrets: list[str] = []
     try:
-        root = runtime_root()
+        root = runtime_root(args.runtime_root)
         settings = select_profile(read_settings(root), args.browser, args.profile)
         status = doctor(settings, root)
         if args.command == 'doctor':

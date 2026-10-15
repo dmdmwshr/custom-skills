@@ -33,6 +33,18 @@ class BrowserLauncherTests(unittest.TestCase):
             self.assertIn('-s=' + browser + '-case-1', argv)
             self.assertFalse(any(secret in a for a in argv))
 
+    def test_explicit_runtime_reuses_one_real_directory_without_changing_environment(self):
+        with patch.dict(os.environ, {'LOCALAPPDATA': str(self.root / 'different-context')}):
+            before = os.environ['LOCALAPPDATA']
+            self.assertEqual(cli.runtime_root(), Path(before) / 'CodexBrowser/playwright')
+            with self.assertRaises(ValueError):
+                cli.runtime_root(str(self.root))
+            (self.root / 'runtime.json').write_text('{}', encoding='utf-8')
+            self.assertEqual(cli.runtime_root(str(self.root)), self.root.resolve())
+            self.assertEqual(os.environ['LOCALAPPDATA'], before)
+            with self.assertRaises(ValueError):
+                cli.runtime_root('relative-runtime')
+
     def test_environment_is_local_and_conflicting_overrides_removed(self):
         with patch.dict(os.environ, {'PLAYWRIGHT_MCP_EXTENSION_TOKEN': 'old', 'PLAYWRIGHT_MCP_CDP_ENDPOINT': 'bad', 'DEBUG': '*'}):
             _, env, _ = self.prepare()
