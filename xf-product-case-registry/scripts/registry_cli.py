@@ -39,7 +39,7 @@ else:
     from upload_transport import bounded_request, upload_request
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
-VERSION = "1.10.9"
+VERSION = "1.11.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -5252,6 +5252,28 @@ def source_add_detail_command(args: argparse.Namespace) -> None:
     )
 
 
+def source_accept_manual_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(
+        f"{__package__}.manual_intake" if __package__ else "manual_intake"
+    )
+    try:
+        result = module.accept(resolve_source_layout(args), read_json(Path(args.review_json)))
+    except (workspace_api().WorkspaceStateError, source_intake_api().SourceIntakeError) as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def source_acknowledge_gaps_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(
+        f"{__package__}.manual_intake" if __package__ else "manual_intake"
+    )
+    try:
+        result = module.acknowledge_gaps(resolve_source_layout(args), args.project, args.reason)
+    except workspace_api().WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def source_snapshot_downloads_command(args: argparse.Namespace) -> None:
     source = source_intake_api()
     workspace = workspace_api()
@@ -5523,6 +5545,21 @@ def build_parser() -> argparse.ArgumentParser:
     source_detail.add_argument("--source-url", required=True)
     source_detail.add_argument("--screenshot", required=True)
     source_detail.set_defaults(func=source_add_detail_command)
+
+    manual_intake = source_sub.add_parser(
+        "accept-manual", help="接收已逐图核清的手动原始 ZIP 和详情截图"
+    )
+    add_workspace_resolution_options(manual_intake)
+    manual_intake.add_argument("--review-json", required=True)
+    manual_intake.set_defaults(func=source_accept_manual_command)
+
+    acknowledge = source_sub.add_parser(
+        "acknowledge-gaps", help="按当前用户口径保留来源缺件并收口现有材料"
+    )
+    add_workspace_resolution_options(acknowledge)
+    acknowledge.add_argument("--project", required=True)
+    acknowledge.add_argument("--reason", required=True)
+    acknowledge.set_defaults(func=source_acknowledge_gaps_command)
 
     source_snapshot = source_sub.add_parser(
         "snapshot-downloads",

@@ -401,11 +401,16 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
     projected = {f.get("clientRef") for f in projection if isinstance(f, dict)} - {None}
     received = set(state.get("uploadedFileRefs") or []) & projected
     material_gaps = source.get("materialGaps") or []
+    if __package__:
+        from .manual_intake import gaps_acknowledged
+    else:
+        from manual_intake import gaps_acknowledged
+    retained_source_issues = gaps_acknowledged(source)
     if material_gaps:
         issues.append("SOURCE_MATERIALS_INCOMPLETE")
     stages = {
         "sourceRegistered": bool(
-            source.get("projectIdentitySource") == "DETAIL" or source.get("rwid")
+            source.get("projectIdentitySource") in {"DETAIL", "MANUAL_DETAIL"} or source.get("rwid")
         ),
         "materialsCollected": not material_gaps
         and (
@@ -465,9 +470,12 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         **classification,
         "stages": stages,
         "complete": all(stages.values()) and not source.get("changePending") and not system_changed,
+        "availableMaterialWorkflowComplete": bool(archived and registered and body_verified
+            and not source.get("changePending") and not system_changed),
+        "sourceIssuesRetained": retained_source_issues,
         "historicalComplete": historical_complete,
         "activePending": system_changed
-        or bool(material_gaps)
+        or bool(material_gaps and not (retained_source_issues and archived))
         or bool(source.get("changePending"))
         or (
             not historical_complete
@@ -655,7 +663,9 @@ def _excel_evidence_note(row: dict[str, Any]) -> str:
         else "待处理"
     ]
     if "SOURCE_MATERIALS_INCOMPLETE" in row["issues"]:
-        notes.append("来源材料缺件，采集未完成，不能归档")
+        notes.append("来源大队缺件事实保留，现有材料已收口归档"
+                     if row.get("sourceIssuesRetained") and row["stages"]["archived"]
+                     else "来源材料缺件，采集未完成，不能归档")
     if row["sourceChanged"]:
         notes.append("来源新增或变化尚未处理")
     if row["systemChanged"]:

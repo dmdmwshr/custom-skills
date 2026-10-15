@@ -36,6 +36,8 @@
 
 ## BrowserCaptureV1
 
+用户手动提供 ZIP 和清晰截图时使用 [手动交件](manual-intake.md)，生成 ManualCaseIntakeReceiptV1；不伪造本节浏览器筛选、RWID 或下载前基线。新案仍进入同一待处理目录和唯一项目总账；已有包的手动观察独立保全并先比较，不覆盖旧来源。
+
 每个采集批次保存一个封闭的 `BrowserCaptureV1`，至少表达：
 
 - 格式版本、批次 ID、绝对工作根和上海时区创建/更新时间；

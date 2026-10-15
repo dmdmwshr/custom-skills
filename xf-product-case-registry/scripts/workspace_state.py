@@ -1250,7 +1250,12 @@ def archive_verified_case(
     evidence_target = layout.verification_records / f"{project}-{stamp}-{manifest_short}.json"
     with _waterline_lock(layout):
         source_state = load_waterline(layout).get("cases", {}).get(project, {}).get("source") or {}
-        if source_state.get("materialGaps"):
+        if __package__:
+            from .manual_intake import gaps_acknowledged
+        else:
+            from manual_intake import gaps_acknowledged
+        retained_source_issues = gaps_acknowledged(source_state)
+        if source_state.get("materialGaps") and not retained_source_issues:
             raise WorkspaceStateError("来源材料仍有明确缺口，保留已核验断点，暂不归档")
         if source_state.get("changePending"):
             raise WorkspaceStateError("来源变化尚未收口，保留已核验断点，暂不归档")
@@ -1331,6 +1336,10 @@ def archive_verified_case(
                 "verification": verified_evidence,
                 "archivedOriginal": str(completed_target),
                 "archivedWorkspace": str(history_target),
+                "sourceIssuesRetained": retained_source_issues,
+                **({"sourceMaterialGaps": deepcopy(source_state["materialGaps"]),
+                    "materialGapDisposition": deepcopy(source_state["materialGapDisposition"])}
+                   if retained_source_issues else {}),
             }
             _validated_workspace_path(
                 evidence_target, layout.root, "核验记录目标", must_exist=False
@@ -1382,6 +1391,7 @@ def archive_verified_case(
                         "originalPath": str(completed_target),
                         "workspacePath": str(history_target),
                         "verificationRecord": str(evidence_target),
+                        "sourceIssuesRetained": retained_source_issues,
                     },
                 },
             )
