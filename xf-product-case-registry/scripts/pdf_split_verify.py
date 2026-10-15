@@ -17,6 +17,7 @@ if __package__:
         enforce_local_workspace_preflight,
         inside,
         pdf_info,
+        pdf_parts,
         read_json,
         safe_relative,
     )
@@ -26,6 +27,7 @@ else:
         enforce_local_workspace_preflight,
         inside,
         pdf_info,
+        pdf_parts,
         read_json,
         safe_relative,
     )
@@ -75,32 +77,40 @@ def verify_split(work: Path, renderer: str) -> dict[str, Any]:
         raise RegistryError("缺少正式拆分记录")
     verified = []
     for item in items:
-        source_record = by_relative.get(safe_relative(item["sourceRelativePath"]))
-        if not source_record:
-            raise RegistryError("拆分来源不在清点记录中")
-        source = Path(source_record["absolutePath"]).resolve()
         target = (work / safe_relative(item["relativePath"])).resolve()
-        if not inside(source, source_root) or not inside(target, normalized) or source == target:
+        if not inside(target, normalized):
             raise RegistryError("PDF 核验路径越界")
-        source_sha, source_pages = pdf_info(source)
         target_sha, target_pages = pdf_info(target)
-        start, end = item["pageStart"], item["pageEnd"]
-        if source_sha != source_record["sha256"] or target_sha != item["sha256"]:
+        if target_sha != item["sha256"]:
             raise RegistryError("PDF 哈希已变化")
-        if (
-            not isinstance(start, int)
-            or not isinstance(end, int)
-            or not 1 <= start <= end <= source_pages
-            or target_pages != end - start + 1
-        ):
+        ranges = []
+        source_hashes = {}
+        for part in pdf_parts(item):
+            source_record = by_relative.get(part["sourceRelativePath"])
+            if not source_record:
+                raise RegistryError("拆分来源不在清点记录中")
+            source = Path(source_record["absolutePath"]).resolve()
+            if not inside(source, source_root) or source == target:
+                raise RegistryError("PDF 核验路径越界")
+            source_sha, source_pages = pdf_info(source)
+            if source_sha != source_record["sha256"]:
+                raise RegistryError("PDF 哈希已变化")
+            start, end = part["pageStart"], part["pageEnd"]
+            if end > source_pages:
+                raise RegistryError("PDF 拆分页码不闭合")
+            source_hashes[source] = source_sha
+            ranges.extend((source, page) for page in range(start, end + 1))
+        if target_pages != len(ranges):
             raise RegistryError("PDF 拆分页码不闭合")
-        for offset, page in enumerate(range(start, end + 1), 1):
+        for offset, (source, page) in enumerate(ranges, 1):
             # Raw PPM has no PNG timestamps/metadata; compare rendered pixels.
             if render_page(renderer, source, page) != render_page(renderer, target, offset):
                 raise RegistryError(
                     f"规范 PDF 页面与原件不一致：{item['relativePath']} 第 {offset} 页"
                 )
-        if pdf_info(source)[0] != source_sha or pdf_info(target)[0] != target_sha:
+        if any(pdf_info(path)[0] != sha for path, sha in source_hashes.items()) or (
+            pdf_info(target)[0] != target_sha
+        ):
             raise RegistryError("核验期间 PDF 发生变化")
         verified.append(
             {

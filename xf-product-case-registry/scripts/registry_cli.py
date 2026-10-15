@@ -415,6 +415,35 @@ def inventory_command(args: argparse.Namespace) -> None:
     )
 
 
+def pdf_parts(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Explicit ordered source ranges; never mix legacy and multipart syntax."""
+    if "parts" in item:
+        if any(key in item for key in ("sourceRelativePath", "pageStart", "pageEnd")):
+            raise RegistryError("parts 不得与单段来源混用")
+        parts = item["parts"]
+        if not isinstance(parts, list) or not parts:
+            raise RegistryError("parts 必须是非空数组")
+    else:
+        parts = [item]
+    result = []
+    for part in parts:
+        if not isinstance(part, dict):
+            raise RegistryError("PDF 来源分段必须是对象")
+        start, end = part.get("pageStart"), part.get("pageEnd")
+        if type(start) is not int or type(end) is not int or not 1 <= start <= end:
+            raise RegistryError("页码范围不合法")
+        if not isinstance(part.get("sourceRelativePath"), str):
+            raise RegistryError("PDF 来源相对路径不合法")
+        result.append(
+            {
+                "sourceRelativePath": safe_relative(part.get("sourceRelativePath")),
+                "pageStart": start,
+                "pageEnd": end,
+            }
+        )
+    return result
+
+
 def split_command(args: argparse.Namespace) -> None:
     work, plan = Path(args.work_dir).resolve(), read_json(Path(args.plan).resolve())
     enforce_local_workspace_preflight(args, work)
@@ -422,7 +451,7 @@ def split_command(args: argparse.Namespace) -> None:
     by_rel = {
         item["relativePath"]: item for item in inventory.get("files", []) if isinstance(item, dict)
     }
-    planned: list[tuple[dict[str, Any], Path, int, int]] = []
+    planned: list[tuple[dict[str, Any], Path, list[dict[str, Any]]]] = []
     seen: set[Path] = set()
     normalized = (work / "normalized").resolve()
     if not isinstance(plan.get("items"), list):
@@ -430,16 +459,21 @@ def split_command(args: argparse.Namespace) -> None:
     for index, item in enumerate(plan["items"], 1):
         if not isinstance(item, dict):
             raise RegistryError("split-plan 每项必须是对象")
-        source = by_rel.get(item.get("sourceRelativePath"))
-        start, end = item.get("pageStart"), item.get("pageEnd")
-        if not source or source.get("mimeType") != "application/pdf":
-            raise RegistryError("拆分来源必须是 inventory 中的 PDF")
-        if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start:
-            raise RegistryError("页码范围不合法")
-        source_path = Path(source["absolutePath"]).resolve()
-        _sha, pages = pdf_info(source_path)
-        if end > pages:
-            raise RegistryError("页码超出来源 PDF")
+        parts = pdf_parts(item)
+        source_paths = []
+        for part in parts:
+            source = by_rel.get(part["sourceRelativePath"])
+            if not source or source.get("mimeType") != "application/pdf":
+                raise RegistryError("拆分来源必须是 inventory 中的 PDF")
+            source_path = Path(source["absolutePath"]).resolve()
+            if not inside(source_path, Path(inventory["sourceRoot"]).resolve()):
+                raise RegistryError("PDF 拆分来源路径越界")
+            sha, pages = pdf_info(source_path)
+            if sha != source.get("sha256"):
+                raise RegistryError("PDF 拆分来源哈希已变化")
+            if part["pageEnd"] > pages:
+                raise RegistryError("页码超出来源 PDF")
+            source_paths.append(source_path)
         relative = safe_relative(str(item.get("relativePath") or f"normalized/{index:03d}.pdf"))
         target = (work / relative).resolve()
         if (
@@ -451,20 +485,19 @@ def split_command(args: argparse.Namespace) -> None:
         if (
             target in seen
             or target.exists()
-            or target == source_path
-            or inside(source_path, normalized)
+            or target in source_paths
+            or any(inside(source_path, normalized) for source_path in source_paths)
         ):
             raise RegistryError("拆分目标重复、已存在或与源重叠")
         seen.add(target)
-        planned.append((item, target, start, end))
+        planned.append((item, target, parts))
     result = []
-    for item, target, start, end in planned:
-        reader, writer = (
-            PdfReader(str(by_rel[item["sourceRelativePath"]]["absolutePath"])),
-            PdfWriter(),
-        )
-        for page in reader.pages[start - 1 : end]:
-            writer.add_page(page)
+    for item, target, parts in planned:
+        writer = PdfWriter()
+        for part in parts:
+            reader = PdfReader(str(by_rel[part["sourceRelativePath"]]["absolutePath"]))
+            for page in reader.pages[part["pageStart"] - 1 : part["pageEnd"]]:
+                writer.add_page(page)
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("xb") as stream:
             writer.write(stream)
@@ -481,7 +514,11 @@ def split_command(args: argparse.Namespace) -> None:
         )
     write_json(
         work / "split-index.json",
-        {"splitIndexVersion": 4, "generatedAt": utc_now(), "items": result},
+        {
+            "splitIndexVersion": 5 if any("parts" in item for item in plan["items"]) else 4,
+            "generatedAt": utc_now(),
+            "items": result,
+        },
     )
     update_local_case_waterline(
         args,
