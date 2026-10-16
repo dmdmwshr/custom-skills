@@ -229,7 +229,10 @@ def case_inputs(layout: Any, project: str, record: dict[str, Any]) -> tuple[Path
         archive = record.get("archive") or {}
         candidate = archive.get("workspacePath")
         if candidate:
-            candidate = Path(candidate)
+            try:
+                candidate = layout.resolve_recorded_path(candidate)
+            except ws.WorkspaceStateError:
+                return work, {}, {}, ["ARCHIVE_REFERENCE_INVALID"]
             suffix = candidate.name.removeprefix(project + "-")
             if (
                 candidate.parent != layout.root / "工作区" / "历史工作区"
@@ -366,7 +369,9 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
     )
     if archived:
         try:
-            receipt = _read(Path(archive["verificationRecord"]), layout.root)
+            receipt = _read(
+                layout.resolve_recorded_path(archive["verificationRecord"]), layout.root
+            )
             receipt_binding = receipt.get("verification") or {}
             if state:
                 archive_binding_valid = receipt.get("manifestSha256") == state.get("manifestSha256")
@@ -390,7 +395,8 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
                 receipt.get("recordVersion") == 1
                 and receipt.get("projectNo") == project
                 and archive_binding_valid
-                and receipt.get("archivedWorkspace") == str(work)
+                and bool(receipt.get("archivedWorkspace"))
+                and layout.resolve_recorded_path(receipt["archivedWorkspace"]) == work
             )
         except (OSError, ws.WorkspaceStateError):
             archived = False

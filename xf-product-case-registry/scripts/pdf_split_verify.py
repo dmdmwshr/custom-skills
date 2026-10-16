@@ -18,6 +18,7 @@ if __package__:
         inside,
         pdf_info,
         pdf_parts,
+        project_local_path_fields,
         read_json,
         safe_relative,
     )
@@ -28,6 +29,7 @@ else:
         inside,
         pdf_info,
         pdf_parts,
+        project_local_path_fields,
         read_json,
         safe_relative,
     )
@@ -67,7 +69,7 @@ def render_page(renderer: str, path: Path, page: int) -> bytes:
 
 def verify_split(work: Path, renderer: str) -> dict[str, Any]:
     work = work.resolve()
-    inventory = read_json(work / "inventory.json")
+    inventory = project_local_path_fields(read_json(work / "inventory.json"), work)
     index = read_json(work / "split-index.json")
     source_root = Path(inventory["sourceRoot"]).resolve()
     by_relative = {item["relativePath"]: item for item in inventory["files"]}

@@ -19,7 +19,7 @@ def collected_package(api, layout, work: Path, project: str) -> str:
     if inventory.get("inventoryVersion") != 3 or not inventory.get("files"):
         raise api.RegistryError("归档需要已校验的完整材料清单")
     raw = ws._validated_workspace_path(
-        Path(inventory["sourceInput"]),
+        layout.resolve_recorded_path(inventory["sourceInput"]),
         layout.pending_case_dir(project),
         "当前原始材料",
         must_exist=True,

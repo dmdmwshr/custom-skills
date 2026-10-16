@@ -39,7 +39,7 @@ else:
     from upload_transport import bounded_request, upload_request
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
-VERSION = "1.11.3"
+VERSION = "1.12.0"
 WRITE_HEADER, WRITE_HEADER_VALUE = "X-Product-Case-Client", "web-v2"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SESSION_COOKIE_NAME = "__Host-product_case_session"
@@ -447,7 +447,7 @@ def pdf_parts(item: dict[str, Any]) -> list[dict[str, Any]]:
 def split_command(args: argparse.Namespace) -> None:
     work, plan = Path(args.work_dir).resolve(), read_json(Path(args.plan).resolve())
     enforce_local_workspace_preflight(args, work)
-    inventory = read_json(work / "inventory.json")
+    inventory = project_local_path_fields(read_json(work / "inventory.json"), work, args)
     by_rel = {
         item["relativePath"]: item for item in inventory.get("files", []) if isinstance(item, dict)
     }
@@ -535,11 +535,14 @@ def ocr_command(args: argparse.Namespace) -> None:
     )
     enforce_local_workspace_preflight(args, work)
     allowed_roots = None
+    path_transform = None
     if getattr(args, "workspace_required", False):
         resolved = resolve_local_case_workspace(args, work)
         assert resolved is not None
         _workspace, layout, project = resolved
         allowed_roots = [work / "source", layout.pending_case_dir(project)]
+        path_transform = layout.project_recorded_paths
+        inventory = path_transform(inventory)
     try:
         result = run_ocr(
             work=work,
@@ -551,6 +554,7 @@ def ocr_command(args: argparse.Namespace) -> None:
             timeout=args.timeout,
             batch=getattr(args, "batch", False),
             allowed_roots=allowed_roots,
+            path_transform=path_transform,
         )
     except OcrError as error:
         raise RegistryError(str(error)) from error
@@ -968,6 +972,7 @@ def compose_command(args: argparse.Namespace) -> None:
         data.get("case", {}).get("projectNo") if isinstance(data.get("case"), dict) else None
     )
     enforce_local_workspace_preflight(args, work, project_no)
+    inventory = project_local_path_fields(inventory, work, args)
     inventory_hash = inventory.get("packageSha256")
     if not isinstance(inventory_hash, str) or not SHA256.fullmatch(inventory_hash):
         raise RegistryError("inventory.packageSha256 不合法")
@@ -981,7 +986,9 @@ def compose_command(args: argparse.Namespace) -> None:
         sources.update(
             {
                 item["relativePath"]: item
-                for item in read_json(split_path).get("items", [])
+                for item in project_local_path_fields(read_json(split_path), work, args).get(
+                    "items", []
+                )
                 if isinstance(item, dict)
             }
         )
@@ -1435,12 +1442,13 @@ def build_supplement_manifest(
 
 
 def load_supplement_inputs(
-    manifest_path: Path, upload_map_path: Path
+    manifest_path: Path, upload_map_path: Path, args: argparse.Namespace | None = None
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest = read_json(manifest_path)
     upload_map = read_json(upload_map_path).get("files")
     if not isinstance(upload_map, dict):
         raise RegistryError("supplement-upload-map.files 必须是对象")
+    upload_map = project_upload_paths(upload_map, manifest_path, args)
     errors = validate_supplement_manifest(manifest, upload_map)
     if errors:
         raise RegistryError("补录状态文件校验失败：\n- " + "\n- ".join(errors))
@@ -3258,7 +3266,9 @@ def verify_with_client(
     }
 
 
-def load_inputs(manifest_path: str, map_path: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+def load_inputs(
+    manifest_path: str, map_path: str, args: argparse.Namespace | None = None
+) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     path, manifest, upload = (
         Path(manifest_path).resolve(),
         read_json(Path(manifest_path).resolve()),
@@ -3266,6 +3276,7 @@ def load_inputs(manifest_path: str, map_path: str) -> tuple[Path, dict[str, Any]
     )
     if not isinstance(upload, dict):
         raise RegistryError("upload-map.files 必须是对象")
+    upload = project_upload_paths(upload, path, args)
     errors = validate_manifest(manifest, upload)
     if errors:
         raise RegistryError("本地校验失败：\n- " + "\n- ".join(errors))
@@ -3703,7 +3714,7 @@ def verify_existing_command(args: argparse.Namespace) -> None:
 
 
 def verify_command(args: argparse.Namespace) -> None:
-    path, manifest, upload = load_inputs(args.manifest, args.upload_map)
+    path, manifest, upload = load_inputs(args.manifest, args.upload_map, args)
     api_base, origin = origin_of(args.api_base)
     state_path = path.parent / "upload-state.json"
     existing_state = read_json(state_path) if state_path.exists() else {}
@@ -3798,7 +3809,7 @@ def verify_with_poll(
 
 
 def upload_command(args: argparse.Namespace) -> None:
-    path, manifest, upload = load_inputs(args.manifest, args.upload_map)
+    path, manifest, upload = load_inputs(args.manifest, args.upload_map, args)
     if args.dry_run:
         print(
             json.dumps(
@@ -4205,7 +4216,7 @@ def supplement_artifact_paths(manifest_path: Path) -> tuple[Path, Path, Path]:
 
 
 def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
-    manifest_path, full_manifest, full_upload = load_inputs(args.manifest, args.upload_map)
+    manifest_path, full_manifest, full_upload = load_inputs(args.manifest, args.upload_map, args)
     enforce_upload_workspace_preflight(args, manifest_path, full_manifest)
     project_no = full_manifest["case"]["projectNo"]
     brigade_code = full_manifest["case"]["brigadeCode"]
@@ -4276,7 +4287,7 @@ def supplement_case(args: argparse.Namespace) -> dict[str, Any]:
         if supplement_state:
             require_same_state_identity(supplement_state, identity)
             supplement, supplement_upload = load_supplement_inputs(
-                supplement_path, supplement_map_path
+                supplement_path, supplement_map_path, args
             )
             projection = files_projection(supplement, supplement_upload)
             if (
@@ -4624,7 +4635,9 @@ def supplement_batch_command(args: argparse.Namespace) -> None:
         manifest_path = layout.work_case_dir(project_no) / "manifest.json"
         upload_map_path = layout.work_case_dir(project_no) / "upload-map.json"
         try:
-            resolved_path, manifest, _upload = load_inputs(str(manifest_path), str(upload_map_path))
+            resolved_path, manifest, _upload = load_inputs(
+                str(manifest_path), str(upload_map_path), args
+            )
             if manifest.get("case", {}).get("projectNo") != project_no:
                 raise RegistryError("manifest 项目编号与所选项目不一致")
             enforce_upload_workspace_preflight(args, resolved_path, manifest)
@@ -4819,7 +4832,9 @@ def upload_batch_command(args: argparse.Namespace) -> None:
         manifest_path = layout.work_case_dir(project_no) / "manifest.json"
         upload_map_path = layout.work_case_dir(project_no) / "upload-map.json"
         try:
-            resolved_path, manifest, _upload = load_inputs(str(manifest_path), str(upload_map_path))
+            resolved_path, manifest, _upload = load_inputs(
+                str(manifest_path), str(upload_map_path), args
+            )
             if manifest.get("case", {}).get("projectNo") != project_no:
                 raise RegistryError("manifest 项目编号与所选项目不一致")
             enforce_upload_workspace_preflight(args, resolved_path, manifest)
@@ -4970,7 +4985,7 @@ def upload_batch_command(args: argparse.Namespace) -> None:
 
 def validate_command(args: argparse.Namespace) -> None:
     _path, _manifest, _upload = (
-        load_inputs(args.manifest, args.upload_map)
+        load_inputs(args.manifest, args.upload_map, args)
         if args.upload_map
         else (Path(args.manifest), read_json(Path(args.manifest)), {})
     )
@@ -4984,6 +4999,46 @@ def validate_command(args: argparse.Namespace) -> None:
 def workspace_api() -> Any:
     module_name = f"{__package__}.workspace_state" if __package__ else "workspace_state"
     return importlib.import_module(module_name)
+
+
+def configured_layout_for_path(path: Path, args: argparse.Namespace | None = None) -> Any:
+    workspace = workspace_api()
+    options = workspace_kwargs(args) if args is not None else {}
+    if (
+        not options.get("work_root")
+        and not options.get("config_path")
+        and not workspace.default_workspace_config_path().exists()
+    ):
+        return None
+    try:
+        _config, layout = workspace.resolve_workspace(**options)
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    return layout if inside(path.resolve(), layout.root) else None
+
+
+def project_local_path_fields(
+    value: Any, path: Path, args: argparse.Namespace | None = None
+) -> Any:
+    layout = configured_layout_for_path(path, args)
+    return layout.project_recorded_paths(value) if layout else value
+
+
+def project_upload_paths(
+    upload: dict[str, Any], manifest_path: Path, args: argparse.Namespace | None = None
+) -> dict[str, Any]:
+    layout = configured_layout_for_path(manifest_path, args)
+    if layout is None:
+        return upload
+    result = {}
+    for key, value in upload.items():
+        try:
+            result[key] = (
+                str(layout.resolve_recorded_path(value)) if isinstance(value, str) else value
+            )
+        except workspace_api().WorkspaceStateError:
+            result[key] = value
+    return result
 
 
 def source_intake_api() -> Any:
@@ -5023,6 +5078,17 @@ def workspace_configure_command(args: argparse.Namespace) -> None:
             ensure_ascii=False,
         )
     )
+
+
+def workspace_switch_mirror_command(args: argparse.Namespace) -> None:
+    workspace = workspace_api()
+    try:
+        result = workspace.switch_mirror_access(
+            work_root=args.work_root, config_path=getattr(args, "workspace_config", None)
+        )
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
 
 
 def workspace_doctor_command(args: argparse.Namespace) -> None:
@@ -5506,6 +5572,12 @@ def build_parser() -> argparse.ArgumentParser:
     workspace_configure.add_argument("--download-dir")
     workspace_configure.add_argument("--workspace-config")
     workspace_configure.set_defaults(func=workspace_configure_command)
+    workspace_mirror = workspace_sub.add_parser(
+        "switch-mirror", help="核对两端完整文件树后仅切换主操作入口，保留原业务身份与证据"
+    )
+    workspace_mirror.add_argument("--work-root", required=True)
+    workspace_mirror.add_argument("--workspace-config")
+    workspace_mirror.set_defaults(func=workspace_switch_mirror_command)
     workspace_doctor = workspace_sub.add_parser("doctor", help="只读检查工作根与布局")
     add_workspace_resolution_options(workspace_doctor)
     workspace_doctor.set_defaults(func=workspace_doctor_command)

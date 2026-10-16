@@ -340,6 +340,7 @@ def run_ocr(
     timeout: float,
     batch: bool = False,
     allowed_roots: list[Path] | None = None,
+    path_transform: Any = None,
 ) -> dict[str, Any]:
     work, output = safe_path(work), safe_path(output, work)
     if output == work:
@@ -351,10 +352,12 @@ def run_ocr(
     with project_lock(work):
         profile = engine_profile(wrapper)
         output.mkdir(parents=True, exist_ok=True)
-        return _run_locked(work, output, items, wrapper, powershell, profile, timeout, batch)
+        return _run_locked(
+            work, output, items, wrapper, powershell, profile, timeout, batch, path_transform
+        )
 
 
-def task_groups(work, output, pending, profile, batch):
+def task_groups(work, output, pending, profile, batch, path_transform=None):
     remaining = {item["relative"]: item for item in pending}
     groups = []
     for run_dir in sorted(output.glob("run-*")):
@@ -368,6 +371,8 @@ def task_groups(work, output, pending, profile, batch):
             raise OcrError("OCR 原请求记录损坏；保留断点，不猜测或重发") from error
         if not isinstance(attempt, dict):
             raise OcrError("OCR 原请求记录无效；保留断点")
+        if path_transform:
+            attempt = path_transform(attempt)
         if attempt.get("schemaVersion") != TASK_SCHEMA:
             continue
         if attempt.get("workDir") != str(work) or not isinstance(attempt.get("inputs"), list):
@@ -409,6 +414,7 @@ def _run_locked(
     profile: dict[str, Any],
     timeout: float,
     batch: bool,
+    path_transform: Any = None,
 ) -> dict[str, Any]:
     index_path = safe_path(work / "ocr-result.json", work)
     try:
@@ -419,6 +425,8 @@ def _run_locked(
         previous = {}
     if not isinstance(previous, dict):
         previous = {}
+    if path_transform:
+        previous = path_transform(previous)
     previous_mappings = previous.get("mappings", [])
     if not isinstance(previous_mappings, list):
         previous_mappings = []
@@ -504,7 +512,9 @@ def _run_locked(
     checkpoint()
     pending = [item for item in items if item["relative"] not in completed]
     try:
-        for group, run_dir, task_inputs in task_groups(work, output, pending, profile, batch):
+        for group, run_dir, task_inputs in task_groups(
+            work, output, pending, profile, batch, path_transform
+        ):
             if run_dir is None:
                 run_dir = output / ("run-" + uuid.uuid4().hex)
                 input_dir = run_dir / "input"

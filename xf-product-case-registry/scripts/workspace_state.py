@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -144,6 +145,8 @@ class WorkspaceConfig:
     work_root: Path
     download_dir: Path
     config_path: Path
+    identity_root: Path | None = None
+    reference_roots: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,9 +163,14 @@ class BusinessLayout:
     templates: Path
     waterline_json: Path
     waterline_xlsx: Path
+    identity_root: Path | None = None
+    reference_roots: tuple[Path, ...] = ()
 
     @classmethod
-    def from_root(cls, root: str | os.PathLike[str]) -> BusinessLayout:
+    def from_root(
+        cls, root: str | os.PathLike[str], *, identity_root: Path | None = None,
+        reference_roots: tuple[Path, ...] = (),
+    ) -> BusinessLayout:
         root_path = secure_workspace_root(root)
         raw_root = root_path / "原始案卷"
         work_root = root_path / "工作区"
@@ -179,7 +187,43 @@ class BusinessLayout:
             templates=root_path / "资料模板",
             waterline_json=root_path / WATERLINE_JSON_NAME,
             waterline_xlsx=root_path / WATERLINE_XLSX_NAME,
+            identity_root=secure_workspace_root(identity_root) if identity_root else None,
+            reference_roots=tuple(secure_workspace_root(p) for p in reference_roots),
         )
+
+    def accepts_recorded_root(self, value: str | os.PathLike[str]) -> bool:
+        return isinstance(value, (str, os.PathLike)) and Path(value) in {
+            self.root, self.identity_root, *self.reference_roots,
+        }
+
+    def resolve_recorded_path(self, value: str | os.PathLike[str]) -> Path:
+        """Resolve an immutable historical reference against the verified access root."""
+        path = _absolute_path(value, "历史业务路径")
+        if _inside_or_equal(path, self.root):
+            return path
+        for reference in (self.identity_root, *self.reference_roots):
+            if reference and _inside_or_equal(path, reference):
+                return self.root / path.relative_to(reference)
+        raise WorkspaceStateError("历史业务路径超出当前逻辑资料根")
+
+    def project_recorded_paths(self, value: Any) -> Any:
+        """Project stored file references in memory; leave evidence bytes and hashes intact."""
+        if isinstance(value, list):
+            return [self.project_recorded_paths(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {}
+        for key, item in value.items():
+            if key in {"sourceRoot", "sourceInput", "absolutePath", "workDir"} and isinstance(
+                item, str
+            ):
+                try:
+                    result[key] = str(self.resolve_recorded_path(item))
+                    continue
+                except WorkspaceStateError:
+                    pass  # Existing per-operation boundary checks still reject unrelated inputs.
+            result[key] = self.project_recorded_paths(item)
+        return result
 
     def batch_dir(self, batch_id: str) -> Path:
         return self.capture_batches / _safe_component(batch_id, "批次编号")
@@ -302,8 +346,18 @@ def read_workspace_config(config_path: str | os.PathLike[str] | None = None) -> 
         raise WorkspaceStateError("workspace.root 不能为空")
     if not isinstance(download_value, str) or not download_value.strip():
         raise WorkspaceStateError("workspace.download_dir 不能为空")
+    identity_value = section.get("identity_root")
+    if identity_value is not None and (not isinstance(identity_value, str) or not identity_value):
+        raise WorkspaceStateError("workspace.identity_root 必须是明确的历史资料根")
+    reference_values = section.get("reference_roots", [])
+    if not isinstance(reference_values, list) or any(
+        not isinstance(p, str) or not p for p in reference_values
+    ):
+        raise WorkspaceStateError("workspace.reference_roots 必须是历史访问根数组")
     return WorkspaceConfig(
-        secure_workspace_root(root_value), secure_download_dir(download_value), path
+        secure_workspace_root(root_value), secure_download_dir(download_value), path,
+        secure_workspace_root(identity_value) if identity_value else None,
+        tuple(secure_workspace_root(p) for p in reference_values),
     )
 
 
@@ -346,23 +400,132 @@ def configure_workspace(
         download_dir = Path.home() / "Downloads"
     downloads = secure_download_dir(download_dir)
 
+    identity_root = None
+    reference_roots = ()
     if path.exists():
         previous = read_workspace_config(path)
+        if previous.work_root == root:
+            identity_root = previous.identity_root
+            reference_roots = previous.reference_roots
         if previous.work_root != root and _has_active_batches(
             BusinessLayout.from_root(previous.work_root)
         ):
             raise WorkspaceStateError("旧工作根仍有未完成采集批次，不得跨根续跑")
 
-    layout = ensure_workspace_layout(BusinessLayout.from_root(root))
+    layout = ensure_workspace_layout(BusinessLayout.from_root(
+        root, identity_root=identity_root, reference_roots=reference_roots
+    ))
     initialize_legacy_waterline(layout)
     content = (
         "# 仅保存本地业务目录；不得写入账号、密码、Cookie 或令牌。\n"
         "[workspace]\n"
         f"root = {_toml_string(root)}\n"
         f"download_dir = {_toml_string(downloads)}\n"
+        + (f"identity_root = {_toml_string(identity_root)}\n" if identity_root else "")
+        + ("reference_roots = [" + ", ".join(_toml_string(p) for p in reference_roots) + "]\n"
+           if reference_roots else "")
     )
     _atomic_bytes(path, content.encode("utf-8"))
-    return WorkspaceConfig(root, downloads, path)
+    return WorkspaceConfig(root, downloads, path, identity_root, reference_roots)
+
+
+def switch_mirror_access(
+    *, work_root: str | os.PathLike[str], config_path: str | os.PathLike[str] | None = None
+) -> dict[str, Any]:
+    """Change only the access configuration after proving both existing trees identical."""
+    config, previous = resolve_workspace(config_path=config_path)
+    target_root = secure_workspace_root(work_root)
+    if target_root == previous.root:
+        raise WorkspaceStateError("目标已经是当前主操作根，无需重复切换")
+    if _inside_or_equal(target_root, previous.root) or _inside_or_equal(previous.root, target_root):
+        raise WorkspaceStateError("同步资料入口不能互相包含")
+    identity_root = previous.identity_root or previous.root
+    reference_roots = tuple(sorted(
+        {identity_root, previous.root, *previous.reference_roots}, key=str
+    ))
+    target = BusinessLayout.from_root(
+        target_root, identity_root=identity_root, reference_roots=reference_roots
+    )
+    for layout in (previous, target):
+        if any(not p.is_dir() for p in _required_directories(layout)):
+            raise WorkspaceStateError("两端必须已有完整业务布局，不能在切换时初始化或复制")
+        load_waterline(layout)
+    config_before = config.config_path.read_bytes()
+
+    def inventory(root: Path) -> dict[str, Path]:
+        files = {}
+        for directory, children, names in os.walk(root, followlinks=False):
+            for name in [*children, *names]:
+                _reject_reparse_chain(Path(directory) / name, "同步资料树")
+            for name in names:
+                item = Path(directory) / name
+                relative = item.relative_to(root).as_posix()
+                if relative != ".case-waterline.lock":
+                    files[relative] = item
+        return files
+
+    def digest(path: Path) -> str:
+        with path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+
+    with _waterline_lock(previous), _waterline_lock(target):
+        source_files, target_files = inventory(previous.root), inventory(target.root)
+        if source_files.keys() != target_files.keys():
+            raise WorkspaceStateError("同步两端文件集合不一致，未切换主操作根")
+        tree_hash = hashlib.sha256()
+        byte_count = 0
+        checked_stats = {}
+        for relative in sorted(source_files):
+            left, right = source_files[relative], target_files[relative]
+            left_before, right_before = left.stat(), right.stat()
+            left_digest, right_digest = digest(left), digest(right)
+            left_after, right_after = left.stat(), right.stat()
+            if (
+                (left_before.st_size, left_before.st_mtime_ns)
+                != (left_after.st_size, left_after.st_mtime_ns)
+                or (right_before.st_size, right_before.st_mtime_ns)
+                != (right_after.st_size, right_after.st_mtime_ns)
+                or left_digest != right_digest
+            ):
+                raise WorkspaceStateError(f"同步内容不一致或核验期间发生变化：{relative}")
+            byte_count += left_after.st_size
+            tree_hash.update(f"{relative}\0{left_digest}\n".encode())
+            checked_stats[relative] = (
+                (left_after.st_size, left_after.st_mtime_ns),
+                (right_after.st_size, right_after.st_mtime_ns),
+            )
+        if (
+            inventory(previous.root).keys() != source_files.keys()
+            or inventory(target.root).keys() != target_files.keys()
+        ):
+            raise WorkspaceStateError("核验期间文件集合发生变化，未切换")
+        for relative, expected in checked_stats.items():
+            current = tuple(
+                (metadata.st_size, metadata.st_mtime_ns)
+                for metadata in (source_files[relative].stat(), target_files[relative].stat())
+            )
+            if current != expected:
+                raise WorkspaceStateError(f"核验期间已检查文件发生变化，未切换：{relative}")
+        if config.config_path.read_bytes() != config_before:
+            raise WorkspaceStateError("核验期间工作配置发生变化，未切换")
+        if digest(previous.waterline_json) != digest(target.waterline_json):
+            raise WorkspaceStateError("切换前水位不一致，未切换")
+        content = (
+            "# 主操作入口与历史逻辑身份分开保存；原始业务证据不改写。\n[workspace]\n"
+            f"root = {_toml_string(target.root)}\n"
+            f"download_dir = {_toml_string(config.download_dir)}\n"
+            f"identity_root = {_toml_string(identity_root)}\n"
+            + "reference_roots = [" + ", ".join(_toml_string(p) for p in reference_roots) + "]\n"
+        )
+        _atomic_bytes(config.config_path, content.encode("utf-8"))
+    return {
+        "status": "ACCESS_ROOT_SWITCHED", "previousWorkRoot": str(previous.root),
+        "workRoot": str(target.root), "identityRoot": str(identity_root),
+        "verifiedFiles": len(source_files), "verifiedBytesPerSide": byte_count,
+        "treeSha256": tree_hash.hexdigest(), "businessFilesRewritten": False,
+        "excludedCoordinationFiles": [".case-waterline.lock"],
+        "configPath": str(config.config_path), "verifiedAt": _utc_now(),
+    }
 
 
 def resolve_workspace(
@@ -385,18 +548,22 @@ def resolve_workspace(
         else (stored.download_dir if stored is not None else Path.home() / "Downloads")
     )
     downloads = secure_download_dir(raw_download)
-    layout = BusinessLayout.from_root(root)
+    identity_root = stored.identity_root if stored and root == stored.work_root else None
+    reference_roots = stored.reference_roots if stored and root == stored.work_root else ()
+    layout = BusinessLayout.from_root(
+        root, identity_root=identity_root, reference_roots=reference_roots
+    )
     if create_layout:
         ensure_workspace_layout(layout)
         initialize_legacy_waterline(layout)
-    config = WorkspaceConfig(root, downloads, path)
+    config = WorkspaceConfig(root, downloads, path, identity_root, reference_roots)
     return config, layout
 
 
 def _new_waterline(layout: BusinessLayout) -> dict[str, Any]:
     return {
         "schemaVersion": WORKSPACE_SCHEMA,
-        "workspaceRoot": str(layout.root),
+        "workspaceRoot": str(layout.identity_root or layout.root),
         "updatedAt": _utc_now(),
         "cases": {},
     }
@@ -405,7 +572,7 @@ def _new_waterline(layout: BusinessLayout) -> dict[str, Any]:
 def _validate_waterline(layout: BusinessLayout, value: dict[str, Any]) -> dict[str, Any]:
     if value.get("schemaVersion") != WORKSPACE_SCHEMA:
         raise WorkspaceStateError("案卷水位 JSON 版本不支持")
-    if value.get("workspaceRoot") != str(layout.root):
+    if not layout.accepts_recorded_root(value.get("workspaceRoot", "")):
         raise WorkspaceStateError("案卷水位 JSON 不属于当前工作根")
     cases = value.get("cases")
     if not isinstance(cases, dict):
@@ -1465,6 +1632,7 @@ def doctor_workspace(
         "status": "READY" if not missing else "INCOMPLETE",
         "configPath": str(config.config_path),
         "workRoot": str(layout.root),
+        "identityRoot": str(layout.identity_root or layout.root),
         "downloadDir": str(config.download_dir),
         "missingDirectories": missing,
         "waterlineSchema": data["schemaVersion"],

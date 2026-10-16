@@ -204,13 +204,26 @@ def _status(value: Mapping[str, Any], part: str) -> str:
     return str(child.get("status", "UNKNOWN")) if isinstance(child, Mapping) else "UNKNOWN"
 
 
+def _recorded_path(layout: Any, value: str) -> Path:
+    if __package__:
+        from .workspace_state import WorkspaceStateError
+    else:
+        from workspace_state import WorkspaceStateError
+    try:
+        return layout.resolve_recorded_path(value)
+    except WorkspaceStateError as error:
+        raise ReportingError(str(error)) from error
+
+
 def _case_workspace(layout: Any, project: str, record: Mapping[str, Any]) -> Path:
     active = layout.work_case_dir(project)
     if active.is_dir():
         return _safe(active, layout.root)
     archive = record.get("archive")
     if isinstance(archive, Mapping) and archive.get("workspacePath"):
-        archived = _safe(Path(archive["workspacePath"]), layout.history_workspaces)
+        archived = _safe(
+            _recorded_path(layout, archive["workspacePath"]), layout.history_workspaces
+        )
         generation = archive.get("generation")
         if not isinstance(generation, str) or not re.fullmatch(
             r"\d{8}T\d{6}Z-[a-f0-9]{12}", generation
@@ -370,7 +383,7 @@ def describe_case(
                 or value["case"].get("projectNo") != project
             ):
                 raise ReportingError("本地案卷字段格式或项目不一致")
-        ocr_value = inputs.get("ocr-result")
+        ocr_value = layout.project_recorded_paths(inputs.get("ocr-result"))
         if (
             ocr_value
             and ocr_value.get("schemaVersion") == "OcrResultV1"
@@ -487,7 +500,9 @@ def describe_case(
     receipt_available = False
     if isinstance(archive, Mapping) and archive.get("verificationRecord"):
         try:
-            receipt_path = _safe(Path(archive["verificationRecord"]), layout.verification_records)
+            receipt_path = _safe(
+                _recorded_path(layout, archive["verificationRecord"]), layout.verification_records
+            )
             if receipt_path.parent == layout.verification_records and receipt_path.name.startswith(
                 project + "-"
             ):

@@ -1342,7 +1342,7 @@ def _load_capture(layout: Any, batch_id: str) -> tuple[Path, dict[str, Any]]:
     if state.get("batchId") != batch_id:
         raise SourceIntakeError("浏览器采集批次不匹配")
     recorded_root = state.get("workspaceRoot")
-    if recorded_root and Path(recorded_root) != Path(layout.root):
+    if recorded_root and not layout.accepts_recorded_root(recorded_root):
         raise SourceIntakeError("采集断点属于另一工作根，拒绝跨根续跑")
     return path, state
 
