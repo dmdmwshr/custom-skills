@@ -293,6 +293,81 @@ def _content_verified(work: Path, layout: Any, manifest: dict, state: dict) -> b
     )
 
 
+def _content_evidence(
+    work: Path, layout: Any, manifest: dict, state: dict, record: dict
+) -> tuple[Path, dict, dict]:
+    """Allow a pinned attachment-only verification projection, preserving the import."""
+    bundle = record.get("contentVerificationBundle")
+    if not bundle:
+        return work, manifest, state
+    if (
+        not isinstance(bundle, dict)
+        or bundle.get("schemaVersion") != "CaseContentVerificationBundleV1"
+        or state.get("stateVersion") != 6
+        or state.get("status") != "VERIFIED"
+        or bundle.get("baseManifestSha256") != state.get("manifestSha256")
+        or bundle.get("projectNo") != manifest.get("case", {}).get("projectNo")
+        or bundle.get("caseId") != state.get("caseId")
+        or bundle.get("origin") != state.get("origin")
+    ):
+        raise ws.WorkspaceStateError("追加附件核验凭证与原案绑定不符")
+    path = layout.resolve_recorded_path(bundle["manifestPath"])
+    proof_path = layout.resolve_recorded_path(bundle["contentReceiptPath"])
+    if (
+        path.name != "manifest.json"
+        or path.parent == work
+        or not path.is_relative_to(work)
+        or proof_path != path.with_name("content-verification.json")
+    ):
+        raise ws.WorkspaceStateError("追加附件核验凭证必须位于原案子目录")
+    expanded = _read(path, layout.root)
+    proof = _read(proof_path, layout.root)
+    for artifact, field in (
+        (path, "manifestSha256"),
+        (proof_path, "contentReceiptSha256"),
+    ):
+        if "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest() != bundle.get(field):
+            raise ws.WorkspaceStateError("追加附件核验凭证摘要不符")
+    exclude = {"files", "otherAttachments"}
+    if {k: v for k, v in expanded.items() if k not in exclude} != {
+        k: v for k, v in manifest.items() if k not in exclude
+    }:
+        raise ws.WorkspaceStateError("追加附件不能改变原案字段、检查或文书槽位")
+    original_files = {f["clientRef"]: f for f in manifest["files"]}
+    expanded_files = {f["clientRef"]: f for f in expanded["files"]}
+    added = set(expanded_files) - set(original_files)
+    if (
+        not added
+        or len(expanded_files) != len(expanded["files"])
+        or any(expanded_files.get(ref) != item for ref, item in original_files.items())
+    ):
+        raise ws.WorkspaceStateError("追加核验清单必须完整保留原文件且只增加附件")
+    original_attachments = manifest.get("otherAttachments", [])
+    expanded_attachments = expanded.get("otherAttachments", [])
+    additional = expanded_attachments[len(original_attachments):]
+    if (
+        expanded_attachments[:len(original_attachments)] != original_attachments
+        or len(additional) != len(added)
+        or {a.get("fileRef") for a in additional} != added
+        or any(a.get("slotCode") != "OTHER_ATTACHMENT" for a in additional)
+        or any(not isinstance(a.get("title"), str) or not a["title"].strip() for a in additional)
+    ):
+        raise ws.WorkspaceStateError("追加文件缺少唯一其他附件归属")
+    observed = record.get("systemObservation") or {}
+    if (
+        observed.get("exists") is not True
+        or observed.get("caseId") != state.get("caseId")
+        or observed.get("origin") != state.get("origin")
+        or not isinstance(observed.get("fileSnapshot"), dict)
+    ):
+        raise ws.WorkspaceStateError("追加核验凭证缺少当前服务器文件观察")
+    verified_files = proof.get("files") or {}
+    identities = [item.get("fileId") for item in verified_files.values()]
+    if len(identities) != len(set(identities)):
+        raise ws.WorkspaceStateError("追加核验凭证文件身份不唯一")
+    return path.parent, expanded, {**state, "manifestSha256": bundle["manifestSha256"]}
+
+
 def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any]:
     work, manifest, state, issues = case_inputs(layout, project, record)
     source = record.get("source") or {}
@@ -338,17 +413,22 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
                 "manifestSha256": "sha256:"
                 + hashlib.sha256((work / "manifest.json").read_bytes()).hexdigest(),
             }
-        body_verified = (
-            _content_verified(work, layout, manifest, verification_binding) if manifest else False
+        verification_work, verification_manifest, verification_binding = _content_evidence(
+            work, layout, manifest, verification_binding, record
         )
-    except (ws.WorkspaceStateError, OSError, KeyError, TypeError):
+        body_verified = (
+            _content_verified(
+                verification_work, layout, verification_manifest, verification_binding
+            ) if manifest else False
+        )
+        proof = _read(verification_work / "content-verification.json", layout.root)
+    except (ws.WorkspaceStateError, OSError, KeyError, TypeError, AttributeError):
         body_verified = False
         issues.append("CONTENT_RECEIPT_UNTRUSTED")
     system_changed = bool(state.get("caseId") and binding.get("exists") is False)
     if system_changed:
         body_verified = False
     if body_verified and isinstance(binding.get("fileSnapshot"), dict):
-        proof = _read(work / "content-verification.json", layout.root)
         observed = binding["fileSnapshot"]
         verified = {item["fileId"]: item for item in proof["files"].values()}
         body_current = set(observed) == set(verified) and all(

@@ -173,6 +173,121 @@ def test_body_proof_cannot_be_borrowed_from_another_project(layout):
     assert views.ledger_view(layout)["cases"][0]["stages"]["bodyVerified"] is False
 
 
+def attachment_bundle(layout):
+    import copy
+
+    add_case(layout, A, archived=True, deep=True)
+    record = ws.load_waterline(layout)["cases"][A]
+    work = Path(record["archive"]["workspacePath"])
+    manifest = json.loads((work / "manifest.json").read_text())
+    state = json.loads((work / "upload-state.json").read_text())
+    expanded = copy.deepcopy(manifest)
+    expanded["files"].append({"clientRef": "added", "sha256": "sha256:" + "d" * 64})
+    expanded["otherAttachments"] = [
+        {"clientRef": "attachment-added", "slotCode": "OTHER_ATTACHMENT",
+         "title": "Penalty decision", "fileRef": "added"}
+    ]
+    path = work / "additional" / "manifest.json"
+    proof_path = path.with_name("content-verification.json")
+    write(path, expanded)
+    digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    proof = json.loads((work / "content-verification.json").read_text())
+    proof["manifestSha256"] = digest
+    proof["files"]["added"] = {
+        "sha256": "sha256:" + "d" * 64,
+        "fileId": "new-file",
+        "contentGeneration": 1,
+        "sizeBytes": "5",
+        "verifiedAt": NOW,
+        "verifiedAgainstManifestSha256": digest,
+    }
+    write(proof_path, proof)
+    bundle = {
+        "schemaVersion": "CaseContentVerificationBundleV1",
+        "projectNo": A,
+        "caseId": state["caseId"],
+        "origin": state["origin"],
+        "baseManifestSha256": state["manifestSha256"],
+        "manifestPath": str(path),
+        "manifestSha256": digest,
+        "contentReceiptPath": str(proof_path),
+        "contentReceiptSha256": "sha256:" + hashlib.sha256(proof_path.read_bytes()).hexdigest(),
+    }
+    ws.upsert_case(
+        layout, A, contentVerificationBundle=bundle,
+        systemObservation={
+            "exists": True, "caseId": state["caseId"], "origin": state["origin"],
+            "fileSnapshot": {item["fileId"]: {k: item[k] for k in (
+                "sha256", "contentGeneration", "sizeBytes"
+            )} for item in proof["files"].values()},
+        },
+    )
+    return work, path, proof_path, bundle
+
+
+def test_attachment_body_extension_keeps_original_import_and_archive(layout):
+    work, _, _, _ = attachment_bundle(layout)
+    before = {name: (work / name).read_bytes() for name in (
+        "manifest.json", "upload-state.json", "content-verification.json"
+    )}
+    row = views.ledger_view(layout)["cases"][0]
+    assert row["stages"]["bodyVerified"] is True
+    assert row["stages"]["archived"] is True
+    assert row["complete"] is True
+    assert row["systemChanged"] is False
+    assert before == {name: (work / name).read_bytes() for name in before}
+
+
+@pytest.mark.parametrize("damage", [
+    "wrong-base", "other-case", "outside-case", "manifest-hash", "proof-hash",
+    "changed-fields", "removed-original", "not-attachment", "duplicate-file-id",
+    "incomplete", "changed-generation", "missing-observation",
+])
+def test_attachment_body_extension_rejects_unbound_or_stale_evidence(layout, damage):
+    work, path, proof_path, bundle = attachment_bundle(layout)
+    manifest = json.loads(path.read_text())
+    proof = json.loads(proof_path.read_text())
+    if damage == "wrong-base":
+        bundle["baseManifestSha256"] = "sha256:" + "9" * 64
+    elif damage == "other-case":
+        bundle["caseId"] = "unrelated"
+    elif damage == "outside-case":
+        path = layout.work_case_dir(B) / "manifest.json"
+        proof_path = path.with_name("content-verification.json")
+        bundle.update(manifestPath=str(path), contentReceiptPath=str(proof_path))
+    elif damage == "changed-fields":
+        manifest["initialInspection"]["products"][0]["result"] = "QUALIFIED"
+    elif damage == "removed-original":
+        manifest["files"] = manifest["files"][1:]
+    elif damage == "not-attachment":
+        manifest["otherAttachments"][0]["slotCode"] = "INITIAL_INSPECTION_RECORD"
+    elif damage == "duplicate-file-id":
+        proof["files"]["added"]["fileId"] = "fixture-file"
+    elif damage == "incomplete":
+        proof.pop("completedAt")
+    write(path, manifest)
+    bundle["manifestSha256"] = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    proof["manifestSha256"] = bundle["manifestSha256"]
+    write(proof_path, proof)
+    bundle["contentReceiptSha256"] = "sha256:" + hashlib.sha256(proof_path.read_bytes()).hexdigest()
+    if damage == "manifest-hash":
+        bundle["manifestSha256"] = "sha256:" + "8" * 64
+    elif damage == "proof-hash":
+        bundle["contentReceiptSha256"] = "sha256:" + "8" * 64
+    ws.upsert_case(layout, A, contentVerificationBundle=bundle)
+    if damage == "changed-generation":
+        ws.upsert_case(layout, A, systemObservation={"fileSnapshot": {
+            "new-file": {"contentGeneration": 2}
+        }})
+    elif damage == "missing-observation":
+        ws.upsert_case(layout, A, systemObservation={"exists": False})
+    row = views.ledger_view(layout)["cases"][0]
+    assert row["stages"]["bodyVerified"] is False
+    assert row["stages"]["archived"] is True
+    assert row["historicalComplete"] is True
+    assert (work / "upload-state.json").exists()
+
+
 def test_older_absence_cannot_override_new_server_registration_receipt(layout):
     add_case(layout, A, deep=True)
     path = layout.work_case_dir(A) / "upload-state.json"

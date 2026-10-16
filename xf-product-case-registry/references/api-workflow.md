@@ -45,6 +45,14 @@
 
 补录 finalize 的 `created=false` 是既有 Case 模式的正常语义，不能套用完整导入的 `created=false` 失败门禁；但 `replaced.files` 必须为 0、冲突数必须为 0，新增数、同哈希跳过数和冲突数必须覆盖全部补录文件。随后必须用完整 `manifest.json` 核验案卷字段、检查、产品、全部槽位文件 SHA-256、飞牛 AVAILABLE 和 `nasVerifiedAt`，并再次读取同步快照确认历史槽位冲突已解决，才能把原 V6 状态收口为 VERIFIED 并归档。
 
+## 已归档原案追加其他附件
+
+用户明确要求向已存在原案追加本地处罚等附件，且原清单不含这些文件时，使用登记系统现有 `POST /api/v2/cases/{caseId}/attachments?title=...`，请求体仅含 `file` PDF。这与上述历史槽位冲突补录的前提不同；不改原 V6 状态，不创建完整导入任务。先按项目编号取得当前快照，核对原案 ID、原文件身份和新增文件摘要，已有同摘要文件不得再次发送。接口没有幂等键；每份保存请求前断点及接收后文件 ID，未知结果先 GET 回读，不自动重发。
+
+新材料及追加回执保存在原案子目录。原 `manifest.json`、`upload-state.json`、原正文回执和归档回执保持原字节。为了核对追加后的全案文件，可在该子目录建立仅用于核验的 `manifest.json`：完整复制原字段、检查、固定槽位和文件，只追加 `files` 及对应 `OTHER_ATTACHMENT`。不得将该核验清单用于再次完整导入。使用现有正文核验函数及 `content-verification.json`，按服务器文件 ID、摘要、大小和内容代际复用有效旧凭证，仅下载新增或变化正文；全部正文及飞牛状态通过后回读全案快照。
+
+唯一水位可用 `contentVerificationBundle` 关联该核验清单及回执，格式为 `CaseContentVerificationBundleV1`，包含 `projectNo`、`caseId`、`origin`、`baseManifestSha256`、`manifestPath`、`manifestSha256`、`contentReceiptPath`、`contentReceiptSha256`。路径必须位于原案子目录，摘要绑定原清单及追加核验结果。总账只在原文件完整保留、所有增加项均为其他附件、当前服务器文件集合与凭证完全一致时计为正文已核验；原归档身份继续独立验证。补传、正文核验、总账回读、D/E同步分别核验。
+
 ## 本地门禁与续传
 
 - `validate` 和 `upload --dry-run` 只做本地 Schema、归属、PDF、页数和哈希校验，不读取认证配置，不建立网络连接。
