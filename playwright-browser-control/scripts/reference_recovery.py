@@ -17,9 +17,19 @@ def rejected_reference(command, arguments, output, version):
     if not isinstance(ref, str) or not re.fullmatch(r'(?:f\d+)?e\d+', ref):
         return None
     expected = f'### Error\nError: Ref {ref} not found in the current page snapshot. Try capturing new snapshot.'
-    if output.replace('\r\n', '\n').strip() != expected:
-        return None
-    return {'classification': 'reference_not_found_before_input', 'command': command,
+    normalized = re.sub(r'\x1b\[[0-9;]*m', '', output.replace('\r\n', '\n')).strip()
+    classification = 'reference_not_found_before_input'
+    if normalized != expected:
+        # The pinned core waits here before scrolling, hit testing and input.
+        # Accept exactly this first-attempt log, never retries or later phases.
+        pattern = (r"### Error\nTimeoutError: Timeout \d+ms exceeded\.\nCall log:\n"
+            r"  - waiting for locator\('aria-ref=" + re.escape(ref) + r"'\)\n"
+            r"    - locator resolved to [^\n]+\n  - attempting click action\n"
+            r"    - waiting for element to be visible, enabled and stable")
+        if not re.fullmatch(pattern, normalized):
+            return None
+        classification = 'actionability_wait_before_input'
+    return {'classification': classification, 'command': command,
             'reference': ref, 'cli_version': version,
             'output_sha256': hashlib.sha256(output.encode()).hexdigest(), 'output': output}
 
@@ -54,8 +64,9 @@ def legacy_proof(log_path, ordinal, receipt, version):
                 output = item.get('aggregated_output', '')
                 proof = rejected_reference('click', [match[2]] if match else [], output, version)
                 cwd = unquote(urlparse(item.get('cwd', '')).path).lstrip('/')
-                prefix_ok = len(lines) == 1 or (len(lines) == 2 and lines[0].strip() ==
-                    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)')
+                prefix_ok = len(lines) == 1 or (len(lines) == 2 and lines[0].strip() in {
+                    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
+                    '$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)'})
                 if (not owner_verified or row.get('type') != 'event_msg' or
                     payload.get('type') != 'item_completed' or payload.get('thread_id') != receipt['conversation_id'] or
                     item.get('type') != 'CommandExecution' or item.get('status') != 'failed' or
@@ -72,7 +83,7 @@ def legacy_proof(log_path, ordinal, receipt, version):
                 # A later actual/unknown action invalidates this old proof.
                 if item.get('type') == 'CommandExecution':
                     match = re.search(r'--session\s+' + session + r'\s+(\S+)', script)
-                    if match and 'browser_cli.py' in script and match[1] not in {'status','audit','group-info'}:
+                    if match and 'browser_cli.py' in script and match[1] not in {'status','audit','group-info','readback'}:
                         rejected = item.get('aggregated_output', '').strip() == (
                             'Execution requires readback; no business commands or blind reconnect are allowed.')
                         if not rejected:
@@ -84,6 +95,12 @@ def legacy_proof(log_path, ordinal, receipt, version):
 
 def recovery_proof(arguments, receipt, version):
     failure = receipt.get('last_failure')
+    if (failure and failure.get('classification') == 'unclassified_result_unknown' and
+        len(arguments) == 2 and receipt['state'] == 'unknown'):
+        proof = legacy_proof(arguments[0], int(arguments[1]), receipt, version)
+        if abs((datetime.fromisoformat(proof['timestamp']) - datetime.fromisoformat(failure['at'])).total_seconds()) > 2:
+            raise ValueError('The original record is not the currently unresolved failure.')
+        return proof
     if failure:
         proof = rejected_reference(failure.get('command'), [failure.get('reference')],
                                    failure.get('output', ''), version)

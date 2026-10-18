@@ -20,7 +20,7 @@ function fixture({extraTab=false, connections=1, existing=false, duplicate=false
     }}
   };
   const sandbox={chrome};vm.createContext(sandbox);vm.runInContext(source+'\nthis.groupMetadata=groupMetadata;',sandbox);
-  const status={url:()=> 'chrome-extension://mmlmfjhmonkocbjadbfplnigmagldckm/status.html',
+  const status={url:()=> 'chrome-extension://mmlmfjhmonkocbjadbfplnigmagldckm/connect.html?token=fixture',
     on:()=>{},goto:async()=>{assert.equal(existing,false);},evaluate:async(fn,value)=>fn(value),close:async()=>{closed=true;}};
   const context={pages:()=>existing?(duplicate?[status,status]:[status]):[],newPage:async()=>{assert.equal(existing,false);return status;}};
   const bootstrap={context:()=>context};

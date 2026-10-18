@@ -17,6 +17,15 @@ OWNER = '11111111-1111-1111-1111-111111111111'
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_only_first_actionability_wait_can_recover(self):
+        output = ("### Error\nTimeoutError: Timeout 5000ms exceeded.\nCall log:\n"
+            "  - waiting for locator('aria-ref=e47')\n    - locator resolved to <button>…</button>\n"
+            "  - attempting click action\n    - waiting for element to be visible, enabled and stable\n")
+        self.assertEqual(recovery.rejected_reference('click',['e47'],output,'0.1.22')['classification'],
+                         'actionability_wait_before_input')
+        for suffix in ['  - retrying click action', '  - performing click action', '  - click action done']:
+            self.assertIsNone(recovery.rejected_reference('click',['e47'],output+suffix,'0.1.22'))
+
     def test_exact_pre_input_error_only(self):
         self.assertIsNotNone(recovery.rejected_reference('click', ['e47'], ERROR, '0.1.22'))
         for command, args, output, version in [
@@ -103,7 +112,7 @@ class RecoveryTests(unittest.TestCase):
             receipt.pop('last_failure')
             record = {'type':'event_msg','ordinal':9,'timestamp':lifecycle.now(), 'payload':{
                 'type':'item_completed','thread_id':OWNER,'item':{'type':'CommandExecution','id':'original',
-                'command':['python -X utf8 "C:/skill/browser_cli.py" --session case click e47'],
+                'command':['$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\npython -X utf8 "C:/skill/browser_cli.py" --session case click e47'],
                 'cwd':root.as_uri(), 'status':'failed','exit_code':1,'aggregated_output':ERROR}}}
             meta = {'type':'session_meta','payload':{'id':OWNER,'cwd':str(root)}}
             log = root / 'original.jsonl'

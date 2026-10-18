@@ -10,7 +10,8 @@ async function groupMetadata(bootstrap, input) {
     page.on('download',download=>{guard.pending.add(download);download.failure().then(()=>guard.pending.delete(download)).catch(()=>{});});
   }
   const statusUrl = 'chrome-extension://mmlmfjhmonkocbjadbfplnigmagldckm/status.html';
-  const helpers = (context.pages?.() || []).filter(p => p.url().split(/[?#]/)[0] === statusUrl);
+  const helperUrls = [statusUrl, statusUrl.replace('status.html', 'connect.html')];
+  const helpers = (context.pages?.() || []).filter(p => helperUrls.includes(p.url().split(/[?#]/)[0]));
   if (helpers.length > 1) throw Error('control_helper_not_unique');
   const temporary = helpers.length === 0;
   const status = helpers[0] || await context.newPage();

@@ -259,11 +259,11 @@ def managed_main(args, root, settings):
             if args.command in {'finish','disconnect'}:
                 print(json.dumps({**receipt, 'reused_completed_receipt':True}, ensure_ascii=False, indent=2)); return 0
             raise ValueError('This execution is completed; connect creates fresh objects for the next execution.')
-        elif receipt['state'] in {'connecting','unknown','readback_required','cleanup_pending'} and args.command not in {'group-info','audit','readback','recover-reference'}:
+        elif receipt['state'] in {'connecting','unknown','readback_required','cleanup_pending'} and args.command not in {'group-info','audit','readback','recover-reference','recover-click'}:
             raise ValueError('Execution requires readback; no business commands or blind reconnect are allowed.')
 
         proof = None
-        if args.command == 'recover-reference':
+        if args.command in {'recover-reference','recover-click'}:
             if receipt['state'] not in {'unknown','readback_required'}:
                 raise ValueError('Reference recovery requires a failed execution.')
             proof = reference_recovery.recovery_proof(args.arguments, receipt, settings['expected_cli_version'])
@@ -284,7 +284,7 @@ def managed_main(args, root, settings):
 
         def metadata():
             safe_identity = {k:receipt[k] for k in ('schema','computer_name','environment','project_name','session_name','browser_name','title')}
-            code, output = invoke('run-code', [group_code(safe_identity, args.command in {'group-info','audit','readback','recover-reference'})])
+            code, output = invoke('run-code', [group_code(safe_identity, args.command in {'group-info','audit','readback','recover-reference','recover-click'})])
             if code:
                 raise ValueError('Native group readback failed; keep this execution for inspection.')
             return group_result(output)
@@ -348,7 +348,7 @@ def managed_main(args, root, settings):
                 print(json.dumps(receipt, ensure_ascii=False, indent=2)); return 0
             if args.command == 'audit':
                 print(json.dumps(inspect_browser(), ensure_ascii=False, indent=2)); return 0
-            if args.command in {'readback','recover-reference'}:
+            if args.command in {'readback','recover-reference','recover-click'}:
                 if args.command == 'readback' and args.arguments:
                     raise ValueError('readback takes no extra arguments.')
                 if proof:

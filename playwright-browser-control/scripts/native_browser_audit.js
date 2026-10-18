@@ -22,7 +22,7 @@ async function nativeBrowserInventory(input = {}) {
         if (['http:', 'https:'].includes(url.protocol)) { origin = url.origin; kind = 'web_page'; }
         else { origin = url.protocol; }
       } catch {}
-      if (String(t.url || '').split(/[?#]/)[0] === statusUrl) kind = 'automation_control';
+      if ([statusUrl, statusUrl.replace('status.html','connect.html')].includes(String(t.url || '').split(/[?#]/)[0])) kind = 'automation_control';
       return {id: t.id, group_id: t.groupId, window_id: t.windowId,
         active: !!t.active, discarded: !!t.discarded, origin, kind};
     }), connections
@@ -32,7 +32,8 @@ async function nativeBrowserInventory(input = {}) {
 async function captureNativeBrowserInventory(bootstrap, input = {}) {
   const context = bootstrap.context();
   const statusUrl = 'chrome-extension://mmlmfjhmonkocbjadbfplnigmagldckm/status.html';
-  const helpers = (context.pages?.() || []).filter(p => p.url().split(/[?#]/)[0] === statusUrl);
+  const helperUrls = [statusUrl, statusUrl.replace('status.html', 'connect.html')];
+  const helpers = (context.pages?.() || []).filter(p => helperUrls.includes(p.url().split(/[?#]/)[0]));
   if (helpers.length > 1) throw Error('control_helper_not_unique');
   const temporary = helpers.length === 0;
   const status = helpers[0] || await context.newPage();
