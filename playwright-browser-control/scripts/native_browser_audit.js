@@ -30,10 +30,15 @@ async function nativeBrowserInventory(input = {}) {
 }
 
 async function captureNativeBrowserInventory(bootstrap, input = {}) {
-  const status = await bootstrap.context().newPage();
+  const context = bootstrap.context();
+  const statusUrl = 'chrome-extension://mmlmfjhmonkocbjadbfplnigmagldckm/status.html';
+  const helpers = (context.pages?.() || []).filter(p => p.url().split(/[?#]/)[0] === statusUrl);
+  if (helpers.length > 1) throw Error('control_helper_not_unique');
+  const temporary = helpers.length === 0;
+  const status = helpers[0] || await context.newPage();
   try {
-    await status.goto('chrome-extension://mmlmfjhmonkocbjadbfplnigmagldckm/status.html',
+    if (temporary) await status.goto(statusUrl,
       {waitUntil: 'domcontentloaded', timeout: 15000});
-    return await status.evaluate(nativeBrowserInventory, input);
-  } finally { await status.close(); }
+    return await status.evaluate(nativeBrowserInventory, {...input, include_self: !temporary});
+  } finally { if (temporary) await status.close(); }
 }

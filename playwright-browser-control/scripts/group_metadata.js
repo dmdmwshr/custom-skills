@@ -9,11 +9,15 @@ async function groupMetadata(bootstrap, input) {
     guard.pages.add(page);
     page.on('download',download=>{guard.pending.add(download);download.failure().then(()=>guard.pending.delete(download)).catch(()=>{});});
   }
-  const status = await context.newPage();
+  const statusUrl = 'chrome-extension://mmlmfjhmonkocbjadbfplnigmagldckm/status.html';
+  const helpers = (context.pages?.() || []).filter(p => p.url().split(/[?#]/)[0] === statusUrl);
+  if (helpers.length > 1) throw Error('control_helper_not_unique');
+  const temporary = helpers.length === 0;
+  const status = helpers[0] || await context.newPage();
   try {
-    await status.goto('chrome-extension://mmlmfjhmonkocbjadbfplnigmagldckm/status.html',
+    if (temporary) await status.goto(statusUrl,
       {waitUntil: 'domcontentloaded', timeout: 15000});
-    return await status.evaluate(async ({identity, readOnly}) => {
+    return await status.evaluate(async ({identity, readOnly, temporary}) => {
       const own = await chrome.tabs.getCurrent();
       if (!own || own.groupId < 0) throw Error('native_group_missing');
       const response = await chrome.runtime.sendMessage({type: 'getConnectionStatus'});
@@ -29,10 +33,10 @@ async function groupMetadata(bootstrap, input) {
       return {...identity, group_id: verified.id, window_id: verified.windowId,
         connection_id: connections[0].id, actual_title: verified.title,
         naming_verified: verified.title === identity.title,
-        native_tab_ids: tabs.filter(t => t.id !== own.id).map(t => t.id),
+        native_tab_ids: tabs.filter(t => !temporary || t.id !== own.id).map(t => t.id),
         saved_group_status: 'not_checked'};
-    }, input);
+    }, {...input, temporary});
   } finally {
-    await status.close();
+    if (temporary) await status.close();
   }
 }

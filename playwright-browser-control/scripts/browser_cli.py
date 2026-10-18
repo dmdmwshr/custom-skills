@@ -13,6 +13,7 @@ import time
 from group_identity import identity
 import execution_state as lifecycle
 import browser_audit
+import reference_recovery
 from saved_groups import snapshot as saved_snapshot
 
 
@@ -258,8 +259,16 @@ def managed_main(args, root, settings):
             if args.command in {'finish','disconnect'}:
                 print(json.dumps({**receipt, 'reused_completed_receipt':True}, ensure_ascii=False, indent=2)); return 0
             raise ValueError('This execution is completed; connect creates fresh objects for the next execution.')
-        elif receipt['state'] in {'connecting','unknown','cleanup_pending'} and args.command not in {'group-info','audit'}:
+        elif receipt['state'] in {'connecting','unknown','readback_required','cleanup_pending'} and args.command not in {'group-info','audit','readback','recover-reference'}:
             raise ValueError('Execution requires readback; no business commands or blind reconnect are allowed.')
+
+        proof = None
+        if args.command == 'recover-reference':
+            if receipt['state'] not in {'unknown','readback_required'}:
+                raise ValueError('Reference recovery requires a failed execution.')
+            proof = reference_recovery.recovery_proof(args.arguments, receipt, settings['expected_cli_version'])
+            backup = path.parent.parent / 'recovery' / receipt['execution_id'] / (str(time.time_ns()) + '.json')
+            lifecycle.save(backup, receipt)
 
         def invoke(command, arguments=None):
             argv, env, secrets = prepare(settings, root, args.browser, args.session, command,
@@ -267,13 +276,15 @@ def managed_main(args, root, settings):
             try:
                 code, output = run_cli(argv, env, args.timeout, secrets)
             except subprocess.TimeoutExpired:
-                receipt['state'] = 'unknown'; persist()
+                receipt['state'] = 'unknown'
+                receipt['last_failure'] = {'classification':'timeout_result_unknown', 'at':lifecycle.now()}
+                persist()
                 raise
             return code, output
 
         def metadata():
             safe_identity = {k:receipt[k] for k in ('schema','computer_name','environment','project_name','session_name','browser_name','title')}
-            code, output = invoke('run-code', [group_code(safe_identity, args.command in {'group-info','audit'})])
+            code, output = invoke('run-code', [group_code(safe_identity, args.command in {'group-info','audit','readback','recover-reference'})])
             if code:
                 raise ValueError('Native group readback failed; keep this execution for inspection.')
             return group_result(output)
@@ -337,6 +348,29 @@ def managed_main(args, root, settings):
                 print(json.dumps(receipt, ensure_ascii=False, indent=2)); return 0
             if args.command == 'audit':
                 print(json.dumps(inspect_browser(), ensure_ascii=False, indent=2)); return 0
+            if args.command in {'readback','recover-reference'}:
+                if args.command == 'readback' and args.arguments:
+                    raise ValueError('readback takes no extra arguments.')
+                if proof:
+                    if set(actual['native_tab_ids']) != set(receipt['owned_tab_ids']) or not receipt.get('browser_epoch'):
+                        raise ValueError('Exact original membership and browser process identity are required for recovery.')
+                    if browser_audit.browser_epoch(args.browser, profile) != receipt['browser_epoch']:
+                        raise ValueError('The original browser process cannot be verified; recovery remains protected.')
+                    inspect_browser()
+                code, output = invoke('snapshot')
+                print(output)
+                if code:
+                    raise ValueError('Fresh read-only snapshot failed; execution remains protected.')
+                if proof:
+                    after = metadata()
+                    if (after['group_id'] != receipt['group_id'] or after['connection_id'] != receipt['connection_id'] or
+                        set(after['native_tab_ids']) != set(receipt['owned_tab_ids'])):
+                        raise ValueError('Ownership changed during recovery readback.')
+                    receipt['last_failure'] = {**proof, 'reconciled_at':lifecycle.now(),
+                        'resolution':'fresh_snapshot_no_replay', 'baseline_receipt':str(backup)}
+                    receipt['state'] = 'active'
+                    persist()
+                return 0
             if args.command in {'finish','disconnect'}:
                 receipt['owned_tab_ids'] = actual['native_tab_ids']
                 inspect_browser()
@@ -385,7 +419,10 @@ def managed_main(args, root, settings):
             code, output = invoke(args.command, args.arguments)
             print(output, end='' if output.endswith('\n') else '\n')
             if code:
-                receipt['state'] = 'unknown'; persist(); return code
+                failure = reference_recovery.rejected_reference(args.command, args.arguments, output, settings['expected_cli_version'])
+                receipt['last_failure'] = {**(failure or {'classification':'unclassified_result_unknown'}), 'at':lifecycle.now()}
+                receipt['state'] = 'readback_required' if failure else 'unknown'
+                persist(); return code
             after = metadata()
             if (after['group_id'] != receipt['group_id'] or after['connection_id'] != receipt['connection_id']
                     or args.command not in {'tab-new','run-code'} and not set(after['native_tab_ids']).issubset(receipt['owned_tab_ids'])):

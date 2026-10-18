@@ -50,6 +50,8 @@ python -X utf8 $browserTool --session task-name finish
 - 桌面应用内创建的运行配置可能位于 Windows 应用包的实际缓存目录，独立后台看不到表面的 AppData 路径。此时先在原环境核实真实目录和现用 `runtime.json`，为后台显式传 `--runtime-root <同一受管目录的实际绝对路径>`；配置中的程序路径也须指向已核实实体。只复用同一配置和凭据，不新建第二套运行根，不更改 `LOCALAPPDATA` 或浏览器资料位置。
 - `--profile <名称>` 选择 runtime.json 中 `profiles.<浏览器>.<名称>` 登记的独立资料；同一执行每次保持该参数一致。不传时保留既有默认资料，未知名称直接拒绝，不回退到默认账号。资料映射只保存 channel、profile_directory、可选 profile_path 及凭据引用。扩展凭据可用既有受限 token_file，或 LocalVault 的 secret_name 与 credential_username；后者还需配置 vault_pwsh_executable。先用 `localvault-credentials` 保存 PSCredential，再以本机私有管道读入启动器；仅扩展令牌按官方协议注入 CLI 子进程环境，不写父进程、普通文件、命令参数或报告。网站密码继续遵循下述标准输入登录流程。
 - 同一次执行保持目录、浏览器及标签一致。每次 `connect` 创建新的实际 CLI 会话；已在用或未知执行不能重复 connect。`status` 读取管理回执，`group-info` 只读原生身份，`audit` 只读巡检当前资料中的组、页、连接及历史保存记录；`group-name` 仅用于当前合法执行。未知状态下 `audit` 不结算未知业务、不重放原动作。
+- 失败后可用 `readback` 读取同一执行的新快照，读取不会解除保护。只有固定验收版 CLI 明确在输入分发前报告单次 `click` 的引用不存在，才可用 `recover-reference`：保留原失败、核对原浏览器进程、组、连接与全部自有页，再取得新快照后恢复；不重放旧点击。旧版回执需传原始本会话执行日志绝对路径及该失败事件 ordinal，校验归属和后续动作后才适用。超时、其他错误、归属变化及已恢复的旧失败均不能借此解除保护。
+- 原生身份和巡检优先复用当前连接中唯一的扩展状态辅助页，不为每次读取新建并关闭前台标签；找不到辅助页时才创建临时观察页，并关闭精确临时对象。
 - 最新执行指针保存在 `.playwright/groups/<浏览器>-<标签>.json`，历史按 execution ID 单独归档。跨会话、目录或资料的调用被拒绝。旧版连接回执要先精确退役，不能作为新页面入口。
 - `doctor` 核对固定验收版本；版本漂移先核验升级，不每次安装 latest 或另装浏览器。凭证只由本地启动子进程读取并注入，输出脱敏；不回显凭证、Cookie、密码、认证头或网站存储。
 
