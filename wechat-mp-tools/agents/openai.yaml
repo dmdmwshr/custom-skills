@@ -1,0 +1,4 @@
+interface:
+  display_name: "微信公众号文章获取"
+  short_description: "调用本机 WeChat MP Tools 单次获取公众号文章，保留断点并验证离线成果"
+  default_prompt: "使用 $wechat-mp-tools 单次获取这个公众号的文章，保存文章目录、正文和失败回执，不创建持续订阅。"
