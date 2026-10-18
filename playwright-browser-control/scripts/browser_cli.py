@@ -175,7 +175,9 @@ def run_cli(command: list[str], env: dict, timeout: int, secrets: list[str]) -> 
                             errors='replace', timeout=timeout, shell=False,
                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     output = redact(result.stdout + result.stderr, secrets)
-    return result.returncode or (1 if '### Error' in output else 0), output
+    # Generated code may quote an earlier error receipt; only a real CLI section is an error.
+    failed = re.search(r'(?m)^### Error\s*$', output.replace('\r\n', '\n')) is not None
+    return result.returncode or (1 if failed else 0), output
 
 
 def parse_result(output, schema):
@@ -259,7 +261,7 @@ def managed_main(args, root, settings):
             if args.command in {'finish','disconnect'}:
                 print(json.dumps({**receipt, 'reused_completed_receipt':True}, ensure_ascii=False, indent=2)); return 0
             raise ValueError('This execution is completed; connect creates fresh objects for the next execution.')
-        elif receipt['state'] in {'connecting','unknown','readback_required','cleanup_pending'} and args.command not in {'group-info','audit','readback','recover-reference','recover-click'}:
+        elif receipt['state'] in {'connecting','unknown','readback_required','cleanup_pending'} and args.command not in {'group-info','audit','readback','recover-reference','recover-click','reconcile-cleanup'}:
             raise ValueError('Execution requires readback; no business commands or blind reconnect are allowed.')
 
         proof = None
@@ -310,6 +312,28 @@ def managed_main(args, root, settings):
             return report
 
         try:
+            if args.command == 'reconcile-cleanup':
+                if receipt['state'] != 'unknown' or len(args.arguments) != 1:
+                    raise ValueError('Cleanup reconciliation requires one original cleanup output for the unknown execution.')
+                original = Path(args.arguments[0]).read_text(encoding='utf-8-sig')
+                cleanup = parse_result(original, 'BrowserCleanupV1')
+                if (not cleanup.get('scheduled') or cleanup.get('group_id') != receipt['group_id'] or
+                    not set(receipt['owned_tab_ids']).issubset(cleanup.get('tab_ids', [])) or
+                    len(set(cleanup['tab_ids']) - set(receipt['owned_tab_ids'])) > 1):
+                    raise ValueError('The cleanup receipt does not match the original execution.')
+                current = saved_groups(profile)
+                if any(g in current for g in receipt['saved_group_ids']):
+                    raise ValueError('The original saved group still exists; cleanup must remain unresolved.')
+                backup = path.parent.parent / 'recovery' / receipt['execution_id'] / (str(time.time_ns()) + '.json')
+                lifecycle.save(backup, receipt)
+                release_code, release_output = invoke('disconnect')
+                cleanup['connection_release'] = release_status(release_code, release_output, receipt['cli_session'])
+                cleanup['saved_group_status'] = 'verified_absent'
+                receipt.update(state='cleanup_pending', cleanup=cleanup, finished_at=lifecycle.now(),
+                               cleanup_reconciled_from=str(Path(args.arguments[0]).resolve()))
+                persist()
+                print(json.dumps({'state':receipt['state'],'cleanup':cleanup},ensure_ascii=False))
+                return 0 if cleanup['connection_release'] != 'unverified' else 1
             if args.command == 'connect':
                 code, output = invoke('connect')
                 if code:

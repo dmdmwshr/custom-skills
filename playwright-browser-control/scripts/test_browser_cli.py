@@ -85,6 +85,13 @@ class BrowserLauncherTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cli.group_result(output)
 
+    def test_quoted_failure_receipt_does_not_turn_successful_cleanup_into_failure(self):
+        for output, expected in [('### Result\n{}\n### Ran Playwright code\nconst old="### Error";',0),
+                                 ('### Error\nTimeout',1), ('### Error\r\nTimeout',1)]:
+            with patch.object(cli.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=output,stderr='')):
+                code, _ = cli.run_cli(['fixture'],{},2,[])
+            self.assertEqual(code,expected)
+
     def configure_seth(self):
         executable = self.root / 'pwsh.exe'
         executable.touch()
