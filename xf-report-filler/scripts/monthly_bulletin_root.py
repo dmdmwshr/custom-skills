@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import sys
+from copy import copy
 from datetime import date, datetime
 from pathlib import Path
 
@@ -120,7 +121,9 @@ def openpyxl_pending_font():
 
 def mark_openpyxl_pending(cell):
     cell.fill = openpyxl_pending_fill()
-    cell.font = openpyxl_pending_font()
+    font = copy(cell.font)
+    font.color = PENDING_FONT_RGB
+    cell.font = font
 
 
 def clear_openpyxl_pending(cell):
@@ -782,7 +785,8 @@ def ensure_product_stats_required_value(value, staff_count):
     text = str(value or "").strip()
     required = product_stats_pending_value(staff_count)
     if parse_required_count(text):
-        return text
+        refresh = CONFIG['pending_rules']['product_stats_required_counts'].get('refresh_required_count', True)
+        return re.sub(r"[（(]\s*\d+\s*[）)]", required, text, count=1) if refresh else text
     return f"{text}{required}" if text else required
 
 
@@ -843,6 +847,10 @@ def mark_pending_cells(
         stats_path = paths["product_stats"]["pending"] if paths["product_stats"]["pending"].exists() else paths["product_stats"]["normal"]
         if stats_path.exists():
             product_stats = read_product_stats(stats_path)
+            # pending模式即将刷新B列括号要求；科室表使用同一最新要求。
+            for brigade, row_stats in product_stats.items():
+                if brigade in staff_counts:
+                    row_stats.get('columns', {}).get('B', {})['required'] = staff_counts[brigade]
             stats_audit = audit_product_stats(product_stats, case_counts)
             blockers.extend(stats_audit["blockers"])
             warnings.extend(stats_audit["warnings"])

@@ -53,6 +53,19 @@ class MonthlyBulletinRootTests(unittest.TestCase):
         self.assertEqual(root.ensure_product_stats_required_value("7次", 8), "7次（8）")
         self.assertEqual(root.ensure_product_stats_required_value("7次（8）", 8), "7次（8）")
 
+    def test_refresh_required_count_preserves_reported_data_and_notes(self):
+        self.assertEqual(root.ensure_product_stats_required_value("（12）", 8), "（8）")
+        self.assertEqual(root.ensure_product_stats_required_value("7次（12）已报", 8), "7次（8）已报")
+        self.assertEqual(root.ensure_product_stats_required_value("7次(12)", 8), "7次（8）")
+
+    def test_pending_marker_preserves_template_font(self):
+        from openpyxl.styles import Font
+        cell = Workbook().active['A1']
+        cell.font = Font(name='宋体', size=14, bold=True, italic=True)
+        root.mark_openpyxl_pending(cell)
+        self.assertEqual((cell.font.name, cell.font.sz, cell.font.bold, cell.font.italic), ('宋体', 14, True, True))
+        self.assertEqual(cell.font.color.rgb, root.PENDING_FONT_RGB)
+
     def test_read_work_plan_month_tasks_uses_cumulative_yellow_red_text_only(self):
         class FakeSheet:
             nrows = 3

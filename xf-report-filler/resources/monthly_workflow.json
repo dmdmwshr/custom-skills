@@ -233,6 +233,7 @@
       "target_column": 2,
       "pending_columns": "B:K",
       "value": "（{staff_count}）",
+      "refresh_required_count": true,
       "pending_style": "spreadsheet_pending_style"
     }
   },
