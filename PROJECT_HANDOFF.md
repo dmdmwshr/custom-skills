@@ -1,3 +1,10 @@
+## 2026-10-19 用户直接指令：Claude 独立能力补齐中的 MarkItDown WSL 适配
+
+- 本次只改 markitdown-local/SKILL.md 与 platforms.json；原 convert.py 不变。Windows 原路径保留，WSL 使用协作项目独立文档环境的 MarkItDown 0.1.8。受管平台增加 WSL，不宣称其他 Linux 已安装。
+- 已用虚构 Word、Excel、PPT、PDF 四格式实跑同一 convert.py：全部提取中文成功、源文件 SHA256 不变；已有输出被拒绝覆盖且内容不变。测试证据在 /srv/work/tasks/2026-10-19-claude-capability-upgrade/markitdown-publication/acceptance/receipt.json。
+- 源仓先从已核对干净的 4bd9ab8 快进到远端 2d1f46f，保留其中其他 Skill 的 5 个提交；本轮仅提交上述两文件及本节，精确发布 markitdown-local。发布提交、远端回读、安装/发现证据与恢复点由同任务目录 publication.json 记录，未有成功回执前不视为完成。
+- Windows 安装副本本轮不变；WSL Claude 通过既有同步脚本链接受管 Codex 副本。源码、安装、发现和模型调用分开验收；Claude 实际调用按主任务 19:00 安排执行。
+
 # 2026-10-18 路径迁移收尾交接
 
 状态：六仓路径提交及双端受管安装验收完成。更新时间：2026-10-18T17:35:39-07:00。

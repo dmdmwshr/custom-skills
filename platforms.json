@@ -12,7 +12,8 @@
     "macro-strategy-data-operations",
     "playwright-browser-control",
     "server-traffic-sync",
-    "linux-computer-control"
+    "linux-computer-control",
+    "markitdown-local"
   ],
   "notes": "This is enforced by the managed publisher, not a native Codex frontmatter filter. Support declarations do not prove business dependencies or real-host validation. Windows-only entries describe current delivered workflows, not portability of every helper.",
   "skills": {
@@ -538,17 +539,18 @@
       "dependencies": "Pinned Windows runtime under USERPROFILE/.local/share/codex-tools; see SKILL.md."
     },
     "markitdown-local": {
-      "category": "platform_specific",
+      "category": "cross_platform",
       "execution_platforms": [
-        "windows"
+        "windows",
+        "wsl"
       ],
-      "managed_wsl": false,
+      "managed_wsl": true,
       "validation": {
         "windows": "stable_entry_verified_20261013",
-        "wsl": "not_installed",
+        "wsl": "four_formats_and_no_overwrite_verified_20261019",
         "linux": "not_installed"
       },
-      "dependencies": "Pinned Windows runtime under USERPROFILE/.local/share/codex-tools; see SKILL.md."
+      "dependencies": "Per-host pinned MarkItDown 0.1.8; Windows codex-tools runtime or WSL claude-codex document-tools venv; see SKILL.md."
     },
     "serena-local": {
       "category": "platform_specific",
