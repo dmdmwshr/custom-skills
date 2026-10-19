@@ -173,6 +173,23 @@ class ArtifactVisualQaTests(unittest.TestCase):
                 source_texts=[str(self.source)], rule_source_texts=[str(workbook)],
                 receipt_text=str(self.root / 'result.visual-qa.json'))
 
+    def test_changed_accepted_workbook_uses_new_receipt_and_preserves_prior_result(self):
+        artifact = self.root / 'result.xlsx'
+        original_receipt = self.root / 'first.visual-qa.json'
+        self._baseline(artifact=artifact, artifact_type='xlsx', receipt=original_receipt)
+        artifact.write_bytes(b'workbook-version-one')
+        qa.finalize_receipt(receipt_text=str(original_receipt),
+            inspection_text=str(self._inspection(checked_units=['sheet:登记表','print-page:登记表:1'], total_units=2)))
+        previous_evidence = original_receipt.read_bytes()
+        artifact.write_bytes(b'workbook-version-two')
+        self.assertEqual(qa.verify_receipt(receipt_text=str(original_receipt))['outcome'], 'blocked')
+        current_receipt = self.root / 'second.visual-qa.json'
+        self._baseline(artifact=artifact, artifact_type='xlsx', receipt=current_receipt)
+        result = qa.finalize_receipt(receipt_text=str(current_receipt),
+            inspection_text=str(self._inspection(checked_units=['sheet:登记表','print-page:登记表:1'], total_units=2)))
+        self.assertEqual(result['outcome'], 'passed')
+        self.assertEqual(original_receipt.read_bytes(), previous_evidence)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -384,6 +384,7 @@
     "retain_multiple_pages_if_needed": true
   },
   "visual_qa_rules": {
+    "metadata_drift_policy": "preserve_primary_and_versions_then_reinspect_with_new_receipt",
     "rule_snapshot_suffixes": [
       ".json",
       ".js",
