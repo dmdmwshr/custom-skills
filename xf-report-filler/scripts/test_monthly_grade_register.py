@@ -214,6 +214,32 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
         self.assertEqual(person, "")
         self.assertIn("联系人", issues)
 
+    def test_parse_monitor_note_preserves_missing_contact_issues(self):
+        for note, expected in [
+            ("4374未关联、监督系统编码、pdf", "未关联、监督系统编码、pdf"),
+            ("0405未关联参谋、pdf", "未关联参谋、pdf"),
+            ("3202U00026   未关联消防机构联系人、pdf", "未关联消防机构联系人、pdf"),
+            ("3202U00405未挂靠、pdf", "未挂靠、pdf"),
+        ]:
+            with self.subTest(note=note):
+                self.assertEqual(mgr.parse_monitor_note(note), ("", expected))
+
+    def test_parse_monitor_note_keeps_real_contact_after_full_identifier(self):
+        self.assertEqual(mgr.parse_monitor_note("3202U00440曹云皓、pdf、主机日期"), ("曹云皓", "pdf、主机日期"))
+        self.assertEqual(mgr.parse_monitor_note("0440 张杰、cad"), ("张杰", "cad"))
+
+    def test_missing_contact_report_does_not_invent_a_person(self):
+        _, text = mgr.build_report_sections([], [{
+            "short": "经开", "大队": "经开大队", "index": 1, "score": 9.5,
+            "联系人": "", "单位": "测试中学",
+            "issues_report": mgr.normalize_monitor_issues("未关联、监督系统编码、pdf、缺维保合同维保记录"),
+        }])
+        self.assertEqual(text, "经开大队的测试中学存在未关联消防机构联系人、监督系统编码缺失、缺火灾防控图、缺维保合同、缺维保记录。")
+
+    def test_monitor_combined_missing_documents_and_drawing_suffixes(self):
+        self.assertEqual(mgr.normalize_monitor_issues("缺维保合同维保记录、缺维保记录维保合同、CAD图纸、PDF图纸"),
+                         "缺维保合同、缺维保记录、缺维保合同、缺维保记录、缺点位图、缺火灾防控图")
+
     def test_normalize_monitor_issues_uses_public_cad_pdf_names(self):
         text = mgr.normalize_monitor_issues("cad、CAD、缺cad、缺CAD、CAD图、点位图、pdf、PDF、缺pdf、缺PDF、火灾防控图")
         self.assertNotIn("CAD", text)

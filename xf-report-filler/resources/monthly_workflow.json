@@ -259,6 +259,10 @@
       "K": "加油、加气站点消防产品检查次数需人工核对，按总次数（检查出不合格次数）填写。"
     }
   },
+  "monitor_note_rules": {
+    "missing_contact_prefixes": ["未关联", "未挂靠"],
+    "missing_contact_public_text": "未关联消防机构联系人"
+  },
   "personal_stats_rules": {
     "product_score_column": "AA",
     "mismatch_marker": "待核对",

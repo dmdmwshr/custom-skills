@@ -530,7 +530,7 @@ def monitor_contact_warnings(monitor_details):
         if detail.get("联系人"):
             continue
         note = str(detail.get("note") or "")
-        if "联系人" not in note:
+        if not re.search(r"联系人|未关联|未挂靠", note):
             continue
         warnings.append(
             {
@@ -966,13 +966,15 @@ def normalize_monitor_issues(raw):
     normalized = []
     for part in parts:
         low = part.lower()
-        if part in {"人员信息", "未上传人员信息"}:
+        if any(part.startswith(prefix) for prefix in WORKFLOW_CONFIG.get("monitor_note_rules", {}).get("missing_contact_prefixes", ["未关联", "未挂靠"])) or part in INVALID_MONITOR_CONTACTS or part == "消防机构联系人":
+            normalized.append(WORKFLOW_CONFIG.get("monitor_note_rules", {}).get("missing_contact_public_text", "未关联消防机构联系人"))
+        elif part in {"人员信息", "未上传人员信息"}:
             normalized.append("缺人员信息")
-        elif re.fullmatch(r"缺?\s*pdf(?:图)?", low) or part in {"火灾防控图", "缺火灾防控图"}:
+        elif re.fullmatch(r"缺?\s*pdf(?:图纸|图)?", low) or part in {"火灾防控图", "缺火灾防控图"}:
             normalized.append("缺火灾防控图")
-        elif re.fullmatch(r"缺?\s*cad(?:图)?", low) or part in {"点位图", "缺点位图"}:
+        elif re.fullmatch(r"缺?\s*cad(?:图纸|图)?", low) or part in {"点位图", "缺点位图"}:
             normalized.append("缺点位图")
-        elif part == "主机日期":
+        elif part in {"主机日期", "主机生产日期"}:
             normalized.append("消控主机生产日期未录入")
         elif part in {"未登录", "账号长期登录"}:
             normalized.append("账号长期未登录")
@@ -982,10 +984,12 @@ def normalize_monitor_issues(raw):
             normalized.append("消控室电话不规范")
         elif part == "监督编码":
             normalized.append("监督编码缺失")
+        elif part == "监督系统编码":
+            normalized.append("监督系统编码缺失")
         elif part == "设备离线":
             normalized.append("设备离线")
-        elif "维保合同维保记录" in part:
-            normalized.append(part.replace("维保合同维保记录", "缺维保合同、缺维保记录"))
+        elif re.fullmatch(r"缺?维保合同缺?维保记录|缺?维保记录缺?维保合同", part):
+            normalized.append("缺维保合同、缺维保记录")
         elif part == "维保记录":
             normalized.append("缺维保记录")
         elif part == "维保合同":
@@ -999,14 +1003,19 @@ def normalize_monitor_issues(raw):
 
 def parse_monitor_note(note):
     note = str(note or "").strip()
-    match = re.search(r"\d{3,4}\s*[，,、]?\s*([\u4e00-\u9fff]{2,4})", note)
+    code = re.match(r"^\d+[A-Za-z]?\d*\s*[，,、]?\s*", note)
+    remainder = note[code.end():] if code else note
+    missing_prefixes = WORKFLOW_CONFIG.get("monitor_note_rules", {}).get("missing_contact_prefixes", ["未关联", "未挂靠"])
+    if any(remainder.startswith(prefix) for prefix in missing_prefixes) or remainder.startswith(("消防机构联系人", "机构联系人", "联系人")):
+        return "", remainder.strip(" /\\，,、")
+    match = re.match(r"([\u4e00-\u9fff]{2,4})(?=[\s，,、/\\;；]|$)", remainder) if code else None
     person = match.group(1) if match else ""
     if person in INVALID_MONITOR_CONTACTS or "机构" in person or "联系人" in person:
         person = ""
     if match:
-        issues = note[match.end() :]
+        issues = remainder[match.end() :]
     else:
-        issues = note
+        issues = remainder
     issues = issues.strip(" /\\，,、")
     return person, issues
 
@@ -1680,8 +1689,10 @@ def build_report_sections(product_records, monitor_details, monitor_scores=None,
 
     monitor_sentences = []
     for detail in select_monitor_report_cases(monitor_details, monitor_scores, history_counts):
+        contact = str(detail.get('联系人') or '').strip()
+        subject = f"{detail['大队']}{contact}联系的" if contact else f"{detail['大队']}的"
         monitor_sentences.append(
-            f"{detail['大队']}{detail['联系人']}联系的{detail['单位']}"
+            f"{subject}{detail['单位']}存在"
             f"{detail['issues_report']}"
         )
     monitor_text = "。".join(monitor_sentences) + "。"
