@@ -1,6 +1,9 @@
 ---
 name: "xf-report-filler"
 description: "根据消防产品底册、联网监测源表和月度模板整理通报目录，生成产品或联网成绩登记材料、年度问题汇总及旧版 .doc 档案。用于月度通报、成绩登记和年度汇总；案卷截图台账与 V2 导入分别使用对应专用 skill。"
+metadata:
+  x-custom-skill: true
+  x-source-repo: dmdmwshr/custom-skills
 ---
 
 # xf-report-filler
@@ -28,7 +31,7 @@ description: "根据消防产品底册、联网监测源表和月度模板整理
 - 用户指出某个文件不合规：只加载该目标文件对象、它依赖的数据源对象和 `validation_and_audit.md`，再改配置、脚本和测试。
 - 新增或修改规则时，必须落到具体文件对象文档、对应工作流配置和测试里，不只写在聊天记录或总览文档中。
 
-正式生成 Word 或 Excel 成品时，先按 `references/artifact-visual-qa.md` 运行 `scripts/artifact_visual_qa.py baseline` 冻结本次实际采用源；全量渲染或打印预览并形成轻量 inspection JSON 后，运行 `finalize` 和只读 `verify`。收据为 `qa_pending`、`blocked` 或无法回读时，不能宣称最终验收通过。
+正式生成 Word 或 Excel 成品时，先按 `references/artifact-visual-qa.md` 运行 `scripts/artifact_visual_qa.py baseline`：业务源和外部Office模板用 `--source`，实际采用的规则文本用 `--rule-source` 冻结版本。全量渲染后，inspection JSON 必须记录所检查成品的 `artifact_sha256`，再运行 `finalize` 和只读 `verify`。收据为 `qa_pending`、`blocked` 或无法回读时，不能宣称最终验收通过。
 
 ## 月度执行顺序
 
@@ -130,6 +133,7 @@ python scripts/sync_monthly_templates.py --apply
 - 生成 `6月巡查` 成绩时，文件名和成绩数据仍按 6 月；但 `2026年6月消防产品监督成绩` 内各大队产品监督档案的评查日期按通报月份写，例如 `2607_通报\6月巡查` 写 `2026年7月`。
 - `产品巡查底册（不发）` 和 `基础信息考评截图（不发）` 是数据源，不标 `【待补】`。
 - 根层两张表在当月 25 号最终数据确认前，文件名前加 `【待补】`；表格内不写 `【待补】`，待确认单元格只用红色底色标记。
+- 正常生成默认不写联网通报历史；只有本次材料已经验收且用户明确确认后，才可使用 `--update-history`。根层待补、工作动态资料待补和已完成的编制交付分别报告，不把生成成功写成整月定稿。
 - R02《消防产品监督统计表》待补范围为 B:K：B 列只补大队人员要求数；I 列网售消防产品检查、J 列维修后灭火器检查、K 列加油和加气站点消防产品检查由人工按“总次数（不合格次数）”填写，不自动推算或覆盖。旧表缺少新增列时保留原结构，仅提示人工核对。
 - 产品底册黄色高亮问题属于私账：不进入成品，不参与扣分。
 - 产品公开问题描述只写底册括号前内容；括号内、`ps` 后、字段级细节只用于内部定位。
@@ -156,6 +160,8 @@ python scripts/sync_monthly_templates.py --apply
 ```powershell
 python scripts/reader.py "<旧.doc绝对路径>" "<中间数据.json>"
 ```
+
+转换仅在独立临时目录操作输入副本，不在原件旁建立或删除同名`.docx`；转换失败保留断点并报错。旧版和月度批量入口均使用独立Word实例、只读打开模板，不复用或退出用户正在使用的Word实例。
 
 按 `resources/template.json` 的完整结构修改 JSON 后生成：
 

@@ -4,10 +4,13 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+import monthly_workflow
 
 
 SCHEMA = "xf-report-visual-qa/v1"
@@ -15,6 +18,8 @@ MAX_JSON_BYTES = 1024 * 1024
 WORD_TYPES = {"doc", "docx"}
 EXCEL_TYPES = {"xls", "xlsx"}
 SUPPORTED_TYPES = WORD_TYPES | EXCEL_TYPES
+QA_RULES = monthly_workflow.load_config().get('visual_qa_rules', {})
+RULE_SNAPSHOT_SUFFIXES = set(QA_RULES.get('rule_snapshot_suffixes', ['.json', '.js', '.py', '.md', '.yaml', '.yml']))
 
 
 class VisualQaError(RuntimeError):
@@ -93,6 +98,7 @@ def create_baseline(
     artifact_type: str,
     source_texts: Sequence[str],
     receipt_text: str,
+    rule_source_texts: Sequence[str] = (),
 ) -> dict[str, Any]:
     normalized_type = artifact_type.lower().lstrip(".")
     if normalized_type not in SUPPORTED_TYPES:
@@ -107,18 +113,37 @@ def create_baseline(
         raise VisualQaError("至少需要一个 --source。")
 
     sources = [_resolve(value) for value in source_texts]
-    if len(set(sources)) != len(sources):
-        raise VisualQaError("--source 不能重复。")
+    rules = [_resolve(value) for value in rule_source_texts]
+    if len(set(sources + rules)) != len(sources + rules):
+        raise VisualQaError("--source 与 --rule-source 不能重复。")
     protected = {artifact, receipt}
-    if any(source in protected for source in sources):
+    if any(source in protected for source in sources + rules):
         raise VisualQaError("采用源不能与成品或视觉收据使用同一路径。")
+    if any(rule.suffix.lower() not in RULE_SNAPSHOT_SUFFIXES for rule in rules):
+        raise VisualQaError('规则快照仅接受配置或规则文本；业务源表和外部Office模板必须使用 --source。')
+    source_baseline = [_snapshot(source) for source in sources]
+    rule_baseline = [_snapshot(rule) for rule in rules]
+    if rules:
+        rule_dir = receipt.parent / f'{receipt.stem}.rules'
+        try:
+            rule_dir.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            raise VisualQaError(f'规则快照目录已存在或无法创建，保留断点：{rule_dir}') from exc
+        for index, (rule, baseline) in enumerate(zip(rules, rule_baseline), 1):
+            frozen = rule_dir / f"{index:02d}-{baseline['sha256'][:12]}-{rule.name}"
+            shutil.copy2(rule, frozen)
+            if _sha256(frozen) != baseline['sha256'] or _sha256(rule) != baseline['sha256']:
+                raise VisualQaError(f'冻结期间规则文件发生变化，保留快照及断点：{rule}')
+            baseline['snapshot'] = _snapshot(frozen)
 
     payload: dict[str, Any] = {
         "schema": SCHEMA,
         "status": "baseline_ready",
         "observed_at": _now_utc(),
         "artifact": {"path": str(artifact), "type": normalized_type},
-        "source_baseline": [_snapshot(source) for source in sources],
+        "source_baseline": source_baseline,
+        "rule_baseline": rule_baseline,
+        "inspection_hash_required": QA_RULES.get('require_inspection_artifact_hash', True),
         "sources_unchanged": None,
         "outcome": "qa_pending",
         "warnings": [],
@@ -193,6 +218,17 @@ def _inspection_result(inspection: Mapping[str, Any], artifact_type: str) -> tup
     return pending, blockers
 
 
+def _inspection_hash_result(inspection, artifact_snapshot, required):
+    hashes = [inspection[key] for key in ['artifact_sha256', 'stage_sha256'] if inspection.get(key)]
+    if not hashes:
+        return (['视觉检查未记录所检查成品的 artifact_sha256。'] if required else []), []
+    if any(not isinstance(value, str) for value in hashes):
+        return ['视觉检查成品哈希格式无效。'], []
+    if isinstance(artifact_snapshot, Mapping) and artifact_snapshot.get('sha256') and any(value.lower() != artifact_snapshot['sha256'] for value in hashes):
+        return [], ['当前成品与已完成视觉检查的文件哈希不同，须重新检查实际版本。']
+    return [], []
+
+
 def finalize_receipt(*, receipt_text: str, inspection_text: str) -> dict[str, Any]:
     receipt_path = _resolve(receipt_text)
     inspection_path = _resolve(inspection_text)
@@ -230,6 +266,19 @@ def finalize_receipt(*, receipt_text: str, inspection_text: str) -> dict[str, An
             sources_unchanged = False
             blockers.append(f"采用源在生成期间发生变化：{source_path}")
 
+    rule_after = []
+    for baseline in receipt.get('rule_baseline', []):
+        try:
+            current = _snapshot(_resolve(baseline['path']))
+            frozen = _snapshot(_resolve(baseline['snapshot']['path']))
+            if current['sha256'] != baseline['sha256'] or frozen['sha256'] != baseline['sha256']:
+                sources_unchanged = False
+                blockers.append(f"采用规则在生成期间发生变化或快照损坏：{baseline['path']}")
+            rule_after.append({'original': current, 'snapshot': frozen})
+        except (KeyError, VisualQaError) as exc:
+            sources_unchanged = False
+            blockers.append(f'采用规则基线无效：{exc}')
+
     artifact_snapshot: dict[str, Any] | None = None
     try:
         artifact_snapshot = _snapshot(artifact_path)
@@ -237,6 +286,9 @@ def finalize_receipt(*, receipt_text: str, inspection_text: str) -> dict[str, An
             pending.append("成品为空文件。")
     except VisualQaError as exc:
         pending.append(str(exc))
+    hash_pending, hash_blockers = _inspection_hash_result(inspection, artifact_snapshot, receipt.get('inspection_hash_required', False))
+    pending.extend(hash_pending)
+    blockers.extend(hash_blockers)
 
     supplied_warnings = inspection.get("warnings", [])
     receipt.update(
@@ -244,6 +296,7 @@ def finalize_receipt(*, receipt_text: str, inspection_text: str) -> dict[str, An
             "finalized_at": _now_utc(),
             "artifact": {**dict(artifact_record), **(artifact_snapshot or {})},
             "source_after": source_after,
+            "rule_after": rule_after,
             "sources_unchanged": sources_unchanged,
             "inspection": inspection,
             "warnings": list(supplied_warnings) if isinstance(supplied_warnings, list) else [],
@@ -284,6 +337,8 @@ def verify_receipt(*, receipt_text: str) -> dict[str, Any]:
             reasons.append(str(exc))
     else:
         reasons.append("成品哈希记录缺失。")
+    hash_pending, hash_blockers = _inspection_hash_result(receipt.get('inspection', {}), artifact, receipt.get('inspection_hash_required', False))
+    reasons.extend(hash_pending + hash_blockers)
 
     for baseline in receipt.get("source_baseline", []):
         if not isinstance(baseline, Mapping) or not baseline.get("path") or not baseline.get("sha256"):
@@ -295,6 +350,13 @@ def verify_receipt(*, receipt_text: str) -> dict[str, Any]:
                 reasons.append(f"采用源哈希已漂移：{baseline['path']}")
         except VisualQaError as exc:
             reasons.append(str(exc))
+    for baseline in receipt.get('rule_baseline', []):
+        try:
+            frozen = _snapshot(_resolve(baseline['snapshot']['path']))
+            if frozen['sha256'] != baseline['sha256']:
+                reasons.append(f"采用规则快照哈希已漂移：{baseline['snapshot']['path']}")
+        except (KeyError, VisualQaError) as exc:
+            reasons.append(f'采用规则快照无效：{exc}')
     return {
         "schema": SCHEMA,
         "verified_at": _now_utc(),
@@ -311,6 +373,7 @@ def build_parser() -> argparse.ArgumentParser:
     baseline.add_argument("--artifact", required=True)
     baseline.add_argument("--artifact-type", required=True, choices=sorted(SUPPORTED_TYPES))
     baseline.add_argument("--source", action="append", required=True)
+    baseline.add_argument('--rule-source', action='append', default=[], help='冻结实际采用的规则文本；完成后按快照回读，不受后续规则发布影响')
     baseline.add_argument("--receipt", required=True)
 
     finalize = subparsers.add_parser("finalize", help="生成后核验源哈希并合并全量视觉检查。")
@@ -331,6 +394,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 artifact_type=args.artifact_type,
                 source_texts=args.source,
                 receipt_text=args.receipt,
+                rule_source_texts=args.rule_source,
             )
         elif args.operation == "finalize":
             result = finalize_receipt(receipt_text=args.receipt, inspection_text=args.inspection)

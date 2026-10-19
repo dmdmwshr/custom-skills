@@ -632,8 +632,7 @@ def find_score_sources(score_dir, month):
     score_dir = Path(score_dir)
     product_matches = sorted(score_dir.glob(f"*{month}月*产品巡查底册*.docx")) + sorted(score_dir.glob("*产品巡查底册*.docx"))
     product_matches = [path for path in product_matches if not path.name.startswith("~$")]
-    network_matches = sorted(score_dir.glob("*联网监测基础信息考评明细表"))
-    network_dir = network_matches[0] if network_matches else None
+    network_dir = workflow.find_monitor_directory(score_dir, month=month)
     network_stats = network_dir / "联网监测统计表.xls" if network_dir else None
     base_info = None
     root_base = sorted(score_dir.glob("*基础信息考评截图*（不发）*.xls")) + sorted(score_dir.glob("*基础信息考评截图*.xls"))
@@ -652,7 +651,11 @@ def find_score_sources(score_dir, month):
 
 
 def read_score_office_content(score_dir, month, blockers):
-    sources = find_score_sources(score_dir, month)
+    try:
+        sources = find_score_sources(score_dir, month)
+    except ValueError as exc:
+        add_blocker(blockers, str(exc), path=score_dir)
+        return {}, [], []
     for label, key in [
         ("产品巡查底册", "product_register"),
         ("联网监测统计表", "network_stats"),

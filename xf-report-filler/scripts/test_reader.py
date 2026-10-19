@@ -1,13 +1,25 @@
-import os
-import win32com.client
-word = win32com.client.Dispatch('Word.Application')
-try:
-    doc = word.Documents.Open(r'c:\Users\12070\Desktop\项目开发\产品监督信息填报自动化\宜兴（1月档案）.doc')
-    table = doc.Tables(1)
-    cells = table.Range.Cells
-    print('Testing table.Range.Cells Count:', cells.Count)
-    doc.Close(False)
-except Exception as e:
-    print('Error:', e)
-finally:
-    word.Quit()
+"""显式执行的旧版Word表格诊断；unittest发现测试时不打开Office或历史业务文件。"""
+import argparse
+from pathlib import Path
+
+
+def main():
+    parser = argparse.ArgumentParser(description='只读检查明确指定的Word表格单元格数量。')
+    parser.add_argument('document')
+    args = parser.parse_args()
+    path = Path(args.document).resolve(strict=True)
+    import win32com.client
+    word = win32com.client.DispatchEx('Word.Application')
+    word.Visible = False
+    doc = None
+    try:
+        doc = word.Documents.Open(str(path), ReadOnly=True, AddToRecentFiles=False, Visible=False)
+        print('Table cells:', doc.Tables(1).Range.Cells.Count)
+    finally:
+        if doc is not None:
+            doc.Close(False)
+        word.Quit()
+
+
+if __name__ == '__main__':
+    main()

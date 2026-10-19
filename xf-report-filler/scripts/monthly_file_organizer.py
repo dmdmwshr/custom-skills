@@ -249,11 +249,46 @@ def ensure_score_subdirs(score_dir, score_year, score_month, actions, apply):
         ensure_dir(path, actions, apply, f"ensure_score_subdir_{key}")
 
 
-def normalize_score_source_names(score_dir, score_year, score_month, actions, blockers, apply):
+def normalize_monitor_directory(score_dir, score_year, score_month, actions, blockers, apply):
+    target = score_subdir_paths(score_dir, score_year, score_month)['monitor_base_info_detail']
+    if target.exists() and not target.is_dir():
+        add_blocker(blockers, '联网规范目录位置被文件占用，保留原状', path=target)
+        return None
+    try:
+        source = workflow.find_monitor_directory(score_dir, score_year, score_month, CONFIG)
+    except ValueError as exc:
+        add_blocker(blockers, str(exc))
+        return None
+    if source is None or source == target:
+        return target
+    objects = [source, *source.rglob('*')]
+    if any(path.is_symlink() or path.is_junction() or not is_under(path, score_dir) for path in objects):
+        add_blocker(blockers, '联网旧名目录含链接或越界对象，保留原状', path=source)
+        return None
+    if any(path.name.startswith('~$') for path in objects):
+        add_blocker(blockers, '联网旧名目录含Office锁文件，保留原状', path=source)
+        return None
+    if target.exists() and (not target.is_dir() or any(target.iterdir())):
+        add_blocker(blockers, '联网规范目录与旧名目录同时有内容，保留双方版本', src=source, dst=target)
+        return None
+    manifest = {str(path.relative_to(source)): sha256_file(path) for path in objects if path.is_file()}
+    actions.append({'kind': 'normalize_monitor_directory', 'status': 'done' if apply else 'planned',
+        'src': str(source), 'dst': str(target), 'files': len(manifest), 'source_hashes': manifest})
+    if apply:
+        if target.exists():
+            target.rmdir()  # 只移除上方已核实为空的精确规范目录。
+        source.rename(target)
+        after = {str(path.relative_to(target)): sha256_file(path) for path in target.rglob('*') if path.is_file()}
+        if after != manifest:
+            raise RuntimeError('联网目录规范后哈希不一致，保留断点')
+    return target if apply else source
+
+
+def normalize_score_source_names(score_dir, score_year, score_month, actions, blockers, apply, network_source=None):
     score_dir = Path(score_dir)
     product_normal_name = f"{score_year}年{score_month}月产品巡查底册（不发）.docx"
     base_info_normal_name = f"{score_year}年{score_month}月基础信息考评截图（不发）.xls"
-    network_dir = score_subdir_paths(score_dir, score_year, score_month)["monitor_base_info_detail"]
+    network_dir = network_source or score_subdir_paths(score_dir, score_year, score_month)["monitor_base_info_detail"]
 
     product_target = score_dir / product_normal_name
     product_old_names = [
@@ -293,6 +328,9 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
     if cleanup_blockers:
         return
     ensure_dir(score_dir, actions, apply, "ensure_score_patrol_dir")
+    network_source = normalize_monitor_directory(score_dir, score_year, score_month, actions, blockers, apply)
+    if blockers:
+        return
     ensure_score_subdirs(score_dir, score_year, score_month, actions, apply)
 
     for item in BULLETIN_ROOT_TEMPLATE_MAP:
@@ -300,6 +338,9 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
         target_name = item["target"].format(year=bulletin_year, month=bulletin_month)
         pending_target = bulletin_dir / f"{PENDING_PREFIX}{target_name}"
         if pending_target.exists():
+            normal_target = bulletin_dir / target_name
+            if normal_target.is_file() and sha256_file(normal_target) == sha256_file(source):
+                delete_file_if_exists(normal_target, actions, blockers, apply, bulletin_dir, 'delete_verified_unprefixed_template')
             actions.append(
                 {
                     "kind": "copy_bulletin_root_file",
@@ -323,16 +364,14 @@ def instantiate_bulletin_dir(bulletin_dir, bulletin_year, bulletin_month, score_
 
 
     wrong_score_office = score_dir / f"{score_year}年{score_month}月科室月考核情况记录表.xlsx"
-    delete_file_if_exists(
-        wrong_score_office,
-        actions,
-        blockers,
-        apply,
-        bulletin_dir,
-        "delete_wrong_score_office_record",
-    )
+    if wrong_score_office.is_file():
+        if sha256_file(wrong_score_office) in collect_known_template_hashes(template_dir):
+            delete_file_if_exists(wrong_score_office, actions, blockers, apply, bulletin_dir, 'delete_wrong_score_office_record')
+        else:
+            actions.append({'kind': 'preserve_unverified_score_office_record', 'status': 'preserved',
+                'path': str(wrong_score_office), 'message': '不能证明为空白模板，保留已有人工内容。'})
 
-    normalize_score_source_names(score_dir, score_year, score_month, actions, blockers, apply)
+    normalize_score_source_names(score_dir, score_year, score_month, actions, blockers, apply, network_source)
 
 
 def collect_known_template_hashes(template_dir):

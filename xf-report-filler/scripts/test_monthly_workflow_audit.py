@@ -11,6 +11,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import monthly_workflow as workflow
 import monthly_workflow_audit as audit
+import monthly_bulletin_root as root
 
 
 def write_fake_template_tree(template_dir):
@@ -26,6 +27,19 @@ def write_fake_template_tree(template_dir):
 
 
 class MonthlyWorkflowAuditTests(unittest.TestCase):
+    def test_all_source_readers_prefer_populated_alias_over_empty_standard_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            score = Path(tmp)
+            legacy = score / '2026年9月联网检测基础信息考评明细表'
+            legacy.mkdir()
+            (score / '2026年9月联网监测基础信息考评明细表').mkdir()
+            (legacy / '联网监测统计表.xls').write_bytes(b'original-stats')
+            self.assertEqual(workflow.find_monitor_directory(score, 2026, 9), legacy)
+            self.assertEqual(audit.find_network_dir(score, 2026, 9), legacy)
+            sources = root.find_score_sources(score, 9)
+            self.assertEqual(sources['network_dir'], legacy)
+            self.assertEqual(sources['network_stats'], legacy / '联网监测统计表.xls')
+
     def test_audit_reports_paths_without_mutating(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

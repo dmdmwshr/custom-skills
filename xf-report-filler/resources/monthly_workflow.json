@@ -207,7 +207,10 @@
     },
     {
       "key": "monitor_base_info_detail",
-      "target": "{year}年{month}月联网监测基础信息考评明细表"
+      "target": "{year}年{month}月联网监测基础信息考评明细表",
+      "aliases": [
+        "{year}年{month}月联网检测基础信息考评明细表"
+      ]
     },
     {
       "key": "product_archive_dir",
@@ -272,7 +275,20 @@
     "mismatch_marker": "待核对",
     "mismatch_fill_color": "FFFF0000",
     "mismatch_font_color": "FF000000",
-    "mismatch_comment_prefix": "产品底册立卷人未在个人执法统计表中找到"
+    "mismatch_comment_prefix": "产品底册立卷人未在个人执法统计表中找到",
+    "print_layout": {
+      "paper_size": "8",
+      "orientation": "landscape",
+      "fit_to_width": 1,
+      "fit_to_height": 0,
+      "repeat_rows": "2:5",
+      "margins_inches": {
+        "left": 0.25,
+        "right": 0.25,
+        "top": 0.333333,
+        "bottom": 0.333333
+      }
+    }
   },
   "validation_rules": {
     "case_window": "previous_month_26_to_current_month_25",
@@ -360,5 +376,32 @@
     "primary_root": "D:\\工作备份\\移动硬盘",
     "backup_root": "E:\\文件夹",
     "backup_lag_blocks_primary_write": false
+  },
+  "archive_layout_rules": {
+    "empty_tail_font_points": 1,
+    "maximum_margin_reduction_points": 14.2,
+    "minimum_margin_points": 28.35,
+    "retain_multiple_pages_if_needed": true
+  },
+  "visual_qa_rules": {
+    "rule_snapshot_suffixes": [
+      ".json",
+      ".js",
+      ".py",
+      ".md",
+      ".yaml",
+      ".yml"
+    ],
+    "require_inspection_artifact_hash": true
+  },
+  "monitor_history_rules": {
+    "default_update": false,
+    "update_requires_explicit_confirmation": true
+  },
+  "delivery_rules": {
+    "delete_legacy_output_only_if_known_blank_template": true,
+    "pending_business_inputs_are_not_final": true,
+    "backup_status_separate_from_primary_completion": true,
+    "cleanup_policy_denial_blocks_business_delivery": false
   }
 }

@@ -1160,7 +1160,6 @@ def mark_personal_product_mismatches(ws, issues):
     for issue in product_issues:
         by_short.setdefault(brigade_short(issue.get("大队")), []).append(issue)
     fill = PatternFill(fill_type="solid", fgColor=PENDING_FILL_RGB)
-    font = Font(color=PENDING_FONT_RGB)
     for short, items in by_short.items():
         row = brigade_rows.get(short)
         if not row:
@@ -1170,6 +1169,8 @@ def mark_personal_product_mismatches(ws, issues):
         names_text = "、".join(names)
         cell.value = f"{PERSONAL_RULES.get('mismatch_marker', '待核对')}：{names_text}"
         cell.fill = fill
+        font = copy.copy(cell.font)
+        font.color = PENDING_FONT_RGB
         cell.font = font
         comment_lines = [
             PERSONAL_RULES.get("mismatch_comment_prefix", "产品底册立卷人未在个人执法统计表中找到"),
@@ -1180,7 +1181,41 @@ def mark_personal_product_mismatches(ws, issues):
     return changed
 
 
-def write_personal_stats(template_path, output_path, product_records, monitor_details, month, force):
+def configure_personal_sheet(workbook, ws, output_path, month, year=None):
+    warnings = []
+    period = YEAR_MONTH_PATTERN.search(Path(output_path).name)
+    year = year or (int(period.group(1)) if period else None)
+    if year and YEAR_MONTH_PATTERN.fullmatch(ws.title):
+        title = f'{year}年{month}月'
+        references_old_title = any(
+            cell.data_type == 'f' and (f"'{ws.title}'!" in str(cell.value) or f'{ws.title}!' in str(cell.value))
+            for sheet in workbook.worksheets for row in sheet.iter_rows() for cell in row
+        ) or any(ws.title in str(name.attr_text) for name in workbook.defined_names.values())
+        if title != ws.title and title in workbook.sheetnames:
+            warnings.append(f'目标月份工作表已存在，保留原页名避免覆盖：{title}')
+        elif title != ws.title and (references_old_title or any(sheet._charts for sheet in workbook.worksheets)):
+            warnings.append(f'旧月份页名存在公式或图表引用，保留原页名待核对：{ws.title}')
+        else:
+            ws.title = title
+    profile = PERSONAL_RULES.get('print_layout', {})
+    if profile:
+        ws.page_setup.paperSize = profile['paper_size']
+        ws.page_setup.orientation = profile['orientation']
+        ws.page_setup.scale = None
+        ws.page_setup.fitToWidth = profile['fit_to_width']
+        ws.page_setup.fitToHeight = profile['fit_to_height']
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.print_title_rows = profile['repeat_rows']
+        populated = [cell for row in ws.iter_rows() for cell in row if cell.value is not None]
+        last_row = max((cell.row for cell in populated), default=5)
+        last_col = max(35, max((cell.column for cell in populated), default=35))
+        ws.print_area = f'A1:{get_column_letter(last_col)}{last_row}'
+        for key, value in profile.get('margins_inches', {}).items():
+            setattr(ws.page_margins, key, value)
+    return warnings
+
+
+def write_personal_stats(template_path, output_path, product_records, monitor_details, month, force, year=None):
     match_issues = collect_person_match_issues(template_path, product_records, monitor_details)
     copy_output(template_path, output_path, force=force)
     workbook = load_workbook(output_path)
@@ -1192,7 +1227,7 @@ def write_personal_stats(template_path, output_path, product_records, monitor_de
             ws.cell(row, col).value = None
 
     person_index = build_person_index(ws)
-    warnings = []
+    warnings = configure_personal_sheet(workbook, ws, output_path, month, year)
     for item in product_records:
         if item["no_case"] or not item["立卷人"]:
             continue
@@ -1354,7 +1389,9 @@ def write_case_scores(template_path, output_path, product_records, monitor_score
 
 
 def decode_legacy_text(raw):
-    for encoding in ("gb18030", "utf-8", "utf-16"):
+    if raw.startswith((b'\xff\xfe', b'\xfe\xff')):
+        return raw.decode('utf-16')
+    for encoding in ("utf-8-sig", "gb18030", "utf-16"):
         try:
             return raw.decode(encoding)
         except UnicodeDecodeError:
@@ -1363,10 +1400,18 @@ def decode_legacy_text(raw):
 
 
 def extract_monitor_report_section(report_path):
-    out_dir = Path(tempfile.mkdtemp(prefix="xf_report_history_"))
-    try:
+    with tempfile.TemporaryDirectory(prefix="xf_report_history_") as temporary:
+        work_dir = Path(temporary)
+        out_dir = work_dir / 'converted'
+        input_dir = work_dir / 'input'
+        profile = work_dir / 'lo-profile'
+        for directory in [out_dir, input_dir, profile]:
+            directory.mkdir()
+        isolated = input_dir / Path(report_path).name
+        shutil.copy2(report_path, isolated)
         subprocess.run(
-            [find_soffice(), "--headless", "--convert-to", "txt:Text", "--outdir", str(out_dir), str(report_path)],
+            [find_soffice(), "--headless", f'-env:UserInstallation={profile.resolve().as_uri()}',
+                "--convert-to", "txt:Text", "--outdir", str(out_dir), str(isolated)],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1383,8 +1428,6 @@ def extract_monitor_report_section(report_path):
         if start < 0:
             return ""
         return text[start:end if end > start else len(text)]
-    finally:
-        shutil.rmtree(out_dir, ignore_errors=True)
 
 
 def parse_report_month(report_path, default_year=None, fallback_date=None):
@@ -1785,6 +1828,7 @@ def generate_product_docs(product_records, product_output_dir, year, month, forc
             product_output_dir,
             month=month,
             export_pdf=False,
+            compact_layout=True,
         )
     finally:
         try:
@@ -1808,6 +1852,11 @@ def build_output_files(month_dir, year, month, include_score_office_record=False
     return output_files
 
 
+def history_update_requested(args):
+    default = WORKFLOW_CONFIG.get('monitor_history_rules', {}).get('default_update', False)
+    return bool(getattr(args, 'update_history', default)) and not bool(getattr(args, 'no_history_update', False))
+
+
 def run(args):
     month_dir = require_path(args.month_dir, "月份目录")
     include_score_office_record = getattr(args, "include_score_office_record", False)
@@ -1825,7 +1874,9 @@ def run(args):
         include_score_office_record=include_score_office_record,
     )
     product_register = find_one(month_dir, [f"*{args.month}月*产品巡查底册*.docx", "*产品巡查底册*.docx"], "产品巡查底册")
-    network_dir = find_one(month_dir, ["*联网监测基础信息考评明细表"], "联网监测明细目录")
+    network_dir = monthly_workflow.find_monitor_directory(month_dir, args.year, args.month)
+    if network_dir is None:
+        raise FileNotFoundError(f'找不到联网监测明细目录：{month_dir}')
     network_stats = require_path(network_dir / "联网监测统计表.xls", "联网监测统计表")
     base_info = find_base_info(month_dir, network_dir)
     personal_template = templates["personal_stats"]
@@ -1870,7 +1921,7 @@ def run(args):
             selected_cases,
             monitor_scores,
         )
-        history_action = "disabled" if args.no_history_update else history_record_action(history, current_record)
+        history_action = history_record_action(history, current_record) if history_update_requested(args) else "disabled"
         backfill_months = sorted(key for key in scanned_history if key not in {item.get("month_key") for item in history.get("records", [])})
         print(
             json.dumps(
@@ -1980,6 +2031,7 @@ def run(args):
         monitor_details,
         args.month,
         args.force,
+        year=args.year,
     )
     if include_score_office_record:
         write_office_record(
@@ -2015,7 +2067,7 @@ def run(args):
         monitor_scores,
     )
     history_update = {"written": False, "actions": [], "current_action": "disabled"}
-    if not args.no_history_update:
+    if history_update_requested(args):
         history_update = update_monitor_history(history, scanned_history, current_record)
 
     summary = {
@@ -2080,7 +2132,9 @@ def main():
     parser.add_argument("--force", action="store_true", help="覆盖已生成的同名成品文件")
     parser.add_argument("--dry-run", action="store_true", help="只解析并输出数据，不写入文件")
     parser.add_argument("--template-dir", help="临时覆盖月度模板根目录；默认使用 monthly_workflow.json 的外部事实源")
-    parser.add_argument("--no-history-update", action="store_true", help="生成文件但不更新联网通报历史台账")
+    history_mode = parser.add_mutually_exclusive_group()
+    history_mode.add_argument("--no-history-update", action="store_true", help="兼容旧入口；默认已不更新联网通报历史台账")
+    history_mode.add_argument("--update-history", action="store_true", help="仅在本次材料已明确确认后，显式更新联网通报历史台账")
     parser.add_argument("--bulletin-year", type=int, help="通报所属年份；默认从上级通报目录识别")
     parser.add_argument("--bulletin-month", type=int, help="通报所属月份；默认从上级通报目录识别")
     parser.add_argument(

@@ -23,6 +23,7 @@ class ArtifactVisualQaTests(unittest.TestCase):
         path.write_text(
             json.dumps(
                 {
+                    "artifact_sha256": qa._sha256(next(path for path in [self.root / 'result.docx', self.root / 'result.xlsx'] if path.exists())),
                     "renderer": "fixture-renderer",
                     "renderer_version": "1.0",
                     "total_units": total_units,
@@ -112,6 +113,65 @@ class ArtifactVisualQaTests(unittest.TestCase):
                 source_texts=[str(self.source)],
                 receipt_text=str(self.root / "alias.json"),
             )
+
+    def test_inspection_cannot_accept_another_version_of_the_artifact(self):
+        artifact, receipt = self.root / 'result.docx', self.root / 'result.visual-qa.json'
+        self._baseline(artifact=artifact, artifact_type='docx', receipt=receipt)
+        artifact.write_bytes(b'version-that-was-reviewed')
+        inspection = self._inspection(checked_units=['page-1'], total_units=1)
+        artifact.write_bytes(b'version-that-was-never-reviewed')
+        result = qa.finalize_receipt(receipt_text=str(receipt), inspection_text=str(inspection))
+        self.assertEqual(result['outcome'], 'blocked')
+        self.assertTrue(any('哈希不同' in text for text in result['blockers']))
+
+    def test_new_inspection_without_an_artifact_hash_remains_pending(self):
+        artifact, receipt = self.root / 'result.docx', self.root / 'result.visual-qa.json'
+        self._baseline(artifact=artifact, artifact_type='docx', receipt=receipt)
+        artifact.write_bytes(b'output')
+        inspection = self._inspection(checked_units=['page-1'], total_units=1)
+        payload = json.loads(inspection.read_text(encoding='utf-8'))
+        payload.pop('artifact_sha256')
+        inspection.write_text(json.dumps(payload), encoding='utf-8')
+        result = qa.finalize_receipt(receipt_text=str(receipt), inspection_text=str(inspection))
+        self.assertEqual(result['outcome'], 'qa_pending')
+
+    def test_rule_release_after_acceptance_preserves_adopted_rule_evidence(self):
+        artifact, receipt = self.root / 'result.docx', self.root / 'result.visual-qa.json'
+        rule = self.root / 'rules.json'
+        rule.write_text('{"version":1}', encoding='utf-8')
+        baseline = qa.create_baseline(artifact_text=str(artifact), artifact_type='docx',
+            source_texts=[str(self.source)], rule_source_texts=[str(rule)], receipt_text=str(receipt))
+        artifact.write_bytes(b'output')
+        result = qa.finalize_receipt(receipt_text=str(receipt),
+            inspection_text=str(self._inspection(checked_units=['page-1'], total_units=1)))
+        self.assertEqual(result['outcome'], 'passed')
+        rule.write_text('{"version":2}', encoding='utf-8')
+        self.assertEqual(qa.verify_receipt(receipt_text=str(receipt))['outcome'], 'passed')
+        frozen = Path(baseline['rule_baseline'][0]['snapshot']['path'])
+        self.assertEqual(frozen.read_text(encoding='utf-8'), '{"version":1}')
+        frozen.write_text('damaged-evidence', encoding='utf-8')
+        self.assertEqual(qa.verify_receipt(receipt_text=str(receipt))['outcome'], 'blocked')
+
+    def test_rule_changes_during_generation_are_blocked(self):
+        artifact, receipt = self.root / 'result.docx', self.root / 'result.visual-qa.json'
+        rule = self.root / 'rules.json'
+        rule.write_text('{}', encoding='utf-8')
+        qa.create_baseline(artifact_text=str(artifact), artifact_type='docx', source_texts=[str(self.source)],
+            rule_source_texts=[str(rule)], receipt_text=str(receipt))
+        artifact.write_bytes(b'output')
+        rule.write_text('{"different":true}', encoding='utf-8')
+        result = qa.finalize_receipt(receipt_text=str(receipt),
+            inspection_text=str(self._inspection(checked_units=['page-1'], total_units=1)))
+        self.assertEqual(result['outcome'], 'blocked')
+        self.assertFalse(result['sources_unchanged'])
+
+    def test_business_workbook_cannot_be_frozen_as_a_rule(self):
+        workbook = self.root / 'business.xlsx'
+        workbook.write_bytes(b'business-data')
+        with self.assertRaises(qa.VisualQaError):
+            qa.create_baseline(artifact_text=str(self.root / 'result.docx'), artifact_type='docx',
+                source_texts=[str(self.source)], rule_source_texts=[str(workbook)],
+                receipt_text=str(self.root / 'result.visual-qa.json'))
 
 
 if __name__ == "__main__":

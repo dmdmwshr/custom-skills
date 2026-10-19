@@ -20,6 +20,72 @@ import monthly_grade_register as mgr
 
 
 class MonthlyGradeRegisterMonthTests(unittest.TestCase):
+    def test_report_history_text_decoding_supports_utf8_bom_gb18030_and_utf16(self):
+        text = '（五）联网监测：梁溪大队。'
+        for encoding in ['utf-8', 'utf-8-sig', 'gb18030', 'utf-16']:
+            with self.subTest(encoding=encoding):
+                self.assertEqual(mgr.decode_legacy_text(text.encode(encoding)), text)
+
+    def test_report_history_converter_uses_a_copy_and_a_private_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / '2026年9月通报.doc'
+            source.write_bytes(b'original-report')
+            section = '（五）联网监测\n梁溪大队的问题。\n'
+            def convert(command, **kwargs):
+                isolated = Path(command[-1])
+                self.assertNotEqual(isolated, source)
+                self.assertEqual(isolated.read_bytes(), b'original-report')
+                self.assertTrue(any(value.startswith('-env:UserInstallation=file:///') for value in command))
+                isolated.write_bytes(b'converter-metadata-change')
+                target = Path(command[command.index('--outdir')+1]) / 'result.txt'
+                target.write_text('前文\n' + section + '三、下一步工作要求\n后文', encoding='utf-8-sig', newline='\n')
+            with patch.object(mgr, 'find_soffice', return_value='soffice'), patch.object(mgr.subprocess, 'run', side_effect=convert):
+                self.assertEqual(mgr.extract_monitor_report_section(source), section)
+            self.assertEqual(source.read_bytes(), b'original-report')
+
+    def test_history_is_not_updated_without_an_explicit_request(self):
+        self.assertFalse(mgr.history_update_requested(types.SimpleNamespace(no_history_update=False)))
+        self.assertTrue(mgr.history_update_requested(types.SimpleNamespace(update_history=True)))
+        self.assertFalse(mgr.history_update_requested(types.SimpleNamespace(update_history=True, no_history_update=True)))
+
+    def test_personal_month_name_print_layout_and_template_fonts_are_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template, output = Path(tmp) / 'template.xlsx', Path(tmp) / '2026年9月个人执法统计表.xlsx'
+            workbook = Workbook()
+            ws = workbook.active
+            ws.title = '2025年12月'
+            ws['A6'], ws['B6'], ws['C6'] = '梁溪大队', '张三', '=1+1'
+            ws['AA6'].font = mgr.Font(name='方正仿宋_GBK', size=16, bold=True)
+            workbook.save(template)
+            original = template.read_bytes()
+            warnings = mgr.write_personal_stats(template, output,
+                [{'short':'梁溪','大队':'梁溪大队','立卷人':'李四','题名':'测试案卷','score':9.5,'no_case':False}],
+                [], 9, force=False, year=2026)
+            result = load_workbook(output)
+            sheet = result.active
+            self.assertEqual(sheet.title, '2026年9月')
+            self.assertEqual(sheet['C6'].value, '=1+1')
+            self.assertEqual((sheet['AA6'].font.name, sheet['AA6'].font.sz, sheet['AA6'].font.bold), ('方正仿宋_GBK',16,True))
+            self.assertEqual(sheet.page_setup.orientation, 'landscape')
+            self.assertEqual((sheet.page_setup.fitToWidth, sheet.page_setup.fitToHeight), (1,0))
+            self.assertEqual(sheet.print_title_rows, '$2:$5')
+            self.assertIn('$AI$6', str(sheet.print_area))
+            self.assertTrue(any('待核对' in warning for warning in warnings))
+            self.assertEqual(template.read_bytes(), original)
+
+    def test_personal_sheet_with_cross_sheet_formula_is_not_broken_by_renaming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template, output = Path(tmp) / 'template.xlsx', Path(tmp) / '2026年9月个人执法统计表.xlsx'
+            workbook = Workbook()
+            workbook.active.title = '2025年12月'
+            workbook.create_sheet('汇总')['A1'] = "='2025年12月'!A1"
+            workbook.save(template)
+            warnings = mgr.write_personal_stats(template, output, [], [], 9, False, year=2026)
+            result = load_workbook(output)
+            self.assertEqual(result.active.title, '2025年12月')
+            self.assertEqual(result['汇总']['A1'].value, "='2025年12月'!A1")
+            self.assertTrue(any('公式或图表引用' in warning for warning in warnings))
+
     def test_default_sources_use_d_as_primary_and_e_only_as_backup(self):
         config = mgr.monthly_workflow.load_config()
         primary = r'D:\工作备份\移动硬盘'

@@ -105,7 +105,7 @@ def write_to_cells(cells, final_data):
 def process_single_record(word_app, template_path, output_doc, output_pdf, default_data, user_data):
     final_data = update_nested_dict(default_data.copy(), user_data)
     
-    doc = word_app.Documents.Open(template_path)
+    doc = word_app.Documents.Open(template_path, ReadOnly=True, AddToRecentFiles=False, Visible=False)
     try:
         table = doc.Tables(1)
         write_to_cells(table.Range.Cells, final_data)
@@ -120,7 +120,7 @@ def process_single_record(word_app, template_path, output_doc, output_pdf, defau
             print(f"✅ Generated PDF: {os.path.basename(output_pdf)}")
             
     except Exception as e:
-        print(f"❌ Error processing record: {e}")
+        raise RuntimeError(f'旧版批量生成失败，保留已生成文件及断点：{output_doc}；{e}') from e
     finally:
         doc.Close(False)
 
@@ -134,8 +134,9 @@ def batch_process(template_doc, batch_json_path, default_json_path, output_dir):
         os.makedirs(output_dir)
 
     import win32com.client
-    word = win32com.client.Dispatch('Word.Application')
+    word = win32com.client.DispatchEx('Word.Application')
     word.Visible = False
+    word.DisplayAlerts = False
     
     try:
         for idx, record in enumerate(batch_data):

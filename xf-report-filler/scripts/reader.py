@@ -2,34 +2,37 @@ import os
 import sys
 import json
 import shutil
+import tempfile
+from pathlib import Path
 
 def convert_doc_to_docx(doc_path):
     import win32com.client
-    # 为了防止原文件被前面崩溃的脚本锁死，我们先copy一个临时脱壳版本来读
-    temp_doc = doc_path + ".temp.doc"
-    shutil.copy(doc_path, temp_doc)
+    source = Path(doc_path).resolve(strict=True)
+    work_dir = Path(tempfile.mkdtemp(prefix='xf_reader_'))
+    input_dir = work_dir / 'input'
+    input_dir.mkdir()
+    temp_doc = input_dir / source.name
+    shutil.copy2(source, temp_doc)
     
     word = win32com.client.DispatchEx('Word.Application')
     word.Visible = False
+    word.DisplayAlerts = False
     
-    docx_path = doc_path + "x"
-    if os.path.exists(docx_path):
-        try: os.remove(docx_path)
-        except: pass
+    docx_path = work_dir / (source.stem + '.docx')
+    doc = None
         
     try:
-        doc = word.Documents.Open(os.path.abspath(temp_doc), ReadOnly=True)
+        doc = word.Documents.Open(str(temp_doc), ReadOnly=True, AddToRecentFiles=False, Visible=False)
         # 16 = wdFormatDocumentDefault
-        doc.SaveAs2(os.path.abspath(docx_path), FileFormat=16)
-        doc.Close(False)
+        doc.SaveAs2(str(docx_path), FileFormat=16)
     except Exception as e:
-        print(f"Failed to convert to docx: {e}")
+        raise RuntimeError(f'旧版档案转换失败，保留临时输入及断点：{work_dir}；{e}') from e
     finally:
+        if doc is not None:
+            doc.Close(False)
         word.Quit()
-        try: os.remove(temp_doc)
-        except: pass
         
-    return docx_path
+    return str(docx_path)
 
 def extract_from_docx(docx_path):
     from docx import Document

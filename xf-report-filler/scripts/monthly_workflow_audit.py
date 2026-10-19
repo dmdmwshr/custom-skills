@@ -32,9 +32,7 @@ def find_product_register(score_dir, year, month):
 
 
 def find_network_dir(score_dir, year, month):
-    score_dir = Path(score_dir)
-    candidates = sorted(score_dir.glob("*联网监测基础信息考评明细表"))
-    return candidates[0] if candidates else None
+    return workflow.find_monitor_directory(score_dir, year, month)
 
 
 def find_base_info(score_dir, network_dir, year, month):
@@ -110,7 +108,12 @@ def run(args):
     )
 
     product_register = find_product_register(score_dir, args.score_year, args.score_month)
-    network_dir = find_network_dir(score_dir, args.score_year, args.score_month)
+    source_blockers = []
+    try:
+        network_dir = find_network_dir(score_dir, args.score_year, args.score_month)
+    except ValueError as exc:
+        network_dir = None
+        source_blockers.append({'message': str(exc), 'path': str(score_dir)})
     network_stats = Path(network_dir) / "联网监测统计表.xls" if network_dir else None
     base_info = find_base_info(score_dir, network_dir, args.score_year, args.score_month)
     work_plan = Path(args.work_plan) if args.work_plan else workflow.data_source_path("work_plan", config)
@@ -135,7 +138,7 @@ def run(args):
         for key, path in build_grade_outputs(score_dir, args.score_year, args.score_month, config).items()
     }
 
-    blockers = []
+    blockers = source_blockers
     warnings = list(template_result["warnings"])
     warnings.extend(
         {

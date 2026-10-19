@@ -4,6 +4,8 @@ import json
 import argparse
 from datetime import datetime
 
+import monthly_workflow
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
@@ -104,11 +106,38 @@ def safe_write(cell, text):
         # print(f"  [Skip] R:{cell.RowIndex}, C:{cell.ColumnIndex} NO-EMPTY: '{current_text}' -> Discard {text}")
         pass
 
-def process_single_record(word_app, template_path, output_doc, output_pdf, record, default_fields):
+def compact_archive_layout(doc):
+    rules = monthly_workflow.load_config().get('archive_layout_rules', {})
+    if not rules or doc.Tables.Count != 1:
+        return
+    original_text = doc.Content.Text
+    trailing = doc.Paragraphs.Last.Range
+    if not trailing.Text.strip('\r\x07\n\t ') and not trailing.Information(12):
+        trailing.Font.Size = rules['empty_tail_font_points']
+        trailing.ParagraphFormat.SpaceBefore = 0
+        trailing.ParagraphFormat.SpaceAfter = 0
+        trailing.ParagraphFormat.LineSpacingRule = 4
+        trailing.ParagraphFormat.LineSpacing = rules['empty_tail_font_points']
+    doc.Repaginate()
+    if doc.ComputeStatistics(2) > 1:
+        margins = (doc.PageSetup.TopMargin, doc.PageSetup.BottomMargin)
+        minimum = rules['minimum_margin_points']
+        reduction = rules['maximum_margin_reduction_points']
+        doc.PageSetup.TopMargin = min(margins[0], max(minimum, margins[0] - reduction))
+        doc.PageSetup.BottomMargin = min(margins[1], max(minimum, margins[1] - reduction))
+        doc.Repaginate()
+        if doc.ComputeStatistics(2) > 1:
+            doc.PageSetup.TopMargin, doc.PageSetup.BottomMargin = margins
+            doc.Repaginate()
+    if doc.Content.Text != original_text:
+        raise RuntimeError('档案版式整理意外改变正文，停止保存')
+
+
+def process_single_record(word_app, template_path, output_doc, output_pdf, record, default_fields, compact_layout=False):
     # 自动计算分数
     auto_calculate_scores(record)
     
-    doc = word_app.Documents.Open(template_path)
+    doc = word_app.Documents.Open(template_path, ReadOnly=True, AddToRecentFiles=False, Visible=False)
     try:
         table = doc.Tables(1)
         cells = table.Range.Cells
@@ -175,6 +204,8 @@ def process_single_record(word_app, template_path, output_doc, output_pdf, recor
             if (r, c) in write_plan:
                 safe_write(cell, write_plan[(r, c)])
                 
+        if compact_layout:
+            compact_archive_layout(doc)
         # 另存为 Doc
         doc.SaveAs(output_doc)
         print(f"Generated DOC: {os.path.basename(output_doc)}")
@@ -185,11 +216,11 @@ def process_single_record(word_app, template_path, output_doc, output_pdf, recor
             print(f"Generated PDF: {os.path.basename(output_pdf)}")
             
     except Exception as e:
-        print(f"Error processing record: {e}")
+        raise RuntimeError(f'生成档案失败，保留已生成文件及失败断点：{output_doc}；{e}') from e
     finally:
         doc.Close(False)
 
-def batch_process(template_doc, batch_json_path, output_dir, month=None, export_pdf=True):
+def batch_process(template_doc, batch_json_path, output_dir, month=None, export_pdf=True, compact_layout=False):
     with open(batch_json_path, 'r', encoding='utf-8') as f:
         batch_data = json.load(f)
 
@@ -208,8 +239,9 @@ def batch_process(template_doc, batch_json_path, output_dir, month=None, export_
         os.makedirs(output_dir)
 
     import win32com.client
-    word = win32com.client.Dispatch('Word.Application')
+    word = win32com.client.DispatchEx('Word.Application')
     word.Visible = False
+    word.DisplayAlerts = False
     
     try:
         if month is None:
@@ -233,7 +265,7 @@ def batch_process(template_doc, batch_json_path, output_dir, month=None, export_
             out_doc = os.path.abspath(os.path.join(output_dir, f"{safe_name}.doc"))
             out_pdf = os.path.abspath(os.path.join(output_dir, f"{safe_name}.pdf")) if export_pdf else None
             
-            process_single_record(word, os.path.abspath(template_doc), out_doc, out_pdf, record, default_fields)
+            process_single_record(word, os.path.abspath(template_doc), out_doc, out_pdf, record, default_fields, compact_layout=compact_layout)
     finally:
         word.Quit()
 

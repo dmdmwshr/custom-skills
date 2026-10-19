@@ -161,6 +161,25 @@ def score_subdir_map(year, month, config=None):
     return {item["key"]: score_subdir_name(item, year, month) for item in score_subdirectories(config)}
 
 
+def monitor_directory_candidates(score_dir, year=None, month=None, config=None):
+    config = config or load_config()
+    item = next(item for item in score_subdirectories(config) if item['key'] == 'monitor_base_info_detail')
+    patterns = [item['target'], *item.get('aliases', [])]
+    result = []
+    for pattern in patterns:
+        name = pattern.format(year=year if year is not None else '*', month=month if month is not None else '*')
+        result.extend(path for path in sorted(Path(score_dir).glob(name)) if path.is_dir())
+    return list(dict.fromkeys(result))
+
+
+def find_monitor_directory(score_dir, year=None, month=None, config=None):
+    candidates = monitor_directory_candidates(score_dir, year, month, config)
+    populated = [path for path in candidates if any(path.iterdir())]
+    if len(populated) > 1:
+        raise ValueError('联网明细存在多个非空候选目录，须核对具体版本：' + '；'.join(map(str, populated)))
+    return populated[0] if populated else (candidates[0] if candidates else None)
+
+
 def data_source_path(name, config=None):
     config = config or load_config()
     value = config["data_sources"][name]["path"]

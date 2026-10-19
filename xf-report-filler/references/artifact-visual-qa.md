@@ -11,6 +11,9 @@
 1. 在正式生成前，对本次实际采用的外部模板和源文件记录绝对路径、大小、修改时间与 SHA-256；生成结束后对同一组路径重新计算。
 2. `sources_unchanged=true` 只表示同一采用源在本次生成前后哈希一致。外部模板与 Skill 快照哈希不同继续按模板策略记为 warning，并采用外部模板；两者不相等不是本门的 blocker。
 3. 任一采用源在生成期间发生变化、消失或被替换，结果为 blocker；不得把生成物误列为源文件，也不得为取得一致哈希改写源文件。
+4. 业务数据和外部Office模板用 `--source`，保持原路径前后核验。实际采用的JSON配置、评分脚本等规则文本用 `--rule-source`，工具在收据旁建立规则快照并保存原始位置与哈希。`finalize`仍检查规则原件在生成期间未变；验收后的`verify`检查固定快照，后续技能发布不使历史验收失效。业务源表不能作为规则文本冻结，不能借此掩盖业务数据变化。
+
+例如：`baseline --artifact <成品> --artifact-type doc --source <业务源> --source <外部模板> --rule-source <实际采用配置.json> --receipt <临时目录内新收据.json>`。生成必须实际使用这些已冻结版本；规则在基线后变化则保留断点，不能改写快照来取得通过。
 
 ## Word 成品
 
@@ -34,4 +37,4 @@
 
 渲染入口不可用、页面/工作表未全部检查、收据字段缺失或结果无法回读时，标记 `qa_pending`，只能报告“成品已生成，视觉验收未完成”，不能宣称最终验收通过。
 
-inspection JSON 至少提供 `renderer`、`renderer_version`、`total_units`、`checked_units`、`checks`、`warnings` 和 `blockers`。Word 的 `checked_units` 必须按 `page-1` 到 `page-N` 连续列出；Excel 使用 `sheet:<名称>` 和需要时的 `print-page:<名称>:<页号>`。所有检查必须为 `passed` 或 `not_applicable`；失败项写 `failed` 或进入 blockers。
+inspection JSON 至少提供 `artifact_sha256`、`renderer`、`renderer_version`、`total_units`、`checked_units`、`checks`、`warnings` 和 `blockers`。`artifact_sha256`必须是在完成全量视觉检查时计算的该版本文件哈希；兼容已有`stage_sha256`，两者同时提供时必须一致。未记录哈希的新检查保持待验收，当前成品与已检查版本哈希不同则阻断，不自动把新文件当作已检查。Word 的 `checked_units` 必须按 `page-1` 到 `page-N` 连续列出；Excel 使用 `sheet:<名称>` 和需要时的 `print-page:<名称>:<页号>`。所有检查必须为 `passed` 或 `not_applicable`；失败项写 `failed` 或进入 blockers。旧收据保持可读，不覆盖旧终态。
