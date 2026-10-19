@@ -7,6 +7,8 @@ description: "根据消防产品底册、联网监测源表和月度模板整理
 
 执行平台：Windows。先核对本机依赖及用户配置；WSL/Linux 不直接套用此入口，远程载荷须单独核验。安装、发现和业务验收按目标平台分别报告，以对应记录及当前实测为准。
 
+资料权威关系：`D:\工作备份\移动硬盘` 是业务主资料，`E:\文件夹` 仅为备份；路径中的“备份”不改变 D 盘主导身份。默认配置、输入、模板和正式成果使用 D 盘。E 盘备份滞后、离线或不同步只记录备份状态，不阻断正常的 D 盘业务写入，不自动用 E 盘还原 D 盘。资料主从关系不自动改变后台同步设置。
+
 本 skill 分三条工作流：
 
 1. **月度产品与联网监测成绩登记**：整理月度通报目录、校验模板版本、生成 `（X-1）月巡查` 成绩材料、处理当月根层两张通报表待补/定稿，并识别根层工作动态文件。
@@ -34,7 +36,7 @@ description: "根据消防产品底册、联网监测源表和月度模板整理
 
 ```powershell
 python scripts/monthly_workflow_audit.py `
-  --bulletin-dir "E:\文件夹\1、工作\2、产品科技联网\1、产品监督\26年\1、月度通报\2607_通报" `
+  --bulletin-dir "D:\工作备份\移动硬盘\1、工作\2、产品科技联网\1、产品监督\26年\1、月度通报\2607_通报" `
   --bulletin-year 2026 `
   --bulletin-month 7 `
   --score-year 2026 `
@@ -97,7 +99,7 @@ python scripts/monthly_grade_register.py `
 
 ```powershell
 python scripts/annual_product_problem_summary.py `
-  --year-root "E:\文件夹\1、工作\2、产品科技联网\1、产品监督\26年" `
+  --year-root "D:\工作备份\移动硬盘\1、工作\2、产品科技联网\1、产品监督\26年" `
   --year 2026 `
   --dry-run `
   --review-json "<审计输出.json>"

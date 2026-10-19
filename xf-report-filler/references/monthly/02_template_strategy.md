@@ -4,6 +4,8 @@
 
 模板事实源来自 `resources/monthly_workflow.json` 中的绝对路径：
 
+默认事实源是 D 盘主资料；E 盘同一路径只用于备份核验或明确授权的恢复，不以备份滞后阻断 D 盘正常生成。
+
 - `template_sources.external_root`
 - `template_sources.bulletin_skeleton`
 - `template_sources.score_skeleton`

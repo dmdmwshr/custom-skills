@@ -1,21 +1,21 @@
 {
   "version": 1,
   "template_sources": {
-    "external_root": "E:\\文件夹\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板",
-    "bulletin_skeleton": "E:\\文件夹\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板\\月通报模板",
-    "score_skeleton": "E:\\文件夹\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板\\月通报模板\\（X-1）月巡查",
+    "external_root": "D:\\工作备份\\移动硬盘\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板",
+    "bulletin_skeleton": "D:\\工作备份\\移动硬盘\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板\\月通报模板",
+    "score_skeleton": "D:\\工作备份\\移动硬盘\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\0、模板文件\\1、产品模板\\月通报模板\\（X-1）月巡查",
     "skill_snapshot": "resources/monthly_templates"
   },
   "data_sources": {
     "work_plan": {
-      "path": "E:\\文件夹\\1、工作\\2、产品科技联网\\26年产品科技工作计划.xls",
+      "path": "D:\\工作备份\\移动硬盘\\1、工作\\2、产品科技联网\\26年产品科技工作计划.xls",
       "required_for": [
         "bulletin_root_pending",
         "bulletin_root_final_audit"
       ]
     },
     "case_data": {
-      "path": "E:\\文件夹\\1、工作\\2、产品科技联网\\1、产品监督\\26年\\2、案卷信息采集\\产品案卷数据.xlsx",
+      "path": "D:\\工作备份\\移动硬盘\\1、工作\\2、产品科技联网\\1、产品监督\\26年\\2、案卷信息采集\\产品案卷数据.xlsx",
       "required_for": [
         "bulletin_root_pending",
         "bulletin_root_final_audit"
@@ -261,7 +261,10 @@
     }
   },
   "monitor_note_rules": {
-    "missing_contact_prefixes": ["未关联", "未挂靠"],
+    "missing_contact_prefixes": [
+      "未关联",
+      "未挂靠"
+    ],
     "missing_contact_public_text": "未关联消防机构联系人"
   },
   "personal_stats_rules": {
@@ -352,5 +355,10 @@
     "09_消防产品监督统计表工作检查模板.xls": "X月消防产品监督统计表.xls",
     "(模板)X月消防产品监督统计表.xls": "X月消防产品监督统计表.xls",
     "（样例数据）消防产品档案质量明细表.doc": "90_消防产品档案质量明细表样例数据.doc"
+  },
+  "storage_policy": {
+    "primary_root": "D:\\工作备份\\移动硬盘",
+    "backup_root": "E:\\文件夹",
+    "backup_lag_blocks_primary_write": false
   }
 }

@@ -20,6 +20,39 @@ import monthly_grade_register as mgr
 
 
 class MonthlyGradeRegisterMonthTests(unittest.TestCase):
+    def test_default_sources_use_d_as_primary_and_e_only_as_backup(self):
+        config = mgr.monthly_workflow.load_config()
+        primary = r'D:\工作备份\移动硬盘'
+        self.assertEqual(config['storage_policy']['primary_root'], primary)
+        self.assertEqual(config['storage_policy']['backup_root'], r'E:\文件夹')
+        self.assertFalse(config['storage_policy']['backup_lag_blocks_primary_write'])
+        self.assertTrue(str(mgr.monthly_workflow.template_root(config)).startswith(primary))
+        for key in ['work_plan', 'case_data']:
+            self.assertTrue(str(mgr.monthly_workflow.data_source_path(key, config)).startswith(primary))
+
+    def test_xls_conversion_never_passes_original_to_mutating_converter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'source.xls'
+            original = b'original-xls-evidence'
+            source.write_bytes(original)
+
+            def convert(command, **kwargs):
+                isolated = Path(command[-1])
+                self.assertNotEqual(isolated, source)
+                self.assertEqual(isolated.read_bytes(), original)
+                isolated.write_bytes(b'converter-updated-internal-metadata')
+                output = Path(command[command.index('--outdir')+1]) / 'source.xlsx'
+                Workbook().save(output)
+                return types.SimpleNamespace(returncode=0)
+
+            with patch.object(mgr, 'find_soffice', return_value='soffice'), patch.object(mgr.subprocess, 'run', side_effect=convert):
+                workbook = mgr.load_xls_as_workbook(source)
+                try:
+                    self.assertEqual(source.read_bytes(), original)
+                finally:
+                    workbook.close()
+                    workbook._xf_temp_dir.cleanup()
+
     def test_resolve_score_month_prefers_filename(self):
         info = mgr.resolve_score_month(
             r"C:\workspace\5月\2026年5月通报.doc",

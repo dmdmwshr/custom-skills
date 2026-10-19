@@ -860,13 +860,18 @@ def find_soffice():
 
 
 def load_xls_as_workbook(path, data_only=True):
+    path = Path(path)
     soffice = find_soffice()
     temp_dir = tempfile.TemporaryDirectory(prefix="xf_grade_xls_")
     out_dir = Path(temp_dir.name)
     convert_dir = out_dir / "converted"
     profile_dir = out_dir / "lo-profile"
+    input_dir = out_dir / "input"
     convert_dir.mkdir()
     profile_dir.mkdir()
+    input_dir.mkdir()
+    isolated_input = input_dir / path.name
+    shutil.copy2(path, isolated_input)
     try:
         subprocess.run(
             [
@@ -877,7 +882,7 @@ def load_xls_as_workbook(path, data_only=True):
                 "xlsx",
                 "--outdir",
                 str(convert_dir),
-                str(path),
+                str(isolated_input),
             ],
             check=True,
             stdout=subprocess.PIPE,
@@ -889,7 +894,7 @@ def load_xls_as_workbook(path, data_only=True):
         converted = next(convert_dir.glob("*.xlsx"))
     except Exception as soffice_error:
         try:
-            converted = convert_xls_with_excel(path, convert_dir)
+            converted = convert_xls_with_excel(isolated_input, convert_dir)
         except Exception as excel_error:
             raise RuntimeError(
                 f"无法转换 .xls：{path}；LibreOffice 错误：{soffice_error}；Excel 兜底错误：{excel_error}"
