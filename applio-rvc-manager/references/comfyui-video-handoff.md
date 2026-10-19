@@ -35,7 +35,7 @@
 项目事实源放在：
 
 ```text
-D:\12070\Documents\workspaces\Comfy-Codex-Workspace\projects\<project_slug>\
+D:\ws\04-content\04-01-ai-imaging\comfy-workspace\projects\<project_slug>\
 └── audio\
     ├── script\       # 台词和分镜版本
     ├── source\       # 原录音或提取的干声

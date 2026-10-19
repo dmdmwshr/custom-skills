@@ -19,7 +19,7 @@ description: 用于在本机 Obsidian 仓库中查询、读取和写入保留笔
 
 ## 默认笔记仓库
 
-- `D:\12070\Documents\workspaces\Obsidian仓库\日常工作记录`
+- `D:\ws\00-library\obsidian-vault\日常工作记录`
 
 ## 读取规则
 

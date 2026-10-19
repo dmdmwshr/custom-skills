@@ -21,14 +21,14 @@
   "poll_interval_seconds": 5,
   "timeout_seconds": 1800,
   "note_roots": {
-    "bilibili": "D:\\12070\\Documents\\workspaces\\Obsidian仓库\\日常工作记录\\30_Knowledge (知识)\\01_领域\\AI工具链\\BiliNote视频笔记\\bilibili",
-    "douyin": "D:\\12070\\Documents\\workspaces\\Obsidian仓库\\日常工作记录\\30_Knowledge (知识)\\01_领域\\AI工具链\\BiliNote视频笔记\\douyin"
+    "bilibili": "D:\\ws\\00-library\\obsidian-vault\\日常工作记录\\30_Knowledge (知识)\\01_领域\\AI工具链\\BiliNote视频笔记\\bilibili",
+    "douyin": "D:\\ws\\00-library\\obsidian-vault\\日常工作记录\\30_Knowledge (知识)\\01_领域\\AI工具链\\BiliNote视频笔记\\douyin"
   },
   "attachment_roots": {
-    "bilibili": "D:\\12070\\Documents\\workspaces\\Obsidian仓库\\日常工作记录\\80_Attachments (附件)\\04_来源与摘录\\bilinote-video-note\\bilibili",
-    "douyin": "D:\\12070\\Documents\\workspaces\\Obsidian仓库\\日常工作记录\\80_Attachments (附件)\\04_来源与摘录\\bilinote-video-note\\douyin"
+    "bilibili": "D:\\ws\\00-library\\obsidian-vault\\日常工作记录\\80_Attachments (附件)\\04_来源与摘录\\bilinote-video-note\\bilibili",
+    "douyin": "D:\\ws\\00-library\\obsidian-vault\\日常工作记录\\80_Attachments (附件)\\04_来源与摘录\\bilinote-video-note\\douyin"
   },
-  "skill_doc_note_path": "D:\\12070\\Documents\\workspaces\\Obsidian仓库\\日常工作记录\\30_Knowledge (知识)\\01_领域\\AI工具链\\BiliNote视频知识提取Skill（bilinote-video-note）.md",
+  "skill_doc_note_path": "D:\\ws\\00-library\\obsidian-vault\\日常工作记录\\30_Knowledge (知识)\\01_领域\\AI工具链\\BiliNote视频知识提取Skill（bilinote-video-note）.md",
   "frontmatter_defaults": {
     "type": "source",
     "status": "active",

@@ -6,7 +6,7 @@
 
 适用已发布 ProjectBrowserV2 的 WSL 主机。先按全局主机索引读取 browser-control.md 顶部，核对当前部署、项目登记、账号范围及真实执行者；路径、Node/MCP版本、显示和profile只读取本机部署配置，不照搬Windows或别的机器。
 
-本机唯一契约为 `/srv/workspaces/codex-host/docs/project-browser-v2.md`，统一入口 `/usr/local/libexec/codex-host/shared_playwright.py --project <登记项目>`。若路径已迁移，以本机索引为准。不在Skill复制实现或另建连接管理脚本。
+本机唯一契约为 `/srv/workspaces/03-env/03-03-codex-host/docs/project-browser-v2.md`，统一入口 `/usr/local/libexec/codex-host/shared_playwright.py --project <登记项目>`。若路径已迁移，以本机索引为准。不在Skill复制实现或另建连接管理脚本。
 
 - 一项目同一时刻一个受管MCP连接/原生组；一次执行完成后删除组和页、停止自有MCP，下次建立新连接，名称 `Playwright · <真实电脑名称> · WSL/<实际发行版> · <正式项目名称>`；同电脑 Windows 分组写 `Windows`。共同控制层在原连接内核对唯一连接与原生组后规范标题，返回 `BrowserGroupIdentityV1` 溯源字段；MCP客户端登记名、项目身份和原生组ID保持独立，不为改名重建业务连接。旧组在正常可写接续时按同一原生身份改名；只读核验与故障对账不改标题，旧规范标题可暂待迁移，任意其他标题漂移仍按现行归属规则处理。每组可有多页，各项目竞争同一主机进程锁。CLI过渡项目依登记继续原后端，迁移先结束旧连接。所有接入ProjectBrowserV2的项目共用进入、页面集合变化及退出时的归属核对与清理；业务只声明用途、留存和完成情况，由共同控制层执行，不通过多建连接或原生组绕过遗留页。
 - 原生页面、连接和保存组分别验收。共同控制层回执包含来源字段，不以页面空或finish成功声称Google保存组已删除。同步显示的外端组和关闭后仅剩保存记录的旧组，不按Playwright前缀批量处理；受管接口未核实保存记录时明确报告待核实。Windows与WSL均执行本轮强制收尾策略；原跨已完成执行留页规则已废止。

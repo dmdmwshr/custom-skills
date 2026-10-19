@@ -2,7 +2,7 @@
 
 将本文件复制到：
 
-`D:\12070\Documents\workspaces\Comfy-Codex-Workspace\projects\<project_slug>\audio\records\audio-production-record.md`
+`D:\ws\04-content\04-01-ai-imaging\comfy-workspace\projects\<project_slug>\audio\records\audio-production-record.md`
 
 ## 项目基线
 

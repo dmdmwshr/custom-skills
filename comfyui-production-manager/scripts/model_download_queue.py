@@ -43,7 +43,7 @@ from stage_model_download import (
 )
 
 
-WORKSPACE = Path(r"D:\12070\Documents\workspaces\Comfy-Codex-Workspace")
+WORKSPACE = Path(r"D:\ws\04-content\04-01-ai-imaging\comfy-workspace")
 DEFAULT_REPORT = WORKSPACE / "models" / "template_dependency_report.json"
 DEFAULT_QUEUE = WORKSPACE / "models" / "download_queue.json"
 DEFAULT_CONTROL = WORKSPACE / "models" / "download_queue.control.json"

@@ -7,7 +7,7 @@ Applio 的安装目录是运行目录，不是长期素材仓库。训练原件�
 默认项目根目录：
 
 ```text
-D:\12070\Documents\workspaces\Applio-Voice-Projects\<project_slug>\
+D:\ws\Applio-Voice-Projects\<project_slug>\
 ```
 
 如果项目已经属于 ComfyUI 视频，沿用该项目的 `audio\` 目录，并遵守 `references/comfyui-video-handoff.md`；不要为同一镜头建立第二套事实源。

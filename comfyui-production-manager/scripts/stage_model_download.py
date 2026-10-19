@@ -49,7 +49,7 @@ DEFAULT_REMOTE_RESERVE_GIB = 4
 DEFAULT_LOCAL_RESERVE_GIB = 10
 TEMPORARY_TRANSFER_EXIT_CODE = 74
 DEFAULT_CATALOG = Path(
-    r"D:\12070\Documents\workspaces\Comfy-Codex-Workspace\models\catalog.json"
+    r"D:\ws\04-content\04-01-ai-imaging\comfy-workspace\models\catalog.json"
 )
 MODEL_SUFFIXES = {".safetensors", ".ckpt", ".pth", ".pt", ".bin", ".gguf", ".onnx"}
 SHA256_RE = re.compile(r"(?i)^[0-9a-f]{64}$")

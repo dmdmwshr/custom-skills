@@ -34,7 +34,7 @@ description: 把普通网页或文章 URL 通过本机 summarize CLI 转为 Mark
 
 - CLI：固定 summarize 0.25.2 与独立 Node 24.21.0；脚本读取 `references/local-config.json` 中的绝对入口，不依赖默认 Node 主版本
 - 配置：`C:\Users\12070\.summarize\config.json`
-- 输出目录：`D:\12070\Documents\workspaces\summarize-output`
+- 输出目录：`D:\ws\00-library\summarize-output`
 - 默认模式：总结模式，输出 Markdown 笔记
 - 当前 `summarize` 已配置 `FIRECRAWL_API_KEY`；处理普通网页时，会优先用 Firecrawl 抽取网页内容，再交给模型总结
 - 浏览器扩展/插件 ID 不参与本 skill 的 CLI 配置，也不是必填项
@@ -80,7 +80,7 @@ summarize "<URL>" --format md --markdown-mode readability --length long --plain 
 
 - 默认不要把网页原始 HTML 直接塞进笔记。
 - 默认保留 `summarize` 产出的总结版 Markdown 作为笔记草稿。
-- 文件默认输出到 `D:\12070\Documents\workspaces\summarize-output`。
+- 文件默认输出到 `D:\ws\00-library\summarize-output`。
 - 如果用户没有指定文件名，允许脚本自动生成安全文件名。
 - 如果用户明确要“全文提取”“原文 Markdown”“不做总结”，再改用 `--extract --format md`。
 

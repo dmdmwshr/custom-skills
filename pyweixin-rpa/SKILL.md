@@ -46,7 +46,7 @@ metadata:
 
 ## 当前补下载项目
 
-项目：`D:\12070\Documents\workspaces\业务工作\微信消息自动拉取备份`。
+项目：`D:\ws\01-business\01-03-wechat-backup`。
 
 读取项目 `AGENTS.md`、`PROJECT_STATUS.md`、配置、`docs/AI_DOWNLOAD_WORKFLOW.md` 和最近必要的轻量回执。使用项目 `.venv` 与既有单步组件；自动化沿用原专用运行聊天，每天北京时间 22:00，旧 Windows 任务保持停用。维护聊天负责修复和验收，不另建日常聊天或调度。
 

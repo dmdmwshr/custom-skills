@@ -7,10 +7,10 @@ in loader widgets.  It never downloads or moves a model.
 
 Example:
   python audit_model_dependencies.py \
-    --workflow-root "D:/12070/Documents/workspaces/Comfy-Codex-Workspace/workflows/模板库" \
+    --workflow-root "D:/ws/04-content/04-01-ai-imaging/comfy-workspace/workflows/模板库" \
     --model-root "D:/Comfy-Desktop/ComfyUI-Shared/models" \
     --model-root "C:/Users/12070/Documents/ComfyUI/models" \
-    --output "D:/12070/Documents/workspaces/Comfy-Codex-Workspace/models/template_dependency_report.json"
+    --output "D:/ws/04-content/04-01-ai-imaging/comfy-workspace/models/template_dependency_report.json"
 """
 
 from __future__ import annotations

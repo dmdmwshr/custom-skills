@@ -3,7 +3,7 @@
 ## 目录事实源
 
 ```text
-D:\12070\Documents\workspaces\Comfy-Codex-Workspace\workflows\
+D:\ws\04-content\04-01-ai-imaging\comfy-workspace\workflows\
 ├── 模板库/                 # 官方 + 特色模板，按学习能力去重
 │   ├── 01_图像生成与编辑/
 │   ├── 02_视频生成与控制/

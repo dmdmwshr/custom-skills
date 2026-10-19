@@ -15,9 +15,9 @@ description: 管理本机 ComfyUI 工作流、模型依赖和可追溯 AI 创作
 
 - ComfyUI：`C:\Users\12070\Documents\ComfyUI`
 - 运行工作流：`C:\Users\12070\Documents\ComfyUI\user\default\workflows`
-- 工作区：`D:\12070\Documents\workspaces\Comfy-Codex-Workspace`
-- 工作区工作流母版：`D:\12070\Documents\workspaces\Comfy-Codex-Workspace\workflows`
-- 项目：`D:\12070\Documents\workspaces\Comfy-Codex-Workspace\projects`
+- 工作区：`D:\ws\04-content\04-01-ai-imaging\comfy-workspace`
+- 工作区工作流母版：`D:\ws\04-content\04-01-ai-imaging\comfy-workspace\workflows`
+- 项目：`D:\ws\04-content\04-01-ai-imaging\comfy-workspace\projects`
 - 模型：优先使用 ComfyUI `models/` 或已经配置的共享模型目录，不把大模型复制进项目。
 
 ## 三个功能模块

@@ -1,7 +1,7 @@
 {
   "cli": "summarize",
   "config_path": "C:\\Users\\12070\\.summarize\\config.json",
-  "output_dir": "D:\\12070\\Documents\\workspaces\\summarize-output",
+  "output_dir": "D:\\ws\\00-library\\summarize-output",
   "default_mode": "summary-markdown",
   "excluded_inputs": [
     "pdf"

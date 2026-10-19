@@ -4,7 +4,7 @@
 Usage:
   python audit_workflows.py \
     --root runtime="C:/Users/12070/Documents/ComfyUI/user/default/workflows" \
-    --root library="D:/12070/Documents/workspaces/Comfy-Codex-Workspace/workflows" \
+    --root library="D:/ws/04-content/04-01-ai-imaging/comfy-workspace/workflows" \
     --output report.json
 
 The report distinguishes byte-identical files from JSON-equivalent files and
