@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex 项目管理"
+  short_description: "核对项目名称和路径，处理目录迁移、项目登记与会话重建，保留恢复证据"
+  default_prompt: "使用 $codex-project-manager 核对目标项目，按授权完成改名、路径迁移或重建，并分别回读各层结果。"

@@ -4,6 +4,7 @@
     "feishu-operations",
     "x-message-monitoring",
     "codex-project-task-handoff",
+    "codex-project-manager",
     "codex-archive-retrospective",
     "codex-local-state-diagnostics",
     "okxnew-backtest-operations",
@@ -113,6 +114,21 @@
         "windows": "runtime_unverified_this_change"
       },
       "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+    },
+    "codex-project-manager": {
+      "category": "cross_platform",
+      "execution_platforms": [
+        "windows",
+        "linux",
+        "wsl"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "readonly_helper_tests_verified_2026-10-20_migration_runtime_requires_target_verification",
+        "linux": "runtime_unverified",
+        "windows": "desktop_rename_observed_2026-10-20_migration_modes_require_target_verification"
+      },
+      "dependencies": "Current official project/thread tools or app-server schema; desktop UI driver on its actual host when needed. No generic migration mutator is bundled."
     },
     "codex-project-task-handoff": {
       "category": "cross_platform",
