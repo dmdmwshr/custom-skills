@@ -14,10 +14,41 @@
     "playwright-browser-control",
     "server-traffic-sync",
     "linux-computer-control",
-    "markitdown-local"
+    "markitdown-local",
+    "windows-from-wsl",
+    "claude-session-ops"
   ],
   "notes": "This is enforced by the managed publisher, not a native Codex frontmatter filter. Support declarations do not prove business dependencies or real-host validation. Windows-only entries describe current delivered workflows, not portability of every helper.",
   "skills": {
+    "windows-from-wsl": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "wsl"
+      ],
+      "remote_payload_platforms": [
+        "windows"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "source_and_readonly_preflight_require_publication_acceptance",
+        "linux": "not_supported_by_current_workflow",
+        "windows": "remote_payload_only_mutating_workflows_unverified_this_change"
+      },
+      "dependencies": "WSL mount access to the authorized Windows project; existing BatchMode SSH route windows-host-codex, Git Bash and pwsh; workbench win-codex for native delegation. No Windows credentials or services are installed."
+    },
+    "claude-session-ops": {
+      "category": "business_specific",
+      "execution_platforms": [
+        "wsl"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "source_checklist_only_session_mutations_unverified_this_change",
+        "linux": "not_supported_by_current_workflow",
+        "windows": "not_supported_by_current_workflow"
+      },
+      "dependencies": "WSL Claude desktop Code session-management tools with current schema; workbench project registry, dispatch.py and gen_index.py. Codex discovery does not provide Claude session tools."
+    },
     "applio-rvc-manager": {
       "category": "platform_specific",
       "execution_platforms": [

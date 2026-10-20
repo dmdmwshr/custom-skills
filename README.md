@@ -6,6 +6,8 @@ This repository is the source of truth for self-built skills. Windows installati
 
 ## Included skills
 
+- windows-from-wsl — WSL 操作 Windows 项目的文件、命令与派发检查表
+- claude-session-ops — 工作台 Claude 主会话、任务派发和归档检查表
 - bilinote-video-note
 - cc-switch
 - drawio-local
@@ -38,4 +40,4 @@ WSL 源仓按本机公共路径配置定位，与 Windows 工作树分离。技�
 
 ## 平台发现与按需加载
 
-platforms.json 是受管平台清单；scripts/skill_platforms.py 提供只读执行主机预检。原生发布器拒绝 Windows 专用技能，不自动安装源仓全部技能。当前管理 8 个 WSL 技能，包含独立的 feishu-operations；其他流程保留其 Windows 依赖，Windows 实机验证本次未执行。公共路径读取 /etc/codex-dev/paths.json（若目标机存在）或实际环境；不会从 Linux 共享用户认证到 Windows。
+platforms.json 是受管平台清单；scripts/skill_platforms.py 提供只读执行主机预检。原生发布器拒绝 Windows 专用技能，不自动安装源仓全部技能。受管范围以清单的 managed_wsl_order 为准，包含独立的 feishu-operations、windows-from-wsl 与 claude-session-ops；后两项在 WSL 执行，分别依赖 Windows 宿主机通道和 Claude 桌面会话工具。声明支持不代表业务实机验收。公共路径读取 /etc/codex-dev/paths.json（若目标机存在）或实际环境；不会从 Linux 共享用户认证到 Windows。
