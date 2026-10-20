@@ -62,3 +62,9 @@ compilation_pdf正式记录包含schema_version、profile、revision、path、sh
 apply把候选PDF与材料一并暂存校验，before保存登记旧PDF；写入阶段旧PDF移至replaced，新PDF原子改名进入实时根部，再核验并写台账、目录、说明及成功回执。只处理记录中的精确PDF路径；目标新出现未知文件时拒绝覆盖。事务记录book_before/book_after，失败recover检查新改动与备份完整性后保留失败现场，并恢复材料、PDF和管理记录。已成功提交事务不能用recover覆盖后续业务。
 
 verify兼容旧账；启用后必须核对PDF文件校验值、输入指纹、29件或当前入编件数、顺序、起始页、可点击目录、书签和A4页面。模板变更时更新脚本PROFILE并重建，不将历史模板输出冒充当前版。验收和同步以当前实际成果为准，正常10秒以上延迟不作失败，D盘提交后先等15秒再检查E盘PDF及记录。
+
+### 制作资料、日粒度名称与同日修订
+
+新合成本命名为`网络安全和信息化工作文件汇编（无附件，YYYYMMDD修订）.pdf`，目录首页仅显示年月日；revision仍为北京时间完整时间。同日多次更新可采用相同正式路径，transition只允许校验值与正式登记完全一致的上一版占用目标；apply仍先备份并将上一版移入replaced，再原子发布，新出现的未知文件一律拒绝覆盖，recover兼容新旧PDF路径相同。旧带时分秒正式记录可读，不批量改名历史。
+
+Word清理模块word_pdf.py保留原件及派生docx的文字、媒体和分节，仅统一白底、关闭高亮、阴影等装饰。转换器、清理profile、原件SHA-256共同确定缓存身份；旧doc采用原格式直接导出后清理派生PDF底纹，避免docx中转改变分页；docx在副本中清理再导出。成功缓存位于`归档管理/PDF制作资料/转换缓存/<身份指纹>`，保留original、body.pdf、conversion.json和转换日志，docx另存清理后的body.docx。正式PDF每个part可带conversion_assets及conversion_receipt_sha256；verify复核回执、文件指纹及rendered_sha256。缓存异常保留现场并停止，不以同名新文件覆盖。缓存是制作资料，不是业务台账；选页、收录及目录仍由唯一文件台账管理。
