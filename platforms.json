@@ -367,6 +367,20 @@
       },
       "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
     },
+    "wsl-system-lifecycle": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "not_supported_by_current_workflow",
+        "windows": "ubuntu_off_docker_retained_verified_startup_mock_tested_real_startup_pending"
+      },
+      "dependencies": "Existing Windows WSL maintenance project and its Python environment, task identities and saved lifecycle baseline. Ubuntu-only shutdown keeps Docker; full shutdown includes Docker.",
+      "note": "Runs from Windows without waking a distribution for status or startup planning."
+    },
     "wsl-backup-audit": {
       "category": "platform_specific",
       "execution_platforms": [

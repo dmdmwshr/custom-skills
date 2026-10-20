@@ -1,0 +1,4 @@
+interface:
+  display_name: "WSL 开关机"
+  short_description: "按范围关闭 Ubuntu 或全部 WSL，保留恢复依据并恢复原自启动设置"
+  default_prompt: "使用 $wsl-system-lifecycle 按我的要求开关 WSL，区分仅关闭 Ubuntu 和连同 Docker 全部关闭，并核验原自启动设置。"
