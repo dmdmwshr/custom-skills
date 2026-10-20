@@ -1,3 +1,12 @@
+## 2026-10-20 用户直接指令：Codex 项目管理 Skill 与前台规则
+
+- 用户要求：前台操作优先少用但不另行询问；将项目改名、路径迁移、项目登记与会话重建整理为 Skill，并给 WSL Codex、Claude 安装。该请求不触发真实项目迁移或会话重建。
+- 新增 codex-project-manager，保留一份跨平台流程；4 份按需参考分别覆盖桌面名称、目录/登记迁移、会话/绑定和历史证据。声明平台与 WSL 受管名单已补齐。桌面和独立 app-server 项目身份、归属和执行目录分别核验。
+- 只读名称核验器在 Windows 通过 14 项检查及 27 项真实改名回执复核；WSL 完成初版 10 项检查，最终修订测试与安装发现按本轮发布回执验收。独立行为试读 4 场景通过，并修正错误标记漏检和混合远程项目输入边界。
+- Windows 全局规则与 WSL 共享规则明确：已授权任务后台不可用时可短暂前台操作，无需再问；保留用户本次明确不抢焦点/禁止前台的限制。WSL Codex 链接与 Claude 导入均回读到同一规则源；未启动模型或重启服务。
+- 源仓先核对并整合远端 26b3645，保留既有 MarkItDown WSL 变更；本轮只发布 codex-project-manager，不顺带升级其他 Skill。Windows 使用 CC Switch 精确发布，WSL 使用现有受管发布器，Claude 沿既有链接机制。
+- 最终源提交、实时远端、Windows/WSL/Claude 安装与新进程发现、恢复点及未验收层级统一记录于 Windows 仓外 D:/12070/Documents/工作台管理报告/Codex项目管理Skill-20261020/completion.json。未出现成功回执前不把计划发布写成已完成；无需为记录提交号改写同一载荷。
+
 ## 2026-10-19 用户直接指令：Claude 独立能力补齐中的 MarkItDown WSL 适配
 
 - 本次只改 markitdown-local/SKILL.md 与 platforms.json；原 convert.py 不变。Windows 原路径保留，WSL 使用协作项目独立文档环境的 MarkItDown 0.1.8。受管平台增加 WSL，不宣称其他 Linux 已安装。
