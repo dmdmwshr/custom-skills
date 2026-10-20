@@ -1,3 +1,12 @@
+## 2026-10-20 新增 windows-from-wsl、claude-session-ops 两个 Skill
+
+- 源提交：`f14d0d6975731aac85ba1b973e6824b661823cfa`（`f14d0d6`），已推送既有 `origin/main` 并实时回读一致。新增两个 Skill 和最小只读检查脚本，仅同步 README 与 platforms.json；按现场使用仓库根目录布局。
+- 验收：格式、UTF-8、引用、脚本实跑与受管管理器验证通过；源文件、安装副本和发布记录哈希一致。新 Codex 进程在源仓及工作台目录均发现唯一 enabled 入口，`errors=[]`，未启动模型回合。
+- 发布记录：`/srv/work/host-baseline/skill-releases/20261020T015629912725Z`。
+- 完成回执：`/srv/work/tasks/2026-10-19-two-skills-01a15701/outputs/completion.json`。Claude 链接已通过指定同步脚本完成并回读确认，分别指向本机 Codex 受管安装副本。
+- 真实业务会话创建、派发、归档以及 Windows 界面和设备操作未执行；本次 Skill 发布验收无未完成项。本轮仅补写交接、单独 docs 提交并推送既有远端，不重跑发布；补录提交号与推送回读记录在同任务目录 `outputs/handoff-closeout.json`。
+- 本项目收尾规则（用户本次明确）：以后每个任务结束都必须在 `PROJECT_HANDOFF.md` 写一条，包含提交号和回执路径；当前提交号需避免自引用时，由该回执记录并可回读。
+
 ## 2026-10-20 用户直接指令：Codex 项目管理 Skill 与前台规则
 
 - 用户要求：前台操作优先少用但不另行询问；将项目改名、路径迁移、项目登记与会话重建整理为 Skill，并给 WSL Codex、Claude 安装。该请求不触发真实项目迁移或会话重建。
