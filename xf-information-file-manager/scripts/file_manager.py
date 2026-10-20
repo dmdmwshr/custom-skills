@@ -1,4 +1,4 @@
-"""Lossless archive / live compilation manager. Python 3.12+, standard library only."""
+"""Lossless archive manager; optional reviewed PDF books use the bundled PDF runtime."""
 from __future__ import annotations
 import argparse
 import copy
@@ -455,14 +455,17 @@ def check(root, manifest, frozen=None):
             raise ValueError('历史原始材料未覆盖：' + entry['path'])
     if frozen is not None and protected(root) != frozen:
         raise ValueError('固定专项或流程目录变化')
+    import compilation_pdf as book
+    pdf_result = book.verify(root, manifest)
     return {'documents': len(manifest['documents']), 'included': sum(d['included'] for d in manifest['documents']),
             'archive_files': sum(p.split('/')[0] in ARCHIVES for p in actual),
-            'compilation_files': sum(p.startswith(LIVE + '/') for p in actual), 'verified': True}
+            'compilation_files': sum(p.startswith(LIVE + '/') for p in actual), 'verified': True, **pdf_result}
 
 
 def semantic(manifest):
     value = copy.deepcopy(manifest)
-    for k in ('version', 'previous_version', 'transaction', 'protected_files', 'snapshot_relocations'): value.pop(k, None)
+    for k in ('version', 'previous_version', 'transaction', 'protected_files', 'snapshot_relocations',
+              'compilation_pdf_candidate', 'compilation_pdf'): value.pop(k, None)
     value.pop('changes', None)
     for d in value['documents']:
         for m in d['members']:
@@ -481,7 +484,10 @@ def apply(root, manifest):
     try:
         out, files, plan = make_plan(root, manifest)
         old = load(root / RECORDS[0]) if (root / RECORDS[0]).exists() else None
-        if not plan['added'] and not plan['removed'] and old and semantic(out) == semantic(old):
+        import compilation_pdf as book
+        book_plan = book.transition(root, out, old)
+        if (not plan['added'] and not plan['removed'] and old and semantic(out) == semantic(old)
+                and (not book_plan or book_plan['action'] == 'reuse')):
             return {'changed': False, **check(root, old, old.get('protected_files'))}
         frozen = protected(root)
         if old:
@@ -494,6 +500,9 @@ def apply(root, manifest):
                   'protected_relocations': manifest.get('protected_relocations', {}),
                   'snapshot_relocations': manifest.get('snapshot_relocations', {}),
                   'version_note': LIVE + '/版本变更说明/' + version + '_更新说明.txt'}
+        previous_book = (old or {}).get('compilation_pdf')
+        record['book_before'] = {previous_book['path']: previous_book['sha256']} if previous_book else {}
+        record['book_after'] = {book_plan['record']['path']: book_plan['record']['sha256']} if book_plan else {}
         save(transaction / 'transaction.json', record)
         try:
             stage = transaction / 'stage'; backup = transaction / 'before'
@@ -502,7 +511,20 @@ def apply(root, manifest):
                 target = stage / rel; target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(safe(root, info['source']), target)
                 if digest(target) != info['sha256']: raise ValueError('暂存校验失败：' + rel)
+            if book_plan:
+                out['compilation_pdf'] = book_plan['record']
+                if book_plan['action'] != 'reuse':
+                    target = stage / book_plan['record']['path']; target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(book_plan['source'], target)
+                    if digest(target) != book_plan['record']['sha256']:
+                        raise ValueError('候选PDF暂存校验失败')
+            out.pop('compilation_pdf_candidate', None)
             copy_snapshot(root, backup, record['snapshot_relocations'])
+            for rel, sha in record['book_before'].items():
+                original = safe(root, rel)
+                if not original.is_file() or digest(original) != sha:
+                    raise ValueError('原PDF已变化，停止提交')
+                target = backup / rel; target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(original, target)
             for rel, sha in record['records'].items():
                 if sha:
                     p = backup / rel; p.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(root / rel, p)
@@ -510,6 +532,9 @@ def apply(root, manifest):
                 raise ValueError('备份校验失败')
             if scan(root, MANAGED) != plan['before'] or protected(root) != frozen or record_snapshot(root) != record['records']:
                 raise ValueError('执行前文件被其他进程修改')
+            for rel, sha in record['book_before'].items():
+                if not safe(root, rel).is_file() or digest(safe(root, rel)) != sha:
+                    raise ValueError('执行前PDF被其他进程修改')
             record['phase'] = 'applying'; save(transaction / 'transaction.json', record)
             for prefix in MANAGED:
                 target = safe(root, prefix); retained = transaction / 'replaced' / prefix
@@ -520,6 +545,13 @@ def apply(root, manifest):
                 rename_snapshot(transaction / 'replaced', record['snapshot_relocations'])
                 if scan_snapshot(transaction / 'replaced', record['snapshot_relocations']) != plan['before']:
                     raise ValueError('保留现场存储映射校验失败')
+            if book_plan and book_plan['action'] != 'reuse':
+                for rel in record['book_before']:
+                    retained = transaction / 'replaced' / rel; retained.parent.mkdir(parents=True, exist_ok=True)
+                    safe(root, rel).rename(retained)
+                target = safe(root, book_plan['record']['path'])
+                if target.exists(): raise ValueError('PDF提交目标出现新文件，拒绝覆盖')
+                (stage / book_plan['record']['path']).rename(target)
             for d in out['documents']:
                 for m in d['members']:
                     m['sources'] = sorted(set(m.get('sources', []) + [m['source']]))
@@ -532,7 +564,12 @@ def apply(root, manifest):
             save(root / RECORDS[0], out)
             txt(root / RECORDS[1], directory(out))
             txt(root / RECORDS[2], '\n'.join(readable_issues(out) or ['无']) + '\n')
-            txt(root / record['version_note'], report(out, plan, version, out['previous_version'], old))
+            note = report(out, plan, version, out['previous_version'], old)
+            if book_plan:
+                action = {'create': '新增', 'update': '更新', 'reuse': '正文未变，沿用'}[book_plan['action']]
+                line = f"实时PDF——{action}——{Path(book_plan['record']['path']).name}（{book_plan['record']['document_count']}件文书；保留制度正文及主体标准表格，排除配套附件）。\n\n"
+                note = note.replace('最新文件目录', line + '最新文件目录', 1)
+            txt(root / record['version_note'], note)
             save(transaction / '版本台账.json', out)
             record.update(phase='committed', result=result); save(transaction / 'transaction.json', record)
             return {'changed': True, 'version': version, 'report': record['version_note'], **result}
@@ -559,6 +596,13 @@ def recover(root, rel):
     for p, h in current.items():
         if h not in (record['before'].get(p), record['after'].get(p)):
             raise ValueError('发现事务之外的新改动，停止恢复：' + p)
+    for rel in set(record.get('book_before', {})) | set(record.get('book_after', {})):
+        path = safe(root, rel)
+        if path.exists() and digest(path) not in (record.get('book_before', {}).get(rel), record.get('book_after', {}).get(rel)):
+            raise ValueError('发现PDF事务之外的新改动，停止恢复：' + rel)
+    for rel, sha in record.get('book_before', {}).items():
+        if not (transaction / 'before' / rel).is_file() or digest(transaction / 'before' / rel) != sha:
+            raise ValueError('PDF恢复备份损坏')
     evidence = transaction / ('failed-live-' + datetime.now().strftime('%H%M%S_%f'))
     for prefix in MANAGED:
         target = safe(root, prefix)
@@ -566,6 +610,12 @@ def recover(root, rel):
             hold = evidence / prefix; hold.parent.mkdir(parents=True, exist_ok=True); target.rename(hold)
     reverse = {new: old for old, new in record.get('snapshot_relocations', {}).items()}
     copy_snapshot(transaction / 'before', root, reverse)
+    for rel in set(record.get('book_before', {})) | set(record.get('book_after', {})):
+        target = safe(root, rel)
+        if target.exists():
+            hold = evidence / rel; hold.parent.mkdir(parents=True, exist_ok=True); target.rename(hold)
+        if rel in record.get('book_before', {}):
+            target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(transaction / 'before' / rel, target)
     for rel, sha in record['records'].items():
         target = safe(root, rel)
         if target.exists():
@@ -576,6 +626,8 @@ def recover(root, rel):
         (evidence / '说明').mkdir(parents=True, exist_ok=True); note.rename(evidence / '说明' / note.name)
     if scan(root, MANAGED) != record['before'] or record_snapshot(root) != record['records']:
         raise ValueError('恢复后验证失败，保留现场')
+    if any(digest(safe(root, rel)) != sha for rel, sha in record.get('book_before', {}).items()):
+        raise ValueError('恢复后PDF验证失败，保留现场')
     record['phase'] = 'recovered'; save(transaction / 'transaction.json', record)
     return {'recovered': True, 'transaction': transaction.relative_to(root).as_posix()}
 
@@ -587,6 +639,10 @@ def main():
     sub.add_parser('inventory'); sub.add_parser('verify')
     for command in ('preview', 'apply'):
         sub.add_parser(command).add_argument('--manifest', required=True)
+    book_parser = sub.add_parser('prepare-book')
+    book_parser.add_argument('--manifest', required=True)
+    book_parser.add_argument('--workdir', required=True)
+    book_parser.add_argument('--soffice', default='D:/Program_Files/LibreOffice/program/soffice.com')
     sub.add_parser('recover').add_argument('--transaction', required=True)
     storage = sub.add_parser('migrate-storage')
     storage.add_argument('--transaction', required=True)
@@ -601,11 +657,18 @@ def main():
         result = recover(root, args.transaction)
     elif args.command == 'migrate-storage':
         result = migrate_storage(root, args.transaction, load(args.relocations))
+    elif args.command == 'prepare-book':
+        import compilation_pdf as book
+        result = book.prepare(root, Path(args.manifest), Path(args.workdir), Path(args.soffice))
     elif args.command == 'preview':
         out, files, plan = make_plan(root, load(args.manifest))
+        import compilation_pdf as book
+        old = load(root / RECORDS[0]) if (root / RECORDS[0]).exists() else None
+        book_plan = book.transition(root, out, old)
         result = {'documents': len(out['documents']), 'included': sum(d['included'] for d in out['documents']),
                   'add': list(plan['added']), 'remove_or_rename': list(plan['removed']),
-                  'issues': out.get('issues', []), 'directory': directory(out)}
+                  'issues': out.get('issues', []), 'directory': directory(out),
+                  'pdf': {'action': book_plan['action'], 'path': book_plan['record']['path']} if book_plan else None}
     else:
         result = apply(root, load(args.manifest))
     print(json.dumps(result, ensure_ascii=False, indent=2))

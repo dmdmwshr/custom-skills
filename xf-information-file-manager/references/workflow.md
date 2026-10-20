@@ -1,6 +1,6 @@
 # 台账和命令
 
-脚本仅用 Python 标准库；在 Windows 使用已验证的 Python 3.12+，不向系统安装依赖。所有文本 UTF-8，用户阅读的 TXT 使用 UTF-8 BOM。
+基础归档只使用Python标准库；实时PDF启用后使用应用提供的Python、pypdf、pdfplumber、reportlab及Pillow，Word副本由本机既有LibreOffice转换，不向系统Python安装依赖。所有文本 UTF-8，用户阅读的 TXT 使用 UTF-8 BOM。
 
 `scripts/file_manager.py --root <业务根目录> inventory` 只读输出材料数量。
 
@@ -45,3 +45,20 @@ preview/apply 拒绝：受管根目录丢失、路径越界、重解析点、校
 为防止新事务备份重新生成旧长名，候选台账可带 `snapshot_relocations`：旧逻辑相对路径到短名存储相对路径的对象。同时明确目录及其内主文件的映射；只允许在同一受管目录内改名，目标必须与新布局的原件校验值一致，不得碰撞、不可逆或仍超过 255 UTF-8 字节。apply 的 before 与 replaced 使用短名物理存储，事务的 before 逻辑索引、管理记录原件和历史校验值保留；recover 按映射恢复原始逻辑布局。映射保存在事务记录，不留在成功提交的正式台账。
 
 已完成历史事务中的长名副本使用 `migrate-storage --transaction <事务相对路径> --relocations <映射JSON>` 整理。此命令只改 before/replaced 的存储名称，先校验全量内容和管理记录、备份原 transaction.json，再记录映射和迁移回执；不重放业务、不改历史版本状态和原逻辑路径。失败事务禁止整理。完成后按 `scan_snapshot` 对逻辑清单和原哈希核验；原始 transaction.json 备份与迁移回执保留在原事务中。
+
+
+## 实时PDF接口与事务
+
+正式台账仍为schema_version=1。compilation_pdf_required=true表示本项目已经启用PDF维护，后续候选不得取消。旧台账不含此字段时基础归档照常兼容。
+
+每件included=true的文书必须有book_selection.reviewed=true及parts数组。每个part以member_sha256绑定本件已收入实时版的成员，首个part必须为实时选定的唯一main；独立制度、指南或指标表可作为后续part，不能只合并通知。part包含page_count、keep_ranges（1起始闭区间列表）、excluded_ranges（ranges及reason）、evidence；保留与排除页段必须完整覆盖转换PDF且不重叠。可选crops以页码字符串为键，值为[左、下、右、上]归一化坐标，仅裁派生页。excluded_members逐项保留未采用成员的校验值及原因，不从档案删除任何成员。
+
+命令：`--root <D盘业务根> prepare-book --manifest <候选台账> --workdir <本批临时目录>`；可用--soffice显式指定现有转换入口。workdir必须在业务根之外。生成失败写build-failure.json，保留转换日志和中间材料；不修改正式台账。成功将compilation_pdf_candidate写入候选台账，包含候选文件绝对路径和构建记录。每次authoring和视觉检查遵循当前官方PDF技能；本命令的结构核验不代替视觉验收。
+
+prepare-book先重排候选布局，核对成员、页段与源文件校验值后构建。PDF优先合并原页面，Word转换只读取短名副本，采用独立file:///配置目录；混合正文/表单页采用局部高分辨率派生裁图，防止裁后仍带隐藏表单文本。缓存绑定原件和转换PDF双校验值，异常不盲覆盖。
+
+compilation_pdf正式记录包含schema_version、profile、revision、path、sha256、input_fingerprint、document_count、page_count、toc_pages及documents（每件id、section、sequence、首个PDF页、连续正文起始页、页数、原件及转换校验值、选页依据）。输入指纹覆盖文书顺序、显示名称、文号日期、参考状态、所选正文内容和页段；不包含无关附件或运行目录。仅附件变化时prepare-book返回reused，apply沿用原PDF并说明。新正文、名称、排序、收录或选取变化但未prepare时，preview/apply拒绝提交，不能沿用旧PDF。
+
+apply把候选PDF与材料一并暂存校验，before保存登记旧PDF；写入阶段旧PDF移至replaced，新PDF原子改名进入实时根部，再核验并写台账、目录、说明及成功回执。只处理记录中的精确PDF路径；目标新出现未知文件时拒绝覆盖。事务记录book_before/book_after，失败recover检查新改动与备份完整性后保留失败现场，并恢复材料、PDF和管理记录。已成功提交事务不能用recover覆盖后续业务。
+
+verify兼容旧账；启用后必须核对PDF文件校验值、输入指纹、29件或当前入编件数、顺序、起始页、可点击目录、书签和A4页面。模板变更时更新脚本PROFILE并重建，不将历史模板输出冒充当前版。验收和同步以当前实际成果为准，正常10秒以上延迟不作失败，D盘提交后先等15秒再检查E盘PDF及记录。
