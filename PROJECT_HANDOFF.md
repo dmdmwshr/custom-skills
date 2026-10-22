@@ -89,3 +89,11 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 - command-failure.json、stopped-state.json、handoff-before-publish.md：历史失败与原未知边界，未覆盖。
 
 回退只处理本任务精确差异，先核对现有内容是否仍属于本次版本，保留后续用户修改、并发提交和未知状态；不以旧备份覆盖活动数据。
+
+## 2026-10-22 用户直接指令：诊断 Skill 单次被动采样与五类操作卡
+
+- 用户授权实施“多需求协作、Claude 按需使用与长期维护方案”。本源仓只认领 `codex-local-state-diagnostics/SKILL.md` 与新增 `references/passive-maintenance.md`；Windows 采样器实现由 03-05 原项目负责，不复制源码或新增服务。
+- 载荷提交 `6075c21b3e886d862ca933aa0ca52932a3fbbe85`，Claude 窄返工提交 `60011414480186603da7eeacae997e749f3aecd5`。新增人工单次 `--passive` 路由与模型断连、看似卡住、工作空间/会话加载、工具慢操作卡；主动诊断及获授权修复分别处理。旧缺失 Skill 引用改指项目规则与 03-02 唯一协作规范，不改默认角色或权限。
+- 源格式、UTF-8、引用及原有 8 文件摘要保全通过；真实 Claude 已核两处返工与冻结摘要，源规格通过。工具独验、远端同步、Windows 单 Skill 安装及新进程发现按仓外 `D:/12070/Documents/工作台管理报告/按需协作实施-20261022/skill/completion.json` 分层记录，未取得对应成功回读前不能称完成；本条不替代发布回执。
+- 受管同步沿现有 CC Switch，限定这一 Skill，保留全部客户端开关与历史备份。当前 CC Switch 4.0.16/schema 20 的实际登记代码在隔离副本验证通过，新增客户端字段及 content_hash 保持；活跃数据库未用于该测试写入。
+- 本次全部恢复点、源规格独验、受管发布备份、逐文件三方摘要和发现结果留仓外；本交接提交号由同一 completion.json 记录以免自引用。没有启动模型业务、修改运行配置或新增定时诊断。
