@@ -105,3 +105,12 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 - Codex root 已独立核对三文件及权威接口并PASS。03-01登记依最新r2独验通过，r1失败与旧冻结保留；浏览器工具独验和当前运行配置观察也分层留证。源、提交推送、Windows精确两Skill安装、三方哈希、七客户端开关/其他110行保护及一次无模型新进程发现，以仓外 `D:/12070/Documents/工作台管理报告/治理完善实施-20261022/tools-skills/RELEASE_COMPLETION.json` 为最终发布指针；此条不替代尚未取得的发布回读。
 - 工具/Skill资源盘点为派生候选，权威仍为既有项目总表和CC Switch；MCP三缺口仅列后续维护候选，不授权安装、启停、卸载或第三Skill修改。未进行浏览器连接/凭据调用、MCP启停、业务运行或自动化变更。Windows发布不证明WSL、Claude安装或旧聊天热加载。
 - 本轮精确源基线、独验、安装前数据库只读摘要及发布自动备份均保留；回退先对账后续修改和实际引用，只处理本轮精确载荷，不覆盖活动数据。
+
+## 2026-10-22 用户直接指令：整个Codex工具链核查与修复（TOOLCHAIN-20261022/v1）
+
+- 用户要求覆盖全部Skill/MCP用途、相似项主备与合并删减、正常失败重试和本轮自有UI收尾，并减少重MCP常驻；凭据沿现状，不进行密钥库改造。工作台按所属范围协调，本源负责人只写本轮Skill文案与精确CC开关，不接管业务。
+- 本轮自有文案提交 `9fbc17182b339d8727ee7e2b27725f939f66c0aa` 已推送既有origin/main并实时回读一致：browser可选诊断、Chrome主/Edge经核备用、普通读取/未派发的有界恢复与未知写入对账；Comfy同地址只读health瞬时失败最多补读一次，映射补当前0.52.205及03-05现有入口引用。自有B1片段及B2文案由未实施Codex独验PASS，未把外部实现或本轮文案当真实新后端验收。
+- 另有用户安排的浏览器参数预检并发修复，主责可见聊天 `01a16182-8841-7cc1-b99b-0582bbfc2d78`。用户已明确“请协调后合并”；其已完成参数预检精确提交 `de34f00e73abca3431780be41de7204150692e1e`（父9fbc171），31自检与15独验通过并释放源/index写权；本负责人继续必要的无参数snapshot/readback失败分类修复，12隔离自测及未实施Codex14独验通过，保留其参数预检AST。双方变更沿原main统一精确同步browser+comfy。此前未知外部差异已固定保存，本轮自有提交排除其run-code段/脚本/测试，原工作副本保留；不得覆盖、stash或假clean绕过发布条件。
+- 当前状态：前序自有文案和并发参数预检已分别提交/推送；只读失败分类代码与本需求交接正在按独验结果精确提交，安装及新发现待本次正式同步，现有业务仍使用原发布版本。新代码仅使同身份、无未决业务失败的无参数读取错误可正常再读；旧unknown/readback_required、metadata/进程/成员变化和写入失败不解锁，不自动重连或重放。同步继续既有CC受管入口，源/安装/Codex文件树及新进程发现分别验收，Windows成功不代替WSL/Claude。仓外唯一状态和回退指针：`D:/12070/Documents/工作台管理报告/工具链核查修复-20261022/skills/RELEASE_STATUS.json`。
+- B3已单独完成：只将 `openai/skills:skills\.curated\pdf` 的enabled_codex改0并新增旧pdf精确路径的Codex禁用项；官方pdf插件启用保留、112行除该字段外不变、其他客户端和安装/符号链接保留。双cwd新CLI旧pdf=false、pdf:pdf=true、零加载错，自有进程退出；未宣称旧活动聊天热加载或内存改善。已有SQLite在线备份、原配置/安装/链接证据；回退仅恢复精确开关及该路径覆盖，不整库/整配置回灌。回执：`PDF_DISABLE_DRY_RUN.json`、`PDF_DISABLE_APPLY.json`、`POST_B3_SKILL_DISCOVERY.json`；独验在同需求rules/review/B3_POST_APPLY_REVIEW.json。
+- 全量派生能力清单与相似族矩阵保存在同一skills证据根。系统官方openai-docs/creator/installer已刷新启用发现；缓存旧版及pptx无安全删除证据而保留。Cua为工具自身官方Skill包、kdocs为CC第三方源，未直接编辑安装物；03-05已补现有Cua短生命周期及WPS365既有CLI/账户能力边界入口。

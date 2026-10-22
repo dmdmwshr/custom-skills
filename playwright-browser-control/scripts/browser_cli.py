@@ -286,15 +286,16 @@ def managed_main(args, root, settings):
             backup = path.parent.parent / 'recovery' / receipt['execution_id'] / (str(time.time_ns()) + '.json')
             lifecycle.save(backup, receipt)
 
-        def invoke(command, arguments=None):
+        def invoke(command, arguments=None, *, read_only=False):
             argv, env, secrets = prepare(settings, root, args.browser, args.session, command,
                                          arguments or [], cwd, receipt['cli_session'])
             try:
                 code, output = run_cli(argv, env, args.timeout, secrets)
             except subprocess.TimeoutExpired:
-                receipt['state'] = 'unknown'
-                receipt['last_failure'] = {'classification':'timeout_result_unknown', 'at':lifecycle.now()}
-                persist()
+                if not read_only:
+                    receipt['state'] = 'unknown'
+                    receipt['last_failure'] = {'classification':'timeout_result_unknown', 'at':lifecycle.now()}
+                    persist()
                 raise
             return code, output
 
@@ -324,6 +325,47 @@ def managed_main(args, root, settings):
             receipt['end_audit'] = report
             persist()
             return report
+
+        def read_snapshot(actual):
+            # Only the fixed, argument-free snapshot is read-only. Native identity
+            # reads still use the original protected path if their result is unknown.
+            previous_failure = receipt.get('last_failure') or {}
+            resolved = (previous_failure.get('resolution') == 'fresh_snapshot_no_replay'
+                        and bool(previous_failure.get('reconciled_at')))
+            retry_allowed = receipt['state'] == 'active' and (not previous_failure or resolved)
+            if receipt['state'] == 'active' and not retry_allowed:
+                raise ValueError('Previous business failure is unresolved; reconcile it before retrying a read.')
+
+            def verify_identity(value):
+                if (value['group_id'] != receipt['group_id']
+                        or value['connection_id'] != receipt['connection_id']
+                        or set(value['native_tab_ids']) != set(receipt['owned_tab_ids'])):
+                    raise ValueError('Native identity changed during readback; preserve the execution for reconciliation.')
+                if receipt.get('browser_epoch') and browser_audit.browser_epoch(args.browser, profile) != receipt['browser_epoch']:
+                    raise ValueError('Browser process identity changed during readback; preserve the original execution.')
+
+            def record_failure(classification, exit_code=None):
+                receipt['last_read_failure'] = {'classification':classification, 'command':args.command,
+                    'at':lifecycle.now(), 'exit_code':exit_code, 'state_preserved':receipt['state']}
+                persist()
+
+            if retry_allowed:
+                verify_identity(actual)
+            try:
+                code, output = invoke('snapshot', read_only=(retry_allowed or receipt['state'] in {'unknown','readback_required'}))
+            except subprocess.TimeoutExpired as error:
+                if retry_allowed:
+                    verify_identity(metadata())
+                    record_failure('readonly_snapshot_timeout')
+                    error.read_only_state_preserved = True
+                raise
+            if retry_allowed:
+                verify_identity(metadata())
+                if code:
+                    record_failure('readonly_snapshot_failed', code)
+                else:
+                    persist()  # Keep earlier failure evidence after a successful retry.
+            return code, output, retry_allowed
 
         try:
             if args.command == 'reconcile-cleanup':
@@ -395,9 +437,12 @@ def managed_main(args, root, settings):
                     if browser_audit.browser_epoch(args.browser, profile) != receipt['browser_epoch']:
                         raise ValueError('The original browser process cannot be verified; recovery remains protected.')
                     inspect_browser()
-                code, output = invoke('snapshot')
+                code, output, retry_allowed = (read_snapshot(actual) if args.command == 'readback'
+                                               else (*invoke('snapshot'), False))
                 print(output)
                 if code:
+                    if retry_allowed:
+                        return code
                     raise ValueError('Fresh read-only snapshot failed; execution remains protected.')
                 if proof:
                     after = metadata()
@@ -454,6 +499,10 @@ def managed_main(args, root, settings):
                 return 0 if cleanup['saved_group_status'] == 'verified_absent' and cleanup['connection_release'] != 'unverified' else 1
             if args.command == 'tab-close' and len(receipt['owned_tab_ids']) <= 1:
                 raise ValueError('Use finish to delete the final group before closing its final tab.')
+            if args.command == 'snapshot' and not args.arguments:
+                code, output, _ = read_snapshot(actual)
+                print(output, end='' if output.endswith('\n') else '\n')
+                return code
             code, output = invoke(args.command, args.arguments)
             print(output, end='' if output.endswith('\n') else '\n')
             if code:
@@ -504,8 +553,11 @@ def main() -> int:
         if args.timeout < 1:
             raise ValueError('--timeout must be positive.')
         return managed_main(args, root, settings)
-    except subprocess.TimeoutExpired:
-        print('RESULT_UNKNOWN: CLI wait expired. Read back this named session before repeating an action.', file=sys.stderr)
+    except subprocess.TimeoutExpired as error:
+        if getattr(error, 'read_only_state_preserved', False):
+            print('READ_FAILED: Read-only snapshot wait expired; native identity was rechecked and the active state was preserved.', file=sys.stderr)
+        else:
+            print('RESULT_UNKNOWN: CLI wait expired. Read back this named session before repeating an action.', file=sys.stderr)
         return 124
     except (ValueError, OSError, KeyError) as error:
         print(redact(str(error), secrets), file=sys.stderr)
