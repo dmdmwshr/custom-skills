@@ -14,6 +14,7 @@ metadata:
 
 | 用户目标 | 按需读取 |
 | --- | --- |
+| 准备新项目、人工添加后的启动核验与统一登记 | [新项目准备与启动](references/project-admission.md) |
 | 规范项目名称、确认侧栏是否保存 | [项目改名与桌面核验](references/desktop-projects.md) |
 | 移动实体目录、修改项目路径、重建项目登记 | [路径与项目登记迁移](references/path-and-project-migration.md) |
 | 旧会话仍用旧目录，需继续、迁移归属或重建会话 | [会话与绑定处理](references/session-rebuild.md) |
