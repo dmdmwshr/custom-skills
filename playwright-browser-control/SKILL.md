@@ -37,11 +37,11 @@ metadata:
 
 ## Windows 入口
 
-在任务工作目录运行 `scripts/browser_cli.py`，从仓库外 runtime 读取固定 Node、官方 CLI、浏览器映射及凭证引用。默认 Chrome，Edge 显式指定。工具未发现 Chrome 或一次连接失败时，先核对原主机的安装、进程、资料与连接，不据此改用 Edge；切换工具仍须保留原浏览器、账号资料、副屏及后台约束。运行产物 `.playwright/`、`.playwright-cli/` 和 `output/playwright/` 排除 Git。
+在任务工作目录运行 `scripts/browser_cli.py`，从仓库外 runtime 读取固定 Node、官方 CLI、浏览器映射及凭证引用。Chrome 主用，Edge 为经核实的备用并显式选择。工具未发现 Chrome 或一次连接失败时，先核对原主机的安装、进程、资料与连接，处理可恢复原因；证实 Chrome 本轮不可用、原执行已结清或保持隔离、任务未指定 Chrome，且 Edge 自身资料、凭据与目标站点身份均满足原授权时，可选择 Edge。不得因权限拒绝换入口，不能将 Chrome 的账号资料或令牌移给 Edge。切换工具仍保留原任务的账号、副屏及后台约束。运行产物 `.playwright/`、`.playwright-cli/` 和 `output/playwright/` 排除 Git。
 
-启动定位可先使用03-05维护的 `D:/ws/03-env/03-05-codex-env-win/scripts/run_browser_acceptance.py`：无参数为单次离线预检，只读已有配置与实体，不调用启动器、凭据读取器或网络，不派生子进程，不默认落盘。默认Chrome、预期资料目录Default；`--runtime-root`仅显式指定已核实的既有绝对根，`--profile`精确选择且不回退，其他已核实资料同时给出对应`--expected-profile-directory`与`--expected-profile-path`。`--output-dir`仅在配置预检通过后于仓外创建独立批次。退出0的`configuration_checked/not_started`仅证明配置检查完成，不证明凭据、连接、登录、后台/副屏或页面清理。详细入口契约由03-05维护，不在Skill复制实现。
+可选启动诊断使用03-05维护的 `D:/ws/03-env/03-05-codex-env-win/scripts/run_browser_acceptance.py`：无参数为单次离线预检，只读已有配置与实体，不调用启动器、凭据读取器或网络，不派生子进程，不默认落盘。默认Chrome、预期资料目录Default；`--runtime-root`仅显式指定已核实的既有绝对根，`--profile`精确选择且不回退，其他已核实资料同时给出对应`--expected-profile-directory`与`--expected-profile-path`。`--output-dir`仅在配置预检通过后于仓外创建独立批次。退出0的`configuration_checked/not_started`仅证明配置检查完成，不证明凭据、连接、登录、后台/副屏或页面清理。详细入口契约由03-05维护，不在Skill复制实现。
 
-原`doctor`会走既有启动器并可能调用凭据元数据子进程，不能当作上述纯离线入口。显式`--execute`只用于获授权的独立自有本机回环测试，要求真实conversation、仓外批次及已核实窗口/资料/连接与副屏/后台条件；单浏览器、失败立即停，不自动切Edge或重连，超时为未知，`cleanup_pending`不等于物理关闭。公开测试页通过也不证明业务登录；实际执行按03-05当前契约，不由默认预检自动触发。
+原`doctor`会走既有启动器并可能调用凭据元数据子进程，不能当作上述纯离线入口。离线预检是可选诊断，不是每个正常操作前新增的门禁。显式`--execute`只用于获授权的独立自有本机回环测试，要求真实conversation、仓外批次及已核实窗口/资料/连接与副屏/后台条件。单浏览器、失败停止当前测试批次且不自动切Edge或重连，仅是该验收脚本的契约，不推广为日常执行禁止正常重试或备用。超时先按未知对账，`cleanup_pending`不等于物理关闭；公开测试页通过不证明业务登录。实际执行按03-05当前契约，不由默认预检自动触发。
 
 ```powershell
 $browserTool = "$env:USERPROFILE/.codex/skills/playwright-browser-control/scripts/browser_cli.py"
@@ -61,6 +61,10 @@ python -X utf8 $browserTool --session task-name finish
 - 旧启动器若因输出中引用历史错误而误判已返回的清理成功回执，可用 `reconcile-cleanup <原清理输出文件>`：仅核对原组和精确页面、确认保存记录已移除并释放原物理连接；保留原失败且只标 `cleanup_pending`，由下一次原生巡检核实页面消失，不重放关闭动作。
 - 最新执行指针保存在 `.playwright/groups/<浏览器>-<标签>.json`，历史按 execution ID 单独归档。跨会话、目录或资料的调用被拒绝。旧版连接回执要先精确退役，不能作为新页面入口。
 - `doctor` 核对固定验收版本；版本漂移先核验升级，不每次安装 latest 或另装浏览器。凭证只由本地启动子进程读取并注入，输出脱敏；不回显凭证、Cookie、密码、认证头或网站存储。
+
+## 正常重试与失败分类
+
+单次工具失败先按原执行身份回读，保留原失败，不停止无依赖的工作。只读瞬时错误可在同一执行取得新状态后有界重试；不能清除先前仍未知的业务动作。本地参数、凭据预检或输入前引用错误，只有证明目标操作未派发时，才修正原因并沿入口已支持的恢复命令继续；已核未输入的点击按上述 `recover-click` 窄恢复，不重放旧点击。输入、提交、下载或执行结果未知时先查原对象与回执，核清前只阻止相关重放，不设通用强制解锁。若当前入口无法表达已证明的失败分类，保留断点交入口维护者修复，不能直接改执行回执伪造成功。
 
 ## 操作与收尾
 
