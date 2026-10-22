@@ -57,6 +57,7 @@ python -X utf8 $browserTool --session task-name finish
 - `--profile <名称>` 选择 runtime.json 中 `profiles.<浏览器>.<名称>` 登记的独立资料；同一执行每次保持该参数一致。不传时保留既有默认资料，未知名称直接拒绝，不回退到默认账号。资料映射只保存 channel、profile_directory、可选 profile_path 及凭据引用。扩展凭据可用既有受限 token_file，或 LocalVault 的 secret_name 与 credential_username；后者还需配置 vault_pwsh_executable。先用 `localvault-credentials` 保存 PSCredential，再以本机私有管道读入启动器；仅扩展令牌按官方协议注入 CLI 子进程环境，不写父进程、普通文件、命令参数或报告。网站密码继续遵循下述标准输入登录流程。
 - 同一次执行保持目录、浏览器及标签一致。每次 `connect` 创建新的实际 CLI 会话；已在用或未知执行不能重复 connect。`status` 读取管理回执，`group-info` 只读原生身份，`audit` 只读巡检当前资料中的组、页、连接及历史保存记录；`group-name` 仅用于当前合法执行。未知状态下 `audit` 不结算未知业务、不重放原动作。
 - 失败后可用 `readback` 读取同一执行的新快照，读取不会解除保护。只有固定验收版 CLI 明确在输入分发前报告单次 `click` 的引用不存在，或完整日志止于首次等待元素可见、启用与稳定，才可用 `recover-click`（兼容 `recover-reference`）：保留原失败、核对原浏览器进程、组、连接与全部自有页，再取得新快照后恢复；不重放旧点击。旧版回执需传原始本会话执行日志绝对路径及该失败事件 ordinal，校验归属、失败时间和后续动作后才适用。输入阶段超时、重试或日志不全、其他错误、归属变化及已恢复的旧失败均不能借此解除保护。
+- `run-code` 接受一个函数参数或官方 `--filename <JavaScript文件>`（含 `--filename=<文件>`）形式；非法参数在读取运行配置、凭据、浏览器或管理回执前拒绝，不改回执。Windows PowerShell 5.1 优先使用文件参数，避免内联引号拆分；合法参数仍须通过原执行状态和业务授权检查。
 - 原生身份和巡检优先复用当前连接中唯一的扩展状态辅助页，不为每次读取新建并关闭前台标签；找不到辅助页时才创建临时观察页，并关闭精确临时对象。
 - 旧启动器若因输出中引用历史错误而误判已返回的清理成功回执，可用 `reconcile-cleanup <原清理输出文件>`：仅核对原组和精确页面、确认保存记录已移除并释放原物理连接；保留原失败且只标 `cleanup_pending`，由下一次原生巡检核实页面消失，不重放关闭动作。
 - 最新执行指针保存在 `.playwright/groups/<浏览器>-<标签>.json`，历史按 execution ID 单独归档。跨会话、目录或资料的调用被拒绝。旧版连接回执要先精确退役，不能作为新页面入口。

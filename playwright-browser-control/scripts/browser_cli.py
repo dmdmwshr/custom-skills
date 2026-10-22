@@ -17,6 +17,20 @@ import reference_recovery
 from saved_groups import snapshot as saved_snapshot
 
 
+def validate_run_code_arguments(command: str, arguments: list[str]) -> None:
+    """Reject split JavaScript/invalid file arguments before any runtime or browser work."""
+    if command != 'run-code':
+        return
+    inline = len(arguments) == 1 and bool(arguments[0]) and not arguments[0].startswith('-')
+    filename = (len(arguments) == 2 and arguments[0] == '--filename' and
+                bool(arguments[1]) and not arguments[1].startswith('-'))
+    equals = (len(arguments) == 1 and arguments[0].startswith('--filename=') and
+              bool(arguments[0].split('=', 1)[1]))
+    if not (inline or filename or equals):
+        raise ValueError('run-code arguments rejected before browser preflight; use one code argument '
+                         'or run-code --filename <JavaScript file>. No receipt was changed.')
+
+
 def runtime_root(explicit: str | None = None) -> Path:
     if explicit is not None:
         root = Path(explicit)
@@ -476,6 +490,7 @@ def main() -> int:
     args = parser.parse_args()
     secrets: list[str] = []
     try:
+        validate_run_code_arguments(args.command, args.arguments)
         root = runtime_root(args.runtime_root)
         settings = select_profile(read_settings(root), args.browser, args.profile)
         status = doctor(settings, root)
