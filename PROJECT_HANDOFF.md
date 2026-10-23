@@ -2,7 +2,7 @@
 
 - 来源：用户直接指令及明确“还是让 claude 执行包括项目优化合并”；Codex 协调与独立验收，范围与审查纠偏见仓外 `D:/12070/Documents/工作台管理报告/能力整合-20261023/`（任务范围.md、PHASE1_REVIEW_AND_PHASE2_SCOPE.md）。本节写入期间的唯一源仓写者为实际 Claude 会话 `1588e8b8-933d-44db-a6c1-60efa553e496`；本地候选提交后释放，其他脏文件无。
 - 本批源码：`playwright-browser-control`（并入 playwright/playwright-interactive/webapp-testing，新增隔离模式 `scripts/isolated_cli.py`、修复 with_server 残留服务缺陷）、新 `native-gui-control`（Cua/Windows-MCP 双后端路由）、`cloud-docs`、`notion-workflows`、`cloudflare-platform`、`github-flow`、`security-review`、`research-data-ops`（并入 macro/okxnew×2，三旧目录已移除）、`video-intake`（视频唯一核心，`bilinote-video-note`/`video-download` 降为兼容桩，旧脚本路径与 `references/local-config.json` 保持供 Slack 机器人使用）；`platforms.json`、README、`obsidian-notes`（去 json-canvas 指引）、`windows-from-wsl`（指向统一入口）、`summarize-link-note` 文案同步。
-- 未做（阶段3，Codex 协调）：推送、WSL/Windows 受管发布、旧入口发现降级、旧路径兼容安装、json-canvas 卸载、MCP 配置删除、03-05/01-08 的配置与文案切换。未改活动配置、客户端链接、机器人路径、服务或自动化。
+- 阶段3已执行（实际写者 WSL Claude，回执仓外 `D:/12070/Documents/工作台管理报告/能力整合-20261023/claude/stage3/STAGE3_RESULT.md`）：推送 6e8ae68 并实时回读一致；WSL/Windows 受管发布 15 个 Skill 三方摘要一致；旧入口发现降级（Windows 启用 96，精确 29 个关闭）；json-canvas 精确卸载（Windows CC 行 124，`.canvas`/vault 未动）；MCP 精确删除 Windows `windows_mcp`、`cua-driver`、WSL 四个 `playwright-*` 及 CC `windows_mcp` 行；机器人旧路径兼容入口已装（契约检查与 03-05 测试 68 项通过，机器人配置/服务未动）；01-08 AGENTS.md 两行文案同步。未做：机器人 `bilinote_script` 切到新路径并重启（03-05 负责人窗口）、`C:\Users\12070\.codex\AGENTS.md` 文案（Codex）。
 - 验证与回执：仓外 `…/claude/stage2/`（STAGE2_RESULT.md、receipts/）。已知既有失败：`scripts/tests` 的 `test_all_source_entries_have_platform_declarations` 因 `pyweixin-rpa` 无平台声明在基线 HEAD 即失败，本批未处理。
 
 ## 2026-10-20 新增 windows-from-wsl、claude-session-ops 两个 Skill
