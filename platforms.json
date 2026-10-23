@@ -16,7 +16,8 @@
     "linux-computer-control",
     "markitdown-local",
     "windows-from-wsl",
-    "claude-session-ops"
+    "claude-session-ops",
+    "windows-mcp-on-demand"
   ],
   "notes": "This is enforced by the managed publisher, not a native Codex frontmatter filter. Support declarations do not prove business dependencies or real-host validation. Windows-only entries describe current delivered workflows, not portability of every helper.",
   "skills": {
@@ -624,6 +625,22 @@
         "linux": "not_installed"
       },
       "dependencies": "Pinned Windows runtime under USERPROFILE/.local/share/codex-tools; see SKILL.md."
+    },
+    "windows-mcp-on-demand": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows",
+        "wsl"
+      ],
+      "remote_payload_platforms": [
+        "windows"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "windows": "precredential_setup_only_live_gui_pending",
+        "wsl": "ssh_client_precredential_only_live_gui_pending"
+      },
+      "dependencies": "Windows user12070 interactive session; fixed Windows-MCP0.8.7 runtime; dedicated Limited on-demand task; user-entered token; existing windows-host-codex SSH. No constant MCP registration."
     }
   }
 }

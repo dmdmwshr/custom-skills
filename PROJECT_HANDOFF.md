@@ -89,3 +89,14 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 - command-failure.json、stopped-state.json、handoff-before-publish.md：历史失败与原未知边界，未覆盖。
 
 回退只处理本任务精确差异，先核对现有内容是否仍属于本次版本，保留后续用户修改、并发提交和未知状态；不以旧备份覆盖活动数据。
+
+## 2026-10-22 用户直接指令：CLAUDE-ENH-20261022-WINMCP/v1/a1 实施占位
+
+来源：Claude 代用户派发。按需恢复 Windows-MCP；当前唯一 Skill 实施者 skills_readonly，仅写 windows-mcp-on-demand/**、platforms.json 本项及本节。当前实现与必要测试；待根线程独立审查，未提交推送或安装，真实运行等待用户本人录入令牌。其他差异保留。
+
+本轮停止点（已释放源写入占位）：仅保留 windows-mcp-on-demand/scripts/common.py、server.py、client.py 及 references/server.toml 四个实现文件；9项隔离测试通过，未执行真实服务或GUI。第二批包含任务登记/凭据录入脚本及Skill入口、平台声明的组合源写入被自动审批拒绝，原始理由仅为“blocked by policy”，未换通道或拆分重放。未提交、未推送、未发布或安装；未创建计划任务、令牌或服务。源码保持未完成候选，不作为已发现/已可用Skill。仓外文件哈希、测试及Git状态见 /srv/work/tasks/2026-10-22-windows-mcp-skill-a1/implementation-stop.json；真实本机/SSH完整闭环和独立验收均未覆盖。后续仅在解除具体审查阻断后续接，保留已写源码及其他差异。
+
+
+## 2026-10-23 用户本人直接授权：Windows-MCP v1/a1续接
+
+主责01a163ba-d4d6-71b1-b023-7be9c06769a3；实际写者/root。用户本人授权补齐7项源文件、受管发布并两端安装，令牌由本人录入。本轮仅认领windows-mcp-on-demand/**、platforms.json本项及本交接自身节；TOOLCHAIN占位已释放，其他差异保留。备份/证据 /srv/work/tasks/2026-10-23-windows-mcp-skill-resume。

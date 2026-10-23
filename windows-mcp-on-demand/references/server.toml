@@ -1,0 +1,2 @@
+# Skill-owned, deliberately empty upstream configuration.
+# Host, transport, tool exclusions and stateless mode are fixed by server.py.

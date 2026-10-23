@@ -1,0 +1,4 @@
+interface:
+  display_name: "Windows-MCP 按需控制"
+  short_description: "Windows 本机与 WSL 共用按需桌面观察和操作入口，用完停止服务"
+  default_prompt: "使用 $windows-mcp-on-demand 按需查看或操作已授权的 Windows 窗口，并完成收尾。"
