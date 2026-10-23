@@ -125,3 +125,13 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 ## 2026-10-23 用户本人直接授权：Windows-MCP v1/a1续接
 
 主责01a163ba-d4d6-71b1-b023-7be9c06769a3；实际写者/root。用户本人授权补齐7项源文件、受管发布并两端安装，令牌由本人录入。本轮仅认领windows-mcp-on-demand/**、platforms.json本项及本交接自身节；TOOLCHAIN占位已释放，其他差异保留。备份/证据 /srv/work/tasks/2026-10-23-windows-mcp-skill-resume。
+
+
+### Windows-MCP v1/a1：发布与无令牌验证完成，等本人录入
+
+- 7项补齐、共11文件载荷已审查并提交c367cf0；与远端11提交保全合并be44bd2，最终载荷e4df54f4f7e76ed8b837510f1aed6f70c0d7d5d3已推送实时回读一致。空触发器计数实机缺陷已修；PowerShell null/空/单/双计数0/0/1/2、真实XML节点0及未实施Codex窄独验通过。既有9单测/8身份模拟通过；失败和独验范围保留。
+- WSL原发布器精确安装并verify；最终回执/srv/work/host-baseline/skill-releases/20261023T005835467157Z/windows-mcp-on-demand.json。新原生Codex进程唯一启用发现；Claude既有同步器仅新增该Skill链接并回读，未执行模型回合，不宣称旧聊天热加载。
+- Windows沿原CC管理器精确-Skill发布，发布检出在D:/12070/Documents/claude-codex/claude-enhancement-20261022/windows-mcp-v1-a1-resume/release-checkout（仅冻结发布用途），旧Windows脏检出未改。11文件源/安装/Codex三方摘要一致，112原Skill整行及10仓库源不变；新增Skill仅启用Windows Codex。两次CC恢复点20261023-085438-040、20261023-085914-703。
+- Windows专用任务已登记，12070、Limited/Interactive、无触发器、30分钟上限，动作绑定C:/Users/12070/.codex/skills/windows-mcp-on-demand/scripts/server.py；当前物理Codex副本。数据ACL仅12070/SYSTEM；无令牌、无服务启动。本机与WSL SSH同一客户端status均stopped，start在派发前拒绝token_missing_user_input_required，任务运行时间未变、端口/专用进程为空。
+- 按用户本人原指令停在本机Set-Token.ps1交互录入；真实HTTP鉴权/15工具/截图/元素/中文输入/启动停止闭环待录入后继续。未代填/读取令牌、未改全局config、未重启现有应用/服务、未操作业务UI。
+- 唯一结果报告D:/12070/Documents/claude-codex/claude-enhancement-20261022/REPLY-tools.md；本轮仓外证据windows-mcp-v1-a1-resume/含独验转录、三方摘要、WSL发现、PRETOKEN_VERIFICATION.json、原报告备份，COMPLETION.json记录本交接提交。此文档收尾不改变冻结载荷，不重复发布；写入占位释放，无自动继续。
