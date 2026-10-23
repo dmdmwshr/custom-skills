@@ -55,5 +55,7 @@
     "默认模型从中央模型文件的 strong 角色读取；中央文件不存在时兼容原 model_name，显式 ModelName 参数优先。",
     "source_id 优先取 audio_meta.video_id，取不到时回退到规范化 URL 哈希。",
     "转写全文与任务 JSON 不直接写入正文。"
-  ]
+  ],
+  "superseded_by": "video-intake",
+  "compat_note": "Read-only compatibility copy: the Slack agent (03-05 slack-12070-agent video_tasks.note_config) reads this file next to scripts/save-video-note.ps1. The canonical config is video-intake/references/local-config.json; tests assert the shared keys stay identical."
 }

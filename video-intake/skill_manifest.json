@@ -1,0 +1,19 @@
+{
+  "skill_name": "video-intake",
+  "skill_version": "2.0.0",
+  "x-custom-skill": true,
+  "x-managed-by": "cc-switch",
+  "x-source-repo": "dmdmwshr/custom-skills",
+  "x-edit-policy": "edit-source-repo-only",
+  "supersedes": ["video-download", "bilinote-video-note"],
+  "required_skill_files": [
+    "SKILL.md",
+    "skill_manifest.json",
+    "agents/openai.yaml",
+    "references/local-config.json",
+    "references/video-note-template.md",
+    "references/skill-doc-template.md",
+    "scripts/video_intake.py",
+    "tests/test_video_intake.py"
+  ]
+}

@@ -1,4 +1,6 @@
 interface:
-  display_name: "BiliNote 视频笔记"
-  short_description: "通过 BiliNote 把 B站和抖音视频整理为 Obsidian 知识笔记"
-  default_prompt: "使用 $bilinote-video-note 把这个 B站或抖音视频链接整理为固定结构的 Obsidian 笔记和附件。"
+  display_name: "BiliNote 视频笔记（兼容）"
+  short_description: "兼容旧路径；新任务使用 video-intake"
+  default_prompt: "使用 $video-intake 把这个 B站或抖音视频整理为 Obsidian 笔记。"
+policy:
+  allow_implicit_invocation: false

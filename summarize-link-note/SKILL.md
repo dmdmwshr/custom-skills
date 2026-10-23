@@ -1,6 +1,6 @@
 ---
 name: summarize-link-note
-description: 把普通网页或文章 URL 通过本机 summarize CLI 转为 Markdown 笔记草稿并保存到固定输出目录。用户要求网页提取、转 Markdown 或保存笔记时使用；不处理 PDF、B站或抖音视频，视频改用 bilinote-video-note。
+description: 把普通网页或文章 URL 通过本机 summarize CLI 转为 Markdown 笔记草稿并保存到固定输出目录。用户要求网页提取、转 Markdown 或保存笔记时使用；不处理 PDF、B站或抖音视频，视频改用 video-intake。
 ---
 
 # Summarize Link Note

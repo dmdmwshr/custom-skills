@@ -1,0 +1,66 @@
+{
+  "skill_name": "video-intake",
+  "backend_base_url": "http://127.0.0.1:8483",
+  "backend_result_dir": "D:\\Program_Files\\BiliNote-releases\\2.4.5\\backend\\note_results",
+  "model_roles_file": "%USERPROFILE%/.config/ai-models.json",
+  "supported_platforms": [
+    "bilibili",
+    "douyin"
+  ],
+  "default_request": {
+    "quality": "medium",
+    "style": "minimal",
+    "link": true,
+    "screenshot": false,
+    "video_understanding": false,
+    "format": [],
+    "provider_id": "859650d5-fbee-4018-9760-5e12136f0a47",
+    "model_name": "gpt-5.4",
+    "model_role": "strong"
+  },
+  "poll_interval_seconds": 5,
+  "timeout_seconds": 1800,
+  "note_roots": {
+    "bilibili": "D:\\ws\\00-library\\obsidian-vault\\日常工作记录\\30_Knowledge (知识)\\01_领域\\AI工具链\\BiliNote视频笔记\\bilibili",
+    "douyin": "D:\\ws\\00-library\\obsidian-vault\\日常工作记录\\30_Knowledge (知识)\\01_领域\\AI工具链\\BiliNote视频笔记\\douyin"
+  },
+  "attachment_roots": {
+    "bilibili": "D:\\ws\\00-library\\obsidian-vault\\日常工作记录\\80_Attachments (附件)\\04_来源与摘录\\bilinote-video-note\\bilibili",
+    "douyin": "D:\\ws\\00-library\\obsidian-vault\\日常工作记录\\80_Attachments (附件)\\04_来源与摘录\\bilinote-video-note\\douyin"
+  },
+  "skill_doc_note_path": "D:\\ws\\00-library\\obsidian-vault\\日常工作记录\\30_Knowledge (知识)\\01_领域\\AI工具链\\BiliNote视频知识提取Skill（bilinote-video-note）.md",
+  "frontmatter_defaults": {
+    "type": "source",
+    "status": "active",
+    "area_link": "[[领域 - AI工具链]]",
+    "related_links": [
+      "[[领域 - AI工具链]]",
+      "[[skill管理与更新（skill-updater）]]",
+      "[[BiliNote视频知识提取Skill（bilinote-video-note）]]"
+    ],
+    "tags": [
+      "video",
+      "bilinote",
+      "skill",
+      "bilinote-video-note"
+    ]
+  },
+  "graphiti_groups": {
+    "skill_management": "skill-management",
+    "workflow_ingest": "workflow-content-ingest"
+  },
+  "notes": [
+    "正文笔记与附件目录分离保存。",
+    "默认只支持 bilibili 和 douyin。",
+    "默认模型从中央模型文件的 strong 角色读取；中央文件不存在时兼容原 model_name，显式 ModelName 参数优先。",
+    "source_id 优先取 audio_meta.video_id，取不到时回退到规范化 URL 哈希。",
+    "转写全文与任务 JSON 不直接写入正文。",
+    "工具路径优先级：命令行参数 > 环境变量 VIDEO_INTAKE_YT_DLP/FFMPEG/FFPROBE > 本文件 tools > PATH。"
+  ],
+  "note_skill_name": "bilinote-video-note",
+  "tools": {
+    "yt-dlp": "C:/Users/12070/.local/share/codex-tools/video-download/2026.8.19/.venv/Scripts/yt-dlp.exe",
+    "ffmpeg": "D:/Program_Files/Common/ffmpeg/bin/ffmpeg.exe",
+    "ffprobe": "D:/Program_Files/Common/ffmpeg/bin/ffprobe.exe"
+  }
+}
