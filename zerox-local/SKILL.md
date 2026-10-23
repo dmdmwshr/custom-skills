@@ -1,6 +1,9 @@
 ---
 name: zerox-local
-description: 默认使用本机 D:\Program_Files\zerox 将 PDF、Office、文本、HTML、表格和常见图片转换为 Markdown，并检查模型端点和转换输出。文档转 Markdown 优先使用本 skill；效果不佳时再调用 mineru-local。
+description: 使用本机 Zerox 封装调用远端模型，把已获本次云端处理授权的文档转换为 Markdown；本机启动不等于离线处理。仅作授权模型解析专用，文字层轻量提取及本地限制按现有专用工具路由。
+metadata:
+  x-custom-skill: true
+  x-source-repo: dmdmwshr/custom-skills
 ---
 
 # Zerox Local
@@ -9,7 +12,7 @@ description: 默认使用本机 D:\Program_Files\zerox 将 PDF、Office、文本
 
 本 skill 面向本机已经安装好的 Zerox。
 
-这是当前默认首选的文档转 Markdown 路线。
+本机仅负责启动和格式预处理，当前 Sub2API/Gemini 模型在远端，不能称离线。此入口仅用于本次数据范围已获云端处理授权的模型解析；普通文字层读取以官方PDF本地工具为主，轻量正文检索可用MarkItDown，OCR和本地限制沿当前已验专用路由，不再默认所有转Markdown都走Zerox。
 
 默认安装位置与配置：
 
@@ -36,6 +39,8 @@ description: 默认使用本机 D:\Program_Files\zerox 将 PDF、Office、文本
 
 ## 标准流程
 
+先核当前任务的数据去向授权；原文、原图或含原值回填成品不能因local/本机命名自动送远端。已有明确授权直接沿其范围执行；缺少云处理授权时使用符合任务的本地入口或保留该依赖，不拿端点健康代替材料授权。
+
 1. 如果用户提到最近转换失败、模型不可用、账号池异常，先运行：
 
 ```powershell
@@ -56,7 +61,7 @@ D:\Program_Files\zerox\bin\zerox-local.cmd --input "<绝对路径或URL>" --outp
 
 3. 成功后读取输出目录中的 `.md` 文件并继续后续处理。
 
-4. 只有在 Zerox 结果结构明显不佳时，再考虑回退到 `mineru-local` 的 Docker 高精度备份方案。
+4. 输出结构或关键字段不佳时先保留原结果，再按当前任务的数据限制及现有Skill边界选择Docling/MinerU等专用路径；不因回退重复未确认的云端调用，不以转换成功代替质量核验。
 
 ## 故障判断
 
@@ -69,8 +74,8 @@ D:\Program_Files\zerox\bin\zerox-local.cmd --input "<绝对路径或URL>" --outp
 - `.env.local` 里包含真实端点和密钥，除非用户明确要求，不要改写或外泄。
 - 该本地封装已经把输出 Markdown 文件名改成输入文件名，优先读取该重命名后的文件。
 - 当前默认模型配置为 `gemini-3-flash`；如果端点恢复后仍要切模型，只修改 `.env.local` 的 `ZEROX_MODEL`。
-- 对短表单、验收模板、流程附件和常见制度文档，默认先相信 Zerox 结果，再决定是否需要备用方案复核。
+- 文字、关键数字、单位、页码及表格行列对应分别抽核；端点正常和转换退出成功不证明内容准确，保留原件和失败/部分结果。
 
 ## 补充替补入口
 
-当前全局规则增加 `docling-local`：需要本地扫描识别、表格结构，或现有服务不可用、结果不佳时可采用；仅提取简单文字可用 `markitdown-local`。既有业务默认路线保持，用户明确指定时优先。具体入口和验收范围读取对应技能。
+复杂扫描/表格或本地处理限制按 `docling-local`、`mineru-local` 现有专用边界；`markitdown-local` 仅作简单正文/检索提取。业务模板与用户明确指定入口优先，但不扩大数据外传授权。各入口按对应主机、真实依赖和已验范围使用，不把本轮未调用的工具写成通过。

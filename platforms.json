@@ -651,8 +651,8 @@
       ],
       "managed_wsl": true,
       "validation": {
-        "windows": "precredential_setup_only_live_gui_pending",
-        "wsl": "ssh_client_precredential_only_live_gui_pending"
+        "windows": "status_pointer=D:/ws/03-env/03-05-codex-env-win/PROJECT_HANDOFF.md; scoped Windows acceptance in its referenced receipts",
+        "wsl": "status_pointer=D:/ws/03-env/03-05-codex-env-win/PROJECT_HANDOFF.md; scoped WSL SSH acceptance in its referenced receipts"
       },
       "dependencies": "Windows user12070 interactive session; fixed Windows-MCP0.8.7 runtime; dedicated Limited on-demand task; user-entered token; existing windows-host-codex SSH. No constant MCP registration."
     }

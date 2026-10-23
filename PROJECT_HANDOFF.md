@@ -158,3 +158,11 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 - 用户明确要求现成工具自主实测、“不用代码，就是AI自主测试，看效果流畅度”；只改文案/现成发现链接与客户端状态，不开发测试脚本、适配器、监控或新通道。windows-from-wsl移除原生GUI必须交Windows Codex的旧要求，继续复用现成CLI/SSH；产品专属授权、常驻自动化与未知不重放边界保持。
 - 原生规则候选已由未实施Codex审查，R1a两点返工已通过；实际业务测试由原批次负责，不以源文本或发现自称业务验收。当前文档主备待同样本终版，CC安装等唯一桌面批次完成Figma官方UI仅停用后再实施。
 - 冻结、恢复与分层回执：D:/12070/Documents/工作台管理报告/现成工具自主实测-20261023/pruning-rules/；不改全局默认模型、权限、服务、业务或原失败/未知结果。
+
+- 2026-10-23用户直接指令：【停止前端测试 现在比较忙 其他继续修复】。本轮全部GUI/前台测试及Figma的CC官方UI停用暂停，不换通道继续、不重放原审批拒绝删除；原生批次已确认没有CC UI/数据库写入在途。文件、规则、源与受管发布按授权继续。Figma8项及24个活动客户端开关保持原状，标用户暂停待办。
+- windows-from-wsl载荷56a9391593193a54e03e59f349e136b7d26a04eb已推送并实时回读，WSL精确发布恢复点20261023T025617448216Z；2文件安装核验通过，新Codex进程唯一enabled/errors=[]，无模型回合。源/WSL安装/既有Claude链接SHA相同，未新增Windows安装、未动CC数据库，旧聊天热加载未覆盖。
+- R2仅将platforms.json中Windows-MCP的两个过期precredential验证字符串改为03-05唯一交接与分层回执指针，未实施Codex已独立审通过；支持平台、受管名单和执行参数不变，不重跑原GUI。后续文档主备按同样本终版后最小修改并同批精确提交。
+
+- 文档同样本终版已到并由未实施Codex核读：普通Office沿当前官方Documents/Spreadsheets/Presentations主用；WPS桌面已验CLI仅作Windows导出/分页复核备选，与WPS365授权分开，未找到其官方Skill实体，不把内嵌版本当发现；PDF文字层沿官方Poppler/pdfplumber，MarkItDown轻量提取备选；云OCR/模型先核当前输入授权，RapidOCR只核既有项目API文字+bbox，不推广该项目环境。Docling/MinerU本批未测专用保留，Zerox为远端模型专用而非默认文档解析。证据documents/REPORT.md，失败与未覆盖原样保留。
+- R3五文件最小差异及R2两个元数据指针已由未实施Codex独审通过，并逐文件冻结基线CAS保存回读；本源仅windows-mcp-on-demand/references/operations.md、zerox-local/SKILL.md、platforms.json和本节。MCP补目标不可见不盲点、用户活动停输入、当前明确暂停不恢复、截图像素/UI树分层范围与未知动作对账；纯说明修复，没有程序变更或GUI复测。受管发布只按原平台精确两端安装，不新增WPS/RapidOCR通用Skill或依赖。
+- Figma插件及官方Computer Use插件产品卸载已回读；8个CC Figma Skill的原删除在进程创建前被自动审批拒绝，未重放。用户暂停CC界面停用后，沿官方已证实的Codex逐Skill enabled=false配置完成8个路径的非破坏性发现禁用，新CLI实际输入目录无8项；CC实体、登记、24条客户端链接及Gemini/OpenCode开关仍保留，不能称实体卸载或全客户端停用。完整恢复与回执在pruning-rules，未动共享运行时。
