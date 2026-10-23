@@ -135,3 +135,5 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 - Windows专用任务已登记，12070、Limited/Interactive、无触发器、30分钟上限，动作绑定C:/Users/12070/.codex/skills/windows-mcp-on-demand/scripts/server.py；当前物理Codex副本。数据ACL仅12070/SYSTEM；无令牌、无服务启动。本机与WSL SSH同一客户端status均stopped，start在派发前拒绝token_missing_user_input_required，任务运行时间未变、端口/专用进程为空。
 - 按用户本人原指令停在本机Set-Token.ps1交互录入；真实HTTP鉴权/15工具/截图/元素/中文输入/启动停止闭环待录入后继续。未代填/读取令牌、未改全局config、未重启现有应用/服务、未操作业务UI。
 - 唯一结果报告D:/12070/Documents/claude-codex/claude-enhancement-20261022/REPLY-tools.md；本轮仓外证据windows-mcp-v1-a1-resume/含独验转录、三方摘要、WSL发现、PRETOKEN_VERIFICATION.json、原报告备份，COMPLETION.json记录本交接提交。此文档收尾不改变冻结载荷，不重复发布；写入占位释放，无自动继续。
+
+- 跨主机最终逐字节核对发现Windows发布检出增量pull继承全局core.autocrlf=true，两个文件换行转换；仅该发布检出固定为false，按Git已提交对象原字节恢复并逐对象验证相同后刷新索引，源代码无变更。再次原CC精确发布，恢复点20261023-090939-819；最终11文件在WSL权威源、WSL安装、Windows发布检出、CC安装及Codex安装全部SHA256相同，Windows新进程发现和本机/SSH无令牌验证再通过。最终Windows回执WINDOWS_RELEASE_VERIFICATION-44c21f6.json；此前换行版本、回执及备份保留。此后仅交接文档提交，不重发载荷。
