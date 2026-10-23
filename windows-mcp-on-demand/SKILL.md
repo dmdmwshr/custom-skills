@@ -1,6 +1,6 @@
 ---
 name: windows-mcp-on-demand
-description: 按需使用 Windows-MCP 截图、读取界面元素并操作已授权的 Windows 窗口；Windows 本机调用或 WSL 经 SSH 复用同一客户端。用于明确指定 Windows-MCP 或原生主工具能力不足时；网页内容流程继续用浏览器 Skill。
+description: 按需使用 Windows-MCP 截图、读取界面元素并操作已授权的 Windows 窗口；Windows 本机调用或 WSL 经 SSH 复用同一客户端。根据任务与实测选择，与 Cua Driver 按需互补；网页内容流程继续用浏览器 Skill。
 metadata:
   x-custom-skill: true
   x-source-repo: dmdmwshr/custom-skills
@@ -14,7 +14,7 @@ metadata:
 
 按已授权范围调用 status → start → tools，确认鉴权、回环监听及工具集合。Snapshot 读取新鲜元素，Screenshot 输出本地文件路径、摘要和媒体类型；不要把图片编码回传。call 的参数来自 UTF-8 JSON 文件。任何运行或界面未知结果先回读，不能自动重放输入。
 
-原生主用仍是 Cua Driver 精确窗口后台操作。Windows-MCP 补充只读观察或必要前台操作；不能把截图成功解释为后台隔离。先核显示布局和唯一自建/授权窗口，能用副屏则用，前台操作后恢复鼠标和焦点。结束时关闭精确自建未保存测试窗口、stop 并回读端口和自有进程退出；保留用户窗口和其他控制者。
+Windows 原生操作按当前任务和真实效果，在 Cua Driver 与 Windows-MCP 之间选择，按需互补、不设固定总排名。能保持原前台、鼠标和输入焦点不变时优先 Cua 后台路径，其余按能力和实测选择；不能把截图成功解释为后台隔离。先核显示布局和唯一自建/授权窗口，能用副屏则用，前台操作后恢复鼠标和焦点。结束时关闭精确自建未保存测试窗口、stop 并回读端口和自有进程退出；保留用户窗口和其他控制者。
 
 PowerShell、FileSystem、Registry、Process、Scrape 在服务端排除且客户端拒绝。Notification/Clipboard/App 等其余工具仍受任务授权限制；发现工具不产生发送、登录或操作其他应用的授权。
 
