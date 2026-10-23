@@ -40,7 +40,7 @@ def inspect():
         + "$t=Get-ScheduledTask -TaskPath '" + TASK_PATH + "' -TaskName '" + TASK_NAME + "' -ErrorAction SilentlyContinue; "
         + "$ports=@(Get-NetTCPConnection -LocalPort " + str(PORT) + " -State Listen -ErrorAction SilentlyContinue | Select-Object LocalAddress,OwningProcess); "
         + "$p=@(Get-CimInstance Win32_Process | Where-Object {$_.CommandLine -and $_.CommandLine.Contains('" + server + "')} | Select-Object ProcessId,ParentProcessId,ExecutablePath,@{n='created_at';e={([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds()/1000}},CommandLine); "
-        + "[ordered]@{task=if($t){@{state=[string]$t.State;actions=@($t.Actions|Select-Object Execute,Arguments,WorkingDirectory);user=$t.Principal.UserId;userSid=([Security.Principal.NTAccount]::new($t.Principal.UserId)).Translate([Security.Principal.SecurityIdentifier]).Value;description=$t.Description;logon=[string]$t.Principal.LogonType;level=[string]$t.Principal.RunLevel;triggers=@($t.Triggers).Count}}else{$null};listeners=$ports;processes=$p}|ConvertTo-Json -Depth 6 -Compress")
+        + "[ordered]@{task=if($t){@{state=[string]$t.State;actions=@($t.Actions|Select-Object Execute,Arguments,WorkingDirectory);user=$t.Principal.UserId;userSid=([Security.Principal.NTAccount]::new($t.Principal.UserId)).Translate([Security.Principal.SecurityIdentifier]).Value;description=$t.Description;logon=[string]$t.Principal.LogonType;level=[string]$t.Principal.RunLevel;triggers=@($t.Triggers | Where-Object {$null -ne $_}).Count}}else{$null};listeners=$ports;processes=$p}|ConvertTo-Json -Depth 6 -Compress")
 def valid_task(info):
     task = info.get("task")
     if not task:

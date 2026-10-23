@@ -17,7 +17,13 @@ $task=Get-ScheduledTask -TaskPath $taskPath -TaskName $taskName -ErrorAction Sil
 function Readback {
     $t=Get-ScheduledTask -TaskPath $taskPath -TaskName $taskName -ErrorAction SilentlyContinue
     if (!$t) {return @{exists=$false}}
-    return @{exists=$true;task=($taskPath+$taskName);state=[string]$t.State;principal=$t.Principal;actions=$t.Actions;triggers=@($t.Triggers).Count;settings=$t.Settings}
+    return @{
+        exists=$true;task=($taskPath+$taskName);state=[string]$t.State
+        principal=@{user=$t.Principal.UserId;logon=[string]$t.Principal.LogonType;level=[string]$t.Principal.RunLevel}
+        actions=@($t.Actions | Select-Object Execute,Arguments,WorkingDirectory)
+        triggers=@($t.Triggers | Where-Object {$null -ne $_}).Count
+        settings=@{multiple_instances=[string]$t.Settings.MultipleInstances;execution_time_limit=$t.Settings.ExecutionTimeLimit;allow_demand_start=$t.Settings.AllowDemandStart;start_when_available=$t.Settings.StartWhenAvailable;wake_to_run=$t.Settings.WakeToRun;restart_count=$t.Settings.RestartCount}
+    }
 }
 if ($Action -eq 'Show') {Readback | ConvertTo-Json -Depth 6;exit}
 if ($task -and ($task.State -eq 'Running')) {throw 'deferred_active_target'}
