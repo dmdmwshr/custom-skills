@@ -168,3 +168,9 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 - Figma插件及官方Computer Use插件产品卸载已回读；8个CC Figma Skill的原删除在进程创建前被自动审批拒绝，未重放。用户暂停CC界面停用后，沿官方已证实的Codex逐Skill enabled=false配置完成8个路径的非破坏性发现禁用，新CLI实际输入目录无8项；CC实体、登记、24条客户端链接及Gemini/OpenCode开关仍保留，不能称实体卸载或全客户端停用。完整恢复与回执在pruning-rules，未动共享运行时。
 
 - 本批非界面发布完成：载荷ea247519e5caf769ea9e64f971f8c9b1e6abeec2已推送回读；Windows精确MCP11/Zerox2文件，WSL精确MCP11文件沿原管理器发布。恢复点Windows20261023-113139-011、WSL20261023T033105451545Z。13文件四层摘要及MCP另含WSL实体/Claude既有链接11文件相同；新Windows原生CLI实际输入目录与WSL原生发现通过，无模型回合、无GUI。CC111非目标整行、10源及全部7客户端字段保持，8项Figma行与config未变。03-05本轮规则两行精确本地提交4c94395，无远端；两项目共享交接只保存自身节，非Git全局/协作规范只保存。完整分层回执与精确摘要在pruning-rules/RELEASE_COMPLETION.json、R3_RELEASE_READBACK.json，本收尾仅文档不改载荷、不重复安装；源/index和配置写入占用释放，GUI暂停项不自动恢复。
+
+## TOOL-EXPERIENCE-20261023/v1 windows-from-wsl：WPS 后台 Ctrl+S 说明（用户直接指令，Codex 派发）
+
+- 实际写者 WSL Claude；仅 `windows-from-wsl/SKILL.md`「界面、联接与设备」新增一条，限定本机 Cua 0.34.0 + WPS 表格 12.1.0.28802 后台 `hotkey ctrl+s` 曾被当作字符 `s`、回执 unverifiable 不足证明保存，样本保存优先工具栏 UIA 保存并回读文件/重开核值，内部原因与前台 Ctrl+S 未证。不加通用门禁。
+- 源提交 `b9e7f17b545aeda494a199405c21a2229ebc1c8c` 已推送并经 `git ls-remote` 实时回读；WSL 受管发布记录 `/srv/work/host-baseline/skill-releases/20261023T093044226130Z`，源/Codex 安装/Claude 链接三方 SHA256 一致，新进程发现 enabled=true、errors=[]，无模型回合。Windows 仅 remote_payload，未安装。
+- 回执（仓外）：`D:/12070/Documents/工作台管理报告/现成工具自主实测-20261023/native-ego/continuation-a4/SKILL_IMPLEMENT_RESULT.md`。候选 B（ego-browser 无可维护源）未实施；03-05 交接由 Codex 写。
