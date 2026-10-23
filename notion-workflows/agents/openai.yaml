@@ -1,0 +1,4 @@
+interface:
+  display_name: "Notion 工作流"
+  short_description: "Notion 内的知识沉淀、会议准备、研究文档、规格转实施计划"
+  default_prompt: "使用 $notion-workflows 在 Notion 中完成这项整理或计划工作。"

@@ -7,17 +7,16 @@
     "codex-project-manager",
     "codex-archive-retrospective",
     "codex-local-state-diagnostics",
-    "okxnew-backtest-operations",
-    "okxnew-data-operations",
     "personal-memory-on-demand",
-    "macro-strategy-data-operations",
+    "research-data-ops",
     "playwright-browser-control",
     "server-traffic-sync",
     "linux-computer-control",
     "markitdown-local",
     "windows-from-wsl",
     "claude-session-ops",
-    "windows-mcp-on-demand"
+    "windows-mcp-on-demand",
+    "native-gui-control"
   ],
   "notes": "This is enforced by the managed publisher, not a native Codex frontmatter filter. Support declarations do not prove business dependencies or real-host validation. Windows-only entries describe current delivered workflows, not portability of every helper.",
   "skills": {
@@ -74,7 +73,7 @@
         "linux": "runtime_unverified",
         "windows": "runtime_unverified_this_change"
       },
-      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+      "dependencies": "Compatibility entry superseded by video-intake; keeps scripts/save-video-note.ps1 and bn.ps1 paths for the existing Slack agent."
     },
     "browser-tamer": {
       "category": "platform_specific",
@@ -284,36 +283,6 @@
       },
       "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
     },
-    "okxnew-backtest-operations": {
-      "category": "business_specific",
-      "execution_platforms": [
-        "windows",
-        "linux",
-        "wsl"
-      ],
-      "managed_wsl": true,
-      "validation": {
-        "wsl": "source_and_discovery_previously_verified",
-        "linux": "runtime_unverified",
-        "windows": "runtime_unverified_this_change"
-      },
-      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
-    },
-    "okxnew-data-operations": {
-      "category": "business_specific",
-      "execution_platforms": [
-        "windows",
-        "linux",
-        "wsl"
-      ],
-      "managed_wsl": true,
-      "validation": {
-        "wsl": "source_and_discovery_previously_verified",
-        "linux": "runtime_unverified",
-        "windows": "runtime_unverified_this_change"
-      },
-      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
-    },
     "personal-memory-on-demand": {
       "category": "business_workflow",
       "execution_platforms": [
@@ -514,21 +483,7 @@
         "wsl": "project_browser_v2_native_groups_reuse_cleanup_verified",
         "linux": "not_supported_by_current_workflow"
       },
-      "dependencies": "Windows: pinned official Playwright CLI extension and per-user runtime mapping. WSL: locally published ProjectBrowserV2 managed MCP lifecycle and registered project; do not mix backends."
-    },
-    "macro-strategy-data-operations": {
-      "category": "business_specific",
-      "execution_platforms": [
-        "linux",
-        "wsl"
-      ],
-      "managed_wsl": true,
-      "validation": {
-        "wsl": "runtime_verified_2026_09_22",
-        "linux": "runtime_unverified",
-        "windows": "not_supported_by_current_workflow"
-      },
-      "dependencies": "Independent macro-strategy project, documented bounded systemd worker and source registry; no legacy OKXnew runtime dependencies."
+      "dependencies": "Windows: pinned official Playwright CLI extension and per-user runtime mapping. WSL: locally published ProjectBrowserV2 managed MCP lifecycle and registered project; do not mix backends. Isolated mode additionally uses the installed playwright-cli and a local Chrome/Edge; no managed profile is touched."
     },
     "xf-information-file-manager": {
       "category": "business_specific",
@@ -638,7 +593,7 @@
         "wsl": "not_installed",
         "linux": "not_installed"
       },
-      "dependencies": "Pinned Windows runtime under USERPROFILE/.local/share/codex-tools; see SKILL.md."
+      "dependencies": "Compatibility entry superseded by video-intake."
     },
     "windows-mcp-on-demand": {
       "category": "platform_specific",
@@ -654,7 +609,116 @@
         "windows": "status_pointer=D:/ws/03-env/03-05-codex-env-win/PROJECT_HANDOFF.md; scoped Windows acceptance in its referenced receipts",
         "wsl": "status_pointer=D:/ws/03-env/03-05-codex-env-win/PROJECT_HANDOFF.md; scoped WSL SSH acceptance in its referenced receipts"
       },
-      "dependencies": "Windows user12070 interactive session; fixed Windows-MCP0.8.7 runtime; dedicated Limited on-demand task; user-entered token; existing windows-host-codex SSH. No constant MCP registration."
+      "dependencies": "Windows user12070 interactive session; fixed Windows-MCP0.8.7 runtime; dedicated Limited on-demand task; user-entered token; existing windows-host-codex SSH. No constant MCP registration. Backend module of native-gui-control (implicit invocation off)."
+    },
+    "research-data-ops": {
+      "category": "business_specific",
+      "execution_platforms": [
+        "linux",
+        "wsl"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "wsl": "source_merge_isolated_checks_only_require_publication_acceptance; macro runtime previously verified_2026_09_22",
+        "linux": "runtime_unverified",
+        "windows": "not_supported_by_current_workflow"
+      },
+      "dependencies": "macro-strategy: independent project, bounded systemd worker and source registry, no legacy OKXnew dependency. okxnew modules are retired read-only archive references; no OKXnew runtime is restored by this skill."
+    },
+    "native-gui-control": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows",
+        "wsl"
+      ],
+      "remote_payload_platforms": [
+        "windows"
+      ],
+      "managed_wsl": true,
+      "validation": {
+        "windows": "routing_text_only; backends accepted separately (Cua 0.34.0, windows-mcp-on-demand status_pointer in its entry)",
+        "wsl": "routing_text_only; WSL reaches Windows-MCP through existing SSH client",
+        "linux": "pointer_to_linux-computer-control_only"
+      },
+      "dependencies": "Cua Driver official skill pack (cua-driver skills update) and windows-mcp-on-demand backend; user input avoidance and target-window controller checks apply."
+    },
+    "video-intake": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "source_and_isolated_tests_only_require_publication_acceptance"
+      },
+      "dependencies": "Windows: yt-dlp, ffmpeg/ffprobe, local BiliNote backend 127.0.0.1:8483, Python 3 (stdlib only). Isolated tests use synthetic media, a local HTTP site and a BiliNote stub; real platforms and real BiliNote not exercised by source tests."
+    },
+    "cloud-docs": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "source_and_isolated_tests_only_require_publication_acceptance"
+      },
+      "dependencies": "Routes to installed official Tencent Docs (native HTTP MCP), Kingsoft kdocs-cli, WPS365 CLI and Feishu CLI skills; accounts/tokens are user-owned; no cloud write exercised by source checks."
+    },
+    "notion-workflows": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "source_and_isolated_tests_only_require_publication_acceptance"
+      },
+      "dependencies": "Notion MCP is not configured on this machine; user must connect it (OAuth) before any Notion write."
+    },
+    "cloudflare-platform": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "source_and_isolated_tests_only_require_publication_acceptance"
+      },
+      "dependencies": "Reads installed upstream Cloudflare skills under C:/Users/12070/.cc-switch/skills (cloudflare/skills and OpenAI cloudflare-deploy); wrangler/API token owned by the user; web-perf additionally needs Chrome DevTools MCP."
+    },
+    "github-flow": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "source_and_isolated_tests_only_require_publication_acceptance"
+      },
+      "dependencies": "GitHub CLI gh with a user-authenticated session; vendored OpenAI curated yeet / gh-fix-ci / gh-address-comments (Apache-2.0)."
+    },
+    "security-review": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "source_and_isolated_tests_only_require_publication_acceptance"
+      },
+      "dependencies": "Vendored OpenAI curated security skills (Apache-2.0); ownership-map needs networkx (run via uv --with networkx) and a git repository; explicit user request only."
     }
   }
 }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cloudflare 平台"
+  short_description: "按任务路由 Cloudflare 部署、Workers、DO、Sandbox、Zero Trust、邮件、Turnstile 与性能后端"
+  default_prompt: "使用 $cloudflare-platform 完成这项 Cloudflare 相关任务。"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub PR 周期"
+  short_description: "显式要求时：提交推送开 PR、修 GitHub Actions 失败、处理 PR 评论"
+  default_prompt: "使用 $github-flow 处理这个仓库的 PR 或 CI 失败。"

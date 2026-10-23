@@ -1,0 +1,4 @@
+interface:
+  display_name: "安全审查"
+  short_description: "显式要求时：安全最佳实践审查、威胁建模、git 历史所有权分析"
+  default_prompt: "使用 $security-review 对这个代码库做指定的安全审查。"

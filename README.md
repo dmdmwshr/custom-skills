@@ -8,7 +8,11 @@ This repository is the source of truth for self-built skills. Windows installati
 
 - windows-from-wsl — WSL 操作 Windows 项目的文件、命令与派发检查表
 - claude-session-ops — 工作台 Claude 主会话、任务派发和归档检查表
-- bilinote-video-note
+- video-intake — 视频下载/提取/BiliNote 笔记/状态恢复/去重索引（唯一核心；bilinote-video-note 与 video-download 为兼容桩）
+- playwright-browser-control — 受管真实资料浏览器 + 隔离调试/本地网页测试
+- native-gui-control — Cua Driver 与按需 Windows-MCP 的统一原生界面入口
+- cloud-docs / notion-workflows / cloudflare-platform / github-flow / security-review — 按任务路由的合并入口
+- research-data-ops — macro-strategy 数据运维 + 已退役 OKXnew 只读参考
 - cc-switch
 - drawio-local
 - flclash-proxy-toggle

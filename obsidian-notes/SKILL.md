@@ -41,6 +41,5 @@ description: 用于在本机 Obsidian 仓库中查询、读取和写入保留笔
 
 1. `obsidian-cli`：笔记查找、批量读写、属性操作
 2. `obsidian-markdown`：Obsidian Markdown、wikilink、embed 结构
-3. `json-canvas`：仅 `.canvas`
-4. `obsidian-bases`：仅 `.base`
-5. `defuddle`：仅在把网页内容整理进保留笔记时使用
+3. `obsidian-bases`：仅 `.base`
+4. `defuddle`：仅在把网页内容整理进保留笔记时使用

@@ -1,0 +1,4 @@
+interface:
+  display_name: "云文档"
+  short_description: "腾讯文档、金山文档、WPS 365 与飞书文档的按平台路由与云端写入边界"
+  default_prompt: "使用 $cloud-docs 在指定云文档平台完成这项文档任务。"
