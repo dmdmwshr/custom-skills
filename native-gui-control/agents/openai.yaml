@@ -1,0 +1,4 @@
+interface:
+  display_name: "原生界面控制"
+  short_description: "统一选择 Cua Driver 或按需 Windows-MCP 操作真实应用窗口，含最小读取与收尾规则"
+  default_prompt: "使用 $native-gui-control 在已授权的应用窗口中完成界面操作并回读结果。"

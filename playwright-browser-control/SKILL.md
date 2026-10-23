@@ -1,6 +1,6 @@
 ---
 name: playwright-browser-control
-description: 按实际主机通过受管 Playwright 控制 Chrome 或 Edge；登记主机、项目、真实会话及本次执行，每次结束巡检运行组、页面及历史残留，删除自有组与页面，下次创建新对象。Windows 使用官方 CLI 扩展，WSL 使用项目唯一控制入口。
+description: 按实际主机通过受管 Playwright 控制 Chrome 或 Edge（真实资料）；登记主机、项目、真实会话及本次执行，每次结束巡检运行组、页面及历史残留，删除自有组与页面，下次创建新对象。Windows 使用官方 CLI 扩展，WSL 使用项目唯一控制入口。另含隔离模式：本地网页/Electron 的 playwright-cli 调试、持久交互调试与本地应用网页测试（不用真实资料）。
 metadata:
   x-custom-skill: true
   x-source-repo: dmdmwshr/custom-skills
@@ -9,6 +9,15 @@ metadata:
 # Playwright 浏览器控制
 
 先核对实际主机、系统、用户、浏览器资料及用户授权。Windows 使用下述官方 CLI 与扩展；WSL 读取 [WSL 项目入口](references/wsl-project-browser.md) 和本机唯一契约。既有业务驱动按授权适配，保留现有官方插件。
+
+## 模式选择（先判断，再往下读）
+
+| 需求 | 模式 | 入口 |
+| --- | --- | --- |
+| 需要真实登录态/真实资料/业务站点，或用户指定已有浏览器 | **A 受管真实资料**（本文件下文全部规则） | Windows `scripts/browser_cli.py`；WSL 项目唯一入口 |
+| 本机开发应用/静态页/Electron 的调试、截图、网页回归测试，无需登录 | **B 隔离调试与测试** | [references/isolated-testing.md](references/isolated-testing.md)，`scripts/isolated_cli.py`、`scripts/webapp/with_server.py` |
+
+两种模式的会话、登记、收尾互不借用：模式 B 绝不连接受管组、不使用用户资料；模式 B 的“本地页通过”不能当作业务登录或线上页面验收。旧的 `playwright`、`playwright-interactive`、`webapp-testing` 三个入口已并入此处，底层工具与上游正文保留在 `references/upstream/`。
 
 ## 管理关系
 

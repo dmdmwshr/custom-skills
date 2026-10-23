@@ -1,0 +1,6 @@
+scripts/webapp/with_server.py and examples/*.py derive from anthropics/skills (skills/webapp-testing), Apache License 2.0
+(see Apache-2.0.txt in this directory).
+
+Modifications: with_server.py now starts each server in its own process group (POSIX) / process group with taskkill /T (Windows)
+and stops the whole tree on exit; upstream terminated only the shell and left the server process listening. Server output goes to
+DEVNULL instead of undrained pipes. The examples are unchanged.

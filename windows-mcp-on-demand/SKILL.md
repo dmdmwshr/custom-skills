@@ -8,6 +8,8 @@ metadata:
 
 # Windows-MCP 按需控制
 
+> 本 Skill 现为 [native-gui-control](../native-gui-control/SKILL.md) 的后端模块：新任务先读统一入口选择 Cua 或 Windows-MCP；此处保留 Windows-MCP 自身的安装、令牌、调用与收尾细节。目录名与 `scripts/server.py` 路径被 Windows 计划任务绑定，不可更名或移动。
+
 本机 Windows 12070 专用。Windows 使用 scripts/client.py；WSL 使用 scripts/wsl_client.py，经已配置的 windows-host-codex 调用相同 Windows 客户端。无需常驻 MCP 注册或重启应用。
 
 开始前读 [操作与部署](references/operations.md)，核当前实际安装、任务、令牌就绪和目标窗口控制者。用户未录入令牌时停在本人录入步骤，不生成、代填或输出秘密。
