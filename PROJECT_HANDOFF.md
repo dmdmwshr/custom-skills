@@ -137,3 +137,12 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 - 唯一结果报告D:/12070/Documents/claude-codex/claude-enhancement-20261022/REPLY-tools.md；本轮仓外证据windows-mcp-v1-a1-resume/含独验转录、三方摘要、WSL发现、PRETOKEN_VERIFICATION.json、原报告备份，COMPLETION.json记录本交接提交。此文档收尾不改变冻结载荷，不重复发布；写入占位释放，无自动继续。
 
 - 跨主机最终逐字节核对发现Windows发布检出增量pull继承全局core.autocrlf=true，两个文件换行转换；仅该发布检出固定为false，按Git已提交对象原字节恢复并逐对象验证相同后刷新索引，源代码无变更。再次原CC精确发布，恢复点20261023-090939-819；最终11文件在WSL权威源、WSL安装、Windows发布检出、CC安装及Codex安装全部SHA256相同，Windows新进程发现和本机/SSH无令牌验证再通过。最终Windows回执WINDOWS_RELEASE_VERIFICATION-44c21f6.json；此前换行版本、回执及备份保留。此后仅交接文档提交，不重发载荷。
+
+
+### Windows-MCP v1/a1：本人录入后真实行为验证完成
+
+- 2026-10-23用户本人本机隐藏录入成功；用户先后明确暂停桌面操作，主责沿原授权完成Windows与WSL SSH实际鉴权、15工具、截图、Snapshot中文值、中文Notepad输入、不保存关闭及停止。原始证据D:/12070/AppData/WindowsMCP/receipts/live-20261023-a1；汇总windows-mcp-v1-a1-resume/LIVE_VERIFICATION.json。令牌仅由运行程序使用，未输出、未复制至WSL。
+- 自建句柄9969510、7086042、25043136最终均消失；原用户3021364保留且最小化，最终ChatGPT前台/输入焦点与鼠标[1337,1219]恢复。本机和WSL停止回读无监听/自有进程。未宣称后台键鼠隔离。
+- 上游App的模糊标题与缓存曾误展开原用户Notepad，未输入已恢复；第一次空白窗消失原因未知。输入/关闭期间有其他桌面操作，精确断言失败的动作未派发。源文档补充完整Snapshot、唯一句柄、当前控件和控制者核验，保留原失败，不改上游运行时或扩大工具权限。
+- 本轮仅更新本Skill入口/操作说明及自身交接，无实现代码变更。将沿原管理器精确发布两端并核摘要/新进程发现；最终发布提交与独立读证结论见REPLY-tools.md。未参与实现Codex独立读原始证据及停止现场，范围不是独立重复GUI执行。
+- 当前全局config相对本轮原基线另有3个键变化（model_reasoning_effort及两个插件项），来源未归因；本任务未写或回滚，windows_mcp常驻仍false。不能再使用早期“全局配置哈希未变”的当前断言。
