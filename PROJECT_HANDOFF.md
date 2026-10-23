@@ -90,6 +90,31 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 
 回退只处理本任务精确差异，先核对现有内容是否仍属于本次版本，保留后续用户修改、并发提交和未知状态；不以旧备份覆盖活动数据。
 
+## 2026-10-22 用户直接指令：诊断 Skill 单次被动采样与五类操作卡
+
+- 用户授权实施“多需求协作、Claude 按需使用与长期维护方案”。本源仓只认领 `codex-local-state-diagnostics/SKILL.md` 与新增 `references/passive-maintenance.md`；Windows 采样器实现由 03-05 原项目负责，不复制源码或新增服务。
+- 载荷提交 `6075c21b3e886d862ca933aa0ca52932a3fbbe85`，Claude 窄返工提交 `60011414480186603da7eeacae997e749f3aecd5`。新增人工单次 `--passive` 路由与模型断连、看似卡住、工作空间/会话加载、工具慢操作卡；主动诊断及获授权修复分别处理。旧缺失 Skill 引用改指项目规则与 03-02 唯一协作规范，不改默认角色或权限。
+- 源格式、UTF-8、引用及原有 8 文件摘要保全通过；真实 Claude 已核两处返工与冻结摘要，源规格通过。工具独验、远端同步、Windows 单 Skill 安装及新进程发现按仓外 `D:/12070/Documents/工作台管理报告/按需协作实施-20261022/skill/completion.json` 分层记录，未取得对应成功回读前不能称完成；本条不替代发布回执。
+- 受管同步沿现有 CC Switch，限定这一 Skill，保留全部客户端开关与历史备份。当前 CC Switch 4.0.16/schema 20 的实际登记代码在隔离副本验证通过，新增客户端字段及 content_hash 保持；活跃数据库未用于该测试写入。
+- 本次全部恢复点、源规格独验、受管发布备份、逐文件三方摘要和发现结果留仓外；本交接提交号由同一 completion.json 记录以免自引用。没有启动模型业务、修改运行配置或新增定时诊断。
+
+## 2026-10-22 用户直接指令：项目启动登记与浏览器约束（WB-FLOW-20261022/v1）
+
+- 本轮唯一源写域为 `codex-project-manager` 与 `playwright-browser-control`，载荷提交 `1be38703a3613d458c8bab89a3f2025772173200`，仅三文件说明/启动模板修改。准入后由目标聊天核对人工添加的应用身份、目录、分区和实际权限，引用03-01唯一 `PROJECT_REGISTRATION.md` 与 `status/ensure` 完成自身登记并回原交接继续已授权工作；不复制总表或请求实现。
+- 浏览器保留Chrome、账号资料、副屏及后台约束；一次未发现/连接失败先核原入口，不切Edge或借Seth替Default、新建运行根掩盖缺口。引用03-05默认离线预检，配置检查、显式运行、业务登录及物理清理分别结论化，不把旧缺失写为当前故障。
+- Codex root 已独立核对三文件及权威接口并PASS。03-01登记依最新r2独验通过，r1失败与旧冻结保留；浏览器工具独验和当前运行配置观察也分层留证。源、提交推送、Windows精确两Skill安装、三方哈希、七客户端开关/其他110行保护及一次无模型新进程发现，以仓外 `D:/12070/Documents/工作台管理报告/治理完善实施-20261022/tools-skills/RELEASE_COMPLETION.json` 为最终发布指针；此条不替代尚未取得的发布回读。
+- 工具/Skill资源盘点为派生候选，权威仍为既有项目总表和CC Switch；MCP三缺口仅列后续维护候选，不授权安装、启停、卸载或第三Skill修改。未进行浏览器连接/凭据调用、MCP启停、业务运行或自动化变更。Windows发布不证明WSL、Claude安装或旧聊天热加载。
+- 本轮精确源基线、独验、安装前数据库只读摘要及发布自动备份均保留；回退先对账后续修改和实际引用，只处理本轮精确载荷，不覆盖活动数据。
+
+## 2026-10-22 用户直接指令：整个Codex工具链核查与修复（TOOLCHAIN-20261022/v1）
+
+- 用户要求覆盖全部Skill/MCP用途、相似项主备与合并删减、正常失败重试和本轮自有UI收尾，并减少重MCP常驻；凭据沿现状，不进行密钥库改造。工作台按所属范围协调，本源负责人只写本轮Skill文案与精确CC开关，不接管业务。
+- 本轮自有文案提交 `9fbc17182b339d8727ee7e2b27725f939f66c0aa` 已推送既有origin/main并实时回读一致：browser可选诊断、Chrome主/Edge经核备用、普通读取/未派发的有界恢复与未知写入对账；Comfy同地址只读health瞬时失败最多补读一次，映射补当前0.52.205及03-05现有入口引用。自有B1片段及B2文案由未实施Codex独验PASS，未把外部实现或本轮文案当真实新后端验收。
+- 另有用户安排的浏览器参数预检并发修复，主责可见聊天 `01a16182-8841-7cc1-b99b-0582bbfc2d78`。用户已明确“请协调后合并”；其已完成参数预检精确提交 `de34f00e73abca3431780be41de7204150692e1e`（父9fbc171），31自检与15独验通过并释放源/index写权；本负责人继续必要的无参数snapshot/readback失败分类修复，12隔离自测及未实施Codex14独验通过，保留其参数预检AST。双方变更沿原main统一精确同步browser+comfy。此前未知外部差异已固定保存，本轮自有提交排除其run-code段/脚本/测试，原工作副本保留；不得覆盖、stash或假clean绕过发布条件。
+- 当前状态：载荷提交 `c320f6d3386bd392c82f4e9c9aeb7e3328115c9b`（父de34f00）已推送并实时回读一致，源main清洁后沿原受管脚本精确同步browser+comfy完成。browser28文件、Comfy5文件在源/CC安装/Codex三方逐文件摘要一致；全部112条登记的7客户端开关不变，非目标110条整行及10个源登记不变。双cwd新CLI分别发现两个目标及官方pdf唯一启用、旧pdf禁用、零加载错，自有进程退出；既有活动聊天热加载、WSL/Claude发布不在本轮验收层。新代码仅使同身份、无未决业务失败的无参数读取错误可正常再读；旧unknown/readback_required、metadata/进程/成员变化和写入失败不解锁，不自动重连或重放。 源代码增量已由未实施Codex14隔离用例独验通过；参数预检31自检/15独验及先前真实Chrome/Edge自有页循环证据复用，未追加真实浏览器或业务测试。同步恢复点为 `C:/Users/12070/.cc-switch/skill-backups/20261022-225208-498-custom-skills-before-sync`；最终发布分层回执为同证据根 `RELEASE_COMPLETION.json`，只补本交接的后续提交不改变载荷，不重复同步。同步继续既有CC受管入口，源/安装/Codex文件树及新进程发现分别验收，Windows成功不代替WSL/Claude。仓外唯一状态和回退指针：`D:/12070/Documents/工作台管理报告/工具链核查修复-20261022/skills/RELEASE_STATUS.json`。
+- B3已单独完成：只将 `openai/skills:skills\.curated\pdf` 的enabled_codex改0并新增旧pdf精确路径的Codex禁用项；官方pdf插件启用保留、112行除该字段外不变、其他客户端和安装/符号链接保留。双cwd新CLI旧pdf=false、pdf:pdf=true、零加载错，自有进程退出；未宣称旧活动聊天热加载或内存改善。已有SQLite在线备份、原配置/安装/链接证据；回退仅恢复精确开关及该路径覆盖，不整库/整配置回灌。回执：`PDF_DISABLE_DRY_RUN.json`、`PDF_DISABLE_APPLY.json`、`POST_B3_SKILL_DISCOVERY.json`；独验在同需求rules/review/B3_POST_APPLY_REVIEW.json。
+- 全量派生能力清单与相似族矩阵保存在同一skills证据根。系统官方openai-docs/creator/installer已刷新启用发现；缓存旧版及pptx无安全删除证据而保留。Cua为工具自身官方Skill包、kdocs为CC第三方源，未直接编辑安装物；03-05已补现有Cua短生命周期及WPS365既有CLI/账户能力边界入口。
+
 ## 2026-10-22 用户直接指令：CLAUDE-ENH-20261022-WINMCP/v1/a1 实施占位
 
 来源：Claude 代用户派发。按需恢复 Windows-MCP；当前唯一 Skill 实施者 skills_readonly，仅写 windows-mcp-on-demand/**、platforms.json 本项及本节。当前实现与必要测试；待根线程独立审查，未提交推送或安装，真实运行等待用户本人录入令牌。其他差异保留。

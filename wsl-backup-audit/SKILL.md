@@ -12,6 +12,8 @@ metadata:
 
 此 skill 只检查现有备份，不启动备份或 WSL。它支持由 Windows 固定任务执行的 Ubuntu-24.04 完整停机备份：每周六北京时间 04:00 到期，每天 04:00 检查漏跑；恢复原环境和校验成功后保留最新一份，失败保留旧份。
 
+用户要求 WSL 开机、关机或释放资源时，转用 `$wsl-system-lifecycle`；默认只关 Ubuntu、保留 Docker，明确全部关机才包含 Docker。此处巡检不能代替启停实施。维护项目 `runtime\system-lifecycle\state.json` 若记录有意停机，按当前证据报告备份已暂停，不自动恢复自启动，也不因预期任务停用认定备份失败；真实备份缺失、过期或恢复未完成仍按检查结果报告。
+
 ## 固定入口
 
 项目位于 `D:\ws\03-env\03-06-wsl-maint\backup`。统一维护入口为上级 `wsl维护` 项目，网络维护位于其 `wifi` 子目录。使用备份项目解释器 `.venv\Scripts\python.exe`，加 `-X utf8 -B` 运行 `scripts\audit.py`，工作目录为备份项目。该检查器只读取 Windows 任务、文件及小型运行记录，输出精简检查结果；不调用 WSL、不写入日志、不完整读取大磁盘。

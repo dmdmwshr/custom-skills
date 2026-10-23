@@ -3,6 +3,9 @@ import copy
 import json
 import tempfile
 import unittest
+import hashlib
+import io
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +13,7 @@ from reportlab.pdfgen.canvas import Canvas
 from pypdf import PdfReader
 import compilation_pdf as book
 import file_manager as fm
+import word_pdf
 
 
 class BookTests(unittest.TestCase):
@@ -52,6 +56,84 @@ class BookTests(unittest.TestCase):
         self.assertEqual(3,len(reader.pages));self.assertTrue(reader.pages[0].get('/Annots'))
         self.assertFalse(fm.apply(self.root,current)['changed'])
         self.assertEqual(self.fixed,fm.protected(self.root))
+
+    def test_date_only_and_same_day_revision_preserves_registered_previous_pdf(self):
+        fm.apply(self.root,self.prepare(self.manifest(self.document()),'initial'))
+        current=fm.load(self.root/fm.RECORDS[0]);old=copy.deepcopy(current['compilation_pdf'])
+        self.assertRegex(Path(old['path']).name,r'，\d{8}修订）\.pdf$')
+        current['documents'][0]['title']='Same day renamed'
+        updated=self.prepare(current,'same-day')
+        self.assertEqual(old['path'],updated['compilation_pdf_candidate']['record']['path'])
+        fm.apply(self.root,updated);saved=fm.load(self.root/fm.RECORDS[0]);transaction=self.root/saved['transaction']
+        self.assertNotEqual(old['sha256'],saved['compilation_pdf']['sha256'])
+        self.assertEqual(old['sha256'],fm.digest(transaction/'before'/old['path']))
+        self.assertEqual(old['sha256'],fm.digest(transaction/'replaced'/old['path']))
+        self.assertTrue(fm.check(self.root,saved,self.fixed)['pdf_verified'])
+
+    def test_unknown_date_named_pdf_collision_is_not_overwritten(self):
+        candidate=self.prepare(self.manifest(self.document()),'initial')
+        target=self.root/candidate['compilation_pdf_candidate']['record']['path'];target.parent.mkdir(parents=True,exist_ok=True)
+        target.write_bytes(b'user owned file')
+        before=fm.scan(self.root,fm.MANAGED)
+        with self.assertRaisesRegex(ValueError,'不是已登记'):fm.apply(self.root,candidate)
+        self.assertEqual(b'user owned file',target.read_bytes());self.assertEqual(before,fm.scan(self.root,fm.MANAGED))
+
+    def test_toc_uses_title_once_metadata_once_date_only_and_precise_links(self):
+        doc=self.document(title='较长的规范标题'*12);doc['number']='测试〔2026〕1号';doc['short_title']='用户确认短名'
+        result=self.prepare(self.manifest(doc),'toc-style');record=result['compilation_pdf_candidate']['record']
+        reader=PdfReader(result['compilation_pdf_candidate']['source']);text=reader.pages[0].extract_text()
+        self.assertEqual(1,text.count('用户确认短名'));self.assertEqual(1,text.count('测试〔2026〕1号'))
+        self.assertEqual(1,text.count('[支队]'));self.assertNotRegex(text,r'\d{2}:\d{2}:\d{2}')
+        self.assertIn('........',text);self.assertEqual(1,len(reader.pages[0]['/Annots']))
+        link=reader.pages[0]['/Annots'][0].get_object();self.assertEqual(74,float(link['/Rect'][0]));self.assertEqual(record['toc_pages'],reader.get_destination_page_number(reader.outline[0]))
+
+    def test_word_cleanup_preserves_text_tables_seals_and_layout_properties(self):
+        source=self.base/'original.docx';target=self.base/'clean.docx'
+        xml=b'''<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:rPr><w:highlight w:val="yellow"/><w:shadow/><w:color w:val="FF0000"/></w:rPr><w:t>Rule text</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:tcPr><w:shd w:fill="DEE0E3"/><w:tcW w:w="1000"/></w:tcPr><w:p><w:r><w:t>Normative table value 42</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr><a:effectLst><a:outerShdw/></a:effectLst></w:body></w:document>'''
+        with zipfile.ZipFile(source,'w') as z:z.writestr('word/document.xml',xml);z.writestr('word/media/seal.png',b'original seal pixels')
+        original_hash=fm.digest(source);counts=word_pdf.normalize(source,target)
+        with zipfile.ZipFile(target) as z:
+            result=z.read('word/document.xml');self.assertIn(b'Rule text',result);self.assertIn(b'Normative table value 42',result)
+            self.assertIn(b'FF0000',result);self.assertIn(b'w:val="none"',result);self.assertIn(b'FFFFFF',result)
+            self.assertNotIn(b'outerShdw',result);self.assertIn(b'w:pgSz w:w="11906" w:h="16838"',result)
+            self.assertEqual(b'original seal pixels',z.read('word/media/seal.png'))
+        self.assertEqual(original_hash,fm.digest(source));self.assertEqual(1,counts['highlight']);self.assertEqual(1,counts['drawing_effect'])
+
+    def test_conversion_cache_reuse_and_corruption_detection(self):
+        source=self.root/'source.docx';source.write_bytes(b'word original');member={'source':source.name,'sha256':fm.digest(source)}
+        identity={'source_sha256':member['sha256'],'profile':word_pdf.PROFILE,'converter':{'test':'converter'}}
+        key=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest();folder=self.root/fm.MGMT/'PDF制作资料/转换缓存'/key;folder.mkdir(parents=True)
+        (folder/'body.pdf').write_bytes(b'cached result');fm.save(folder/'conversion.json',{'identity':identity,'files':{'body.pdf':fm.digest(folder/'body.pdf')}})
+        with patch.object(word_pdf,'converter_identity',return_value={'test':'converter'}),patch.object(word_pdf.subprocess,'run',side_effect=AssertionError('should reuse')):
+            self.assertEqual(folder/'body.pdf',word_pdf.convert(self.root,member,self.base/'second-build',Path('unused')))
+            (folder/'body.pdf').write_bytes(b'changed cached result')
+            with self.assertRaisesRegex(ValueError,'缓存校验失败'):word_pdf.convert(self.root,member,self.base/'third-build',Path('unused'))
+
+    def test_word_pdf_background_cleanup_keeps_text_borders_and_red_content(self):
+        original=self.base/'word-export.pdf';clean=self.base/'white.pdf'
+        canvas=Canvas(str(original),pagesize=(595.276,841.89))
+        canvas.setFillColorRGB(1,1,0);canvas.rect(50,650,300,30,stroke=0,fill=1)
+        canvas.setFillColorRGB(.85,.85,.85);canvas.rect(50,550,300,30,stroke=1,fill=1)
+        canvas.setFillColorRGB(1,0,0);canvas.rect(50,750,300,2,stroke=0,fill=1)
+        canvas.setFillColorRGB(0,0,0);canvas.drawString(60,660,'Full rule text remains');canvas.save()
+        self.assertEqual(2,word_pdf.clean_pdf_backgrounds(original,clean))
+        self.assertEqual(PdfReader(original).pages[0].extract_text(),PdfReader(clean).pages[0].extract_text())
+        import pypdfium2 as pdfium
+        with pdfium.PdfDocument(str(clean)) as pdf:
+            bitmap=pdf[0].render(scale=1);im=bitmap.to_pil()
+            self.assertEqual((255,255,255),im.getpixel((55,170))[:3])
+            red_pixels=sum(r>200 and g<25 and b<25 for r,g,b in im.convert('RGB').get_flattened_data())
+            self.assertGreater(red_pixels,200);bitmap.close()
+
+    def test_same_day_failure_recovers_exact_old_pdf(self):
+        fm.apply(self.root,self.prepare(self.manifest(self.document()),'initial'))
+        current=fm.load(self.root/fm.RECORDS[0]);old=copy.deepcopy(current['compilation_pdf']);current['documents'][0]['title']='Same day failing update'
+        candidate=self.prepare(current,'failed-same-day')
+        with patch.object(fm,'check',side_effect=ValueError('injected failure')):
+            with self.assertRaisesRegex(RuntimeError,'执行失败'):fm.apply(self.root,candidate)
+        failed=next(p for p in (self.root/fm.MGMT/'事务').iterdir() if fm.load(p/'transaction.json')['phase']=='failed')
+        fm.recover(self.root,failed.relative_to(self.root).as_posix());restored=fm.load(self.root/fm.RECORDS[0])
+        self.assertEqual(old,restored['compilation_pdf']);self.assertEqual(old['sha256'],fm.digest(self.root/old['path']))
 
     def test_reorder_update_keeps_old_pdf_in_transaction(self):
         current=self.prepare(self.manifest(self.document()),'initial')

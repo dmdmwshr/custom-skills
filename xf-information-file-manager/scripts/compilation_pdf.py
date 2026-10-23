@@ -7,12 +7,9 @@ import io
 import json
 from pathlib import Path
 import re
-import shutil
-import subprocess
 from datetime import datetime, timedelta, timezone
-from xml.sax.saxutils import escape
 
-PROFILE = 'it-guidelines-a4-20261020-v1'
+PROFILE = 'it-guidelines-a4-20261020-v3-date-clean-toc'
 TITLE = '网络安全和信息化工作文件汇编'
 CST = timezone(timedelta(hours=8))
 
@@ -110,14 +107,15 @@ def transition(root, manifest, old=None):
     record = candidate['record']
     target = fm.safe(root, record['path'])
     if target.parent != fm.safe(root, fm.LIVE) or not re.fullmatch(
-            re.escape(TITLE) + r'（无附件，\d{8}_\d{6}修订）\.pdf', target.name):
+            re.escape(TITLE) + r'（无附件，\d{8}修订）\.pdf', target.name):
         raise ValueError('实时PDF命名或位置不符合规则')
     source = Path(candidate['source'])
     if (not source.is_absolute() or source.is_symlink() or not source.is_file()
             or digest(source) != record['sha256']):
         raise ValueError('候选PDF缺失或内容变化')
-    if target.exists():
-        raise ValueError('新PDF目标已存在，拒绝覆盖：' + str(target))
+    if target.exists() and (not previous or previous['path'] != record['path']
+                            or not target.is_file() or digest(target) != previous['sha256']):
+        raise ValueError('新PDF目标已存在且不是已登记的上一版，拒绝覆盖：' + str(target))
     verify_file(source, record)
     return {'action': 'update' if previous else 'create', 'record': copy.deepcopy(record), 'source': str(source)}
 
@@ -164,6 +162,18 @@ def verify(root, manifest):
     actual = [(d['id'], d['section'], d['sequence']) for d in record['documents']]
     if actual != expected:
         raise ValueError('PDF文书顺序与台账不一致')
+    for item in record['documents']:
+        for part in item['parts']:
+            if part.get('conversion_assets'):
+                import word_pdf
+                folder = fm.safe(root, part['conversion_assets'])
+                receipt = folder/'conversion.json'
+                if not receipt.is_file() or digest(receipt) != part['conversion_receipt_sha256']:
+                    raise ValueError('PDF制作资料回执变化：'+str(receipt))
+                cached = json.loads(receipt.read_text(encoding='utf-8'))
+                converted = word_pdf.load_cached(folder, cached['identity'])
+                if digest(converted) != part['rendered_sha256']:
+                    raise ValueError('PDF制作资料与合成本选用版本不一致')
     verify_file(path, record)
     return {'pdf_verified': True, 'pdf_documents': record['document_count'], 'pdf_pages': record['page_count']}
 
@@ -191,60 +201,73 @@ def render_member(root, member, workdir, soffice):
         return source
     if suffix not in ('.doc', '.docx', '.odt', '.rtf'):
         raise ValueError('PDF构建不支持该正文格式：' + suffix)
-    inputs = workdir / 'inputs'; outputs = workdir / 'converted'
-    inputs.mkdir(parents=True, exist_ok=True); outputs.mkdir(parents=True, exist_ok=True)
-    target = inputs / (member['sha256'][:16] + suffix)
-    if target.exists() and digest(target) != member['sha256']:
-        raise ValueError('转换缓存输入冲突')
-    shutil.copy2(source, target)
-    pdf = outputs / (target.stem + '.pdf')
-    receipt = outputs / (target.stem + '.json')
-    if pdf.exists() and receipt.exists():
-        cached = json.loads(receipt.read_text(encoding='utf-8'))
-        if cached.get('source_sha256') == member['sha256'] and cached.get('pdf_sha256') == digest(pdf):
-            return pdf
-        raise ValueError('转换缓存校验失败；保留现场，使用新的工作目录核对')
-    command = [str(soffice), '-env:UserInstallation=' + (workdir / 'lo-profile').as_uri(),
-               '--headless', '--convert-to', 'pdf:writer_pdf_Export', '--outdir', str(outputs), str(target)]
-    result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=180)
-    (outputs / (target.stem + '.log')).write_text(result.stdout + '\n' + result.stderr, encoding='utf-8')
-    if result.returncode or not pdf.is_file():
-        raise RuntimeError('Word转PDF失败，保留转换日志：' + str(target))
-    receipt.write_text(json.dumps({'source_sha256': member['sha256'], 'pdf_sha256': digest(pdf)}, indent=2), encoding='utf-8')
-    return pdf
+    import word_pdf
+    return word_pdf.convert(root, member, workdir, soffice)
 
 
-def toc_pdf(documents, revision, expected_pages=None):
+def toc_pdf(documents, revision, links=None):
     import file_manager as fm
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, KeepTogether, Table, TableStyle
-    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    from reportlab.pdfgen.canvas import Canvas
     buffer = io.BytesIO()
-    styles = {
-        'title': ParagraphStyle('title', fontName='BookHei', fontSize=18, leading=25, alignment=TA_CENTER, spaceAfter=6),
-        'revision': ParagraphStyle('revision', fontName='BookSong', fontSize=10, leading=16, alignment=TA_CENTER, spaceAfter=14),
-        'section': ParagraphStyle('section', fontName='BookHei', fontSize=15, leading=22, spaceBefore=12, spaceAfter=8),
-        'entry': ParagraphStyle('entry', fontName='BookSong', fontSize=12.5, leading=18, wordWrap='CJK'),
-        'page': ParagraphStyle('page', fontName='BookSong', fontSize=12.5, leading=18, alignment=TA_RIGHT),
-        'meta': ParagraphStyle('meta', fontName='BookSong', fontSize=9.5, leading=14, leftIndent=16, spaceAfter=6),
-    }
-    story = [Paragraph(TITLE, styles['title']), Paragraph('目录', styles['title']),
-             Paragraph('无附件版　' + revision.strftime('%Y年%m月%d日 %H:%M:%S') + '修订', styles['revision'])]
+    canvas = Canvas(buffer, pagesize=(595.276, 841.89))
+    left, right, bottom = 74, 525, 48
+    page_index, y = 0, 801
+
+    def wrap(text, width, size):
+        lines, line = [], ''
+        for char in text:
+            if line and stringWidth(line+char, 'BookSong', size) > width:
+                # Keep closing punctuation with its preceding text.
+                if char in '，。、；：）》】〕）': line += char; char = ''
+                elif line[-1] in '《（【〔(': char = line[-1]+char; line = line[:-1]
+                lines.append(line); line = char
+            else: line += char
+        if line: lines.append(line)
+        if len(lines)>1 and len(lines[-1])<6 and len(lines[-2])>12:
+            borrow=6-len(lines[-1])
+            while lines[-2][-borrow] in '，。、；：）》】〕）': borrow+=1
+            lines[-1]=lines[-2][-borrow:]+lines[-1];lines[-2]=lines[-2][:-borrow]
+        return lines
+
+    def next_page():
+        nonlocal page_index, y
+        canvas.showPage(); page_index += 1; y = 794
+
+    canvas.setFont('BookHei', 16); canvas.drawCentredString(595.276/2, y, TITLE)
+    canvas.setFont('BookSong', 10); canvas.drawCentredString(595.276/2, y-20, '无附件版　'+revision.strftime('%Y年%m月%d日')+'修订')
+    canvas.setFont('BookHei', 18); canvas.drawCentredString(595.276/2, y-51, '目录')
+    y -= 83
     current_section = None
     for item in documents:
+        title = str(item['sequence'])+'、'+item.get('toc_title', item['name'])
+        title_lines = wrap(title, right-left-30, 12.5)
+        meta_lines = wrap(item['metadata'], right-left-16, 9.5)
+        height = len(title_lines)*17.5+len(meta_lines)*12+6
         if item['section'] != current_section:
             current_section = item['section']
-            story.append(Paragraph('第' + '一二三'[current_section - 1] + '部分　' + fm.SECTIONS[current_section - 1].split('、', 1)[1], styles['section']))
-        entry = f"{item['sequence']}、{escape(item['name'])}"
-        metadata = escape(item['metadata'])
-        row = Table([[Paragraph(entry, styles['entry']), Paragraph('… '+str(item['body_start']), styles['page'])]],
-                    colWidths=[435, 48], hAlign='LEFT')
-        row.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'BOTTOM'),('LEFTPADDING',(0,0),(-1,-1),0),
-                                 ('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),
-                                 ('BOTTOMPADDING',(0,0),(-1,-1),0)]))
-        story.append(KeepTogether([row, Paragraph(metadata, styles['meta'])]))
-    SimpleDocTemplate(buffer, pagesize=(595.276, 841.89), leftMargin=48, rightMargin=48,
-                      topMargin=43, bottomMargin=40, title=TITLE).build(story)
+            if y-height-33 < bottom: next_page()
+            canvas.setFont('BookHei', 15)
+            canvas.drawString(left, y, '第'+'一二三'[current_section-1]+'部分 '+fm.SECTIONS[current_section-1].split('、',1)[1])
+            y -= 27
+        elif y-height < bottom: next_page()
+        top = y+13
+        canvas.setFont('BookSong', 12.5)
+        for line in title_lines:
+            canvas.drawString(left, y, line); y -= 17.5
+        last_y = y+17.5
+        folio = str(item['body_start'])
+        dot_start = left+stringWidth(title_lines[-1], 'BookSong', 12.5)+3
+        dot_end = right-stringWidth(folio, 'BookSong', 12.5)-4
+        dots = max(0, int((dot_end-dot_start)/stringWidth('.', 'Times-Roman', 12.5)))
+        canvas.setFont('Times-Roman', 12.5); canvas.drawString(dot_start, last_y, '.'*dots)
+        canvas.setFont('BookSong', 12.5); canvas.drawRightString(right, last_y, folio)
+        canvas.setFont('BookSong', 9.5)
+        for line in meta_lines:
+            canvas.drawString(left+16, y+2, line); y -= 12
+        y -= 6
+        if links is not None: links.append({'id':item['id'], 'page':page_index, 'rect':[left,y+4,right,top]})
+    canvas.save()
     return buffer.getvalue()
 
 
@@ -276,10 +299,11 @@ def build(root, manifest, workdir, soffice):
         raise ValueError('PDF加工目录须位于业务根目录之外')
     fonts()
     revision = datetime.now(CST)
-    name = TITLE + '（无附件，' + revision.strftime('%Y%m%d_%H%M%S') + '修订）.pdf'
+    name = TITLE + '（无附件，' + revision.strftime('%Y%m%d') + '修订）.pdf'
     writer = PdfWriter(); documents = []; readers = []; body_pages = []
     for doc, parts, members in selections(manifest):
         item = {'id': doc['id'], 'section': doc['section'], 'sequence': doc['sequence'], 'name': fm.stem(doc),
+                'toc_title': doc.get('short_title') or doc['title'],
                 'body_start': len(body_pages) + 1, 'parts': [], 'body_page_count': 0,
                 'metadata': f"[{doc['level']}] [{doc['topic']}] " + (doc.get('number') or doc.get('date') or '')
                             + (' （参考）' if doc['status'] == '历史留存' else '')}
@@ -291,6 +315,9 @@ def build(root, manifest, workdir, soffice):
                 raise ValueError('转换页数与人工核对页段不一致：' + doc['id'])
             part_record = copy.deepcopy(selection)
             part_record.update(source=member.get('archive_path', member['source']), rendered_sha256=digest(source))
+            if source.name == 'body.pdf' and source.is_relative_to(root):
+                part_record['conversion_assets'] = source.parent.relative_to(root).as_posix()
+                part_record['conversion_receipt_sha256'] = digest(source.parent/'conversion.json')
             item['parts'].append(part_record)
             for page_number in expand(selection['keep_ranges'], len(reader.pages)):
                 page = copy.copy(reader.pages[page_number - 1])
@@ -320,7 +347,8 @@ def build(root, manifest, workdir, soffice):
                 body_pages.append((output, doc['section']))
                 item['body_page_count'] += 1
         documents.append(item)
-    toc = PdfReader(io.BytesIO(toc_pdf(documents, revision)))
+    toc_links = []
+    toc = PdfReader(io.BytesIO(toc_pdf(documents, revision, toc_links)))
     toc_count = len(toc.pages)
     for page in toc.pages: writer.add_page(page)
     for number, (page, section) in enumerate(body_pages, 1):
@@ -336,29 +364,10 @@ def build(root, manifest, workdir, soffice):
         section = item['section']
         if section not in section_bookmarks:
             section_bookmarks[section] = writer.add_outline_item('第'+'一二三'[section-1]+'部分 '+fm.SECTIONS[section-1].split('、',1)[1], first)
-        writer.add_outline_item(str(item['sequence'])+'、'+item['name'], first, parent=section_bookmarks[section])
-    # Reuse ReportLab paragraph geometry for precise clickable TOC areas.
-    # Each entry is searched as a wrapped paragraph, so links follow the actual multi-line layout.
-    import pdfplumber
-    with pdfplumber.open(io.BytesIO(toc_pdf(documents, revision))) as pdf:
-        for item in documents:
-            needle=f"{item['sequence']}、{item['name']}"
-            for page_index, page in enumerate(pdf.pages):
-                plain=re.sub(r'\s+', '', page.extract_text() or '')
-                if re.sub(r'\s+', '', needle) not in plain:
-                    continue
-                chars=page.chars
-                joined=''.join(c['text'] for c in chars)
-                start=joined.find(needle)
-                if start < 0:
-                    continue
-                selected=chars[start:start+len(needle)]
-                rect=[min(c['x0'] for c in selected), page.height-max(c['bottom'] for c in selected),
-                      max(c['x1'] for c in selected), page.height-min(c['top'] for c in selected)]
-                writer.add_annotation(page_index, Link(rect=rect, target_page_index=item['first_page']-1))
-                break
-            else:
-                raise ValueError('目录条目无法建立跳转：'+item['id'])
+        writer.add_outline_item(str(item['sequence'])+'、'+item['toc_title'], first, parent=section_bookmarks[section])
+    by_id = {item['id']:item for item in documents}
+    for link in toc_links:
+        writer.add_annotation(link['page'], Link(rect=link['rect'], target_page_index=by_id[link['id']]['first_page']-1))
     input_fingerprint=fingerprint(manifest)
     writer.add_metadata({'/Title':TITLE+'（无附件）','/Author':'','/Subject':input_fingerprint,
                          '/CreationDate':revision.strftime('D:%Y%m%d%H%M%S')+"+08'00'"})
@@ -367,6 +376,7 @@ def build(root, manifest, workdir, soffice):
     if output.exists(): raise ValueError('候选PDF名称已存在，拒绝覆盖')
     writer.write(output)
     record={'schema_version':1,'profile':PROFILE,'revision':revision.isoformat(timespec='seconds'),
+            'revision_date':revision.date().isoformat(),
             'path':fm.LIVE+'/'+name,'sha256':digest(output),'input_fingerprint':input_fingerprint,
             'document_count':len(documents),'page_count':len(writer.pages),'toc_pages':toc_count,'documents':documents}
     verify_file(output,record)

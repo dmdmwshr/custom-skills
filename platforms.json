@@ -368,6 +368,20 @@
       },
       "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
     },
+    "wsl-system-lifecycle": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "not_supported_by_current_workflow",
+        "windows": "ubuntu_off_docker_retained_verified_startup_mock_tested_real_startup_pending"
+      },
+      "dependencies": "Existing Windows WSL maintenance project and its Python environment, task identities and saved lifecycle baseline. Ubuntu-only shutdown keeps Docker; full shutdown includes Docker.",
+      "note": "Runs from Windows without waking a distribution for status or startup planning."
+    },
     "wsl-backup-audit": {
       "category": "platform_specific",
       "execution_platforms": [
@@ -523,11 +537,11 @@
       ],
       "managed_wsl": false,
       "validation": {
-        "windows": "runtime_verified_2026_10_20_live_pdf_candidate_416_pages_and_28_tests",
+        "windows": "runtime_verified_2026_10_20_date_only_clean_word_toc_415_pages_and_35_tests",
         "linux": "runtime_unverified",
         "wsl": "not_supported_by_current_workflow"
       },
-      "dependencies": "Base archive: Python 3.12+ standard library. Live PDF: bundled Python with pypdf, pdfplumber, reportlab and Pillow; existing LibreOffice and Windows Song/Hei fonts. Explicit business root, reviewed body page selection, protected historical book. No scheduled task or business-file external upload."
+      "dependencies": "Base archive: Python 3.12+ standard library. Live PDF: bundled Python with pypdf, pdfplumber, reportlab, Pillow and lxml; existing LibreOffice and Windows Song/Hei fonts. Explicit business root, reviewed body page selection, protected historical book. No scheduled task or business-file external upload."
     },
     "xf-product-standards": {
       "category": "business_specific",

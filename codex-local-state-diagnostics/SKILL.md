@@ -1,6 +1,6 @@
 ---
 name: codex-local-state-diagnostics
-description: 分层诊断 Linux/WSL 或 Windows 本机 Codex 的会话加载、索引、SQLite、rollout 路径、app-server、MCP/进程、网络及浏览器控制问题。默认只读；用户要求修复时保留恢复点并验证目标。用于工具预热失败、反复重连、会话故障、启动错配置或浏览器连接问题。
+description: 分层诊断 Linux/WSL 或 Windows 本机 Codex 的模型断连、看似卡住、工作空间与会话加载、工具启动、索引、SQLite、app-server、网络及浏览器控制问题。默认只读；用户要求修复时保留恢复点并验证目标。
 metadata:
   x-custom-skill: true
   x-source-repo: dmdmwshr/custom-skills
@@ -19,7 +19,9 @@ metadata:
 - openai-docs 负责当前官方产品能力、支持范围、模型和配置文档；本 skill 不用本机异常推断官方事实。
 - Windows 计划任务由目标机已安装的 `windows-task-scheduler` 处理；Linux 服务按项目 systemd 或实际启动方式处理，Codex 自动化用产品工具。本 skill 只按需核对触发与进程证据，不自动迁移调度器。
 - codex-project-task-handoff 负责项目内唯一交接文档、同项目后继任务及旧任务改名归档；本 skill 只诊断其读写结果，不创建第二份交接文档或后继任务。
-- cc-connect-collaboration 负责固定会话、移动通道、绑定代次和路由换代；固定会话问题不得被本 skill 当作普通项目接力处理。
+- 固定角色、任务身份、绑定代次和路由换代按当前项目规则及 03-02 维护的唯一协作规范处理；本 skill 只定位证据，不把这些问题当作普通项目接力或另建绑定。
+
+模型断连、看似卡住、工作空间加载超时、会话加载卡顿或工具启动慢时，按 [单次被动采样与五类操作卡](references/passive-maintenance.md) 选择最小证据。Windows 优先使用该页的显式 `--passive` 入口；它不调用模型、CLI、网络或新服务。主动诊断与获授权修复分别执行，不把一次采样成功当作故障已修复。Linux/WSL 保持本机平台流程，不从挂载路径调用 Windows 采样器。
 
 浏览器不可控、启动到错误配置、页面等待误判、采集器加载差异或已登录站点复用问题，直接读取 [浏览器控制恢复](references/browser-control-recovery.md)，从相关层开始，不先扫描会话数据库、历史或网络。用户只要求诊断时保持只读；已明确要求修复目标浏览器或采集器时，必要的范围内修复、备份、测试和回读一起完成，不逐步重复确认。外部发送、凭据及项目固定会话契约继续单独约束。
 
