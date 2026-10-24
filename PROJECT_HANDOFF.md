@@ -202,3 +202,10 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 - playwright-browser-control：文首改为“默认 ego-browser，备用仅用户当前明确要求才用”，去掉对已退役 x-message-monitoring 的例外。
 - 发布回执见仓外 STAGE5_RESULT.md / PUBLISH_RECEIPTS.json。
 - 发布（源 fd8e7e8，已推送并 `git ls-remote` 回读一致）：WSL 发布 playwright-browser-control、native-gui-control、windows-from-wsl，记录 `/srv/work/host-baseline/skill-releases/20261024T010523042514Z`，源/安装/Claude 链接一致，新进程发现 errors=[]；Windows 经 CC 精确发布 video-intake、playwright-browser-control、native-gui-control、notion-workflows（发布检出 release-checkout，恢复点 `C:\Users\12070\.cc-switch\skill-backups\20261024-090610-154-custom-skills-before-sync`），源/CC/Codex 三方摘要一致；机器人旧路径（自建skills 脏检出）仅替换 video-intake 的 video_intake.py、SKILL.md、tests/test_video_intake_integrity.py，其余 196 项差异与 bilinote local-config 未动；核心 SHA256 85a17f48…7097f；已删除 `~/.claude/skills/cua-driver` 手工链接（备份见仓外 cua-link-backup.txt）。详见仓外 STAGE5_RESULT.md、PUBLISH_RECEIPTS.json。
+
+## CAPABILITY-MERGE-20261023/v3 阶段 A：drawio-local 取代 MCP、腾讯文档移除、源仓审计（Claude 实施，Codex 待验）
+
+- 写入者 WSL Claude；本批本地提交 e0a3d18（cloud-docs 移除腾讯文档）、663025b（drawio-local 重写）、9b7e011（pyweixin-rpa 平台声明 + README 清单）；未推送、未发布、未卸载任何实体。
+- drawio-local：改用官方 draw.io Desktop 32.6.1 命令行（便携解压到 `C:\Users\12070\.local\share\codex-tools\drawio-desktop\32.6.1`，`current` 联接），带 Mermaid/CSV 转换、ELK 预设、正交避障（本机实测名 `orthogonalEdge`，官方文档的 `libavoid` 在 32.6.1 报 Unknown layout）、PNG/SVG/PDF 导出、多页读写与形状检索脚本、本地参考文档；旧 `@drawio/mcp` 8 个工具逐项对照见仓外 DRAWIO_EQUIVALENCE.md，未覆盖项已列出。旧 MCP 注册与 npm 包本批未动。
+- 审计（仓外 SOURCE_AUDIT.json）：52 个 Skill 中唯一建议删除的是 x-message-monitoring（业务已退役，仅余 WSL 安装与 Claude 链接）；候选补丁 CANDIDATE_retire-x-message-monitoring.patch 未应用；video-download、bilinote-video-note 是仍被机器人路径和提示引用的兼容桩，须由 03-05 持有者迁移后再删；CC 中“未启用”的 cloudflare 后端条目是前门的文件后端，不是废弃；notion/gh/security/playwright 等被前门合并的上游条目仍是 enabled，属 Root 的 CC 治理。
+- 发布阶段待办（未执行）：推送；Windows CC 精确发布 cloud-docs、drawio-local、（pyweixin 仅 platforms 变更无需安装）；根 Codex 删除 Windows 四个腾讯 MCP、停用的 tencent-docs 实体与全局 drawio MCP 表/CC 行；x-message-monitoring 是否应用候选补丁由根决定。
