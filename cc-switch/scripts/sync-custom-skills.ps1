@@ -154,7 +154,7 @@ function Invoke-PythonCode {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $output = @(& $script:PythonPath -X utf8 -c $runnerCode $encodedCode @Arguments 2>&1)
+        $output = @(& $script:PythonPath -B -X utf8 -c $runnerCode $encodedCode @Arguments 2>&1)
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
