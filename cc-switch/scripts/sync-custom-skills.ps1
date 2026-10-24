@@ -1,8 +1,11 @@
 ﻿[CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [string]$SourceRoot = 'C:\Users\12070\.cc-switch\skills\自建skills',
+    # 必须显式指定干净的发布镜像（WSL 源仓 main 的 Windows 检出）；不再默认旧的 自建skills 脏检出，机器人仍读取该旧路径
+    [Parameter(Mandatory = $true)]
+    [string]$SourceRoot,
     [string]$InstallRoot = 'C:\Users\12070\.cc-switch\skills',
     [string]$CodexSkillsRoot = 'C:\Users\12070\.codex\skills',
+    [string]$GeminiSkillsRoot = '',
     [string]$DatabasePath = 'C:\Users\12070\.cc-switch\cc-switch.db',
     [string]$PythonPath = 'C:\Users\12070\AppData\Local\Programs\Python\Python312\python.exe',
     [string]$Remote = 'origin',
@@ -313,6 +316,8 @@ function New-BackupRoot {
 $SourceRoot = Resolve-FullPath $SourceRoot
 $InstallRoot = Resolve-FullPath $InstallRoot
 $CodexSkillsRoot = Resolve-FullPath $CodexSkillsRoot
+$GeminiArgument = '-'
+if (-not [string]::IsNullOrWhiteSpace($GeminiSkillsRoot)) { $GeminiArgument = Resolve-FullPath $GeminiSkillsRoot }
 $DatabasePath = Resolve-FullPath $DatabasePath
 $PythonPath = Resolve-FullPath $PythonPath
 
@@ -407,6 +412,9 @@ foreach ($skillDirectory in $skillDirectories) {
 }
 
 $registrationCode = @'
+import hashlib
+import json
+import os
 import re
 import sqlite3
 import sys
@@ -417,8 +425,36 @@ try:
 except Exception as exc:
     raise SystemExit(f"PyYAML 不可用：{exc}")
 
-mode, source_root_text, database_text, owner, repository, branch, selected_text = sys.argv[1:]
+mode, source_root_text, database_text, owner, repository, branch, selected_text = sys.argv[1:8]
+install_root = Path(sys.argv[8]).resolve() if len(sys.argv) > 8 else None
+compat_path = Path(sys.argv[9]) if len(sys.argv) > 9 else None
 selected = set(selected_text.split(','))
+
+
+def dir_hash(root: Path) -> str:
+    """CC Switch 上游 compute_dir_hash（Desktop 4.0.18 已与本机 50 个自建安装副本逐项核对）：
+    递归所有非点开头文件/目录，按路径组件字节序排序，逐文件 feed 相对路径(/)+NUL+原始字节+NUL。"""
+    files = []
+
+    def walk(current: Path) -> None:
+        for entry in os.scandir(current):
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                walk(Path(entry.path))
+            else:
+                files.append(Path(entry.path))
+
+    walk(root)
+    files.sort(key=lambda p: [part.encode("utf-8") for part in p.relative_to(root).parts])
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 source_root = Path(source_root_text).resolve()
 database_path = Path(database_text).resolve()
 frontmatter_pattern = re.compile(
@@ -479,6 +515,15 @@ try:
         print(f"validated={len(skills)}")
     elif mode == "register":
         now = int(__import__("time").time())
+        # content_hash 只在已核验的结构版本下按上游算法写入；其余版本保持旧行为（保留已有值、新记录留空）并明确提示
+        schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
+        has_hash_column = any(row[1] == "content_hash" for row in connection.execute("PRAGMA table_info(skills)"))
+        verified_schemas = []
+        if compat_path is not None and compat_path.is_file():
+            verified_schemas = json.loads(compat_path.read_text(encoding="utf-8")).get("content_hash_verified_schemas", [])
+        write_hash = install_root is not None and has_hash_column and schema_version in verified_schemas
+        if not write_hash:
+            print(f"content_hash_not_written schema={schema_version} verified={verified_schemas}")
         connection.execute("begin immediate")
         try:
             for name, description in skills:
@@ -538,269 +583,25 @@ try:
                         ),
                     )
 
+                if write_hash:
+                    connection.execute(
+                        "update skills set content_hash=? where id=?",
+                        (dir_hash(install_root / name), skill_id),
+                    )
+
             connection.commit()
         except Exception:
             connection.rollback()
             raise
 
-        print(f"registered={len(skills)}")
+        print(f"registered={len(skills)} content_hash_written={int(write_hash)}")
     else:
         raise SystemExit(f"未知模式：{mode}")
 finally:
     connection.close()
 '@
 
-$codexSyncCode = @'
-import hashlib
-import json
-import os
-import shutil
-import sqlite3
-import stat
-import sys
-from pathlib import Path
-
-(
-    mode,
-    content_root_text,
-    install_root_text,
-    codex_root_text,
-    database_text,
-    backup_root_text,
-    owner,
-    repository,
-    selected_text,
-) = sys.argv[1:]
-selected = set(selected_text.split(','))
-
-content_root = Path(content_root_text).resolve()
-install_root = Path(install_root_text).resolve()
-codex_root = Path(codex_root_text).resolve()
-database_path = Path(database_text).resolve()
-backup_root = None if backup_root_text == "-" else Path(backup_root_text).resolve()
-reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-
-
-def lexists(path: Path) -> bool:
-    return os.path.lexists(str(path))
-
-
-def is_reparse(path: Path) -> bool:
-    return bool(getattr(path.lstat(), "st_file_attributes", 0) & reparse_flag)
-
-
-def normalized_resolved(path: Path, *, strict: bool) -> str:
-    return os.path.normcase(os.path.normpath(str(path.resolve(strict=strict))))
-
-
-def assert_plain_tree(root: Path) -> None:
-    if not root.is_dir() or is_reparse(root):
-        raise RuntimeError(f"skill 安装源不是普通目录：{root}")
-    for directory, directory_names, file_names in os.walk(root):
-        directory_path = Path(directory)
-        for name in [*directory_names, *file_names]:
-            child = directory_path / name
-            if is_reparse(child):
-                raise RuntimeError(f"skill 安装源包含重解析点：{child}")
-
-
-def manifest(root: Path) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for directory, _, file_names in os.walk(root):
-        directory_path = Path(directory)
-        for name in sorted(file_names):
-            file_path = directory_path / name
-            relative = os.path.relpath(file_path, root).replace("\\", "/")
-            digest = hashlib.sha256()
-            with file_path.open("rb") as stream:
-                for block in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(block)
-            result[relative] = digest.hexdigest()
-    return result
-
-
-def classify_destination(destination: Path, source: Path) -> str:
-    if not lexists(destination):
-        return "absent"
-    if is_reparse(destination):
-        try:
-            actual = normalized_resolved(destination, strict=True)
-            expected = normalized_resolved(source, strict=True)
-        except OSError as exc:
-            raise RuntimeError(f"Codex skill 链接无法解析：{destination}: {exc}") from exc
-        if actual != expected:
-            raise RuntimeError(
-                f"Codex skill 链接指向非预期来源：{destination} -> {actual}，预期 {expected}"
-            )
-        return "link"
-    if not destination.is_dir():
-        raise RuntimeError(f"Codex skill 目标不是目录：{destination}")
-    if not (destination / "SKILL.md").is_file():
-        raise RuntimeError(f"Codex skill 物理目录缺少 SKILL.md：{destination}")
-    return "physical"
-
-
-if not content_root.is_dir():
-    raise SystemExit(f"skill 内容根目录不存在：{content_root}")
-if not install_root.is_dir():
-    raise SystemExit(f"skill 安装根目录不存在：{install_root}")
-if not codex_root.is_dir() or is_reparse(codex_root):
-    raise SystemExit(f"Codex skill 根目录不存在或是重解析点：{codex_root}")
-
-expected_names = sorted(
-    path.name
-    for path in content_root.iterdir()
-    if path.name in selected and path.is_dir() and not path.is_symlink() and (path / "SKILL.md").is_file()
-)
-if not expected_names:
-    raise SystemExit(f"没有找到待同步的 skill：{content_root}")
-
-connection = sqlite3.connect(
-    f"file:{database_path.as_posix()}?mode=ro",
-    uri=True,
-)
-try:
-    rows = connection.execute(
-        "select name, enabled_codex from skills where repo_owner=? and repo_name=?",
-        (owner, repository),
-    ).fetchall()
-finally:
-    connection.close()
-
-enabled_by_name = {str(name): bool(enabled) for name, enabled in rows}
-enabled_names = [name for name in expected_names if enabled_by_name.get(name, True)]
-
-sync_method = "auto"
-settings_path = database_path.parent / "settings.json"
-if settings_path.is_file():
-    settings = json.loads(settings_path.read_text(encoding="utf-8-sig"))
-    configured_method = settings.get("skillSyncMethod")
-    if configured_method is not None:
-        sync_method = str(configured_method).lower()
-if sync_method not in {"auto", "symlink", "copy"}:
-    raise SystemExit(f"不支持的 skill 同步模式：{sync_method}")
-
-destination_kinds: dict[str, str] = {}
-for name in enabled_names:
-    install_source = install_root / name
-    destination = codex_root / name
-    destination_kinds[name] = classify_destination(destination, install_source)
-
-if mode == "validate":
-    print(
-        f"codex_validated={len(enabled_names)} method={sync_method} "
-        f"links={sum(kind == 'link' for kind in destination_kinds.values())} "
-        f"physical={sum(kind == 'physical' for kind in destination_kinds.values())} "
-        f"absent={sum(kind == 'absent' for kind in destination_kinds.values())}"
-    )
-    raise SystemExit(0)
-
-if mode != "sync":
-    raise SystemExit(f"未知 Codex 同步模式：{mode}")
-if backup_root is None or not backup_root.is_dir():
-    raise SystemExit(f"Codex 同步备份根目录不存在：{backup_root}")
-
-previous_root = backup_root / "codex-previous-live"
-staging_root = backup_root / "codex-staging"
-failed_root = backup_root / "codex-failed-new"
-for required_root in (previous_root, staging_root, failed_root):
-    if not required_root.is_dir() or any(required_root.iterdir()):
-        raise SystemExit(f"Codex 同步暂存目录不存在或非空：{required_root}")
-
-source_manifests: dict[str, dict[str, str]] = {}
-published_modes: dict[str, str] = {}
-for name in enabled_names:
-    source = install_root / name
-    assert_plain_tree(source)
-    source_manifests[name] = manifest(source)
-    if not source_manifests[name] or "SKILL.md" not in source_manifests[name]:
-        raise RuntimeError(f"skill 安装源为空或缺少 SKILL.md：{source}")
-
-    stage = staging_root / name
-    kind = destination_kinds[name]
-    prefer_link = sync_method == "symlink" or (
-        sync_method == "auto" and kind in {"absent", "link"}
-    )
-    if prefer_link:
-        try:
-            os.symlink(str(source), str(stage), target_is_directory=True)
-            published_modes[name] = "link"
-        except OSError:
-            if sync_method != "auto":
-                raise
-            shutil.copytree(source, stage)
-            published_modes[name] = "copy"
-    else:
-        shutil.copytree(source, stage)
-        published_modes[name] = "copy"
-
-    if manifest(stage) != source_manifests[name]:
-        raise RuntimeError(f"Codex skill 暂存副本校验失败：{name}")
-
-states: list[dict[str, object]] = []
-try:
-    for name in enabled_names:
-        destination = codex_root / name
-        previous = previous_root / name
-        stage = staging_root / name
-        state: dict[str, object] = {
-            "name": name,
-            "had_existing": lexists(destination),
-            "old_moved": False,
-            "attempted": False,
-            "new_published": False,
-        }
-        states.append(state)
-        if state["had_existing"]:
-            shutil.move(str(destination), str(previous))
-            state["old_moved"] = True
-        state["attempted"] = True
-        shutil.move(str(stage), str(destination))
-        state["new_published"] = True
-
-    for name in enabled_names:
-        destination = codex_root / name
-        source = install_root / name
-        if published_modes[name] == "link":
-            if not is_reparse(destination):
-                raise RuntimeError(f"Codex skill 应为链接但实际不是：{destination}")
-            if normalized_resolved(destination, strict=True) != normalized_resolved(source, strict=True):
-                raise RuntimeError(f"Codex skill 链接目标校验失败：{destination}")
-        elif is_reparse(destination):
-            raise RuntimeError(f"Codex skill 应为物理副本但实际是重解析点：{destination}")
-        if manifest(destination) != source_manifests[name]:
-            raise RuntimeError(f"Codex skill 发布后哈希校验失败：{name}")
-except Exception as sync_error:
-    rollback_errors: list[str] = []
-    for state in reversed(states):
-        name = str(state["name"])
-        destination = codex_root / name
-        previous = previous_root / name
-        failed = failed_root / name
-        try:
-            if state["attempted"] and lexists(destination):
-                shutil.move(str(destination), str(failed))
-            if state["old_moved"] and lexists(previous):
-                shutil.move(str(previous), str(destination))
-            if state["had_existing"] and not lexists(destination):
-                raise RuntimeError("原有目标未恢复")
-            if not state["had_existing"] and lexists(destination):
-                raise RuntimeError("新增目标未撤回")
-        except Exception as rollback_error:
-            rollback_errors.append(f"{name}: {rollback_error}")
-    if rollback_errors:
-        raise SystemExit(
-            f"Codex skill 同步失败且回滚不完整：{sync_error}; "
-            + "; ".join(rollback_errors)
-        ) from sync_error
-    raise SystemExit(f"Codex skill 同步失败，已恢复原状态：{sync_error}") from sync_error
-
-print(
-    f"codex_synced={len(enabled_names)} method={sync_method} "
-    f"links={sum(value == 'link' for value in published_modes.values())} "
-    f"copies={sum(value == 'copy' for value in published_modes.values())}"
-)
-'@
+$codexSyncCode = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'sync_custom_clients.py'), [System.Text.Encoding]::UTF8)
 
 Invoke-PythonCode -Code $registrationCode -Arguments @('validate', $SourceRoot, $DatabasePath, $Owner, $Repository, $Branch, $selectedSkills) | Out-Null
 if (-not $SkipCodexClientSync) {
@@ -813,7 +614,8 @@ if (-not $SkipCodexClientSync) {
         '-',
         $Owner,
         $Repository,
-        $selectedSkills
+        $selectedSkills,
+        $GeminiArgument
     )
     $codexValidation | ForEach-Object { Write-Output $_ }
 }
@@ -902,7 +704,7 @@ try {
         Assert-NoReparsePoints $targetDirectory
     }
 
-    Invoke-PythonCode -Code $registrationCode -Arguments @('register', $SourceRoot, $DatabasePath, $Owner, $Repository, $Branch, $selectedSkills) | Out-Null
+    Invoke-PythonCode -Code $registrationCode -Arguments @('register', $SourceRoot, $DatabasePath, $Owner, $Repository, $Branch, $selectedSkills, $InstallRoot, (Join-Path $PSScriptRoot 'cc-switch-compat.json')) | ForEach-Object { Write-Output $_ }
 
     if (-not $SkipCodexClientSync) {
         $codexSyncResult = @(
@@ -915,7 +717,8 @@ try {
                 $backupRoot,
                 $Owner,
                 $Repository,
-                $selectedSkills
+                $selectedSkills,
+        $GeminiArgument
             )
         )
     }

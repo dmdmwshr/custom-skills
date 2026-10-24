@@ -1,125 +1,131 @@
 ---
 name: cc-switch
-description: 通过终端管理本机 CC Switch 的自建及已登记 skills 仓库源、提交推送、备份、安装更新、SQLite 登记、启停、分支和排障。维护 CC Switch 受管 skill 时使用；只有用户明确选择非受管来源时才改用 skill-installer。
+description: 通过终端管理本机 CC Switch 的 Skill：版本与数据库结构兼容检查、检查第三方/官方 Skill 更新并生成可审阅清单、按用户范围经社区 CLI 单项或批量更新（先备份、回读启用开关与摘要）、自建 skills 仓库的精确发布（提交推送后同步、content_hash 记录）、仓库源登记、启停与排障。维护 CC Switch 受管 skill 或用户说“更新 skill / 有 N 个可更新”时使用；只有用户明确选择非受管来源时才改用 skill-installer。
+metadata:
+  x-custom-skill: true
+  x-source-repo: dmdmwshr/custom-skills
 ---
 
 # CC Switch
 
-执行平台：Windows。先核对本机依赖及用户配置；WSL/Linux 不直接套用此入口，远程载荷须单独核验。安装、发现和业务验收按目标平台分别报告，以对应记录及当前实测为准。
+执行平台：Windows（脚本在 Windows 上运行；WSL 里的 Claude/Codex 经 `/mnt/c` 或 `powershell.exe` 调用同一份）。先核对本机版本、数据库结构与用户授权；安装、发现和业务验收分别报告。
 
-本 skill 集中管理本机 CC Switch 的自建 skills 仓库源、源仓库内容、安装副本、Codex 实际发现目录和 SQLite 登记。日常安装与更新默认走终端脚本；桌面应用只用于用户明确要求的只读检查或终端链路故障后的人工排查，不作为常规点击入口。
+CC Switch 管三类东西，更新路径不同，**不要混用**：
 
-当前用户在当前请求中明确指定 skill、仓库和新建、修改、同步、启停或精确删除动作时，视为已授权该范围及必要的验证步骤；常规可恢复操作不重复确认。只有删除范围不清、仓库级删除或可能造成重大且难以恢复的损失时，才一次性确认精确对象、影响和备份位置。
+| 对象 | 更新方式 |
+| --- | --- |
+| 自建源 `dmdmwshr/custom-skills`（50 个自建 Skill） | 源码主仓在 WSL；单次任务内“提交→推送→精确发布→发现回读”闭环，走 `scripts/sync-custom-skills.ps1`。**没有后台自动更新**：库里 `skill_repos.enabled=1` 只表示“登记为启用的源”，不会定时拉取；不得为此新建计划任务 |
+| 第三方/官方源（openai、anthropics、kdocs、obsidian…） | 社区 CLI `cc-switch-cli skills check-updates / update`，经本 Skill 的 `scripts/cc_switch_control.py` 门禁、备份与回读 |
+| 桌面 GUI（用户在界面点“更新”） | 用户自己的操作；GUI 与 CLI 共用同一个库和安装目录，二者不要同时写 |
 
-## 适用范围
-
-- 查询 C:\Users\12070\.cc-switch\cc-switch.db 中的 skill_repos 与关联 skills 记录。
-- 管理自建源 dmdmwshr/custom-skills 的提交、推送、自动安装、自动更新、备份、安装副本和 Codex 发现目录核验。
-- 添加、启用、停用、改分支或删除其他 skills 仓库源。
-- 管理自建 skill 的新增、修改、删除和多客户端启用状态。
-- 排查源仓库、安装副本、数据库登记、同步脚本和 CC Switch 桌面应用状态。
+当前用户在本次请求里明确指定 Skill、范围和动作时，视为已授权该范围及必要的验证；可恢复的常规操作不重复确认。删除范围不清、仓库级删除、可能难以恢复的损失才集中确认一次。
 
 ## 硬规则
 
-1. 先做只读状态检查，再执行任何变更。
-2. 自建 skill 的安装与更新默认只运行 scripts/sync-custom-skills.ps1；脚本同时更新 CC Switch 安装副本、SQLite 登记和 Codex 实际发现目录。不通过可视化应用点击完成常规同步；终端链路失败时报告具体原因并停止，不静默改走 GUI。
-3. 自建 skill 内容只在 C:\Users\12070\.cc-switch\skills\自建skills 源仓库中修改；C:\Users\12070\.cc-switch\skills 下的安装副本和 C:\Users\12070\.codex\skills 下的受管入口只由同步脚本更新。
-4. 同步前必须确认源仓库已审查、测试、提交并推送，且本地分支为 main、工作区干净、HEAD 与 origin/main 一致；不满足时拒绝安装或更新。
-5. 直接写 SQLite 前必须先创建可恢复备份。同步脚本会先做 SQLite 在线备份，再更新安装副本、skills 登记和 Codex 受管入口；同步失败时恢复已替换的安装副本与数据库，Codex 发布阶段也独立回滚。
-6. 只使用源仓的受管同步入口；调用前核对脚本路径、版本与目标主机。
-7. Windows PowerShell 中不得用 Copy-Item -LiteralPath "<src>\*" 复制通配符；必须枚举子项并以 LiteralPath 逐项复制。
-8. 源目录、CC Switch 安装副本和备份目标中的重解析点（符号链接、联接等可能跳出边界的路径）一律拒绝处理。Codex 受管入口可按 CC Switch 同步模式使用符号链接，但只能精确指向对应安装副本；未知或越界目标必须停止。
-9. 不知道 CC Switch 的 skills.content_hash 算法时，不手工计算或覆盖 content_hash；同步脚本只更新来源、目录、元数据、时间和登记状态，保留已有 hash，新记录留空。
-10. 同步脚本只添加或更新源仓库当前列出的 skill，不因源目录缺失自动删除安装副本或数据库记录；删除必须按单个 skill 明确核对、备份和执行。
-11. 不为 cc-switch 的零散子功能新建独立 skill；相关管理功能集中维护在本 skill 及其 scripts 目录中。
-12. CC Switch 桌面应用、随附脚本和数据库结构可能随版本升级变化；不得把当前表、字段、目录、启用开关、迁移方式或 content_hash 规则当成永久契约。发现版本或结构变化时先停在只读检查，确认兼容性并备份后再写入。
+1. 先只读检查（`doctor`），再写。任何写库前先备份 SQLite。
+2. 自建 Skill 内容只在 WSL 源仓 `/srv/workspaces/02-software/02-25-custom-skills` 修改。Windows 只用**干净的发布镜像**（该仓 main 的 Windows 检出，`core.autocrlf=false`）并显式给 `-SourceRoot`；旧的 `C:\Users\12070\.cc-switch\skills\自建skills` 是带大量未提交差异的遗留检出，Slack 机器人还读它的兼容路径，**不得在其中开发、`git pull` 或整体覆盖**。`sync-custom-skills.ps1` 的 `-SourceRoot` 已改为必填。
+3. 安装副本（`C:\Users\12070\.cc-switch\skills\<名>`）和客户端目录（如 `C:\Users\12070\.codex\skills`）只由同步脚本或 CLI 更新，不手改。
+4. 同步前源仓必须已审查、测试、提交并推送，发布镜像在 main、工作区干净、HEAD 与 origin/main 一致；脚本不满足即拒绝。
+5. `content_hash` 是 CC Switch 判断“可更新”的依据。同步脚本现在会按上游算法写入（见下），**仅当数据库结构版本在 `scripts/cc-switch-compat.json` 的 `content_hash_verified_schemas` 内**；其它版本保持“保留旧值、新记录留空”并输出 `content_hash_not_written`。不得用普通文件 SHA-256 冒充，也不得手工 SQL 改 hash。
+6. 重解析点（符号链接/联接）在源目录、安装副本、备份目标中一律拒绝；Codex 受管入口只能精确指向对应安装副本。
+7. 不为零散功能新建 Skill、常驻服务或计划任务；管理功能集中在本 Skill 与其 scripts。
+8. 同步脚本只添加/更新源仓当前列出的 skill，不因源目录缺失删除安装副本或库记录；删除须按单个 skill 核对、备份、执行。
+9. 禁止把 CLI 指向正式库去“试一下”：CLI 的任何 `skills` 子命令启动时都会做数据库迁移/恢复，不是只读。只有 `--version`、`--help` 不进入启动状态。
 
-## 版本升级与数据库结构兼容性备注
+## 版本与结构兼容（先读这里）
 
-CC Switch 可能自动或手动升级。升级可能改变 cc-switch.db 的表、字段、索引、约束、SQLite user_version、settings 配置、安装目录、客户端开关和 content_hash 算法，也可能改变应用对仓库源和安装副本的同步方式。当前脚本只针对已核验的本机结构，不代表未来版本永久兼容。
+Desktop（4.x）和社区 CLI（5.x）分别发版，数据库用 `PRAGMA user_version` 表示结构版本，**两者必须一致**，且每次升级都可能改表、改开关列、改 hash 规则。已核验对照写在 `scripts/cc-switch-compat.json`：Desktop 4.0.18→结构 21、4.0.19→22；CLI 5.11.3→22、5.11.0–5.11.2→20。表里没有的版本一律视为 unknown，不猜测、不拿“最大值”代替。
 
-每次发现 CC Switch 版本变化、数据库更新时间异常、同步报错或应用完成迁移时，按以下顺序处理：
+`doctor` 的结论：
 
-1. 先停止写入，读取应用版本、SQLite PRAGMA user_version、sqlite_master，以及 skill_repos 和 skills 的 PRAGMA table_info；记录实际表名、字段、类型、默认值和约束。
-2. 对照 scripts/skill-repos.py、scripts/sync-custom-skills.ps1 的预期字段做只读兼容性判断；缺少字段、字段类型或约束异常、出现新必填字段、hash 规则不明时，标记为结构不兼容并停止，不猜测、不强行迁移。
-3. CC Switch 升级前和任何直接写库前都保留 SQLite 备份。应用已经把数据库迁移到新结构后，不要未经确认直接用旧备份覆盖新数据库；恢复前先确认版本和迁移方向可逆。
-4. 适配新版本后先跑 dry-run，再核对安装副本、仓库源、skills 登记和启用状态；不要因为旧版本的 content_hash 或表结构看起来相似，就声称新版本已兼容。
+| verdict | 含义 | 处理 |
+| --- | --- | --- |
+| `ready` | CLI 结构版本 = 库结构版本，Desktop 不低于库 | 可检查/更新 |
+| `needs_coordinated_upgrade` | CLI 与库结构版本不同（CLI 会迁移库或拒绝，且迁移后旧 Desktop 可能打不开） | 停止；由用户决定先升级 Desktop（关闭重开）再装对应 CLI，**不绕过版本拒绝** |
+| `cli_missing` / `cli_unusable` / `cli_version_unknown` / `desktop_version_unknown` | 缺少或未核验的版本组合 | 停止并报告；不自动下载/升级 |
+| `desktop_running`（写命令） | 桌面正在运行 | 须用户决定关闭，或明确加 `--allow-desktop-running` |
 
-## 自建 skill 生命周期
+CLI 稳定入口（待安装后使用）：`C:\Users\12070\.local\share\codex-tools\cc-switch-cli\current\cc-switch-cli.exe`；测试/隔离用 `--cli` 或环境变量 `CC_SWITCH_CLI` 覆盖，不把临时路径写成默认。
 
-- 修改已安装的自建 skill：只改源仓库，保持目录名与 frontmatter 的 name 一致；完成审查和测试后提交、推送，再运行终端同步脚本；最后核对源、安装副本、Codex 发现目录、数据库来源和启用状态。
-- 新建自建 skill：先在源仓库创建并验证 SKILL.md、agents/openai.yaml 和必要脚本，提交并推送；用户要求安装时直接运行终端同步脚本，不要求安装时只完成源仓库交付。
-- 删除自建 skill：先查询 skills 表确认 repo_owner=dmdmwshr、repo_name=custom-skills 和影响范围；备份安装副本与数据库；再对源目录、安装副本和对应登记做精确删除。单删 skill 不删除整个 dmdmwshr/custom-skills 仓库源。
-- 修改仓库源、分支、启用状态或删除仓库源：先用 scripts/skill-repos.py 做 dry-run，再在用户授权后带 --yes 执行；删除前列出关联 skills，默认只删 skill_repos 记录。
+## 工作流 A：检查并更新第三方/官方 Skill（用户说“有 58 个可以更新”）
 
-## 终端优先同步流程
-
-更新指定技能时，在下面的同步调用中添加 `-Skill personal-memory-on-demand`（替换为本次已授权目录名）。该选项同时限定复制、数据库登记和 Codex 发布；省略时仍沿用现有全源行为。范围明确的单技能任务使用精确选项。
-
-1. 在源仓库完成检查、测试、提交和推送。不要把未提交文件或未推送提交交给同步脚本。
-2. 先运行 dry-run，只检查源仓库、远端对齐、skill 数量、安装目标、Codex 受管入口和同步模式，不写数据库、不复制文件：
-   ~~~powershell
-   & "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -File "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\sync-custom-skills.ps1" -WhatIf
-   ~~~
-3. dry-run 通过后运行同一脚本完成同步。默认会 fetch --prune、pull --ff-only、创建带时间戳的备份、只复制 Git 已跟踪的 skill 文件、更新 SQLite 登记并保留已有 content_hash，随后按 CC Switch 的 Auto 规则把已启用技能发布到 Codex：已有物理目录继续用物理副本，已有链接或缺失入口优先用链接，链接不可创建时回退为物理副本。
-   ~~~powershell
-   & "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -File "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\sync-custom-skills.ps1"
-   ~~~
-4. 只在已经单独确认远端引用有效、且当前确实需要离线运行时使用 -SkipRemotePull；该参数不会跳过本地干净和 HEAD 对齐检查。-SkipCodexClientSync 只用于已明确隔离 Codex 客户端的恢复或测试，不作为日常同步选项。
-5. 同步后用固定 Python 查看仓库源和关联 skills，并比较源仓库、安装副本、Codex 发现目录的文件清单与 SHA-256；再启动独立 Codex 进程，只读核对技能发现，不发起模型回合。发现不一致时保留备份并停止继续覆盖：
-   ~~~powershell
-   $py = "C:\Users\12070\AppData\Local\Programs\Python\Python312\python.exe"
-   & $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" show --owner dmdmwshr --name custom-skills
-   git -C "C:\Users\12070\.cc-switch\skills\自建skills" status --short --branch
-   ~~~
-
-## 备份与恢复边界
-
-每次真实同步都会创建 C:\Users\12070\.cc-switch\skill-backups\<时间>-custom-skills-before-sync，至少包括：
-
-- cc-switch.db：SQLite 在线备份。
-- installed-copy：同步前已有安装副本的完整副本。
-- previous-live：替换前安装副本的可恢复移动副本。
-- failed-install-new：发生失败时撤回的新安装副本。
-- staging：本次同步前准备的源 skill 暂存副本。
-- codex-previous-live：替换前的 Codex 受管入口。
-- codex-staging：待发布到 Codex 的链接或物理副本。
-- codex-failed-new：发生失败时从 Codex 撤回的新入口。
-
-脚本只操作源仓库列出的精确 skill 目录，不删除其他安装内容。同步中途出现异常时，先报告错误和备份位置，不删除备份、不强行重试；恢复必须根据备份目录逐项核对后执行。
-
-## 数据库约定
-
-- 自建主源必须在 skill_repos 中登记为 owner=dmdmwshr、name=custom-skills、branch=main、enabled=1；不存在或停用时，同步脚本拒绝写入。
-- 同步脚本按 owner/repository:name 登记 skills，更新名称、描述、目录、来源、分支、说明链接和时间。
-- 已存在 skill 的各客户端启用开关保持不变；新登记的 skill 仅默认启用 Codex，Claude、Gemini、OpenCode 和额外客户端默认关闭。
-- content_hash 只读保留，不把文件 SHA-256 冒充 CC Switch 内部 hash。
-
-## 默认流程
-
-1. 使用固定 Windows PowerShell、固定 Python 3.12 和 Git 做只读预检。
-2. 自建 skill 先在源仓库审查、测试、提交和推送，再用 sync-custom-skills.ps1 dry-run。
-3. dry-run 通过后运行真实同步，读取输出的备份位置和数量。
-4. 用 skill-repos.py show、源/安装/Codex 三方比较和 git status 做回读核验，并用独立 Codex 进程只读验证自动发现。
-5. 只有用户明确要求排查 CC Switch 桌面应用时，才检查 C:\Users\12070\AppData\Local\Programs\CC Switch\cc-switch.exe 的文件或进程状态；不因常规同步主动打开、点击或刷新应用。
-
-## 脚本用法
-
-同步脚本位于本 skill 的 scripts/sync-custom-skills.ps1，仓库源登记脚本位于 scripts/skill-repos.py。推荐使用固定解释器：
+固定入口（Codex 物理副本；发布后可用，或直接用源码路径）：
 
 ~~~powershell
-$ps = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-$py = "C:\Users\12070\AppData\Local\Programs\Python\Python312\python.exe"
-$sync = "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\sync-custom-skills.ps1"
-
-& $ps -NoProfile -File $sync -WhatIf
-& $ps -NoProfile -File $sync
-& $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" list
-& $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" show --owner dmdmwshr --name custom-skills
-& $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" add --owner owner --name repo --branch main --enabled 1 --dry-run
-& $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" enable --owner owner --name repo --enabled 0 --dry-run
-& $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" set-branch --owner owner --name repo --branch main --dry-run
-& $py -X utf8 "C:\Users\12070\.cc-switch\skills\自建skills\cc-switch\scripts\skill-repos.py" remove --owner owner --name repo --dry-run
+$py  = "C:\Users\12070\AppData\Local\Programs\Python\Python312\python.exe"
+$ctl = "C:\Users\12070\.codex\skills\cc-switch\scripts\cc_switch_control.py"
+& $py -X utf8 $ctl doctor                          # 只读：版本/结构/开关/自建摘要/兼容结论（不运行桌面，不迁库）
+& $py -X utf8 $ctl check-updates --plan-out C:\path\updates-plan.json
 ~~~
 
-任何真实删除都必须先 dry-run，并且不得拿官方源或自建主源做测试性删除。
+1. **doctor**：verdict 不是 `ready` 就停，把 `reasons` 原样告诉用户。
+2. **check-updates**：先备份库，再调用 CLI 的 `skills check-updates`（它会回填缺失的 hash，所以不是只读，已备份），生成 `updates-plan.json`。每个条目含目录、来源仓库、各客户端启用开关、库内 hash、安装副本 hash、`problems`：
+   - `custom_repo_use_sync_script`：自建源，走工作流 B，不经 CLI；
+   - `local_modified`：安装副本与库内 hash 不一致（有人手改过）；
+   - `ambiguous_directory` / `not_in_database` / `installed_copy_missing`：不可自动更新。
+   清单默认 `selected:false`。把清单摘要（有问题的与可更新的分开）给用户，**让用户选范围**：全部可更新项、指定若干项、或不更新。
+3. **update**（先 dry-run，再 `--confirm`）：
+
+~~~powershell
+& $py -X utf8 $ctl update --plan C:\path\updates-plan.json            # dry-run，列出将更新的项
+& $py -X utf8 $ctl update --plan C:\path\updates-plan.json --confirm  # 执行（清单里 selected=true 的项）
+& $py -X utf8 $ctl update --skills alpha,beta --confirm               # 或明确点名
+~~~
+
+   - 范围内任何一项有 `problems`、或自上次生成清单后安装副本又变了（`drifted_since_plan`），**整批拒绝且不调用 CLI**；先解决或从范围剔除。
+   - 执行前备份库和所选安装副本到 `skill-backups\<时间>-cli-update\`；逐项调用 `cc-switch-cli skills update <目录>`，**不使用 `--all`**（`--all` 会把自建源也从 GitHub 覆盖下来）。
+   - 每项回读：各客户端启用开关与更新前一致（被关掉的“前门后端”不会被重新打开）、库内 hash 等于安装副本 hash、各已启用客户端目录内容一致。结果为 `updated` / `failed` / `unverified` / `drift`（开关被改，停止整批）/ `unknown`（超时，停止整批，不重放）。
+   - 退出码：0 全成功；1 有失败；3 门禁/范围拒绝；4 结果未知。失败逐项留证，不自动重试；普通已确认失败可在原授权内修正重试，未知结果先对账，不重放。
+4. **verify**：`& $py -X utf8 $ctl verify [--skills a,b]` 回读安装副本摘要、库内摘要、客户端目录；不带 `--skills` 时检查全部自建项。
+
+“58 个可更新”这类数字是 GUI 当时的检测；以本流程重新 `check-updates` 的实际清单为准。
+
+## 工作流 B：更新自建 Skill（单次任务内闭环）
+
+1. 在 WSL 源仓改、审查、测试，精确暂存并提交，推送 `origin/main`，用 `git ls-remote origin refs/heads/main` 回读与本地一致。
+2. WSL 受管 Skill（`platforms.json` 的 `managed_wsl_order`）用 `python3 scripts/publish_wsl_skills.py --skill <名>` 预演、`--apply`、`verify_wsl_skills.py`；Windows 专用 Skill 不装到 WSL。
+3. Windows：更新发布镜像到刚推送的提交，再 dry-run、真实同步（`-Skill` 限定本次对象；每次同步都带 `-SourceRoot`）：
+
+~~~powershell
+$mirror = "D:\12070\Documents\claude-codex\claude-enhancement-20261022\windows-mcp-v1-a1-resume\release-checkout"
+git -C $mirror fetch origin; git -C $mirror merge --ff-only origin/main      # 镜像须 core.autocrlf=false，工作区干净
+$sync = "$mirror\cc-switch\scripts\sync-custom-skills.ps1"
+$ps = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+& $ps -NoProfile -Command "& '$sync' -SourceRoot '$mirror' -SkipRemotePull -Skill 'skill-a','skill-b' -WhatIf"
+& $ps -NoProfile -Command "& '$sync' -SourceRoot '$mirror' -SkipRemotePull -Skill 'skill-a','skill-b'"
+~~~
+
+   （用 `-Command` 才能传多个 `-Skill`；`-File` 会把逗号列表当成一个字符串。）脚本会：备份库与现有安装副本→只复制 Git 已跟踪文件→登记 SQLite（保留各客户端启用开关；新记录仅启用 Codex）→**按上游算法写入 content_hash**（仅已核验结构版本）→按 Auto 规则精确发布到已启用的 Codex / Gemini 发现目录（两者同批回滚）；任一步失败，安装副本和库恢复到同步前。
+4. 回读：`& $py -X utf8 $ctl verify --skills skill-a,skill-b`（库内 hash=安装副本 hash=客户端目录）；源/镜像/安装/Codex/Gemini 目录逐文件比较；独立 Codex 进程只读核对发现（不发起模型回合）。GUI 此后不应再把刚发布的自建项显示为“待更新”。
+5. 机器人旧路径等外部消费者是否需要同步，按各自项目规则另行处理，不在此脚本里覆盖。
+
+## content_hash 算法（已核验，Desktop 4.0.18 / 4.0.19）
+
+上游 `compute_dir_hash`：递归目录下所有**非点开头**的文件/目录；文件按相对路径**组件字节序**排序（`a/b` 排在 `a-b/c` 之前，不是整串字符串排序）；逐文件向同一个 SHA-256 喂入 `UTF8(相对路径，/ 分隔) + NUL + 原始字节 + NUL`。`cc_switch_control.py hash <目录>` 和同步脚本用同一实现；本机 50 个自建安装副本与库内 hash 逐项吻合。已比对 Desktop 4.0.18 / 4.0.19 的两段完整上游函数，逐字相同；本同步器已核验结构21和22。其他结构在重新核验前保留旧hash、新记录留空并明确提示。
+
+## 备份与恢复
+
+- 自建同步：`C:\Users\12070\.cc-switch\skill-backups\<时间>-custom-skills-before-sync`（cc-switch.db、installed-copy、previous-live、failed-install-new、staging、codex-*）。
+- CLI 检查/更新：`...\skill-backups\<时间>-cli-check-updates` 与 `<时间>-cli-update`（cc-switch.db、settings.json（原来存在时）、installed-before\<目录>、update-result.json）。
+- 异常时先报告备份位置，不删除备份、不强行重试；恢复前核对库的结构版本方向，**不要用旧结构备份覆盖已迁移的新库**。
+
+## 仓库源与其他操作
+
+`scripts/skill-repos.py list|show|add|enable|set-branch|remove`（默认只读或 `--dry-run`，真实写入带 `--yes`，不对官方源和自建主源做测试性删除）。删除自建 Skill：确认 `repo_owner=dmdmwshr、repo_name=custom-skills`，备份安装副本与库，再精确删除源目录、安装副本和登记，单删不删整个源。桌面应用只在用户明确要求排查时检查文件/进程，不为常规流程打开或点击。
+
+## 升级本身
+
+CC Switch 升级是版本组合问题：`doctor` 先报版本与结构；升级（桌面 4.0.19、CLI 5.11.3 等）需要用户决定关闭重开桌面，由根 Codex/维护者执行并记录恢复点，装好后更新 `cc-switch-compat.json` 的已核验项并重跑本 Skill 的测试，再恢复工作流 A/B。本 Skill 不自动下载、安装或升级 Desktop/CLI。
+
+## 测试
+
+`scripts/test_cc_switch_control.py`（模拟 CLI + 合成库，覆盖版本拒绝、范围、手改/并发漂移、开关保持、失败/超时/未知、回读）；`scripts/test_selected_skill_sync.py`（Windows，真实 PowerShell 同步脚本 + 隔离夹具，覆盖 hash 写入/保留/未知结构）。
+
+## 原生CLI目录绑定与隔离
+
+- 备份、检查和原生CLI必须绑定同一个配置目录；`--db` / `--ssot-root` 只能确认该目录下的 `cc-switch.db` / `skills`，不能另指一套对象。当前仅核验 `skillStorageLocation=cc_switch`。
+- 生产客户端目录从正式设置及 `CODEX_HOME` / `CLAUDE_CONFIG_DIR` 读取；生产 `--client-dir` 只能核对既有真实映射，不能另设校验对象。SSOT禁止重解析点；Codex等客户端的精确SSOT受管链接允许，其余根、嵌套或越界链接拒绝。
+- `--config-dir` 指定另一套状态时进入隔离测试：目录必须与真实CC/客户端根互不重叠，所有 `--client-dir` 必须在该配置目录内并以 `skills` 为末级（原生CLI固定在配置根追加该目录名）；只在CLI写命令已备份后写入影子settings的正式目录覆盖，并对该子进程设置 `CC_SWITCH_CONFIG_DIR`、`CC_SWITCH_TEST_HOME`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR` 等。只改变HOME/USERPROFILE不足以隔离Windows Known Folder API。
+- 所有 `enabled_*` 列动态保留和冻结；未知且启用的客户端明确阻断，不能漏验后报成功。当前实际schema22是9个客户端开关（含kimi），不把未映射/未核验算通过。
+
+自建发布器当前覆盖实际使用的 Codex / Gemini；所选 Skill 还有其他启用客户端时在写入前明确拒绝，需先核验并适配对应发布路径。其余行的开关不改。生产 Gemini 路径从正式设置 geminiConfigDir 或本机默认位置取得；非生产数据库必须显式传 `-GeminiSkillsRoot`，不会继承真实客户端。`-SkipCodexClientSync` 保留历史参数名，代表跳过整个客户端发布阶段，仅用于明确隔离的恢复或元数据测试。客户端阶段的暂存、旧副本、失败副本仍沿用 codex-* 备份目录，内部按客户端分区；任一客户端发布失败会恢复同批全部客户端，再由外层恢复安装副本和库。

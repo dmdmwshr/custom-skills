@@ -1,7 +1,7 @@
 interface:
   display_name: "CC Switch 终端技能管理"
-  short_description: "终端优先自动安装、更新、备份、登记和核验自建技能仓库"
-  default_prompt: "使用 $cc-switch 通过终端检查、推送、备份、安装和更新自建技能，不使用可视化点击。"
+  short_description: "终端优先：版本兼容检查、经社区 CLI 检查/更新第三方 Skill、自建 Skill 精确发布与回读"
+  default_prompt: "使用 $cc-switch 通过终端检查 CC Switch 版本兼容与 Skill 更新，按用户范围更新并回读，不使用可视化点击。"
 
 policy:
   allow_implicit_invocation: true

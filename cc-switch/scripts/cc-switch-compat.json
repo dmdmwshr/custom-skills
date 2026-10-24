@@ -1,0 +1,17 @@
+{
+  "_comment": "已核验的 CC Switch 版本 → SQLite user_version（结构版本）。只收有证据的版本；表里没有的版本一律按 unknown 处理，不猜测，也不用最大值代替。证据来自 2026-10-24 仓外核验：Desktop 4.0.18 实机库 user_version=21；Desktop 4.0.19 源码 db 模块 schema 22；社区 CLI 各 release 源码的 SCHEMA_VERSION（5.11.3=22，5.11.2/5.11.1/5.11.0=20）。content_hash 算法：Desktop 4.0.18（schema 21）已与 50 个实机安装逐项核对；Desktop 4.0.19 的 compute_dir_hash/collect_files_for_hash 与 4.0.18 逐字节相同（evidence: prune-v3/cc-switch-upgrade/HASH_ALGORITHM_4_0_19.json，algorithm_sha256=3b840902…），且生产库已是 schema 22，故 22 也列入已核验。",
+  "desktop": {
+    "4.0.18": 21,
+    "4.0.19": 22
+  },
+  "cli": {
+    "5.11.3": 22,
+    "5.11.2": 20,
+    "5.11.1": 20,
+    "5.11.0": 20
+  },
+  "content_hash_verified_schemas": [
+    21,
+    22
+  ]
+}

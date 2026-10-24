@@ -1,6 +1,6 @@
 {
   "skill_name": "cc-switch",
-  "skill_version": "1.0.0",
+  "skill_version": "1.1.0",
   "x-custom-skill": true,
   "x-managed-by": "cc-switch",
   "x-source-repo": "dmdmwshr/custom-skills",
@@ -14,6 +14,9 @@
     "skill_manifest.json",
     "agents/openai.yaml",
     "scripts/skill-repos.py",
-    "scripts/sync-custom-skills.ps1"
+    "scripts/sync-custom-skills.ps1",
+    "scripts/cc_switch_control.py",
+    "scripts/cc-switch-compat.json",
+    "scripts/sync_custom_clients.py"
   ]
 }
