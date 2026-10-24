@@ -211,6 +211,14 @@ class Index:
         return found
 
 
+    def last_event(self, event: str, key: str):
+        found = None
+        for row in self.entries():
+            if row.get("event") == event and row.get("source_key") == key:
+                found = row
+        return found
+
+
 class Lock:
     """每来源一个排他锁；陈旧锁不自动清除，报告未知交人工对账。
 
@@ -299,6 +307,12 @@ def finalize_media(path: Path, url: str, platform: str, source_id: str, title: s
     return receipt
 
 
+def _own_fetch(index: Index, key: str, path: Path) -> bool:
+    """该文件是本工具此前从同一来源实际下载的（路径与摘要都与 fetched 记录一致）。"""
+    row = index.last_event("fetched", key)
+    return bool(row and row.get("file_path") == str(path) and row.get("sha256") == sha256_file(path))
+
+
 def cmd_download(args, config):
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -341,7 +355,7 @@ def cmd_download(args, config):
                 return receipt
             # 已登记成品被改动：不在原路径继续下载，也不把变动文件重新签成原来源
             index.append("integrity_mismatch", source_key=key, source_url=url, file_path=str(existing), expected_sha256=prior.get("sha256"))
-            raise IntakeError("索引中的已下载成品摘要已变化，疑似被人工或其他程序改动；原件、原回执与索引保持不动。"
+            raise IntakeError("索引中的已下载成品摘要已变化，疑似被人工或其他程序改动；原件与原回执不动，原索引历史保留并追加核验差异记录。"
                               "请先核对该文件，需要重新下载请先移走它，需要接受现状请用 --adopt 登记。")
         before = {p: (p.stat().st_size, p.stat().st_mtime_ns) for p in out_dir.iterdir() if p.is_file()}
         command = ytdlp_base(ytdlp) + ["--continue", "--no-overwrites", "--retries", "3", "--fragment-retries", "3",
@@ -366,7 +380,10 @@ def cmd_download(args, config):
         final = Path(printed[-1])
         resolved = final if final.is_absolute() else out_dir / final
         stat = resolved.stat() if resolved.is_file() else None
-        if stat is not None and before.get(resolved) == (stat.st_size, stat.st_mtime_ns):
+        if stat is not None and before.get(resolved) != (stat.st_size, stat.st_mtime_ns):
+            # 本次实际写入的文件：先记传输证据，核验（探测）失败时下次可凭它接续，不必删文件重下
+            index.append("fetched", source_key=key, source_url=url, file_path=str(resolved), sha256=sha256_file(resolved), bytes=stat.st_size)
+        if stat is not None and before.get(resolved) == (stat.st_size, stat.st_mtime_ns) and not _own_fetch(index, key, resolved):
             # --no-overwrites 返回了本次没有写入的既有文件：来源未核实，不签成功回执
             index.append("failed", source_key=key, source_url=url, category="preexisting_unverified")
             raise IntakeError(f"目标路径已有本次未写入的文件：{resolved.name}；来源无法核实，未生成回执。"
@@ -676,16 +693,46 @@ def generation_records(attach: Path) -> list:
     return rows
 
 
+BUNDLE_NAMES = ("markdown-source.md", "bilinote-result.json", "task-result.json", "transcript.json", "transcript.txt",
+                "context.json", "backend-result.json", "backend-status.json")
+
+
+def bundle_state(directory: Path) -> dict:
+    return {name: sha256_file(directory / name) for name in BUNDLE_NAMES if (directory / name).is_file()}
+
+
+def bundle_intact(directory: Path, records: list) -> bool:
+    """附件束与该目录最近一次生成记录逐文件一致；目录里没有任何束文件也视为空闲可用。"""
+    current = bundle_state(directory)
+    mine = [r for r in records if r.get("bundle_dir") == str(directory)]
+    if not mine:
+        return not current
+    return current == mine[-1].get("bundle")
+
+
 def find_generation(attach_root: Path, fingerprint: str, source_id: str | None):
-    """同一请求指纹且笔记仍在的最近一次生成记录；无变化的重复请求据此复用，不再调用云模型。"""
+    """复用只命中当前真实匹配的成果：附件束逐文件摘要一致、笔记仍在且未被后续生成替换。
+
+    返回 (记录, 附件束目录, 笔记是否被人工改动)；记录指向已被覆盖的可变路径时不命中。
+    """
     if source_id:
         dirs = [attach_root / source_id]
     else:
         dirs = sorted(d for d in attach_root.iterdir() if d.is_dir()) if attach_root.is_dir() else []
     for directory in dirs:
-        for row in reversed(generation_records(directory)):
-            if row.get("fingerprint") == fingerprint and Path(str(row.get("note_path", ""))).is_file():
-                return row, directory
+        records = generation_records(directory)
+        for row in reversed(records):
+            note = Path(str(row.get("note_path", "")))
+            bundle = Path(str(row.get("bundle_dir", "")))
+            if row.get("fingerprint") != fingerprint or not note.is_file() or not row.get("bundle") or bundle_state(bundle) != row["bundle"]:
+                continue
+            digest = sha256_file(note)
+            if digest == row.get("note_sha256"):
+                return row, bundle, False
+            others = {r.get("note_sha256") for r in records if r.get("note_path") == row["note_path"] and r is not row}
+            if digest in others:
+                continue  # 笔记已被另一次生成替换，该记录不再代表现状
+            return row, bundle, True
     return None
 
 
@@ -708,7 +755,31 @@ def _write_progress(path, task, status, platform, url, uploaded):
                                 "uploaded_path": uploaded})
 
 
+def _unknown_submit(args, resume, payload, url, uploaded, message):
+    _write_progress(args.progress_receipt, resume["task_id"] if resume else None, "unknown", payload["platform"], url, uploaded)
+    raise UnknownOutcome(message)
+
+
+def _guard_progress_receipt(path):
+    """进度回执已有未结清状态（提交中/unknown/处理中）时不覆盖、不重发；终态回执先复制保留再写。"""
+    if not path or not Path(path).is_file():
+        return
+    try:
+        old = read_json(Path(path))
+        status = str(old.get("status", "")) if isinstance(old, dict) else ""
+    except (OSError, ValueError):
+        old, status = None, ""
+    if status in ("SUCCESS", "FAILED"):
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        shutil.copy2(path, Path(path).with_name(f"{Path(path).stem}.prev-{stamp}-{uuid.uuid4().hex[:6]}{Path(path).suffix}"))
+        return
+    task = old.get("task_id") if isinstance(old, dict) else None
+    raise UnknownOutcome(f"进度回执已有未结清状态（{status or '无法读取'}，task_id={task}），可能已提交过：不覆盖、不重发。"
+                         "先用 status --query-backend 对账，确认未提交后换新的进度回执路径。")
+
+
 def _note(args, config, state):
+    _guard_progress_receipt(args.progress_receipt)
     url = args.video_url
     template = Path(args.template or DEFAULT_TEMPLATE).read_text(encoding="utf-8-sig")
     platform = args.platform.strip().lower() if args.platform and args.platform.strip() else detect_platform(url)
@@ -730,13 +801,14 @@ def _note(args, config, state):
     if not args.resume_progress_receipt:
         reuse = find_generation(Path(expand(str(config["attachment_roots"][platform]))), fingerprint, media["source_id"] if media else None)
         if reuse:
-            row, directory = reuse
+            row, directory, modified = reuse
             state["task_id"] = str(row.get("task_id"))
             _write_progress(args.progress_receipt, row.get("task_id"), "SUCCESS", platform, url, None)
             return {"success": True, "platform": platform, "source_id": row.get("source_id") or directory.name,
                     "task_id": str(row.get("task_id")), "note_path": row["note_path"], "attachments_dir": str(directory),
                     "backend_result_path": row.get("backend_result_path"),
-                    "message": "同一请求已有核验成果，直接复用，未再次调用模型；既有笔记与附件未改动。"}
+                    "message": "同一请求已有核验成果，直接复用，未再次调用模型；" + (
+                        "笔记已被人工修改（modified/protected），按现状保留，不代表原生成版本。" if modified else "既有笔记与附件未改动。")}
     backend = Backend(base)
     health = backend.call("/api/sys_health")
     if (health or {}).get("code") != 0:
@@ -774,8 +846,12 @@ def _note(args, config, state):
             # 请求可能已被受理：进度回执标 unknown 并保留，不当作可重派的明确失败
             _write_progress(args.progress_receipt, resume["task_id"] if resume else None, "unknown", payload["platform"], url, uploaded)
             raise
-        if (created or {}).get("code") != 0 or not (created.get("data") or {}).get("task_id"):
-            raise IntakeError(f"发起任务失败：{(created or {}).get('msg')}")
+        if not isinstance(created, dict) or "code" not in created:
+            _unknown_submit(args, resume, payload, url, uploaded, "发起任务返回空或无法识别的确认，任务可能已受理，保留进度，先对账不重发。")
+        if created["code"] != 0:
+            raise IntakeError(f"发起任务失败：{created.get('msg')}")  # 应用层明确拒绝
+        if not isinstance(created.get("data"), dict) or not created["data"].get("task_id"):
+            _unknown_submit(args, resume, payload, url, uploaded, "发起任务返回成功但缺少任务编号，任务可能已受理，保留进度，先对账不重发。")
         state["task_id"] = str(created["data"]["task_id"])
         if resume and state["task_id"] != resume["task_id"]:
             raise IntakeError("恢复返回了其他任务编号，结果未验收。")
@@ -825,10 +901,36 @@ def _note(args, config, state):
     attach.mkdir(parents=True, exist_ok=True)
     backend_result = result_dir / f"{task}.json"
     backend_status = result_dir / f"{task}.status.json"
-    raw_md, result_json, task_json = attach / "markdown-source.md", attach / "bilinote-result.json", attach / "task-result.json"
-    tr_json, tr_txt, ctx = attach / "transcript.json", attach / "transcript.txt", attach / "context.json"
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + task[:8]
+    records = generation_records(attach)
+    prior_notes = existing_notes(note_root, source_id, platform)
+    recorded = {}
+    for row in records:
+        recorded.setdefault(str(row.get("note_path")), set()).add(row.get("note_sha256"))
+    canonical_note = note_root / f"{source_id} - {safe_title}.md"
+    candidate = False
+    previous_note = None
+    if not canonical_note.exists():
+        note_path = canonical_note
+    elif canonical_note in prior_notes and sha256_file(canonical_note) in recorded.get(str(canonical_note), set()):
+        # 本工具生成且未被改动的旧版本：归档后原地更新，仍保持一视频一笔记
+        note_path = previous_note = canonical_note
+    else:
+        # 人工、已修改或来源不明的笔记一律不动：新结果写入带追溯标记的候选笔记
+        candidate = True
+        note_path = note_root / f"{source_id} - {safe_title} (候选 {stamp}).md"
+    # 附件：主附件束仍是本工具未改动的生成成果才原路径更新（旧版本归档）；否则新结果用独立附件束，原路径原字节不动
+    if candidate or not bundle_intact(attach, records):
+        bundle = attach / "candidates" / stamp
+        bundle.mkdir(parents=True, exist_ok=True)
+    else:
+        bundle = attach
     history = attach / "history" / stamp
+    if previous_note is not None:
+        history.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(previous_note, history / "previous-note.md")
+    raw_md, result_json, task_json = bundle / "markdown-source.md", bundle / "bilinote-result.json", bundle / "task-result.json"
+    tr_json, tr_txt, ctx = bundle / "transcript.json", bundle / "transcript.txt", bundle / "context.json"
 
     def put(path: Path, data: bytes) -> None:
         publish_file(path, data, history)
@@ -841,7 +943,7 @@ def _note(args, config, state):
     canon = canonical_video_url(platform, source_id, url)
     put(ctx, json_bytes({"skill_name": config.get("note_skill_name", "bilinote-video-note"), "generated_at": now_iso()[:19], "source_url": canon,
                          "source_platform": platform, "source_id": source_id, "provider_id": provider, "model_name": model,
-                         "task_id": task, "note_root": str(note_root), "attachments_dir": str(attach),
+                         "task_id": task, "note_root": str(note_root), "attachments_dir": str(bundle),
                          "backend_result_path": str(backend_result), "backend_status_path": str(backend_status),
                          "processing_platform": payload["platform"], "verified_media_sha256": media["sha256"] if media else None,
                          "verified_media_receipt": media["receipt_path"] if media else None,
@@ -850,25 +952,8 @@ def _note(args, config, state):
     copies = {}
     for src, name in ((backend_result, "backend-result.json"), (backend_status, "backend-status.json")):
         if src.is_file():
-            copies[name] = attach / name
+            copies[name] = bundle / name
             put(copies[name], src.read_bytes())
-    prior_notes = existing_notes(note_root, source_id, platform)
-    recorded = {}
-    for row in generation_records(attach):
-        recorded.setdefault(str(row.get("note_path")), set()).add(row.get("note_sha256"))
-    canonical_note = note_root / f"{source_id} - {safe_title}.md"
-    candidate = False
-    if not canonical_note.exists():
-        note_path = canonical_note
-    elif canonical_note in prior_notes and sha256_file(canonical_note) in recorded.get(str(canonical_note), set()):
-        # 本工具生成且未被改动的旧版本：归档后原地更新，仍保持一视频一笔记
-        history.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(canonical_note, history / "previous-note.md")
-        note_path = canonical_note
-    else:
-        # 人工、已修改或来源不明的笔记一律不动：新结果写入带追溯标记的候选笔记
-        candidate = True
-        note_path = note_root / f"{source_id} - {safe_title} (候选 {stamp}).md"
     links = [("BiliNote 原始 Markdown", raw_md), ("转写全文", tr_txt), ("转写 JSON", tr_json), ("任务结果 JSON", task_json),
              ("上下文 JSON", ctx)]
     if "backend-result.json" in copies:
@@ -883,7 +968,7 @@ def _note(args, config, state):
         "{{tags_block}}": "\n".join(f"- '{v}'" for v in tags), "{{related_block}}": "\n".join(f"- '{v}'" for v in defaults["related_links"]),
         "{{skill_name}}": config.get("note_skill_name", "bilinote-video-note"), "{{source_platform}}": platform, "{{source_url}}": canon,
         "{{source_id}}": source_id, "{{provider_id}}": provider, "{{model_name}}": model, "{{task_id}}": task,
-        "{{attachments_dir}}": str(attach).replace("\\", "/"), "{{generated_at}}": now_iso()[:19], "{{title}}": title,
+        "{{attachments_dir}}": str(bundle).replace("\\", "/"), "{{generated_at}}": now_iso()[:19], "{{title}}": title,
         "{{source_url_markdown}}": f"[原始视频链接](<{canon}>)", "{{body_markdown}}": normalize_markdown(str(result.get("markdown") or "")),
         "{{attachments_links}}": link_text}
     rendered = template
@@ -897,13 +982,14 @@ def _note(args, config, state):
     with open(attach / "generations.jsonl", "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"ts": now_iso(), "task_id": task, "source_id": source_id, "fingerprint": fingerprint,
                                  "note_path": str(note_path), "note_sha256": sha256_file(note_path), "model_name": model,
-                                 "provider_id": provider, "candidate": candidate, "backend_result_path": str(backend_result)},
+                                 "provider_id": provider, "candidate": candidate, "backend_result_path": str(backend_result),
+                                 "bundle_dir": str(bundle), "bundle": bundle_state(bundle)},
                                 ensure_ascii=False) + "\n")
     if args.index_work_root:
         Index(Path(args.index_work_root)).append("noted", source_key=source_key(platform, source_id), source_id=source_id,
                                                  platform=platform, task_id=task, note_path=str(note_path))
     return {"success": True, "platform": platform, "source_id": source_id, "task_id": task, "note_path": str(note_path),
-            "attachments_dir": str(attach), "backend_result_path": str(backend_result),
+            "attachments_dir": str(bundle), "backend_result_path": str(backend_result),
             "message": ("该来源已有人工/已修改/来源不明的笔记，原笔记未改动，新结果写入候选笔记。" if candidate
                         else "BiliNote 视频笔记已写入 Obsidian。")}
 
@@ -951,7 +1037,7 @@ def cmd_resume(args, config):
                 # 完成态回执不等于成品通过：不自动重下，不改写回执
                 return {**status, "success": False, "action": "resume", "outcome": "failed",
                         "message": "回执为 completed，但媒体文件缺失或字节数/摘要与回执不一致；未重新下载，回执与现场保持不动。"}
-            return {"success": True, "action": "resume", "message": "下载已完成并核验通过，仅回读，不重复下载。", **status}
+            return {**status, "success": True, "action": "resume", "message": "下载已完成并核验通过，仅回读，不重复下载。"}
         raise IntakeError("下载回执未完成；请用 download 对同一 URL 重跑（yt-dlp 沿 .part 续传）。")
     raise IntakeError("resume 需要 --progress-receipt（笔记）或 --receipt（下载）。")
 

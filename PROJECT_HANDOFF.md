@@ -190,3 +190,8 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 - 浏览器：`playwright-browser-control`、`windows-from-wsl`、`native-gui-control` 文案改为默认 `ego-browser`，Playwright/Chrome/Edge 为备用，需用户明确指定。
 - `scripts/tests` 有一项既有失败（`pyweixin-rpa` 缺平台声明），与本批无关，未改。
 - 发布阶段待办：推送；`publish_wsl_skills.py --skill` 发布 playwright-browser-control、windows-from-wsl、native-gui-control；video-intake 不在 WSL 受管名单，需同步到 Windows 副本与机器人旧路径 shim 实际读取的核心并做隔离契约验证；删除 `~/.claude/skills/cua-driver` 手工链接（同步器不会重建它）。
+
+### 阶段 4 返工（对 5f7cc4a 的 Codex 复验 R1–R5）
+
+- R1 下载成功后先记 `fetched` 传输证据，探测被拒后 `--allow-silent` 凭同路径同摘要证据接续；R2 复用须附件束逐文件摘要一致且笔记未被后续生成替换，否则重新生成；R3 受保护笔记/附件原路径原字节不动，新结果用 `candidates/<时间>/` 独立附件束；R4 POST 空/缺编号确认记 unknown；R5 未结清的进度回执不覆盖不重发；F1 文案、resume 成功 action 小修。
+- Windows 真实工具链全套（yt-dlp/ffmpeg/ffprobe + 旧 PS 入口）见仓外 `STAGE4_REWORK_RESULT.md`。

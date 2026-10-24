@@ -22,7 +22,7 @@ metadata:
 | `resume --progress-receipt OLD --new-progress-receipt NEW --receipt R --url U` | 恢复笔记；对下载回执则只回读 | 原失败回执与缓存哈希保留，恢复基线已存在则拒绝 |
 | `index list|check --work-root W [--source-key K|--sha256 H]` | 追加式索引查询 | `video-intake-index.jsonl` 仅追加 |
 
-退出码：0 成功；1 明确失败；2 参数错误；3 结果未知（超时、遗留锁）。未知结果先查原回执、`.part`、索引与后端状态，不重放；陈旧锁 `locks/*.lock` 不自动清除。下载超时会保留带 `unknown` 标记的锁，确认旧进程已结束后用 `download --clear-unknown-lock` 才能续传。笔记提交 POST 的连接中断/回包丢失/5xx 记为 unknown（进度回执状态 `unknown`，不重发）；BiliNote 任务明确 FAILED 立即返回失败并保留原 task_id。
+退出码：0 成功；1 明确失败；2 参数错误；3 结果未知（超时、遗留锁）。未知结果先查原回执、`.part`、索引与后端状态，不重放；陈旧锁 `locks/*.lock` 不自动清除。下载超时会保留带 `unknown` 标记的锁，确认旧进程已结束后用 `download --clear-unknown-lock` 才能续传。笔记提交 POST 的连接中断/超时/回包丢失/5xx，以及 HTTP 成功但确认为空或缺任务编号，都记为 unknown（进度回执状态 `unknown`，不重发）；仅连接被拒、域名解析失败、4xx 和 `code≠0` 的应用层拒绝是明确失败。`--progress-receipt` 指向的回执若已是 submitting/unknown/处理中，直接返回 unknown，不覆盖、不重发（先 `status --query-backend` 对账，确认未提交再换新路径）；终态回执先复制 `.prev-*` 再写。BiliNote 任务明确 FAILED 立即返回失败并保留原 task_id。
 
 ## 工具与配置
 
@@ -32,8 +32,8 @@ yt-dlp / ffmpeg / ffprobe 优先级：命令行参数 > 环境变量 `VIDEO_INTA
 
 - 笔记平台只支持 `bilibili`、`douyin`；已核验媒体上传入口目前只支持抖音，且只发往本机回环的 BiliNote；回执的来源、编号、大小、SHA-256 必须与文件一致。
 - 站点登录资料、Cookie、令牌不入参数、日志、回执或源码；抖音解析不兼容时的受管浏览器回退属于调用方（01-08 / 03-05 机器人），完成后用 `download --adopt` 登记。
-- 一视频一笔记、一视频一附件目录；`source_id` 按前文元数据精确匹配。同一请求（来源、媒体摘要、模型、模板、参数）已有成果则直接复用、不再调用云模型；有真实差异才重新生成：本工具生成且未改动的旧笔记归档后原地更新，人工/已修改/来源不明的笔记一律不动，新结果写入带追溯标记的候选笔记；被覆盖的旧附件归档到 `附件/history/`。转写全文和任务 JSON 放附件，不入正文；视频正文不写入个人事实记忆。
-- 已登记成品摘要变化（人工或异常改动）时 `download` 拒绝并保留原件/回执/索引；`--no-overwrites` 返回本次未写入的既有文件不签成功回执（确认来源后用 `--adopt`）；内容不同的既有回执改名为 `.prev-*` 保留。`resume --receipt` 对 completed 回执核对文件、字节数与摘要，不符则 exit 1，不自动重下。
+- 一视频一笔记、一视频一附件目录；`source_id` 按前文元数据精确匹配。同一请求（来源、媒体摘要、模型、模板、参数）且当前附件束逐文件摘要仍与生成记录一致、笔记未被后续生成替换时才直接复用、不再调用云模型（笔记被人工改过则按现状复用并标 modified）；A→B→A 这类旧记录已被替换的不命中。有真实差异才重新生成：本工具生成且未改动的旧笔记及未改动的附件束归档（`history/`）后原地更新；人工/已修改/来源不明的笔记或附件一律原路径原字节不动，新结果写入带追溯标记的候选笔记，并使用独立附件束 `附件/<id>/candidates/<时间>/`。转写全文和任务 JSON 放附件，不入正文；视频正文不写入个人事实记忆。
+- 已登记成品摘要变化（人工或异常改动）时 `download` 拒绝并保留原件/回执/索引；`--no-overwrites` 返回本次未写入的既有文件不签成功回执，除非索引有本工具对同一路径同摘要的 `fetched` 传输记录（探测因无音轨等被拒后，显式 `--allow-silent` 可直接接续，不重下；其余确认来源后用 `--adopt`）；内容不同的既有回执改名为 `.prev-*` 保留。`resume --receipt` 对 completed 回执核对文件、字节数与摘要，不符则 exit 1，不自动重下。
 - 真实原视频、笔记、Obsidian、业务台账、失败/未知回执只读保留；验证只用合成媒体、本地站点和 BiliNote 桩（见 `tests/`）。
 - 日常调用方：01-08 视频链接收存与 03-05 `slack-12070-agent`（旧路径 `…/bilinote-video-note/scripts/save-video-note.ps1` 兼容入口保持参数与退出行为）。
 - 官方依据：[yt-dlp](https://github.com/yt-dlp/yt-dlp)。
