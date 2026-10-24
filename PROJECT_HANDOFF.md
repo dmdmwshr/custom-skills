@@ -1,3 +1,5 @@
+当前写入者：CAPABILITY-MERGE-20261023/v3源码、安装与必要回读已交付，本轮实际文件占位释放；其他需求及历史恢复链保持。
+
 ## 2026-10-23 用户直接指令：能力整合 CAPABILITY-MERGE-20261023/v1 阶段2（实际写者 WSL Claude）
 
 - 来源：用户直接指令及明确“还是让 claude 执行包括项目优化合并”；Codex 协调与独立验收，范围与审查纠偏见仓外 `D:/12070/Documents/工作台管理报告/能力整合-20261023/`（任务范围.md、PHASE1_REVIEW_AND_PHASE2_SCOPE.md）。本节写入期间的唯一源仓写者为实际 Claude 会话 `1588e8b8-933d-44db-a6c1-60efa553e496`；本地候选提交后释放，其他脏文件无。
@@ -209,3 +211,17 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 - drawio-local：改用官方 draw.io Desktop 32.6.1 命令行（便携解压到 `C:\Users\12070\.local\share\codex-tools\drawio-desktop\32.6.1`，`current` 联接），带 Mermaid/CSV 转换、ELK 预设、正交避障（本机实测名 `orthogonalEdge`，官方文档的 `libavoid` 在 32.6.1 报 Unknown layout）、PNG/SVG/PDF 导出、多页读写与形状检索脚本、本地参考文档；旧 `@drawio/mcp` 8 个工具逐项对照见仓外 DRAWIO_EQUIVALENCE.md，未覆盖项已列出。旧 MCP 注册与 npm 包本批未动。
 - 审计（仓外 SOURCE_AUDIT.json）：52 个 Skill 中唯一建议删除的是 x-message-monitoring（业务已退役，仅余 WSL 安装与 Claude 链接）；候选补丁 CANDIDATE_retire-x-message-monitoring.patch 未应用；video-download、bilinote-video-note 是仍被机器人路径和提示引用的兼容桩，须由 03-05 持有者迁移后再删；CC 中“未启用”的 cloudflare 后端条目是前门的文件后端，不是废弃；notion/gh/security/playwright 等被前门合并的上游条目仍是 enabled，属 Root 的 CC 治理。
 - 发布阶段待办（未执行）：推送；Windows CC 精确发布 cloud-docs、drawio-local、（pyweixin 仅 platforms 变更无需安装）；根 Codex 删除 Windows 四个腾讯 MCP、停用的 tencent-docs 实体与全局 drawio MCP 表/CC 行；x-message-monitoring 是否应用候选补丁由根决定。
+
+
+## 2026-10-24 CAPABILITY-MERGE-20261023/v3 最终交付（用户直接指令）
+
+- 用户直接指令：删除腾讯文档能力、drawio转Skill并删除MCP、梳理未启用与自建废弃项；适配CC Switch新版，尽量CLI控制与后续AI升级Skill，并核自建同步。用户明确授权配套升级并重开CC Switch；Claude本轮主力只作临时覆盖，Ego长期默认保持。
+- 原实际Claude完成方向及候选；独验复现XML写坏/备份覆盖、更新来源漂移/联接越界/漏验客户端等问题后返工。Claude原入口连续两次ECONNREFUSED且无新效果，根Codex依既有替补规则完成剩余修复，未参与实现的Codex完成必要独验；旧失败与范围限制全留。
+- 代码607e6c4c28801bc436ab8e4722e527c62faafe7f已推送并在干净Windows发布镜像回读。实际发布cc-switch/drawio-local/cloud-docs/pyweixin-rpa，另按既有启用状态对齐playwright-browser-control/windows-mcp-on-demand/xfrhtx-cli；49个Windows自建Skill的131目标1587次文件比较全部相同，9开关保持。WSL只退役X活动入口，其他安装不盲目全装。
+- drawio使用官方Desktop32.6.1按需CLI，标准XML解析与Expat页跨度定位、唯一备份、布局/避障、格式转换导出等按独验/复用范围交付；新安装list/set/get与中文PNG导出及新进程发现通过后，才删除旧drawio全局MCP表和CC原停用登记。
+- CC Switch Desktop4.0.19已按授权重开；CLI5.11.3稳定用户入口已装，实库22。控制集中cc-switch Skill：doctor、check-updates、按计划/范围update、verify；自建仍只走本源提交推送→干净Windows镜像→精确发布→回读，没有后台全量升级。发布器真实Codex/Gemini同批发布与失败逆序恢复已独验；选中其他启用客户端会明确拒绝。结构21/22原生内容摘要算法已核。
+- 腾讯四MCP及官方腾讯活动Skill/登记/cloud-docs路由移除；x-message-monitoring从源、Windows/WSL活动安装、登记退役，业务原件、旧项目、失败/未知与恢复点保留。当前主源51项，Windows49项；路由后端、其他客户端仍启用的旧格式、备用浏览器和视频机器人兼容入口保留。旧Windows自建skills检出有用户差异/兼容引用，未开发、整体同步或清空。
+- 全量回读发现两个Gemini缺入口和WindowsMCP唯一额外生成缓存，先备份再精确对齐。源35个Git忽略/未跟踪pyc、10缓存目录已冷备验证后清理；发布器仅增-B防后续缓存，14项独立静态回读及真实PS夹具通过，最后只重发cc-switch。旧候选缓存/失败证据不删。
+- 真实原生CLI list通过；check准确为部分失败（下载链路及旧openai doc上游目录撤除），严格影子库公开源重试仍下载失败，未执行生产update，未把“58项”宣称全升级。模拟CLI成功、真实PS发布/回滚、原生网络成功更新分开报告；后者未验收。受控检查实际5427条真实保护项均保持。
+- 浏览器默认Ego及既有WSL IAB依赖不动，其他MCP定义与ComfyUI项目继承语义保存。本轮不再重启机器人、不恢复暂停/未知、不发消息。新软件事实登记因health显示Graphiti/Neo4j不可达未发盘点，不重启/换模型，另留待补录。
+- 唯一汇总：D:/12070/Documents/工作台管理报告/能力整合续验与MCP评估-20261024/prune-v3/最终工具清单与升级验收.md；CLOSEOUT.json、FINAL_ALL_CUSTOM_FILE_PARITY.json、各独验/恢复点同根。最后本交接纯文档提交与远端/镜像确认见SOURCE_HANDOFF_PUSH.json；不改变已验Skill代码。仅提交本需求路径，不整体暂存其他作者文件。
