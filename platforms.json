@@ -666,7 +666,7 @@
         "linux": "runtime_unverified",
         "windows": "source_and_isolated_tests_only_require_publication_acceptance"
       },
-      "dependencies": "Routes to installed official Tencent Docs (native HTTP MCP), Kingsoft kdocs-cli, WPS365 CLI and Feishu CLI skills; accounts/tokens are user-owned; no cloud write exercised by source checks."
+      "dependencies": "Routes to installed Kingsoft kdocs-cli, WPS365 CLI and Feishu CLI skills (Tencent Docs removed 2026-10-24); accounts/tokens are user-owned; no cloud write exercised by source checks."
     },
     "notion-workflows": {
       "category": "platform_specific",
