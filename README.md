@@ -10,7 +10,7 @@ This repository is the source of truth for self-built skills. Windows installati
 
 - **跨主机/协作入口（WSL 受管）**：windows-from-wsl、claude-session-ops、native-gui-control、windows-mcp-on-demand（native-gui-control 的活动底层之一）、linux-computer-control、playwright-browser-control（浏览器默认是官方 ego-browser；本项为显式指定的备用入口）
 - **Codex 管理（跨平台，WSL 受管）**：codex-project-task-handoff、codex-project-manager、codex-archive-retrospective、codex-local-state-diagnostics、personal-memory-on-demand、markitdown-local、feishu-operations
-- **业务运维（WSL 受管）**：research-data-ops（macro-strategy + 已退役 OKXnew 只读参考）、server-traffic-sync、x-message-monitoring（业务已退役，见 PROJECT_HANDOFF 的审计）
+- **业务运维（WSL 受管）**：research-data-ops（macro-strategy + 已退役 OKXnew 只读参考）、server-traffic-sync
 - **路由前门（Windows）**：cloud-docs（金山 / WPS 365 / 飞书）、notion-workflows、cloudflare-platform、github-flow、security-review。其后端 Skill 的 CC 条目按设计保持“未启用”，只作文件读取，不是废弃
 - **视频**：video-intake（唯一核心）；video-download、bilinote-video-note 为兼容桩，仍被机器人路径和提示引用
 - **文档与资料（Windows）**：drawio-local（官方 draw.io Desktop CLI）、docling-local、mineru-local、zerox-local、obsidian-notes、summarize-link-note、wechat-mp-tools、wx-cli、pyweixin-rpa、xfrhtx-cli
