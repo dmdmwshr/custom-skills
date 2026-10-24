@@ -8,9 +8,9 @@ metadata:
 
 # Playwright 浏览器控制
 
-> **默认入口已改为 `ego-browser`**（用户 2026-10-24 长期要求；WSL 经 `~/.local/bin/ego-browser` 调 Windows 版，先运行 `ego-browser skill` 读当前版本指南）。本 Skill 与下文全部受管 Playwright、隔离测试、Chrome/Edge 入口降为**备用**：仅在用户明确指定、Ego 无法满足的特殊用途（如项目已登记的专用驱动、需要受管真实资料收尾登记、隔离回归测试）时使用。Ego 一次报错、超时或不可用，不得自动改用本 Skill；先按 Ego 指南排查，仍需切换时说明原因并取得用户确认。项目自有的专用浏览器流程（如 x-message-monitoring）沿其自身授权，不受此默认影响。
+> 默认入口是 `ego-browser`（WSL 经 `~/.local/bin/ego-browser` 调 Windows 版，先运行 `ego-browser skill` 读当前版本指南）。Playwright/Chrome/Edge 及下文隔离模式只在用户当前明确指定或明确要求特殊用途时使用；场景举例本身、Ego 普通失败/超时、项目旧约定均不构成自动切换授权。Ego 需修正时先沿原入口处理，未获当前明确要求就保留断点，不自动换备用。既有定时、在途流程保持原状态，不自动迁移、重启或改绑；新的交互任务仍默认 Ego。Ego 按其官方 Skill 管理 TaskSpace 与收尾，不强套 Playwright 登记/原生组契约。
 
-先核对实际主机、系统、用户、浏览器资料及用户授权。Windows 使用下述官方 CLI 与扩展；WSL 读取 [WSL 项目入口](references/wsl-project-browser.md) 和本机唯一契约。既有业务驱动按授权适配，保留现有官方插件。
+采用本备用入口需用户当前明确要求；先核对实际主机、系统、用户、浏览器资料及用户授权。Windows 使用下述官方 CLI 与扩展；WSL 读取 [WSL 项目入口](references/wsl-project-browser.md) 和本机唯一契约。既有业务驱动按授权适配，保留现有官方插件。
 
 ## 模式选择（先判断，再往下读）
 

@@ -195,3 +195,9 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 
 - R1 下载成功后先记 `fetched` 传输证据，探测被拒后 `--allow-silent` 凭同路径同摘要证据接续；R2 复用须附件束逐文件摘要一致且笔记未被后续生成替换，否则重新生成；R3 受保护笔记/附件原路径原字节不动，新结果用 `candidates/<时间>/` 独立附件束；R4 POST 空/缺编号确认记 unknown；R5 未结清的进度回执不覆盖不重发；F1 文案、resume 成功 action 小修。
 - Windows 真实工具链全套（yt-dlp/ffmpeg/ffprobe + 旧 PS 入口）见仓外 `STAGE4_REWORK_RESULT.md`。
+
+### 阶段 5：文案收敛与发布（Claude 实施）
+
+- notion-workflows：删除已失效的 `rmcp_client` 开关步骤，改为先查现有连接、确需接入再 `codex mcp add` + 用户本人 `codex mcp login`，登录后刷新/新会话，不无条件重启；本批未添加/登录 Notion。
+- playwright-browser-control：文首改为“默认 ego-browser，备用仅用户当前明确要求才用”，去掉对已退役 x-message-monitoring 的例外。
+- 发布回执见仓外 STAGE5_RESULT.md / PUBLISH_RECEIPTS.json。

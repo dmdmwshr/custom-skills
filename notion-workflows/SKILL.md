@@ -17,15 +17,15 @@ metadata:
 
 一个任务通常只用一个模块；跨模块（如研究后沉淀）按顺序读取，不一次展开全部模块。各模块 `evaluations/` 是上游自带的评测样例，可用于核对输出结构。
 
-## 前置：Notion MCP 当前状态
+## 前置：Notion MCP 连接
 
-本机当前**未配置** Notion MCP（`config.toml` 无 notion 条目）。任一 `Notion:*` 工具调用失败且原因是未连接时，暂停并执行下面三步（四个流程共用，原上游步骤逐条保留）：
+先检查当前工具或官方插件是否已有可用的 Notion 连接；已有则直接继续，不因 `config.toml` 里没有 notion 条目而重复添加。任一 `Notion:*` 工具调用失败且原因是未连接，才暂停并确认本次确需接入：
 
-1. 添加 Notion MCP：`codex mcp add notion --url https://mcp.notion.com/mcp`
-2. 启用远程 MCP 客户端：在 `config.toml` 设 `[features].rmcp_client = true`，或运行 `codex --enable rmcp_client`
-3. OAuth 登录：`codex mcp login notion`
+1. 添加：`codex mcp add notion --url https://mcp.notion.com/mcp`（当前官方 MCP 已内置远程 HTTP 支持，无需启用 `rmcp_client`；该开关在 Codex 0.160.0 已报 Unknown feature flag）。
+2. OAuth 登录：由用户本人运行 `codex mcp login notion`。
+3. 登录后按当前客户端能力刷新，或开新会话核对工具与账户，不无条件重启整个 Codex；再从该模块的 Step 1 继续。
 
-登录由用户本人完成；完成后需重启 Codex，再从该模块的 Step 1 继续。不得用未连接状态冒充已验证，也不在未连接时改用其他平台代写。
+不得用未连接状态冒充已验证，也不在未连接时改用其他平台代写。
 
 ## 授权边界
 
