@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import urllib.parse
 import zlib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -60,11 +61,101 @@ class PagesAndRepair(unittest.TestCase):
         self.assertEqual(self.file.read_bytes(), original)
         self.assertEqual(list(self.dir.glob("*.bak-*")), [])
 
+    def test_r1_malformed_or_wrong_root_page_content_is_rejected_and_nothing_changes(self):
+        original = self.file.read_bytes()
+        bad = [
+            "<mxGraphModel><root><mxCell id=\"0\"/></root>",                      # 缺少结束标签
+            "<mxGraphModelNotActuallyAGraph/>",                                     # 只是前缀相同
+            "<mxGraphModel/><mxGraphModel/>",                                       # 多个根
+            "<mxGraphModel><root></mxGraphModel>",                                  # 标签交叉
+            "<mxGraphModel a=\"1\" a=\"2\"/>",                                      # 属性重复
+            "<mxGraphModel a=1/>",                                                  # 属性值未加引号
+            "<mxGraphModel a=\"x<y\"/>",                                            # 值内裸 <
+            "<mxGraphModel a=\"R&D\"/>",                                            # 孤立 &
+            "<mxGraphModel a=\"&nbsp;\"/>",                                         # 未定义实体
+            "<mxGraphModel a=\"&#0;\"/>",                                           # 非法字符引用
+            "<!DOCTYPE x [<!ENTITY a \"b\">]><mxGraphModel/>",                      # DOCTYPE
+            "<mxGraphModel/>tail",                                                  # 根后多余文字
+            "<mxGraphModel><root/><!-- a -- b --></mxGraphModel>",                  # 注释内 --
+            "<mxfile><diagram id=\"z\"></diagram></mxfile>",                        # 错误根
+            "<mxGraphModel><root><diagram/></root></mxGraphModel>",                 # 内含 diagram
+            '<mxGraphModel a="bad\x01value"/>',
+            '<mxGraphModel><root><![CDATA[bad\x01value]]></root></mxGraphModel>',
+            '<mxGraphModel><!-- bad\x01 --></mxGraphModel>',
+            '<mxGraphModel><?xml version="1.0"?><root/></mxGraphModel>',
+            "",
+        ]
+        for content in bad:
+            code, _, err = node(SCRIPTS / "drawio_pages.mjs", "set", self.file, "p1", "-", stdin=content)
+            self.assertNotEqual(code, 0, content)
+        self.assertEqual(self.file.read_bytes(), original)
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["m.drawio"])  # 没有备份、没有残留临时文件
+
+    def test_r1_valid_content_with_chinese_entities_cdata_comment_still_passes(self):
+        good = ('<?xml version="1.0" encoding="UTF-8"?><!-- 注释 --><mxGraphModel grid="1"><root><mxCell id="0"/><mxCell id="1" parent="0"/>'
+                '<mxCell id="q" value="中文 &amp; &lt;b&gt;粗&lt;/b&gt; &#x4e2d;&#25991;" style=\'a=b;\' vertex="1" parent="1"><mxGeometry as="geometry"/></mxCell>'
+                '<UserObject id="u" label="x"><![CDATA[ <raw> & ]]></UserObject></root></mxGraphModel>')
+        code, _, err = node(SCRIPTS / "drawio_pages.mjs", "set", self.file, "p2", "-", stdin=good)
+        self.assertEqual(code, 0, err)
+        ET.fromstring(self.file.read_bytes())  # Whole file must remain valid, including declaration placement.
+        self.assertNotIn('<?xml', self.file.read_text(encoding='utf-8'))
+        self.assertIn("中文 &amp;", node(SCRIPTS / "drawio_pages.mjs", "get", self.file, "明文页")[1])
+
+    def test_r2_every_successful_set_leaves_its_own_unique_recovery_point(self):
+        states = [self.file.read_bytes()]
+        for n in range(12):  # 同一秒/毫秒内连续写入
+            code, _, err = node(SCRIPTS / "drawio_pages.mjs", "set", self.file, "p2", "-", stdin=MODEL.format(i=f"n{n}", v=f"第{n}版"))
+            self.assertEqual(code, 0, err)
+            states.append(self.file.read_bytes())
+        backups = sorted(self.dir.glob("m.drawio.bak-*"))
+        self.assertEqual(len(backups), 12)
+        self.assertEqual(sorted(b.read_bytes() for b in backups), sorted(states[:-1]))  # 每次写入前的完整状态都在，含最初原件
+        self.assertEqual(len(set(b.name for b in backups)), 12)
+        self.assertEqual(list(self.dir.glob("*.tmp")), [])
+
+    def test_r2_existing_files_are_never_overwritten(self):
+        sentinel = self.dir / "m.drawio.bak-sentinel"; sentinel.write_text("别人的恢复点", encoding="utf-8")
+        for _ in range(3):
+            self.assertEqual(node(SCRIPTS / "drawio_pages.mjs", "set", self.file, "p1", "-", stdin=MODEL.format(i="k", v="x"))[0], 0)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "别人的恢复点")
+
+    def test_editor_url_is_built_locally_and_roundtrips(self):
+        url = node(SCRIPTS / "drawio_url.mjs", self.file, "--lightbox", "--dark", "true")[1].strip()
+        self.assertTrue(url.startswith("https://app.diagrams.net/?lightbox=1&dark=1&border=10&edit=_blank#R"))
+        packed = urllib.parse.unquote(url.split("#R", 1)[1])
+        xml = urllib.parse.unquote(zlib.decompress(base64.b64decode(packed), -15).decode("utf-8"))
+        self.assertEqual(xml, self.file.read_text(encoding="utf-8"))
+        mmd = self.dir / "a.mmd"; mmd.write_text("graph TD; A-->B", encoding="utf-8")
+        url = node(SCRIPTS / "drawio_url.mjs", mmd)[1].strip()
+        self.assertIn("#create=", url); self.assertIn("mermaid", urllib.parse.unquote(url))
+        bad = self.dir / "bad.drawio"; bad.write_text("<mxfile>", encoding="utf-8")
+        self.assertNotEqual(node(SCRIPTS / "drawio_url.mjs", bad)[0], 0)
+
+    def test_page_spans_ignore_markup_in_cdata_comments_and_quoted_attributes(self):
+        graph = '<mxGraphModel><root><UserObject><![CDATA[<diagram>只是文字</diagram>]]></UserObject><!-- <diagram/> --></root></mxGraphModel>'
+        for compressed_page in (False, True):
+            body = deflate(graph) if compressed_page else graph
+            self.file.write_text('<mxfile><diagram id="p1" name="中文 > 甲">' + body + '</diagram><diagram id="p2" name="乙"/></mxfile>', encoding="utf-8")
+            code, out, err = node(SCRIPTS / "drawio_pages.mjs", "get", self.file, "p1")
+            self.assertEqual(code, 0, err); self.assertEqual(out.strip(), graph); ET.fromstring(out)
+            code, out, err = node(SCRIPTS / "drawio_pages.mjs", "set", self.file, "p1", "-", stdin=graph.replace('只是文字', '替换后'))
+            self.assertEqual(code, 0, err); ET.fromstring(self.file.read_bytes())
+            self.assertIn('<diagram id="p2" name="乙"/>', self.file.read_text(encoding='utf-8'))
+            self.assertEqual(node(SCRIPTS / "drawio_pages.mjs", "get", self.file, "p1")[1].strip(), graph.replace('只是文字', '替换后'))
+
+    def test_border_zero_and_invalid_values(self):
+        code, out, err = node(SCRIPTS / "drawio_url.mjs", self.file, "--border", "0")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(out.strip()).query)["border"], ["0"])
+        for value in ("-1", "x", "1.5", "12x", "9007199254740992"):
+            self.assertNotEqual(node(SCRIPTS / "drawio_url.mjs", self.file, "--border", value)[0], 0, value)
+        self.assertNotEqual(node(SCRIPTS / "drawio_url.mjs", self.file, "--border")[0], 0)
+
     def test_repair_fixes_slips_and_is_idempotent_on_valid_files(self):
         bad = self.dir / "bad.drawio"
         bad.write_text('前言\n<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="1"/>'
                        '<mxCell id="x" value="R&D <b>" vertex="1" parent="1"/></root></mxGraphModel> 结尾', encoding="utf-8")
-        self.assertEqual(node(SCRIPTS / "drawio_pages.mjs", "list", bad)[0], 0)  # 修复前也不应崩
+        self.assertNotEqual(node(SCRIPTS / "drawio_pages.mjs", "list", bad)[0], 0)  # 非XML输入明确拒绝，修复入口单独处理
         self.assertEqual(node(SCRIPTS / "repair_drawio.mjs", bad)[0], 0)
         fixed = bad.read_text(encoding="utf-8")
         self.assertTrue(fixed.startswith("<mxGraphModel")); self.assertIn("R&amp;D &lt;b>", fixed)

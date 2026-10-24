@@ -18,8 +18,9 @@ metadata:
 | --- | --- |
 | draw.io Desktop（便携解压，当前用户，无注册表、无文件关联） | `C:\Users\12070\.local\share\codex-tools\drawio-desktop\current\draw.io.exe`（`current` 是指向 `32.6.1\` 的目录联接；升级时解压新版本目录并重指，旧版本目录保留作回退） |
 | WSL 调用 | `/mnt/c/Users/12070/.local/share/codex-tools/drawio-desktop/current/draw.io.exe`，传给它的输入/输出路径必须是 Windows 路径（`wslpath -w`） |
-| Node（脚本用） | Windows `C:\Users\12070\.local\share\codex-tools\node24\node-v24.21.0-win-x64\node.exe`；WSL 的 `node` 也可（脚本只用 Node 内置模块，Node ≥ 18） |
-| 本 Skill 脚本 | 随 Skill 目录：`scripts/drawio_pages.mjs`、`scripts/search_shapes.mjs`、`scripts/repair_drawio.mjs` |
+| Node（脚本用） | Windows `C:\Users\12070\.local\share\codex-tools\node24\node-v24.21.0-win-x64\node.exe`；WSL 的 `node` 也可（Node ≥ 18，XML 校验另调用下列既有 Python3） |
+| Python（XML 标准解析） | Windows `C:\Users\12070\AppData\Local\Programs\Python\Python312\python.exe`；WSL `python3`，可用 `DRAWIO_PYTHON` 指定既有 Python ≥ 3.9；只用标准库，不安装依赖 |
+| 本 Skill 脚本 | 随 Skill 目录：`scripts/drawio_pages.mjs`（多页读写）、`scripts/xml_wellformed.mjs`与 `scripts/xml_parser.py`（Python 标准 XML 解析桥，被前者与 XML URL 校验引用）、`scripts/drawio_url.mjs`（编辑器链接）、`scripts/search_shapes.mjs`、`scripts/repair_drawio.mjs`；只用 Node/Python 内置模块，无需安装依赖 |
 | 参考资料 | `references/xml-essentials.md`、`references/xml-reference.md`、`references/mermaid-reference.md`（取自 @drawio/mcp 1.7.0，Apache-2.0，随 Skill 本地保存，不需联网） |
 
 CLI 一律带 `--disable-gpu`；无头导出/转换不会弹窗、不抢焦点。调用结束进程自行退出，仍应核对没有残留 `draw.io.exe`。找不到程序时先核对上表路径；确实缺失才改为只交付手写 XML 的 `.drawio`，并如实说明无法转换/布局/导出，不用其他浏览器工具代替。
@@ -42,7 +43,13 @@ W() { wslpath -w "$1"; }          # WSL 路径 -> Windows 路径
    - **正交避障连线**（不移动任何节点、只重算连线绕开形状）：本机 32.6.1 实测须写 `--layout orthogonalEdge`；官方文档里的名字 `libavoid` 在这个版本返回 `Unknown layout`。流程/树预设已自带连线，不必再叠加。
 4. **导出**：`-x -f png|svg|pdf -e -b 10 -o 图.drawio.png 图.drawio`。`-e` 内嵌 XML，导出文件仍可在 draw.io 里还原编辑；`-a` 多页 PDF，`-p N` 选第 N 页，`-s/--width/--height` 缩放，`-t` 透明 PNG。导出成功后按用户要求保留或删除中间 `.drawio`；双扩展名（`name.drawio.png`）表示含内嵌 XML。**Mermaid 不要直接导出 PNG**（`-e` 会崩），先转 `.drawio` 再导出。
 5. **核验**：不要只看退出码。打开导出的 PNG/SVG 看实际内容（中文标签是否完整），或读 XML 核节点数、坐标、边的 source/target；多页文件用 `drawio_pages.mjs list` 核页数。
-6. 默认只落文件、不自动打开。用户要求在浏览器里看时才生成 `https://app.diagrams.net/#R…` 链接（官方 Skill 的 Node 一行脚本），浏览器按全局默认用 Ego，不自动启动 Chrome/Edge 等备用；图内容会随链接片段交给 draw.io 网页，涉及保密图表先说明或改用本地文件。
+6. 默认只落文件、不自动打开。用户明确要求“给我编辑器链接/在网页里看”时：
+
+   ```bash
+   node scripts/drawio_url.mjs 图.drawio [--lightbox] [--dark true|false|auto] [--border 10]   # .mmd/.csv 自动按 Mermaid/CSV 生成 #create 链接
+   ```
+
+   脚本只**打印**链接（XML 用官方的 `#R<压缩>` 格式，Mermaid/CSV 用 `#create=`，与旧 MCP 一致，往返可还原），只调用本地 Python 校验 XML，不联网、不打开浏览器；`DRAWIO_BASE_URL` 可指向自托管实例。需要打开时按全局默认用 Ego，不自动启动 Chrome/Edge 等备用。链接片段里是整张图的压缩内容，浏览器打开后才由 draw.io 网页读取；涉及保密图表先向用户说明，或改用本地文件。
 
 ## 多页读写（取代 list_pages / get_page / set_page）
 
@@ -52,7 +59,7 @@ node scripts/drawio_pages.mjs get   图.drawio 0|页名|页id        # 输出该
 node scripts/drawio_pages.mjs set   图.drawio 页名 新页.xml      # 只替换该页，保持原压缩状态；其余页不动
 ```
 
-只支持 `.drawio`/`.xml`；`set` 的内容必须是单页 `<mxGraphModel>`（不含 `<diagram>`）；写前自动留 `图.drawio.bak-<时间>` 备份，结果写同目录临时文件再重命名。大文件先 `list` 再只 `get` 需要的页。
+只支持 `.drawio`/`.xml`。`set` 的内容必须是**良构且唯一根为 `<mxGraphModel>`** 的单页 XML（通过 `scripts/xml_wellformed.mjs` 调用 Python 标准 XML 解析器，校验所有字符与语法，拒绝 DOCTYPE 和真实 `<diagram>` 元素；合法单页顶部 XML 声明在解析通过后移除再嵌入，不重序列化正文），且写入前对整份结果再校验；任何一项不过都不改主文件、不留备份和临时文件。通过后：先用排他方式创建唯一备份 `图.drawio.bak-<时间戳毫秒>-<进程号>-<随机>`（绝不覆盖已有文件，连续多次编辑每次的前一状态都各有一份），再写同目录唯一临时文件并重命名，写后回读核对；写入前发现文件被其他程序改动则放弃。失败只清理本次自建的临时文件和备份。大文件先 `list` 再只 `get` 需要的页。页边界由标准 Expat 解析器定位，CDATA、注释或带引号属性中的 diagram 字样不会被认作页标签；list/get 也会拒绝整体非法 XML。
 
 ## 形状 / 图标检索（取代 search_shapes）
 
@@ -72,11 +79,12 @@ node scripts/search_shapes.mjs "aws lambda" 10
 | `get_drawio_reference`（xml / mermaid） | `references/` 本地三份文档 |
 | `list_pages` / `get_page` / `set_page` | `scripts/drawio_pages.mjs` |
 | `search_shapes` | `scripts/search_shapes.mjs` |
-| 在浏览器里直接打开、`lightbox`、`dark` 参数 | 不再默认提供；需要时用上面的链接方式，或在 draw.io 里手动设置 |
+| 返回编辑器链接、`lightbox`、`dark` | `scripts/drawio_url.mjs`：用户明确要求时本地构造等价链接（默认不生成、不打开） |
 | 新增 | PNG/SVG/PDF 导出（内嵌 XML、多页 PDF）；ELK/避障改为本机 Desktop 内置引擎，不再从 CDN 下载 |
 
 ## 边界
 
+- **与旧包仍有的差异**：旧包的 `repair-xml.js` 修复规则更全，本 Skill 的修复遍只覆盖官方 Skill 列出的常见机械错误（图外文字、属性里的 `<` 与孤立 `&`、默认层自指父级），不声称与旧包完全相同；`repair_drawio.mjs` 仍不是 XML 解析器，修复后如需确认可用标准 XML 解析器或导出验证（`list` 只列页，不证明整体良构）。
 - 底层 `@drawio/mcp` 包（`...\codex-tools\node24\...\node_modules\@drawio\mcp`）可作为只读参考保留，本 Skill 不依赖它；不启动、不重新注册该 MCP。
 - 只处理用户指定的目录；不覆盖已有 `.drawio`/导出文件（先确认或另起文件名）；不读取、不上传业务文档；不为导出图表向云端发送内容。
 - 版本记录：draw.io Desktop v32.6.1（官方 `draw.io-32.6.1-windows.zip`，sha256 `41291ad0c06469c183b65793e7604dcb83a6d21d8e339a333790cb1d7576a2ed`），脚本和参考文档来源 `@drawio/mcp` 1.7.0 / jgraph/drawio-mcp（Apache-2.0）；归属见 `references/NOTICE.md`。
