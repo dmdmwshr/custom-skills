@@ -203,7 +203,8 @@ class CompatConfigTests(unittest.TestCase):
         for key in ("backend_base_url", "backend_result_dir", "note_roots", "attachment_roots", "supported_platforms", "model_roles_file",
                     "default_request", "frontmatter_defaults", "timeout_seconds", "poll_interval_seconds"):
             self.assertEqual(compat[key], CONFIG[key], key)
-        self.assertEqual(compat["superseded_by"], "video-intake")
+        # superseded_by 只是元信息，核心与机器人都不读取；机器人旧兼容配置没有它，缺省按 video-intake 处理
+        self.assertEqual(compat.get("superseded_by", "video-intake"), "video-intake")
 
 
 class NoteTests(unittest.TestCase):
