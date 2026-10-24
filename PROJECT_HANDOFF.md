@@ -181,3 +181,12 @@ custom-skills 原 17 文件及交接精确备份后，从 62961da 快进同步�
 - 实际写者 WSL Claude；仅 `windows-from-wsl/SKILL.md`「界面、联接与设备」新增一条，限定本机 Cua 0.34.0 + WPS 表格 12.1.0.28802 后台 `hotkey ctrl+s` 曾被当作字符 `s`、回执 unverifiable 不足证明保存，样本保存优先工具栏 UIA 保存并回读文件/重开核值，内部原因与前台 Ctrl+S 未证。不加通用门禁。
 - 源提交 `b9e7f17b545aeda494a199405c21a2229ebc1c8c` 已推送并经 `git ls-remote` 实时回读；WSL 受管发布记录 `/srv/work/host-baseline/skill-releases/20261023T093044226130Z`，源/Codex 安装/Claude 链接三方 SHA256 一致，新进程发现 enabled=true、errors=[]，无模型回合。Windows 仅 remote_payload，未安装。
 - 回执（仓外）：`D:/12070/Documents/工作台管理报告/现成工具自主实测-20261023/native-ego/continuation-a4/SKILL_IMPLEMENT_RESULT.md`。候选 B（ego-browser 无可维护源）未实施；03-05 交接由 Codex 写。
+
+## CAPABILITY-MERGE-20261023/v2 阶段 4：video-intake 定点修复与 Ego 默认浏览器入口（Claude 实施，Codex 待复验）
+
+- 实际写者 WSL Claude（Sonnet）；仅本地候选提交，未推送、未发布、未改活动配置。
+- video-intake：F1 已登记成品摘要变化时拒绝下载并保留原件/回执/索引，`--no-overwrites` 返回的本次未写入既有文件不签回执，不同内容的旧回执改名 `.prev-*`；F2 `resume --receipt` 核文件/字节/摘要，不符 exit 1 不重下；F3 `existing_notes` 改前文元数据精确匹配，同一请求指纹直接复用不再调用模型，人工/已修改笔记不动并写候选笔记，旧附件归档 `history/`，不再删除/改名任何笔记；F4 POST 连接丢失/回包异常/5xx 记 unknown 且进度回执 `unknown`，轮询明确 FAILED 立即失败并保留 task_id，轮询查询失败记 unknown，下载超时保留 unknown 锁，需 `--clear-unknown-lock`。
+- 新测试 `video-intake/tests/test_video_intake_integrity.py`（15 项，进程内，WSL 可跑）；原 19 项不退。WSL 缺 yt-dlp/ffmpeg，Windows 媒体用例 7 项仍跳过，未在 Windows 复跑。
+- 浏览器：`playwright-browser-control`、`windows-from-wsl`、`native-gui-control` 文案改为默认 `ego-browser`，Playwright/Chrome/Edge 为备用，需用户明确指定。
+- `scripts/tests` 有一项既有失败（`pyweixin-rpa` 缺平台声明），与本批无关，未改。
+- 发布阶段待办：推送；`publish_wsl_skills.py --skill` 发布 playwright-browser-control、windows-from-wsl、native-gui-control；video-intake 不在 WSL 受管名单，需同步到 Windows 副本与机器人旧路径 shim 实际读取的核心并做隔离契约验证；删除 `~/.claude/skills/cua-driver` 手工链接（同步器不会重建它）。

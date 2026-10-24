@@ -17,7 +17,7 @@ metadata:
 | 能保持原前台、鼠标和输入焦点的动作；按窗口/元素令牌操作；原生菜单路径、窗口几何、用户要求续作 Cua 历史 | **Cua Driver**（CLI 为默认，MCP 仅在已启用时） | 读官方技能包 `C:\Users\12070\.cc-switch\skills\cua-driver\SKILL.md`（CC 以 `local:cua-driver` 登记，版本 0.34.0；Codex 目录有同名副本），再按需读 `WORKFLOW.md`、`RUNTIME.md`、`WINDOWS.md`、`BROWSER.md`；用 `cua-driver --version`、`list-tools`（无需守护进程，当前 59 项）、`describe <工具>`、`doctor` 核二进制与 schema，`status` 报 daemon 未运行属正常的按需状态。注意 `cua-driver skills status` 目前报告“本地技能包未安装”——现有 Skill 不是 `skills install` 的产物，**官方包不编辑**；要刷新只能由维护者在明确范围内运行 `cua-driver skills update`（会向各客户端建链接，属安装动作） |
 | Cua 不覆盖或效果不佳的 Windows 动作（如菜单需读取 UI 树后再点、中文输入回读）；需要 UI 树/截图落本地文件 | **Windows-MCP 按需客户端** | 读 [windows-mcp-on-demand](../windows-mcp-on-demand/SKILL.md) 与其 `references/operations.md`；Windows 用 `scripts/client.py`，WSL 用 `scripts/wsl_client.py`（SSH 复用同一客户端）；`status → start → tools → … → stop` |
 | Linux/WSL 图形应用 | `linux-computer-control` | 不在本 Skill 范围 |
-| 网页内容、标签内流程 | `playwright-browser-control` | 浏览器工具栏/分组菜单等原生控件才回到本 Skill |
+| 网页内容、标签内流程 | `ego-browser`（默认；Playwright 仅备用/显式指定） | 浏览器工具栏/分组菜单等原生控件才回到本 Skill |
 
 两个后端在同一桌面同一时刻只留一个活动控制者；切换后端前先停止/收尾前一个。令牌类前置（Windows-MCP 的令牌只能用户本人隐藏录入）不代填、不读取、不输出。
 

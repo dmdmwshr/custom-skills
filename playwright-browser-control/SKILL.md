@@ -1,12 +1,14 @@
 ---
 name: playwright-browser-control
-description: 按实际主机通过受管 Playwright 控制 Chrome 或 Edge（真实资料）；登记主机、项目、真实会话及本次执行，每次结束巡检运行组、页面及历史残留，删除自有组与页面，下次创建新对象。Windows 使用官方 CLI 扩展，WSL 使用项目唯一控制入口。另含隔离模式：本地网页/Electron 的 playwright-cli 调试、持久交互调试与本地应用网页测试（不用真实资料）。
+description: 备用/显式指定浏览器入口（默认浏览器是 ego-browser，本 Skill 仅在用户明确指定 Playwright、受管 Chrome/Edge 真实资料、隔离测试或特殊用途时使用）。按实际主机通过受管 Playwright 控制 Chrome 或 Edge（真实资料）；登记主机、项目、真实会话及本次执行，每次结束巡检运行组、页面及历史残留，删除自有组与页面，下次创建新对象。Windows 使用官方 CLI 扩展，WSL 使用项目唯一控制入口。另含隔离模式：本地网页/Electron 的 playwright-cli 调试、持久交互调试与本地应用网页测试（不用真实资料）。
 metadata:
   x-custom-skill: true
   x-source-repo: dmdmwshr/custom-skills
 ---
 
 # Playwright 浏览器控制
+
+> **默认入口已改为 `ego-browser`**（用户 2026-10-24 长期要求；WSL 经 `~/.local/bin/ego-browser` 调 Windows 版，先运行 `ego-browser skill` 读当前版本指南）。本 Skill 与下文全部受管 Playwright、隔离测试、Chrome/Edge 入口降为**备用**：仅在用户明确指定、Ego 无法满足的特殊用途（如项目已登记的专用驱动、需要受管真实资料收尾登记、隔离回归测试）时使用。Ego 一次报错、超时或不可用，不得自动改用本 Skill；先按 Ego 指南排查，仍需切换时说明原因并取得用户确认。项目自有的专用浏览器流程（如 x-message-monitoring）沿其自身授权，不受此默认影响。
 
 先核对实际主机、系统、用户、浏览器资料及用户授权。Windows 使用下述官方 CLI 与扩展；WSL 读取 [WSL 项目入口](references/wsl-project-browser.md) 和本机唯一契约。既有业务驱动按授权适配，保留现有官方插件。
 

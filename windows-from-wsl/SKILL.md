@@ -46,6 +46,7 @@ ssh -o BatchMode=yes windows-host-codex \
 
 ## 界面、联接与设备
 
+- **浏览器默认 `ego-browser`**（用户 2026-10-24 长期要求）：需要打开网页、登录态站点、表单、截图、抓取时，先运行 `ego-browser skill` 读与已装版本匹配的指南；WSL 的 `~/.local/bin/ego-browser` 是指向 Windows 版 `ego-browser.exe` 的链接，不另装浏览器、不新建桥接。受管 Playwright、隔离测试、Chrome/Edge 等其余浏览器自动化仅作备用，须用户明确指定或有特殊用途才用；Ego 一次失败不自动切换。原生窗口控件（地址栏、系统对话框等）仍走下面的 `native-gui-control`。
 - 先读 `native-gui-control`（统一入口，后端为官方 `cua-driver` 与受管 `windows-mcp-on-demand`），按授权直接复用现成 Windows CLI 或既有 SSH 入口；两者按需互补，依当前任务、后台能力和实测效果选择。不得新建桥接程序，或因某模型额度不足强制转交独立工具操作。
 - 穿越目录联接的移动/删除若被 SSH 重定向保护拒绝，先解析真实源、目标、恢复点和当前效果，再在同一授权范围内走一次性用户会话计划任务。该路径不能绕过平台强制限制或扩大删除范围。
 - 命令提交成功、计划任务退出码为零不等于界面或文件迁移已验收；未知结果保留任务身份及断点，先对账再收尾。
