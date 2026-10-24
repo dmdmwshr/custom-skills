@@ -1,4 +1,4 @@
 interface:
   display_name: "Draw.io 本地制图"
-  short_description: "创建和更新本机可编辑的流程图、架构图与原生 drawio 文件"
-  default_prompt: "使用 $drawio-local 创建或更新这个可编辑的流程图、架构图或原生 drawio 文件。"
+  short_description: "本机生成/转换/布局/导出可编辑 drawio：XML、Mermaid、CSV、ELK、避障、多页、PNG/SVG/PDF"
+  default_prompt: "使用 $drawio-local 创建、转换或导出这个可编辑的 draw.io 图表。"

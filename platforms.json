@@ -211,9 +211,9 @@
       "validation": {
         "wsl": "not_supported_by_current_workflow",
         "linux": "runtime_unverified",
-        "windows": "runtime_unverified_this_change"
+        "windows": "desktop_cli_xml_mermaid_csv_elk_orthogonalEdge_export_pages_search_verified_20261024_source_candidate"
       },
-      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+      "dependencies": "Windows: draw.io Desktop 32.6.1 portable under codex-tools/drawio-desktop (current junction), Node >=18; WSL reaches the same Windows executable via /mnt/c (no separate install). Replaces the disabled @drawio/mcp 1.7.0 registration; the npm package may remain as read-only reference. search_shapes fetches the official shape index/icon service on first use."
     },
     "flclash-proxy-toggle": {
       "category": "platform_specific",
