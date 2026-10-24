@@ -6,26 +6,20 @@ This repository is the source of truth for self-built skills. Windows installati
 
 ## Included skills
 
-- windows-from-wsl — WSL 操作 Windows 项目的文件、命令与派发检查表
-- claude-session-ops — 工作台 Claude 主会话、任务派发和归档检查表
-- video-intake — 视频下载/提取/BiliNote 笔记/状态恢复/去重索引（唯一核心；bilinote-video-note 与 video-download 为兼容桩）
-- playwright-browser-control — 受管真实资料浏览器 + 隔离调试/本地网页测试
-- native-gui-control — Cua Driver 与按需 Windows-MCP 的统一原生界面入口
-- cloud-docs / notion-workflows / cloudflare-platform / github-flow / security-review — 按任务路由的合并入口
-- research-data-ops — macro-strategy 数据运维 + 已退役 OKXnew 只读参考
-- cc-switch
-- drawio-local
-- flclash-proxy-toggle
-- feishu-operations
-- mineru-local
-- obsidian-notes
-- summarize-link-note
-- xf-report-filler
-- zerox-local
+分类以 platforms.json 为准（“WSL 受管”指 managed_wsl_order，其余为 Windows 专用，由 CC Switch 安装）。
+
+- **跨主机/协作入口（WSL 受管）**：windows-from-wsl、claude-session-ops、native-gui-control、windows-mcp-on-demand（native-gui-control 的活动底层之一）、linux-computer-control、playwright-browser-control（浏览器默认是官方 ego-browser；本项为显式指定的备用入口）
+- **Codex 管理（跨平台，WSL 受管）**：codex-project-task-handoff、codex-project-manager、codex-archive-retrospective、codex-local-state-diagnostics、personal-memory-on-demand、markitdown-local、feishu-operations
+- **业务运维（WSL 受管）**：research-data-ops（macro-strategy + 已退役 OKXnew 只读参考）、server-traffic-sync、x-message-monitoring（业务已退役，见 PROJECT_HANDOFF 的审计）
+- **路由前门（Windows）**：cloud-docs（金山 / WPS 365 / 飞书）、notion-workflows、cloudflare-platform、github-flow、security-review。其后端 Skill 的 CC 条目按设计保持“未启用”，只作文件读取，不是废弃
+- **视频**：video-intake（唯一核心）；video-download、bilinote-video-note 为兼容桩，仍被机器人路径和提示引用
+- **文档与资料（Windows）**：drawio-local（官方 draw.io Desktop CLI）、docling-local、mineru-local、zerox-local、obsidian-notes、summarize-link-note、wechat-mp-tools、wx-cli、pyweixin-rpa、xfrhtx-cli
+- **本机环境（Windows）**：cc-switch、flclash-proxy-toggle、browser-tamer、localvault-credentials、serena-local、windows-task-scheduler、wsl-backup-audit、wsl-system-lifecycle、comfyui-on-demand、comfyui-production-manager、applio-rvc-manager、meifu-resumable-download
+- **消防业务（Windows）**：xf-expert-review、xf-information-file-manager、xf-product-case-filler、xf-product-case-registry、xf-product-standards、xf-report-filler
 
 ## Windows management notes
 
-- This repository at `C:\Users\12070\.cc-switch\skills\自建skills` is the source of truth for self-built skills.
+- The source of truth is this WSL repository (`/srv/workspaces/02-software/02-25-custom-skills`). The older Windows checkout at `C:\Users\12070\.cc-switch\skills\自建skills` is not a development tree (it carries unrelated uncommitted differences and the Slack agent's legacy compat path); Windows releases use a clean release checkout with the CC Switch sync script.
 - Installed copies under `C:\Users\12070\.cc-switch\skills\<skill-name>` are cc-switch sync output. Do not edit those copies directly.
 - Add or update self-built skills in this repository first, then commit and push to `dmdmwshr/custom-skills`.
 - After pushing, sync or refresh through cc-switch so the installed root is regenerated from the repository source.

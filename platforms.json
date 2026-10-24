@@ -378,6 +378,19 @@
       },
       "dependencies": "Separately installed xfrhtx-reader 0.2.0+, native 64-bit Windows, and a compatible signed-in XFRHTX client. Tool source and runtime are not bundled with this Skill."
     },
+    "pyweixin-rpa": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "not_supported_by_current_workflow",
+        "windows": "runtime_unverified_declaration_added_20261024"
+      },
+      "dependencies": "Windows WeChat 4.x desktop client and the locally installed pywechat127 (pyweixin module) in the codex-tools environment; local database queries use wx-cli instead; sends, setting changes and exports follow the user's current authorization."
+    },
     "wx-cli": {
       "category": "platform_specific",
       "execution_platforms": [
