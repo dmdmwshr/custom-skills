@@ -525,16 +525,64 @@ def is_loopback(base: str) -> bool:
     return parts.scheme in ("http", "https") and (parts.hostname or "") in ("127.0.0.1", "localhost", "::1")
 
 
+
+def read_environment_roles():
+    """Read current host values, including changes after this process started."""
+    names = {"strong": "AI_MODEL_STRONG", "light": "AI_MODEL_LIGHT"}
+    values = {}
+    if os.name == "nt":
+        import winreg
+        for hive, subkey in (
+            (winreg.HKEY_CURRENT_USER, "Environment"),
+            (winreg.HKEY_LOCAL_MACHINE,
+             r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        ):
+            try:
+                key = winreg.OpenKey(hive, subkey)
+            except FileNotFoundError:
+                continue
+            with key:
+                for role, name in names.items():
+                    if role in values:
+                        continue
+                    try:
+                        value, kind = winreg.QueryValueEx(key, name)
+                    except FileNotFoundError:
+                        continue
+                    if kind not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+                        raise ValueError("Shared model environment values must be text")
+                    values[role] = value
+    for role, name in names.items():
+        if role not in values and name in os.environ:
+            values[role] = os.environ[name]
+    if not values:
+        return None
+    if set(values) != set(names):
+        raise ValueError("Both AI_MODEL_STRONG and AI_MODEL_LIGHT are required")
+    for value in values.values():
+        if (not isinstance(value, str) or value in names
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,99}", value)):
+            raise ValueError("Invalid shared model environment value")
+    return values
+
+
 def resolve_model(config: dict, explicit: str | None) -> str:
     if explicit and explicit.strip():
         return explicit.strip()
     request = config.get("default_request", {})
     role = request.get("model_role", "")
     roles_path = config.get("model_roles_file", "")
-    if role and roles_path:
+    if role:
         if role not in ("strong", "light"):
             raise IntakeError("中央模型角色必须是 strong 或 light。")
-        path = Path(expand(roles_path))
+        path = Path(expand(roles_path)) if roles_path else Path.home() / ".config/ai-models.json"
+        if not roles_path or path.resolve() == (Path.home() / ".config/ai-models.json").resolve():
+            try:
+                environment = read_environment_roles()
+            except (OSError, ValueError) as exc:
+                raise IntakeError("共享模型环境变量缺失或无效。") from exc
+            if environment is not None:
+                return environment[role]
         if path.is_file():
             if path.stat().st_size > 4096:
                 raise IntakeError("中央模型配置超出预期大小。")

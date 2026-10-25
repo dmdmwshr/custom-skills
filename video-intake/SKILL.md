@@ -26,7 +26,7 @@ metadata:
 
 ## 工具与配置
 
-yt-dlp / ffmpeg / ffprobe 优先级：命令行参数 > 环境变量 `VIDEO_INTAKE_YT_DLP|FFMPEG|FFPROBE` > `references/local-config.json` 的 `tools` > PATH。配置文件也含 BiliNote 后端（`127.0.0.1:8483`）、结果目录、Obsidian 正文/附件根、默认模型角色（读中央 `ai-models.json` 的 `strong`，显式 `--model-name` 优先）。测试或迁移用 `--config` 或 `VIDEO_INTAKE_CONFIG` 指向临时配置。不要修改端口和归档根，除非用户明确要求。
+yt-dlp / ffmpeg / ffprobe 优先级：命令行参数 > 环境变量 `VIDEO_INTAKE_YT_DLP|FFMPEG|FFPROBE` > `references/local-config.json` 的 `tools` > PATH。配置文件也含 BiliNote 后端（`127.0.0.1:8483`）、结果目录、Obsidian 正文/附件根、默认模型角色（本机 `AI_MODEL_STRONG` / `AI_MODEL_LIGHT` 环境变量；Windows每次读取持久用户环境，旧 `ai-models.json` 仅兼容，显式 `--model-name` 优先）。测试或迁移用 `--config` 或 `VIDEO_INTAKE_CONFIG` 指向临时配置。不要修改端口和归档根，除非用户明确要求。
 
 ## 边界
 
