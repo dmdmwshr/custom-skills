@@ -45,10 +45,72 @@ def status_folder(s,as_of):
     effective=s.get('implemented','')
     if status=='即将实施' and not effective:raise ValueError('待生效标准缺实施日期：'+s['standard'])
     if effective:
-        day=date.fromisoformat(effective);now=date.fromisoformat(as_of)
+        day=date.fromisoformat(effective);now=date.fromisoformat(s.get('checked_at',as_of)[:10])
         if (status=='现行' and day>now) or (status=='即将实施' and day<=now):raise ValueError('官网状态与实施日期冲突：'+s['standard'])
     national=s['standard'].startswith('GB')
     return ('01_现行国标' if national else '03_现行行标') if status=='现行' else (('02_待生效国标' if national else '04_待生效行标') if status=='即将实施' else '历史')
+
+def scope_active(product):
+    return product.get('certification',{}).get('in_scope') is not False
+
+def product_role(product,code):
+    return 'out_of_scope' if not scope_active(product) else ('reference' if code in product.get('reference_ids',[]) else 'product')
+
+def placement_role(item):
+    if item.get('role'):return item['role']
+    parts=Path(item['path']).parts
+    return 'out_of_scope' if '已退出CCC范围' in parts else ('reference' if '参考标准' in parts else 'product')
+
+def metadata_errors(data):
+    """Check every reviewed standard, including versions with no local PDF."""
+    errors=[]
+    if data.get('schema_version')!=1:errors.append('不支持的数据版本')
+    try:date.fromisoformat(data.get('as_of',''))
+    except (ValueError,TypeError):errors.append('核对基准日期无效')
+    cats=[c['id'] for c in data.get('catalogs',[])]
+    if len(cats)!=len(set(cats)):errors.append('目录ID重复')
+    ids=[p['id'] for p in data.get('products',[])]
+    if len(ids)!=len(set(ids)):errors.append('产品ID重复')
+    standards=data.get('standards',{})
+    for code,s in standards.items():
+        if s.get('standard')!=code:errors.append('标准键与编号不一致：'+code)
+        try:
+            date.fromisoformat(s.get('checked_at','')[:10])
+            url=urlparse(s.get('official_url',''))
+            if url.scheme not in {'https','http'} or not url.hostname:raise ValueError('官网链接无效：'+code)
+            status_folder(s,data.get('as_of',''))
+        except (ValueError,KeyError,TypeError) as ex:errors.append('标准元数据：'+code+'：'+str(ex))
+    for product in data.get('products',[]):
+        if product['catalog'] not in cats:errors.append('产品目录不存在：'+product['id'])
+        for code in product.get('standard_ids',[])+product.get('reference_ids',[]):
+            if code not in standards:errors.append('产品引用未知标准：'+product['id']+' -> '+code)
+        cert=product.get('certification',{})
+        if cert:
+            if not isinstance(cert.get('in_scope'),bool):errors.append('认证范围须明确：'+product['id'])
+            try:
+                date.fromisoformat(cert.get('scope_checked_at','')[:10])
+                source=urlparse(cert.get('scope_source',''))
+                if source.scheme not in {'http','https'} or not source.hostname or source.hostname in {'localhost','127.0.0.1','::1'}:raise ValueError('范围依据链接无效')
+            except (ValueError,TypeError):errors.append('认证范围缺有效核对日期或官网链接：'+product['id'])
+            if cert.get('conversion_deadline') and not cert.get('conversion_source'):errors.append('认证转换期限缺官方依据：'+product['id'])
+    return errors
+
+def reconcile_pending(data,available):
+    """Close fulfilled PDF tasks without discarding their original failure evidence."""
+    present={j['standard'] for j in available};pending=[];seen=set()
+    for item in data.get('pending_research',[]):
+        code=item.get('standard')
+        if item.get('kind')=='缺PDF' and code in present:
+            record=dict(item,resolved_at=data.get('last_maintenance_at',data['as_of']),resolution='已核对入库PDF及哈希')
+            history=data.setdefault('research_history',[])
+            if record not in history:history.append(record)
+        else:
+            pending.append(item)
+            if item.get('kind')=='缺PDF':seen.add(code)
+    for code,s in data['standards'].items():
+        if code not in present and code not in seen:
+            pending.append(dict(kind='缺PDF',standard=code,url=s.get('official_url',''),reason=s.get('download_note') or '已核实标准，尚未取得完整PDF'))
+    data['pending_research']=pending
 
 def verify_pdf(path,s):
     import fitz
@@ -87,7 +149,8 @@ def filename(product,s):
 
 def build(root,data):
     root=Path(root).resolve();root.mkdir(parents=True,exist_ok=True)
-    if data.get('schema_version')!=1:raise ValueError('不支持的数据版本')
+    problems=metadata_errors(data)
+    if problems:raise ValueError('；'.join(problems))
     cats={c['id']:c for c in data['catalogs']};standards=data['standards']
     ids=[p['id'] for p in data['products']]
     if len(ids)!=len(set(ids)):raise ValueError('产品ID重复')
@@ -106,14 +169,15 @@ def build(root,data):
             src=Path(s['source_file']);src=src if src.is_absolute() else safe(root,src)
             if code not in verified:verified[code]=verify_pdf(src,s)
             s.update(verified[code])
-            key=(p['catalog'],category,code,code in p.get('reference_ids',[]))
+            role=product_role(p,code)
+            key=(p['catalog'],category,code,role)
             if key not in jobs:
                 display=s.get('display_name') or p['name']
-                if s['status']=='废止':relative=Path('99_历史标准')/cat['folder']/category/filename(display,s)
-                else:relative=Path(cat['folder'])/category/(Path('参考标准')/folder if key[3] else Path(folder))/filename(display,s)
+                if s['status']=='废止':relative=Path('99_历史标准')/cat['folder']/category/(Path('已退出CCC范围') if role=='out_of_scope' else (Path('参考标准') if role=='reference' else Path()))/filename(display,s)
+                else:relative=Path(cat['folder'])/category/(Path('已退出CCC范围')/folder if role=='out_of_scope' else (Path('参考标准')/folder if role=='reference' else Path(folder)))/filename(display,s)
                 dst=safe(root,relative)
                 if dst.exists() and digest(dst)!=s['sha256']:raise ValueError('已有文件内容冲突：'+str(relative))
-                jobs[key]=dict(standard=code,path=str(relative),sha256=s['sha256'],source=src,target=dst,catalog=p['catalog'],category=category)
+                jobs[key]=dict(standard=code,path=str(relative),sha256=s['sha256'],source=src,target=dst,catalog=p['catalog'],category=category,role=role)
             links[p['id']].append(jobs[key]['path'])
     for job in jobs.values():copy_checked(job['source'],job['target'],job['sha256'])
     placements=[{k:v for k,v in j.items() if k not in ['source','target']} for j in jobs.values()]
@@ -140,6 +204,7 @@ def build(root,data):
         copies=[j for j in placements if j['standard']==code]
         if copies:s['source_file']=copies[0]['path']
     data['placements']=placements
+    reconcile_pending(data,placements)
     for p in data['products']:p['local_files']=links[p['id']]
     (root/'99_历史标准').mkdir(exist_ok=True)
     atomic_json(root/META,data)
@@ -205,9 +270,11 @@ def catalog_coverage(data,available):
     """
     standards=data['standards'];reports=[]
     for cat in data['catalogs']:
-        products=[p for p in data['products'] if p['catalog']==cat['id']]
-        copies=[j for j in available if j.get('catalog')==cat['id']]
-        slots={(j.get('category'),j['standard']) for j in copies}
+        source_products=[p for p in data['products'] if p['catalog']==cat['id']]
+        products=[p for p in source_products if scope_active(p)]
+        all_copies=[j for j in available if j.get('catalog')==cat['id']]
+        copies=[j for j in all_copies if placement_role(j)!='out_of_scope']
+        slots={(j.get('category'),j['standard']) for j in copies if placement_role(j)=='product'}
         present={j['standard'] for j in copies}
         current=set();future=set();references=set();all_codes=set()
         relations=Counter();distribution=Counter();coverage=Counter()
@@ -225,12 +292,13 @@ def catalog_coverage(data,available):
             elif found:state='partial'
             else:state='no_pdf'
             coverage[state]+=1
-        def versions(codes):
-            return dict(versions=len(codes),pdfs=len(codes&present),missing_codes=sorted(codes-present))
-        reports.append(dict(catalog=cat['id'],title=cat['title'],products=len(products),
+        def versions(codes,role='product'):
+            role_present={j['standard'] for j in copies if placement_role(j)==role}
+            return dict(versions=len(codes),pdfs=len(codes&role_present),missing_codes=sorted(codes-role_present))
+        reports.append(dict(catalog=cat['id'],title=cat['title'],products=len(products),source_products=len(source_products),out_of_scope_products=len(source_products)-len(products),retained_copies=len(all_copies)-len(copies),
             copies=len(copies),unique_pdfs=len(present),standard_versions=len(all_codes),
             missing_codes=sorted(all_codes-present),current_product=versions(current),
-            future_product=versions(future),reference=versions(references),
+            future_product=versions(future),reference=versions(references,'reference'),
             current_pdf_coverage={k:coverage[k] for k in ['complete','partial','no_pdf','no_current_standard','pending_applicability']},
             current_associations=sum(relations.values()),
             current_standards_shared_across_products=sum(n>1 for n in relations.values()),
@@ -253,7 +321,7 @@ def render(root,data):
                 if not s.get('verified'):status+='（待核实）'
                 if code in p.get('reference_ids',[]):status+='；参考资料'
                 official=anchor(s['official_url'],'官网') if s.get('official_url') else ''
-                matched=[j for j in data['placements'] if j['standard']==code and j.get('catalog')==cat['id'] and j.get('category')==p['category']]
+                matched=[j for j in data['placements'] if j['standard']==code and j.get('catalog')==cat['id'] and j.get('category')==p['category'] and placement_role(j)==product_role(p,code)]
                 local=' '.join(anchor(quote(os.path.relpath(root/j['path'],folder).replace('\\','/')),'打开PDF') for j in matched)
                 if not local:local='<span class="missing">PDF未取得</span>'
                 if not matched and s.get('resume_urls'):
@@ -264,10 +332,16 @@ def render(root,data):
             elif p.get('review_state') not in ['已匹配','本次检索未查到适用国标或行标']:
                 lines.insert(0,'<div class="missing">'+esc(p.get('review_state','适用标准待核实'))+'</div>')
             note=p.get('note','')
+            if not scope_active(p):
+                cert=p['certification']
+                note+=' 已退出CCC范围；'+cert.get('reason','')
+                lines.insert(0,'<div class="missing"><b>已退出CCC范围（历史条目保留）</b> '+anchor(cert['scope_source'],'范围调整公告')+'</div>')
+            elif p.get('certification',{}).get('conversion_deadline'):
+                note+=' 认证转换截止：'+p['certification']['conversion_deadline']
             if p.get('review_state') and p['review_state']!='已匹配':note+=' '+p['review_state']
             if p.get('source_refs'):note+=' 原目录标准：'+p['source_refs']
             scope='<details><summary>适用范围与说明</summary>'+esc(p.get('scope',''))+'<br>'+esc(note)+'</details>' if p.get('scope') or note else ''
-            row_html.append('<tr><td>'+esc(p['category'])+'</td><td><b>'+esc(p['name'])+'</b><br><small>'+esc(p.get('source_locator',''))+'</small>'+scope+'</td><td>'+''.join(lines)+'</td></tr>')
+            row_html.append(('<tr data-scope="active">' if scope_active(p) else '<tr data-scope="withdrawn">')+'<td>'+esc(p['category'])+'</td><td><b>'+esc(p['name'])+'</b><br><small>'+esc(p.get('source_locator',''))+'</small>'+scope+'</td><td>'+''.join(lines)+'</td></tr>')
         sources=[]
         for src in cat.get('sources',[]):
             if src.get('path'):sources.append(anchor(quote(os.path.relpath(safe(root,src['path']),folder).replace('\\','/')),src['title']))
@@ -277,33 +351,40 @@ def render(root,data):
         numbers=f'现行产品标准：{cp["versions"]}份，已存{cp["pdfs"]}份；待生效产品标准：{fp["versions"]}份，已存{fp["pdfs"]}份；参考标准：{rp["versions"]}份，已存{rp["pdfs"]}份。'
         numbers+=f'<br>产品现行PDF覆盖：齐全{pc["complete"]}项、部分缺件{pc["partial"]}项、无PDF{pc["no_pdf"]}项、尚无现行标准对应{pc["no_current_standard"]}项、适用性待核实{pc["pending_applicability"]}项。'
         numbers+=f'<br>产品与标准不是一一对应：现行适用关系{cs["current_associations"]}条，去重后{cp["versions"]}份标准，其中{cs["current_standards_shared_across_products"]}份由多个产品条目共用。参考资料和待生效版本不计入现行覆盖。'
-        note=f'<p>核对基准日：{esc(data["as_of"])}　产品条目：{len(products)}　已保存不同标准：{count}</p><div class="note">'+numbers+'</div><p>'+anchor('../目录导航.html','返回总目录')+'</p><div class="note">'+esc(cat.get('note',''))+'<br>目录依据：'+'；'.join(sources)+'</div>'
+        note=f'<p>完整状态核对基准日：{esc(data["as_of"])}　当前范围产品：{cs["products"]}；保留原条目：{len(products)}；已退出范围：{cs["out_of_scope_products"]}　已保存不同标准（含保留资料）：{count}</p><div class="note">'+numbers+'</div><p>'+anchor('../目录导航.html','返回总目录')+'</p><div class="note">'+esc(cat.get('note',''))+'<br>目录依据：'+'；'.join(sources)+'</div>'
         script='<script>function filter(){const q=document.getElementById("q").value.toLowerCase();document.querySelectorAll("tbody tr").forEach(r=>r.hidden=!r.textContent.toLowerCase().includes(q))}</script>'
         doc=page(cat['title'],note+'<input id="q" placeholder="搜索产品、标准号、状态、未取得或待核实" oninput="filter()"><table><thead><tr><th width="18%">分类</th><th width="29%">产品</th><th>适用标准与文件</th></tr></thead><tbody>'+''.join(row_html)+'</tbody></table>'+script)
         (folder/'产品与标准目录.html').write_text(doc,encoding='utf-8')
-        stats.append((cat,len(products),count))
-    cards=''.join('<div class="card"><h2>'+anchor(quote(c['folder']+'/产品与标准目录.html'),c['title'])+'</h2><p>'+str(n)+'个产品条目<br>'+str(k)+'份不同标准已保存</p></div>' for c,n,k in stats)
+        stats.append((cat,cs['products'],count))
+    cards=''.join('<div class="card"><h2>'+anchor(quote(c['folder']+'/产品与标准目录.html'),c['title'])+'</h2><p>'+str(n)+'个当前范围产品条目<br>'+str(k)+'份不同标准已保存</p></div>' for c,n,k in stats)
     registry_ids={s for p in data['products'] for s in p.get('standard_ids',[])+p.get('reference_ids',[])}
     present={j['standard'] for j in data['placements']};missing=len(registry_ids-present)
-    pending=sum(p.get('review_state') not in ['已匹配','本次检索未查到适用国标或行标'] for p in data['products'])
+    pending=sum(p.get('review_state') not in ['已匹配','本次检索未查到适用国标或行标'] for p in data['products'] if scope_active(p))
+    active_ids={c for p in data['products'] if scope_active(p) for c in p.get('standard_ids',[])+p.get('reference_ids',[])}
+    active_present={j['standard'] for j in data['placements'] if placement_role(j)!='out_of_scope'}
+    active_missing=len(active_ids-active_present)
     history=root/'99_历史标准';history.mkdir(exist_ok=True)
     entries=[j for j in data['placements'] if Path(j['path']).parts[0]=='99_历史标准']
     history_body='<p>'+anchor('../目录导航.html','返回总目录')+'</p>'
     history_body+=('<ul>'+''.join('<li>'+anchor(quote(os.path.relpath(root/j['path'],history).replace('\\','/')),j['standard'])+'</li>' for j in entries)+'</ul>') if entries else '<p>当前没有归档的废止标准。仅官网确认废止的既有版本进入本目录。</p>'
     (history/'历史标准目录.html').write_text(page('历史标准目录',history_body),encoding='utf-8')
-    body='<p>核对基准日：'+esc(data['as_of'])+'。三种目录分别维护，同一标准在各目录保留完整PDF。</p>'+cards+'<div class="note">已保存不同标准：'+str(len(present))+'；标准副本：'+str(len(data['placements']))+'；已列编号但未取得PDF：'+str(missing)+'；适用关系待核实产品条目：'+str(pending)+'。<br>“未取得PDF”不等于没有标准；未完成官网查询的条目保留待核实标记。仅官网明确废止的版本进入历史目录。<br>查找缺件：进入对应产品目录后搜索“PDF未取得”或“待核实”。</div><p>'+anchor(quote('99_历史标准/历史标准目录.html'),'打开历史标准目录')+'</p>'
+    body='<p>核对基准日：'+esc(data['as_of'])+'。三种目录分别维护，同一标准在各目录保留完整PDF。</p>'+cards+'<div class="note">已保存不同标准：'+str(len(present))+'；全库标准副本（含历史及退出范围保留资料）：'+str(len(data['placements']))+'；全库已列编号但未取得PDF：'+str(missing)+'；当前范围未取得PDF：'+str(active_missing)+'；当前范围适用关系待核实产品条目：'+str(pending)+'。<br>“未取得PDF”不等于没有标准；未完成官网查询的条目保留待核实标记。仅官网明确废止的版本进入历史目录。<br>查找缺件：进入对应产品目录后搜索“PDF未取得”或“待核实”。</div><p>'+anchor(quote('99_历史标准/历史标准目录.html'),'打开历史标准目录')+'</p>'
     if data.get('last_maintenance_at'):body+='<p>最近维护：'+esc(data['last_maintenance_at'])+'；各标准官网核对日期见对应条目。</p>'
     (root/'目录导航.html').write_text(page('消防产品标准资料库',body),encoding='utf-8')
 
 def audit(root,links=False):
-    root=Path(root).resolve();data=json.loads((root/META).read_text(encoding='utf-8'));errors=[]
+    root=Path(root).resolve();data=json.loads((root/META).read_text(encoding='utf-8'));errors=metadata_errors(data)
     hashes=defaultdict(set);available=[]
     for p in data.get('placements',[]):
-        f=safe(root,p['path'])
+        try:f=safe(root,p['path'])
+        except ValueError as ex:
+            errors.append(str(ex)+'：'+p['path']);continue
         if not f.is_file():errors.append('缺文件：'+p['path'])
         elif digest(f)!=p['sha256']:errors.append('内容变化：'+p['path'])
         else:available.append(p)
+        if placement_role(p)=='out_of_scope' and '已退出CCC范围' not in Path(p['path']).parts:errors.append('退出认证范围副本未分区：'+p['path'])
         hashes[p['standard']].add(p['sha256'])
+        if data['standards'].get(p['standard'],{}).get('sha256')!=p['sha256']:errors.append('副本与标准哈希不一致：'+p['standard'])
         s=data['standards'].get(p['standard'],{})
         try:
             folder=status_folder(s,data['as_of'])
@@ -312,6 +393,15 @@ def audit(root,links=False):
         except (ValueError,KeyError) as ex:errors.append(str(ex))
     for code,values in hashes.items():
         if len(values)>1:errors.append('同编号副本内容不一致：'+code)
+    present={p['standard'] for p in available}
+    pending=[p.get('standard') for p in data.get('pending_research',[]) if p.get('kind')=='缺PDF']
+    for code in set(pending)&present:errors.append('已入库标准仍挂缺PDF待办：'+code)
+    for code in set(data['standards'])-present-set(pending):errors.append('缺PDF未列待办：'+code)
+    for code in set(pending)-set(data['standards']):errors.append('缺件待办引用未知标准：'+str(code))
+    if len(pending)!=len(set(pending)):errors.append('缺PDF待办重复')
+    for product in data['products']:
+        expected={j['path'] for j in available if j.get('catalog')==product['catalog'] and j.get('category')==product['category'] and j['standard'] in product.get('standard_ids',[])+product.get('reference_ids',[]) and placement_role(j)==product_role(product,j['standard'])}
+        if set(product.get('local_files',[]))!=expected:errors.append('产品本地文件映射不一致：'+product['id'])
     if links:
         for f in [root/'目录导航.html']+[safe(root,c['folder'])/'产品与标准目录.html' for c in data['catalogs']]:
             if not f.exists():errors.append('缺索引：'+str(f))

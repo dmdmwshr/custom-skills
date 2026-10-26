@@ -39,9 +39,9 @@
 
 `library.py`只依赖Python标准库和PDF校验时的PyMuPDF（`fitz`）。使用已经配置的解释器，不向系统安装依赖。业务数据与PDF不进入Skill源码仓库。
 
-本机配置保存 `root`、`work_dir`、`python`、`browser_cli` 及目录来源。资料库唯一维护数据为 `.标准维护/registry.json`：
+本机配置保存 `root`、`work_dir`、`python`、`browser_cli`（默认 Ego）及目录来源；启动验证路径、依赖与容量，缺失配置须恢复实际入口。资料库唯一维护数据为 `.标准维护/registry.json`：
 
-- `schema_version: 1`，`as_of` 为本次核对日期。
+- `schema_version: 1`，`as_of` 为完整状态核对基准日；增量维护只更新实际核对条目的 `checked_at` 与 `last_maintenance_at`，不抬高未覆盖项目水位。
 - `catalogs`：每项含 `id`、`folder`、`title`、`sources`（原件的资料库相对路径和/或官方URL）、`note`。
 - `products`：每项含唯一 `id`、`catalog`、`category`（相对分类路径）、`name`、`source_locator`、`scope`、`standard_ids`、`note`、`review_state`。`reference_ids` 可记录仍有效的非首选既有文件。适用关系由代理根据原文和官方证据确认，脚本不猜测。
 - `standards`：以完整标准编号为键；值含 `standard`、`title`、`status`（官网原始现行/即将实施/废止）、`implemented`、`checked_at`、`official_url`、`verified`、`replacements`、`download_note`。文件存在时还含 `source_file`（导入来源或已归档副本）、`sha256`、`pages`、`identity_verified`（文字或人工核对且绑定sha256）。
@@ -65,3 +65,9 @@
 ## 验收场景
 
 待生效国标与现行行标共存；官网状态与日期冲突；部分替代不归档；查询失败不误判废止；跨目录副本哈希一致；损坏PDF与错误编号拒收；路径越界及未知文件碰撞拒绝；重复构建不生成新副本；历史迁移保留原内容；下载受限仍有正确目录条目。
+
+## 增量校验与周维护
+
+所有标准（含缺 PDF 项）均核对官网证据、状态及核对日当时的实施日期关系。日期到期由周计划单列复核，不通过脚本擅改状态。已入库的缺件项从 `pending_research` 转入 `research_history` 保留失败历史，真实缺件与适用性未决项继续保留。产品及副本统计区分当前认证范围和已退出范围，退出认证不等于标准废止。
+
+每周调度、Ego 下载、资源预算和清理清单见 [每周维护与资源控制](weekly-maintenance.md)。维护授权才运行构建与清理；审计仍只读。
