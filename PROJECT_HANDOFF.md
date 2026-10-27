@@ -1,4 +1,15 @@
-当前写入者：无（FIRE-STANDARDS-20261026/v1 源码实现和本机验证已完成，精确提交、发布及发现状态以本轮仓外回执为准；不影响其他任务）。
+当前写入者：无（WPS-MEMBER-SKILL-20261027-v1 / v2/a2 本批源码与离线自测完成，精确范围释放；提交、协议交付、独验及发布状态以本批仓外报告和原协议回读为准，不影响其他任务）。
+
+## 2026-10-27 用户直接指令：WPS 会员能力 Skill WPS-MEMBER-SKILL-20261027-v1（v2/a2）
+
+- 来源：用户授权探索、集成和受管交付；优先 Claude Opus5.5/max 的型号已验证，但原受管临时实施消费者不可用，按用户“如果不行就codex开发”由原 WSL Codex `01a15701-c0b2-7c12-ab6b-9e9256ce3e92` g1 实施。唯一源码不变，基线 `005fadf4578a0c7e3066eccbb47f40ef7102b6df`；正式 executionId `dispatch-ac5419d7dcfbdbae75c4811800249520`，只沿原协议事件交付，不改长期 provider、模型默认或客户端开关。
+- 本轮用户最新“先只查接口，我继续使用”覆盖旧七包中的实际转换/GUI测试要求：未创建或附着 WPS/COM 实例，未转换、编辑、AI 或操作/结束共享窗口与进程。当前暂停不固化为 Skill 永久禁令。此前“不新增 WPS 通用 Skill”的旧决定仅在本次明确的新 Skill 目标内被覆盖；全局规则和其他项目不改。
+- 范围：新增 wps-office 的入口、两份按需参考、标准库封装及离线测试；最小更新 cloud-docs 本地/云端分流、platforms.json、README 与本交接。Windows 专用且 managed_wsl=false；不编辑安装副本、旧脏 Windows 检出或插件缓存，不安装到 WSL。
+- 行为：固定28命令及逐命令参数；argv不经shell，输入和水印摘要、云授权依据与输入摘要绑定；全新独占输出范围、禁止覆盖、目录/Markdown/ZIP边界；主机级runId排他持久意图、未知不重放、密码全出口去敏；只管理本次CLI句柄。catalog/probe/run均有实际可调用帮助，不开放install/login或通用编辑透传。
+- 自测：WSL Python3.14.4 的28项离线行为测试通过，覆盖实际自建子进程、并发仅一次、超时/非零/部分失败/缺产物、事件与产物绑定、密码、目录替换与资源边界；27份冻结原始响应逐字节回核（实际26种命令，cad2pdf另有finish证据，CAJ未测）。现有管理器16项通过；两项Skill格式、UTF-8/引用/语法与Windows平台拒绝门禁通过。原管理器历史已知失败在当前基线未复现，未越界修复。
+- 质量及待测：CAD回转缺图为内容失败；OCR字符/排版变化、photo2pdf解析器兼容差异为部分通过；新封装真实原生转换、多输入/改名/错误形态、Windows具体参数/路径行为、COM、保存重开、窗口隔离、AI和会员权益未验。本次源码自测不冒充原生WPS或Windows独验。
+- 本批提交号、父提交、准确远端回读、最终文件摘要、实际宿主/解释器/权限、观察和交付artifact集合由 `/srv/work/tasks/WPS-MEMBER-SKILL-20261027-v1/formal-v1/implementation/IMPLEMENTATION_REPORT.json` 回读；自测原件 `self-tests-commit.json`、格式检查和协议请求/响应均在同目录。正式 delivery 后由未实施 Windows Codex 跑离线独验，原 Claude reviewer 独立判断；review接受前不发布，Windows精确发布/发现由原03-05维护者完成。
+- 原 terminal_unknown 及其批次映射缺口保留，本次未解除、重放或覆盖旧任务，不给无冲突工作新增永久冻结；原固定自动化、恢复引用、AGENTS.md、CLAUDE.md和账号保持。最终交接已定稿并在末次源码提交前释放首行；不在最终推送后追加交接脏差异。
 
 ## 2026-10-27 用户直接指令：流量任务迁移及旧 WSL 入口清理
 

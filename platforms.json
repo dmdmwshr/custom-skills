@@ -717,6 +717,19 @@
         "windows": "source_and_isolated_tests_only_require_publication_acceptance"
       },
       "dependencies": "Vendored OpenAI curated security skills (Apache-2.0); ownership-map needs networkx (run via uv --with networkx) and a git repository; explicit user request only."
+    },
+    "wps-office": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "source_and_offline_fixtures_only_no_linux_wps_runtime",
+        "linux": "not_supported_by_current_workflow",
+        "windows": "requires_independent_source_wrapper_offline_acceptance_native_conversion_com_gui_ai_not_tested"
+      },
+      "dependencies": "Existing Windows WPS builtin wpscli.exe with exact CLI 1.1.0 and frozen help hashes; Python standard library. Separate current input-bound cloud OCR authorization. No installation, login, process-tree management or generic editing passthrough."
     }
   }
 }

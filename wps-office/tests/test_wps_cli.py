@@ -1,0 +1,411 @@
+"""离线行为测试；设置 WPS_TEST_ROOT 为本任务已批准的仓外测试目录。"""
+import concurrent.futures
+import hashlib
+import importlib.util
+import io
+import json
+import ntpath
+import os
+import re
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+import uuid
+import zipfile
+
+sys.dont_write_bytecode = True
+SOURCE = Path(__file__).resolve().parents[1] / 'scripts/wps_cli.py'
+spec = importlib.util.spec_from_file_location('wps_cli_under_test', SOURCE)
+w = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(w)
+REAL_POPEN = subprocess.Popen
+ORIGINAL_OBSERVE = w.observe_binary
+
+FAKE = r'''
+import json,ntpath,os,pathlib,subprocess,sys,time
+mode,argv,marker=sys.argv[1],json.loads(sys.argv[2]),sys.argv[3]
+with open(marker,'a',encoding='utf-8') as f:f.write('spawn\n')
+cmd=argv[1];inputs=[]
+for a in argv[2:]:
+ if a.startswith('--'):break
+ inputs.append(a)
+if mode=='grandchild':
+ child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+ print(json.dumps({'type':'fixture-child','pid':child.pid}),flush=True)
+ time.sleep(60)
+if mode=='timeout':
+ print(json.dumps({'type':'started','input':ntpath.basename(inputs[0])}),flush=True)
+ print(json.dumps({'type':'progress','echo':argv}),flush=True)
+ sys.stderr.write(json.dumps(argv));sys.stderr.flush();time.sleep(60)
+if mode=='slow':time.sleep(.3)
+if cmd=='pdfinfo':
+ for p in inputs: print(json.dumps({'type':'completed','file':p,'page_count':2,'is_scan_document':False}))
+ sys.exit(0)
+out=pathlib.Path(argv[argv.index('--output')+1])
+merged=cmd=='pdfmerge'
+count=1 if merged else len(inputs)
+for i in range(count):
+ print(json.dumps({'type':'started',**({} if merged else {'input':ntpath.basename(inputs[i])})}),flush=True)
+ if mode=='partial' and i==count-1:
+  print(json.dumps({'type':'error','code':214}));sys.exit(1)
+ target=out/(str(i)+'.pdf') if out.is_dir() else out
+ if mode=='rename':target=target.with_stem(target.stem+'(1)')
+ if mode!='missing':target.write_bytes(b'fixture-pdf')
+ if mode=='mutate':pathlib.Path(inputs[0]).write_bytes(b'changed-fixture')
+ print(json.dumps({'type':'completed','status':'success','output':str(target),'echo':argv}))
+if mode=='nonzero':sys.stderr.write(json.dumps(argv));sys.exit(214)
+'''
+
+
+class Harness(unittest.TestCase):
+    def setUp(self):
+        root = os.environ.get('WPS_TEST_ROOT')
+        if not root:
+            raise RuntimeError('WPS_TEST_ROOT must name an authorized external test root')
+        Path(root).mkdir(parents=True, exist_ok=True)
+        self.base = Path(tempfile.mkdtemp(prefix='wps-offline-', dir=root))
+        self.drive = self.base / 't'
+        for name in ('in', 'work', 'bin'):
+            (self.drive / name).mkdir(parents=True)
+        self.binary = self.drive / 'bin/wpscli.exe';self.binary.write_bytes(b'INERT OFFLINE FIXTURE')
+        self.program = self.base / 'fixture.py';self.program.write_text(FAKE, encoding='utf-8')
+        self.marker = self.base / 'spawn-count.txt'
+        self.mode = 'success';self.calls = []
+        self.patches = [patch.object(w, 'require_windows', lambda: None),
+                        patch.object(w, 'winpath', self.resolve),
+                        patch.object(w, 'state_root', lambda: self.base / 'state'),
+                        patch.object(w, 'observe_binary', self.observe),
+                        patch.object(w.subprocess, 'Popen', self.spawn)]
+        for p in self.patches:
+            p.start();self.addCleanup(p.stop)
+        # Deliberately retain all fixture/unknown evidence. Only live self-created processes are cleaned.
+
+    def resolve(self, value):
+        value = str(value)
+        if value.startswith(str(self.base)):
+            return Path(value).resolve()
+        n = w.windows_syntax(value)
+        return (self.base / n[0].lower() / n[3:].replace('\\', '/')).resolve()
+
+    def observe(self, binary, commands, cwd):
+        return {'path': str(binary), 'size': binary.stat().st_size, 'sha256': w.sha_file(binary),
+                'version': 'wpscli 1.1.0 (inert test adapter)', 'wrapperSha256': w.sha_file(SOURCE),
+                'help': {c: w.CATALOG[c]['helpSha256'] for c in commands}}
+
+    def spawn(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        return REAL_POPEN([sys.executable, '-I', '-B', str(self.program), self.mode,
+                           json.dumps(argv), str(self.marker)], **kwargs)
+
+    def request(self, command='word2pdf', count=1):
+        family = 'pdf' if command.startswith('pdf') else next(k for k in w.EXTENSIONS if command.startswith(k))
+        ext = {'word': 'docx', 'excel': 'xlsx', 'ppt': 'pptx', 'pdf': 'pdf',
+               'photo': 'png', 'txt': 'txt', 'cad': 'dxf', 'caj': 'caj'}[family]
+        inputs = ['T:/in/中文 样本' + str(i) + '.' + ext for i in range(count)]
+        for p in inputs:
+            self.resolve(p).write_bytes(b'synthetic-input')
+        directory = command in {'pdfsplit', 'pdf2photo', 'word2photo', 'excel2photo', 'ppt2photo'} or count > 1 and command != 'pdfmerge'
+        run_id = 'fixture-' + uuid.uuid4().hex
+        scope = 'T:/work/' + run_id
+        suffix = w.DEFAULT_SUFFIX.get(command, 'pdf')
+        req = {'schemaVersion': 1, 'runId': run_id, 'command': command, 'inputs': inputs,
+               'outputKind': 'directory' if directory else 'file',
+               'output': scope if directory else scope + '/new.' + suffix,
+               'evidenceDir': 'T:/work/receipt-' + run_id, 'wpscliPath': 'T:/bin/wpscli.exe', 'options': {}}
+        if command == 'pdfinfo':
+            req.pop('output');req['outputKind'] = 'none'
+        if command in {'pdfsplit', 'pdf2cad'}:
+            req['options']['range'] = ';'.join('1-2' for _ in inputs)
+        if command == 'pdfwatermark':
+            req['options']['text'] = '中文; literal # watermark'
+        if command == 'pdfencrypt':
+            req['openPassword'] = 'P-' + uuid.uuid4().hex
+        if command in w.PHOTOS:
+            req['cloudProcessingAuthorized'] = True;req['cloudAuthorizationBasis'] = 'explicit synthetic fixture only'
+            req['authorizedInputHashes'] = {p: w.sha_file(self.resolve(p)) for p in inputs}
+        return req
+
+    def assert_no_password(self, secret, result):
+        serialized = w.json_bytes(result)
+        forbidden = [secret.encode(), secret.encode('utf-16le'), json.dumps(secret)[1:-1].encode()]
+        for raw in [serialized] + [p.read_bytes() for p in self.base.rglob('*') if p.is_file()]:
+            for token in forbidden:
+                self.assertNotIn(token, raw)
+
+    def test_catalog_exact_28_and_no_passthrough(self):
+        names = {'word2pdf','excel2pdf','ppt2pdf','pdf2word','pdf2excel','pdf2ppt','pdf2txt','pdf2md','pdf2photo',
+                 'pdf2imgpdf','pdfcompress','pdfsplit','pdfmerge','pdfwatermark','pdfremovewatermark','pdfencrypt',
+                 'pdfinfo','word2photo','excel2photo','ppt2photo','photo2pdf','photo2word','photo2excel','photo2ppt',
+                 'txt2pdf','pdf2cad','cad2pdf','caj2pdf'}
+        self.assertEqual(set(w.CATALOG), names)
+        for bad in ('install', 'feedback', 'login', 'version', 'cmd'):
+            r = self.request();r['command'] = bad
+            with self.assertRaises(w.Rejected):w.run_request(r)
+        self.assertEqual(self.calls, [])
+
+    def test_every_command_per_command_schema(self):
+        for command in w.CATALOG:
+            with self.subTest(command=command):
+                r = self.request(command);self.assertEqual(w.validate_request(r)[0], command)
+                r['options']['install'] = True
+                with self.assertRaises(w.Rejected):w.run_request(r)
+        self.assertEqual(self.calls, [])
+
+    def test_invalid_options_rejected_before_spawn(self):
+        cases = [('pdf2word', {'scanned': True}), ('pdf2word', {'scanned': True, 'range': '1', 'engine': 'basic'}),
+                 ('pdf2word', {'ai-fix': True}), ('pdf2md', {'scanned': True}),
+                 ('pdf2excel', {'suffix':'csv','multi-sheet':True}), ('ppt2pdf', {'handout-layout':5}),
+                 ('ppt2pdf', {'output-type':'handouts','handout-layout':3,'handout-order':'vertical'}),
+                 ('word2pdf', {'image-quality':'best'}), ('word2photo', {'dpi':601}),
+                 ('pdfcompress', {'color-img-dest-ppi':8}), ('pdfcompress', {'optimizer-settings':'unknown'}),
+                 ('photo2pdf', {'overwrite':True}), ('txt2pdf', {'page-width':20}),
+                 ('pdfwatermark', {'text':'ok','image':'T:/in/watermark.png'}),
+                 ('pdfwatermark', {'text-color':'red'}), ('word2pdf', {'timeout':True})]
+        for cmd, opts in cases:
+            r = self.request(cmd);r['options'] = opts
+            with self.subTest(cmd=cmd, opts=opts), self.assertRaises(w.Rejected):w.run_request(r)
+        self.assertEqual(self.calls, [])
+
+    def test_range_grammars(self):
+        w.validate_ranges('1,3-5', 'excel2pdf', 1)
+        w.validate_ranges('1,2;3-4', 'pdfsplit', 2)
+        w.validate_ranges('1;2-3', 'pdfmerge', 2)
+        for v,c,n in [('1,2','pdfmerge',1),('1,2','pdf2word',1),('1;2','pdf2word',1),('0','word2pdf',1),('4-2','pdfsplit',1)]:
+            with self.assertRaises(w.Rejected):w.validate_ranges(v,c,n)
+
+    def test_path_and_password_delimiters(self):
+        for p in ('relative.pdf','C:relative.pdf','//host/share/a.pdf','C:/../a.pdf','C:/a.pdf:stream','C:/NUL.pdf',
+                  'C:/bad./a.pdf','C:/a?.pdf','C:/a*.pdf','C:/bad /a.pdf','C:/a\n.pdf'):
+            with self.subTest(p=p), self.assertRaises(w.Rejected):w.windows_syntax(p)
+        r = self.request();r['password'] = 'not;native-safe'
+        with self.assertRaises(w.Rejected):w.run_request(r)
+        r = self.request();r['inputs'] = ['T:/in/has;delimiter.docx']
+        with self.assertRaises(w.Rejected):w.run_request(r)
+        self.assertEqual(self.calls, [])
+
+    def test_plain_text_semicolon_exact_argv_and_no_shell(self):
+        r = self.request('pdfwatermark')
+        r['output'] = r['output'].replace('/new.pdf', '/中文; # new.pdf')
+        out = w.run_request(r)
+        self.assertEqual(out['status'], 'completed')
+        argv, kw = self.calls[0]
+        self.assertEqual(argv[argv.index('--text')+1], '中文; literal # watermark')
+        self.assertIs(kw['shell'], False);self.assertEqual(kw['stdin'], subprocess.DEVNULL)
+        self.assertEqual(kw['cwd'], str(self.resolve(r['evidenceDir'])))
+        self.assertEqual(kw.get('creationflags', 0), subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+        self.assertEqual(w.sha_file(self.resolve(r['inputs'][0])), hashlib.sha256(b'synthetic-input').hexdigest())
+
+    def test_replaced_scope_and_watermark_input_protection(self):
+        r=self.request('pdfwatermark');r['options']={'image':'T:/in/水印; #.png'}
+        image=self.resolve(r['options']['image']);image.write_bytes(b'watermark-image')
+        out=w.run_request(r)
+        self.assertEqual(out['status'],'completed')
+        self.assertEqual(len(out['inputHashesAfter']),2)
+        self.assertEqual(image.read_bytes(),b'watermark-image')
+        scope=self.base/'root-to-replace';scope.mkdir();other=self.base/'unrelated';other.mkdir()
+        (other/'original.pdf').write_bytes(b'protected-neighbor')
+        scope.rmdir()
+        try:scope.symlink_to(other,target_is_directory=True)
+        except OSError:self.skipTest('symlink privilege unavailable; independent Windows junction test required')
+        artifacts,errors,_=w.collect_artifacts([{'completed':{'output':str(scope/'original.pdf')}}],scope,'pdfsplit',resolver=Path)
+        self.assertEqual(artifacts,[]);self.assertIn('output_scope_identity_changed',errors)
+
+    def test_cloud_auth_before_spawn_and_hash_binding(self):
+        r = self.request('photo2word');r['cloudProcessingAuthorized'] = False
+        with self.assertRaises(w.Rejected):w.run_request(r)
+        r['cloudProcessingAuthorized'] = True;r['authorizedInputHashes'][r['inputs'][0]] = '0'*64
+        with self.assertRaises(w.Rejected):w.run_request(r)
+        self.assertEqual(self.calls, [])
+
+    def test_default_no_overwrite_and_occupied_scope(self):
+        r = self.request();scope = self.resolve(ntpath.dirname(r['output']));scope.mkdir()
+        old=scope/'old.pdf';old.write_bytes(b'original')
+        with self.assertRaises(w.Rejected):w.run_request(r)
+        self.assertEqual(old.read_bytes(),b'original');self.assertEqual(self.calls,[])
+
+    def test_input_output_alias_and_basename_collision(self):
+        r = self.request();r['output'] = r['inputs'][0].replace('.docx','.pdf')
+        with self.assertRaises(w.Rejected):w.run_request(r)
+        r = self.request(count=2);r['inputs'][1] = 'T:/other/中文 样本0.docx'
+        with self.assertRaises(w.Rejected):w.validate_request(r)
+
+    def test_auto_renamed_actual_file_and_hash(self):
+        r = self.request();self.mode='rename';out=w.run_request(r)
+        self.assertEqual(out['status'],'completed');self.assertEqual(len(out['artifacts']),1)
+        artifact=out['artifacts'][0];self.assertIn('(1)',artifact['path'])
+        self.assertEqual(artifact['sha256'],hashlib.sha256(b'fixture-pdf').hexdigest())
+        self.assertFalse(self.resolve(r['output']).exists())
+
+    def test_directory_and_ordered_batch(self):
+        r=self.request(count=2);out=w.run_request(r)
+        self.assertEqual(out['status'],'completed');self.assertEqual(len(out['artifacts']),2)
+        self.assertEqual([x['inputIndices'] for x in out['commands']],[[0],[1]])
+
+    def test_partial_and_nonzero_keep_known_artifact_unknown(self):
+        for mode,count in [('partial',2),('nonzero',1),('missing',1)]:
+            self.mode=mode;r=self.request(count=count);out=w.run_request(r)
+            self.assertEqual(out['status'],'unknown')
+            if mode!='missing':self.assertEqual(len(out['artifacts']),1)
+            self.assertTrue(out['unknowns'])
+
+    def test_pdfinfo_shape_has_no_output_or_timeout(self):
+        r=self.request('pdfinfo');out=w.run_request(r)
+        self.assertEqual(out['status'],'completed');self.assertEqual(out['artifacts'],[])
+        argv=self.calls[0][0];self.assertNotIn('--output',argv);self.assertNotIn('--timeout',argv)
+        self.assertEqual(out['commands'][0]['completed']['page_count'],2)
+
+    def test_replay_same_run_and_changed_evidence_never_spawn(self):
+        r=self.request();first=w.run_request(r);second=w.run_request(r)
+        self.assertEqual(second['status'],'completed');self.assertIs(second['replayed'],False)
+        self.assertEqual(len(self.calls),1)
+        r['evidenceDir']+='-different'
+        with self.assertRaisesRegex(w.Rejected,'run_id_request_conflict'):w.run_request(r)
+        self.assertEqual(len(self.calls),1)
+
+    def test_atomic_claim_concurrent_spawn_once(self):
+        r=self.request();self.mode='slow'
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            rows=list(pool.map(w.run_request,[r,dict(r)]))
+        self.assertEqual(len(self.marker.read_text().splitlines()),1)
+        self.assertTrue(any(x['status']=='completed' for x in rows))
+
+    def test_crash_after_intent_is_not_replayed(self):
+        r=self.request()
+        with patch.object(w,'observe_binary',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):w.run_request(r)
+        out=w.run_request(r);self.assertEqual(out['status'],'unknown');self.assertEqual(self.calls,[])
+
+    def test_password_success_nonzero_and_timeout_absent_everywhere(self):
+        for mode in ('success','nonzero','timeout'):
+            self.mode=mode;r=self.request('pdfencrypt');secret='秘密_'+uuid.uuid4().hex
+            r['openPassword']=secret;r['password']='src_'+uuid.uuid4().hex
+            if mode=='timeout':r['parentTimeoutSeconds']=1
+            out=w.run_request(r);self.assert_no_password(secret,out);self.assert_no_password(r['password'],out)
+            self.assertEqual(out['status'],'completed' if mode=='success' else 'unknown')
+            # Same timeout run cannot launch again.
+            before=len(self.calls);w.run_request(r);self.assertEqual(len(self.calls),before)
+
+    def test_input_mutation_observed(self):
+        self.mode='mutate';out=w.run_request(self.request())
+        self.assertEqual(out['status'],'unknown');self.assertIn('input_modified',out['unknowns'])
+
+    def test_unexpected_error_after_real_child_effect_is_unknown_without_replay(self):
+        r=self.request()
+        with patch.object(w,'parse_capture',side_effect=RuntimeError('do not stringify arbitrary process context')):
+            out=w.run_request(r)
+        self.assertEqual(out['status'],'unknown')
+        self.assertTrue(self.resolve(r['output']).is_file())
+        before=len(self.calls);again=w.run_request(r)
+        self.assertEqual(again['status'],'unknown');self.assertEqual(len(self.calls),before)
+
+    def test_timeout_kills_only_owned_child_not_grandchild(self):
+        self.mode='grandchild'
+        p,out,err=w.capture_process([str(self.binary),'pdfinfo','fixture.pdf'],self.base,.4)
+        self.assertTrue(p['timedOut'])
+        child=json.loads(out.decode().splitlines()[0])['pid']
+        try:
+            if sys.platform=='win32':
+                import ctypes
+                handle=ctypes.windll.kernel32.OpenProcess(0x1000,False,child)
+                self.assertTrue(handle);ctypes.windll.kernel32.CloseHandle(handle)
+            else:os.kill(child,0)
+        finally:
+            os.kill(child,signal.SIGTERM)  # exact fixture-owned PID only
+
+    def test_probe_only_version_and_selected_help_with_drift_guard(self):
+        cmd='word2pdf';original=w.CATALOG[cmd]['helpSha256']
+        sample=b'Known help\n';w.CATALOG[cmd]['helpSha256']=hashlib.sha256(sample).hexdigest()
+        try:
+            answers=[({'exitCode':0,'timedOut':False},b'wpscli 1.1.0\n',b''),
+                     ({'exitCode':0,'timedOut':False},sample.replace(b'\n',b'\r\n'),b'')]
+            with patch.object(w,'capture_process',side_effect=answers) as c:
+                # Call source code, not Harness's binary observation adapter.
+                original_observe=ORIGINAL_OBSERVE
+                result=original_observe(self.binary,[cmd],self.base)
+                self.assertEqual(result['help'][cmd],hashlib.sha256(sample).hexdigest())
+                self.assertEqual(c.call_args_list[0].args[0],[str(self.binary),'--version'])
+                self.assertEqual(c.call_args_list[1].args[0],[str(self.binary),cmd,'--help'])
+            with patch.object(w,'capture_process',return_value=({'exitCode':0,'timedOut':False},b'wrong',b'')):
+                with self.assertRaises(w.Rejected):original_observe(self.binary,[cmd],self.base)
+        finally:w.CATALOG[cmd]['helpSha256']=original
+
+
+class PureEvidenceTests(unittest.TestCase):
+    def test_three_envelopes_jsonl_and_unknown_lines(self):
+        native='\r\n'+json.dumps({'type':'started','input':'a.pdf'})+'\r\n\r\n'+json.dumps({'type':'completed','status':'success','output':'T:/new/x.pdf'})+'\r\n'
+        for body in [native,json.dumps({'returncode':0,'stdout':native,'stderr':''}),
+                     json.dumps({'rc':0,'stdout':native}),json.dumps({'exit':0,'source':'a','target':'b','stdout':native})]:
+            events,errors=w.parse_capture(body);self.assertEqual(len(events),2);self.assertEqual(errors,[])
+        events,errors=w.parse_capture('not json\n{"type":"future-event"}')
+        self.assertEqual(len(events),1);self.assertEqual(len(errors),2)
+
+    def test_event_binding_order_duplicate_names_merge_and_pdfinfo(self):
+        events=[{'event':{'type':'started','input':'b.pdf'}},{'event':{'type':'completed','status':'success','output':'T:/new/b.docx'}}]
+        rows,errors=w.bind_events(events,'pdf2word',['T:/in/a.pdf']);self.assertTrue(errors)
+        events=[{'event':{'type':'started'}},{'event':{'type':'completed','status':'success','output':'T:/new/all.pdf'}}]
+        rows,errors=w.bind_events(events,'pdfmerge',['T:/in/a.pdf','T:/in/b.pdf'],True)
+        self.assertEqual(errors,[]);self.assertEqual(rows[0]['inputIndices'],[0,1])
+        rows,errors=w.bind_events([{'event':{'type':'completed','file':'T:/else/a.pdf','page_count':2,'is_scan_document':False}}],'pdfinfo',['T:/in/a.pdf'])
+        self.assertTrue(errors)
+
+    def test_markdown_resources_directory_zip_and_escapes(self):
+        root=Path(os.environ['WPS_TEST_ROOT']);root.mkdir(parents=True,exist_ok=True)
+        base=Path(tempfile.mkdtemp(prefix='resource-',dir=root));scope=base/'fresh';scope.mkdir()
+        assets=scope/'renamed.assets';assets.mkdir();(assets/'a image.png').write_bytes(b'image')
+        md=scope/'renamed.md';md.write_text('![图片](renamed.assets/a%20image.png)\n<img src="renamed.assets/a%20image.png">',encoding='utf-8')
+        rows=[{'completed':{'output':str(md)}}]
+        files,errors,unbound=w.collect_artifacts(rows,scope,'pdf2md',resolver=Path)
+        self.assertFalse(errors);self.assertEqual(len(files),2);self.assertFalse(unbound)
+        other=base/'outside.png';other.write_bytes(b'outside')
+        for reference in ('../outside.png','%2e%2e/outside.png','https://example.org/a.png','file:///x.png'):
+            md.write_text('![]('+reference+')',encoding='utf-8')
+            self.assertTrue(w.collect_artifacts(rows,scope,'pdf2md',resolver=Path)[1])
+        z=scope/'cad.zip'
+        with zipfile.ZipFile(z,'w') as f:f.writestr('images/1.jpg',b'image');f.writestr('drawing.dxf',b'dxf')
+        self.assertEqual(len(w.zip_entries(z)),2)
+        with zipfile.ZipFile(z,'w') as f:f.writestr('../escaped',b'bad')
+        with self.assertRaises(w.Rejected):w.zip_entries(z)
+        link=scope/'link'
+        try:link.symlink_to(other)
+        except OSError:self.skipTest('symlink privilege unavailable; independent Windows junction coverage required')
+        self.assertTrue(w.collect_artifacts([{'completed':{'output':str(scope)}}],scope,'pdfsplit',resolver=Path)[1])
+
+    def test_utf8_bom_duplicate_keys_and_corrupt_request(self):
+        self.assertEqual(w.read_request(io.BytesIO(b'\xef\xbb\xbf{"hello":"world"}')),{'hello':'world'})
+        for raw in (b'{"x":1,"x":2}',b'\xff',b'not json'):
+            with self.assertRaises(w.Rejected):w.read_request(io.BytesIO(raw))
+
+    def test_actual_image_header_dimensions_do_not_infer_page_mapping(self):
+        root=Path(os.environ['WPS_TEST_ROOT']);root.mkdir(parents=True,exist_ok=True)
+        path=Path(tempfile.mkdtemp(prefix='image-header-',dir=root))/'long.png'
+        path.write_bytes(b'\x89PNG\r\n\x1a\n'+(13).to_bytes(4,'big')+b'IHDR'+(1122).to_bytes(4,'big')+(3174).to_bytes(4,'big'))
+        result=w.image_dimensions(path)
+        self.assertEqual((result['width'],result['height']),(1122,3174))
+        self.assertEqual(result['pageMapping'],'not-assessed')
+
+    def test_frozen_real_27_capture_shapes(self):
+        path=os.environ.get('WPS_FIXTURE_INDEX')
+        if not path:self.skipTest('not-covered: WPS_FIXTURE_INDEX not supplied; no native command invoked')
+        index=json.loads(Path(path).read_text(encoding='utf-8'))
+        self.assertEqual(len(index['fixtures']),27)
+        for f in index['fixtures']:
+            with self.subTest(path=f['path']):
+                native=f['path']
+                if sys.platform=='win32' and re.match(r'^/mnt/[a-z]/',native):
+                    native=native[5].upper()+':/'+native[7:]
+                raw=Path(native).read_bytes();self.assertEqual(hashlib.sha256(raw).hexdigest(),f['sha256'])
+                events,unknowns=w.parse_capture(raw);self.assertEqual(len(events),f['eventCount']);self.assertEqual(unknowns,[])
+                kinds={}
+                for item in events:kinds[item['event']['type']]=kinds.get(item['event']['type'],0)+1
+                self.assertEqual(kinds,f['eventTypes'])
+                terminals=[x['event'] for x in events if x['event'].get('type')=='completed']
+                self.assertEqual([sorted(x) for x in terminals],[sorted(x['keys']) for x in f['terminalSchemas']])
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

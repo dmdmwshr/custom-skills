@@ -13,7 +13,7 @@ This repository is the source of truth for self-built skills. Windows installati
 - **业务运维（WSL 受管）**：research-data-ops（macro-strategy + 已退役 OKXnew 只读参考）、server-traffic-sync
 - **路由前门（Windows）**：cloud-docs（金山 / WPS 365 / 飞书）、notion-workflows、cloudflare-platform、github-flow、security-review。其后端 Skill 的 CC 条目按设计保持“未启用”，只作文件读取，不是废弃
 - **视频**：video-intake（唯一核心）；video-download、bilinote-video-note 为兼容桩，仍被机器人路径和提示引用
-- **文档与资料（Windows）**：drawio-local（官方 draw.io Desktop CLI）、docling-local、mineru-local、zerox-local、obsidian-notes、summarize-link-note、wechat-mp-tools、wx-cli、pyweixin-rpa、xfrhtx-cli
+- **文档与资料（Windows）**：wps-office（内置 CLI 28 命令与编辑需求评估；Windows 原生运行/会员权益分层验收）、drawio-local（官方 draw.io Desktop CLI）、docling-local、mineru-local、zerox-local、obsidian-notes、summarize-link-note、wechat-mp-tools、wx-cli、pyweixin-rpa、xfrhtx-cli
 - **本机环境（Windows）**：cc-switch、flclash-proxy-toggle、browser-tamer、localvault-credentials、serena-local、windows-task-scheduler、wsl-backup-audit、wsl-system-lifecycle、comfyui-on-demand、comfyui-production-manager、applio-rvc-manager、meifu-resumable-download
 - **消防业务（Windows）**：xf-expert-review、xf-information-file-manager、xf-product-case-filler、xf-product-case-registry、xf-product-standards、xf-report-filler
 
