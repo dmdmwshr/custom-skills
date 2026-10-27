@@ -524,7 +524,7 @@ def redact(value, secrets):
     return value
 
 
-def native_event_view(event, secrets):
+def native_event_view(event, secrets, path_filter=None):
     """只去敏原生载荷；保留已知事件字段及枚举，不改封装的公开身份/状态。"""
     public_keys = {'type', 'status', 'input', 'output', 'file', 'page_count',
                    'is_scan_document', 'code', 'message', 'progress'}
@@ -533,8 +533,79 @@ def native_event_view(event, secrets):
         public_enum = (key == 'type' and isinstance(value, str) and
                        value in {'started', 'progress', 'completed', 'error'}) or (
                        key == 'status' and isinstance(value, str) and value in {'success', 'failed'})
-        result[key if key in public_keys else redact(key, secrets)] = value if public_enum else redact(value, secrets)
+        shown = (path_filter(value) if path_filter is not None and key in {'input', 'output', 'file'}
+                 else value if public_enum else redact(value, secrets))
+        result[key if key in public_keys else redact(key, secrets)] = shown
     return result
+
+
+def result_view(result, scope, requested_output, secrets, known_paths=()):
+    """从原始观察复制出公开视图；原生派生字符串只去敏一次，绝不改文件。"""
+    view = dict(result)
+    names_redacted = False
+    def path_view(value):
+        # The collector already checked the real path. Preserve the resolved request scope
+        # byte-for-byte, and the entire exact requested output filename when it is used.
+        if requested_output is not None and value == str(requested_output):
+            return value
+        prefix = str(scope)
+        require(os.path.normcase(value[:len(prefix)]) == os.path.normcase(prefix) and
+                value[len(prefix):len(prefix) + 1] in {'/', '\\'}, 'artifact_view_outside_scope')
+        return prefix + redact(value[len(prefix):], secrets)
+
+    known = set(known_paths) | {ntpath.basename(p) for p in known_paths}
+    def native_path_view(value):
+        if isinstance(value, list):
+            return [native_path_view(v) for v in value]
+        if isinstance(value, str):
+            if value in known or requested_output is not None and value == str(requested_output):
+                return value
+            prefix = str(scope)
+            if scope is not None and os.path.normcase(value[:len(prefix)]) == os.path.normcase(prefix) and \
+                    value[len(prefix):len(prefix) + 1] in {'/', '\\'}:
+                return path_view(value)
+        return redact(value, secrets)
+
+    view['nativeEvents'] = [{'line': item['line'], 'event': native_event_view(item['event'], secrets, native_path_view)}
+                            for item in result['nativeEvents']]
+    view['commands'] = [{**row, **{key: native_event_view(row[key], secrets, native_path_view)
+                                 for key in ('completed', 'error') if key in row}}
+                        for row in result['commands']]
+    if 'stderr' in result:
+        view['stderr'] = redact(result['stderr'], secrets)
+
+    def file_view(info):
+        nonlocal names_redacted
+        shown = path_view(info['path'])
+        item = {**info, 'path': shown}
+        if shown != info['path']:
+            item['pathRedacted'] = True;names_redacted = True
+        return item
+
+    artifacts = []
+    for artifact in result['artifacts']:
+        item = file_view(artifact)
+        if 'resources' in artifact:
+            item['resources'] = [file_view(resource) for resource in artifact['resources']]
+        if 'zipEntries' in artifact:
+            entries = []
+            for entry in artifact['zipEntries']:
+                shown = redact(entry['name'], secrets)
+                row = {**entry, 'name': shown}
+                if shown != entry['name']:
+                    row['nameRedacted'] = True;names_redacted = True
+                entries.append(row)
+            item['zipEntries'] = entries
+        artifacts.append(item)
+    view['artifacts'] = artifacts
+    if 'unboundFiles' in result:
+        view['unboundFiles'] = [path_view(value) for value in result['unboundFiles']]
+        if view['unboundFiles'] != result['unboundFiles']:
+            view['unboundFilesRedacted'] = True;names_redacted = True
+    if names_redacted:
+        view['nativeNamesRedacted'] = True
+    view['nativeNameViewVersion'] = 1
+    return view
 
 
 def durable_json(path, value, exclusive=False):
@@ -1120,6 +1191,12 @@ def replay_record(run_dir, identity):
         try:
             r = json.loads(result_path.read_text(encoding='ascii'))
             if isinstance(r, dict) and r.get('schemaVersion') == 2 and r.get('requestIdentity') == identity and 'requestDigest' not in r:
+                if r.get('nativeNameViewVersion') != 1:
+                    # Earlier schema2 results may contain unsafe native names. The old password
+                    # is unavailable on changed-secret readback: do not guess, resanitize or rewrite.
+                    return {'schemaVersion': 2, 'requestIdentity': identity, 'status': 'unknown',
+                            'replayed': False, 'existingRun': True, 'preNameViewRecord': True,
+                            'unknowns': ['existing_result_name_view_unverified'], 'stateDir': str(run_dir)}
                 r['replayed'] = False;r['existingRun'] = True
                 return r
         except (OSError, ValueError):
@@ -1247,14 +1324,7 @@ def run_request(request):
     if result['unknowns']:
         result['status'] = 'unknown'
     result['unknowns'] = list(dict.fromkeys(result['unknowns']))
-    result['nativeEvents'] = [{'line': item['line'], 'event': native_event_view(item['event'], secrets)}
-                              for item in result['nativeEvents']]
-    for row in result['commands']:
-        for key in ('completed', 'error'):
-            if key in row:
-                row[key] = native_event_view(row[key], secrets)
-    if 'stderr' in result:
-        result['stderr'] = redact(result['stderr'], secrets)
+    result = result_view(result, scope, output, secrets, [str(p) for p in protected] + request['inputs'])
     durable_json(run_dir / 'result.json', result)
     if evidence_created:
         try:

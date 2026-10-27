@@ -29,13 +29,32 @@ REAL_POPEN = subprocess.Popen
 ORIGINAL_OBSERVE = w.observe_binary
 
 FAKE = r'''
-import json,ntpath,os,pathlib,subprocess,sys,time
+import json,ntpath,os,pathlib,subprocess,sys,time,zipfile
 mode,argv,marker=sys.argv[1],json.loads(sys.argv[2]),sys.argv[3]
 with open(marker,'a',encoding='utf-8') as f:f.write('spawn\n')
 cmd=argv[1];inputs=[]
 for a in argv[2:]:
  if a.startswith('--'):break
  inputs.append(a)
+if mode.startswith('native-names'):
+ secret=argv[argv.index('--password')+1]
+ out=pathlib.Path(argv[argv.index('--output')+1])
+ folder=out.parent/(secret+'-native');folder.mkdir()
+ print(json.dumps({'type':'started','input':ntpath.basename(inputs[0])}),flush=True)
+ if cmd=='pdf2md':
+  target=folder/(secret+'-document.md')
+  (folder/(secret+'-image.png')).write_bytes(b'synthetic-resource')
+  target.write_text('![figure]('+secret+'-image.png)\n',encoding='utf-8')
+ elif cmd=='pdf2cad':
+  target=folder/(secret+'-archive.zip')
+  with zipfile.ZipFile(target,'w') as z:z.writestr(secret+'/layer.dxf','synthetic entry')
+ else:
+  target=folder/(secret+'-actual.pdf');target.write_bytes(b'fixture-pdf')
+ (out.parent/(secret+'-unbound.txt')).write_bytes(b'unbound-fixture')
+ print(json.dumps({'type':'completed','status':'success','output':str(target),'echo':argv}),flush=True)
+ if mode.endswith('nonzero'):sys.stderr.write(json.dumps(argv));sys.exit(214)
+ if mode.endswith('timeout'):time.sleep(60)
+ sys.exit(0)
 if mode=='grandchild':
  child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
  print(json.dumps({'type':'fixture-child','pid':child.pid}),flush=True)
@@ -147,7 +166,98 @@ class Harness(unittest.TestCase):
         with patch.object(w.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(w.json_bytes(request)))), \
                 patch.object(w.sys, 'stdout', SimpleNamespace(buffer=output)):
             code = w.main(['run'])
-        return code, json.loads(output.getvalue())
+        self.last_stdout = output.getvalue()
+        return code, json.loads(self.last_stdout)
+
+    def test_native_name_sinks_redacted_without_changing_files_or_prefix(self):
+        long_secret = 'R2秘密_' + uuid.uuid4().hex
+        cases = [(command, secret, 'native-names') for command in ('word2pdf', 'pdf2md', 'pdf2cad')
+                 for secret in (long_secret, '0', 'a')]
+        cases += [('word2pdf', long_secret, 'native-names-' + suffix) for suffix in ('nonzero', 'timeout')]
+        for command, secret, mode in cases:
+            with self.subTest(command=command, secretKind='short' if len(secret) == 1 else 'long', mode=mode):
+                r = self.request(command);r['password'] = secret
+                r['output'] = r['output'].replace('/work/', '/work/public-a0-')
+                scope = self.resolve(ntpath.dirname(r['output']));self.mode = mode
+                if mode.endswith('timeout'):r['parentTimeoutSeconds'] = 1
+                expected_status = 'completed' if mode == 'native-names' else 'unknown'
+                before = len(self.calls);code, first = self.main_call(r)
+                self.assertEqual((code, first['status']), (0 if expected_status == 'completed' else 3, expected_status))
+                self.assertEqual(first['requestIdentity'], w.request_identity(r))
+                self.assertEqual(first['loadedConfiguration']['outputScope'], str(scope))
+                self.assertTrue(first['nativeNamesRedacted']);self.assertTrue(first['unboundFilesRedacted'])
+                actual = {w.sha_file(p): p for p in scope.rglob('*') if p.is_file()}
+                original_bytes = {p: p.read_bytes() for p in actual.values()}
+                for info in first['artifacts']:
+                    self.assertIn(info['sha256'], actual)
+                    for item in [info, *info.get('resources', [])]:
+                        self.assertTrue(item['pathRedacted']);self.assertTrue(item['path'].startswith(str(scope) + os.sep))
+                        self.assertNotIn(secret, item['path'][len(str(scope)):])
+                        self.assertIn('[REDACTED]', item['path']);self.assertIn(item['sha256'], actual)
+                        self.assertEqual(item['size'], actual[item['sha256']].stat().st_size)
+                    for entry in info.get('zipEntries', []):
+                        self.assertTrue(entry['nameRedacted']);self.assertNotIn(secret, entry['name'])
+                        with zipfile.ZipFile(actual[info['sha256']]) as z:
+                            native_entry = z.infolist()[0]
+                            self.assertIn(secret, native_entry.filename)
+                            self.assertEqual((entry['size'], entry['crc']), (native_entry.file_size, native_entry.CRC))
+                for name in first['unboundFiles']:
+                    self.assertTrue(name.startswith(str(scope) + os.sep));self.assertNotIn(secret, name[len(str(scope)):])
+                event_output = first['commands'][0]['completed']['output']
+                self.assertTrue(event_output.startswith(str(scope) + os.sep))
+                self.assertNotIn(secret, event_output[len(str(scope)):])
+                self.assertEqual(first['nativeEvents'][0]['event']['input'], ntpath.basename(r['inputs'][0]))
+                run_dir = w.state_root() / r['runId']
+                persisted = [run_dir / n for n in ('intent.json', 'launched.json', 'result.json')]
+                receipt = self.resolve(r['evidenceDir']) / 'receipt.json';persisted.append(receipt)
+                self.assertEqual((run_dir / 'result.json').read_bytes(), self.last_stdout)
+                self.assertEqual(receipt.read_bytes(), self.last_stdout)
+                if len(secret) > 1:
+                    for raw in [self.last_stdout, *(p.read_bytes() for p in persisted)]:
+                        self.assertNotIn(secret.encode(), raw)
+                        self.assertNotIn(json.dumps(secret)[1:-1].encode(), raw)
+                        self.assertNotIn(hashlib.sha256(w.json_bytes(r)).hexdigest().encode(), raw)
+                baseline = {p: p.read_bytes() for p in persisted}
+                changed = dict(r, password='changed-' + uuid.uuid4().hex)
+                code, second = self.main_call(changed)
+                self.assertEqual(second['requestIdentity'], first['requestIdentity'])
+                self.assertEqual(second['artifacts'], first['artifacts'])
+                self.assertEqual(second['unboundFiles'], first['unboundFiles'])
+                self.assertEqual(second['status'], expected_status)
+                self.assertTrue(second['existingRun']);self.assertIs(second['replayed'], False)
+                self.assertEqual(len(self.calls), before + 1)
+                self.assertEqual({p: p.read_bytes() for p in persisted}, baseline)
+                self.assertEqual({p: p.read_bytes() for p in original_bytes}, original_bytes)
+
+    def test_request_given_paths_remain_exact_even_with_secret_collision(self):
+        for secret in ('0', 'a', 'PublicPathCollision'):
+            r = self.request();r['password'] = secret
+            r['output'] = 'T:/work/' + secret + '-' + r['runId'] + '/' + secret + '.pdf'
+            self.mode = 'success';code, result = self.main_call(r)
+            self.assertEqual((code, result['status']), (0, 'completed'))
+            actual = str(self.resolve(r['output']))
+            self.assertEqual(result['artifacts'][0]['path'], actual)
+            self.assertEqual(result['commands'][0]['completed']['output'], actual)
+            self.assertNotIn('pathRedacted', result['artifacts'][0])
+            self.assertNotIn('nativeNamesRedacted', result)
+
+    def test_pre_name_view_schema2_readback_is_safe_without_rewriting(self):
+        r = self.request();old_secret = 'old-native-' + uuid.uuid4().hex;r['password'] = old_secret
+        identity = w.request_identity(r);run_dir = w.state_root() / r['runId'];run_dir.mkdir(parents=True)
+        (run_dir / 'intent.json').write_bytes(w.json_bytes({'schemaVersion': 2, 'requestIdentity': identity}))
+        (run_dir / 'result.json').write_bytes(w.json_bytes(
+            {'schemaVersion': 2, 'requestIdentity': identity, 'status': 'completed',
+             'artifacts': [{'path': 'T:/work/' + old_secret + '.pdf'}], 'unboundFiles': [old_secret]}))
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in run_dir.iterdir()}
+        for secret in (old_secret, 'changed-' + uuid.uuid4().hex):
+            code, out = self.main_call(dict(r, password=secret))
+            self.assertEqual((code, out['status']), (3, 'unknown'));self.assertTrue(out['preNameViewRecord'])
+            self.assertTrue(out['existingRun']);self.assertIs(out['replayed'], False)
+            self.assertEqual(out['requestIdentity'], identity)
+            self.assertNotIn(old_secret.encode(), self.last_stdout)
+            self.assertNotIn('artifacts', out);self.assertNotIn('unboundFiles', out)
+        self.assertEqual({p: (p.read_bytes(), p.stat().st_mtime_ns) for p in run_dir.iterdir()}, before)
+        self.assertEqual(self.calls, [])
 
     def test_secret_changes_arrays_and_pairs_read_existing_without_spawn(self):
         for command, count in [('pdfwatermark', 1), ('pdf2word', 2), ('pdfencrypt', 1)]:
@@ -528,6 +638,35 @@ class PureEvidenceTests(unittest.TestCase):
                 self.assertEqual(kinds,f['eventTypes'])
                 terminals=[x['event'] for x in events if x['event'].get('type')=='completed']
                 self.assertEqual([sorted(x) for x in terminals],[sorted(x['keys']) for x in f['terminalSchemas']])
+
+
+class ResultViewTests(unittest.TestCase):
+    def test_aliases_are_copied_and_each_derived_occurrence_redacted_once(self):
+        prefix = 'K:\\public-a0\\scope'
+        requested = prefix + '\\requested-a0.pdf'
+        resource = {'path': prefix + '\\secret-name.png', 'size': 3, 'sha256': 'a0' * 32}
+        raw = {'schemaVersion': 2, 'status': 'completed', 'requestIdentity': 'a0' * 32,
+               'nativeEvents': [], 'commands': [], 'unboundFiles': [resource['path']],
+               'artifacts': [resource, {'path': requested, 'sha256': '0a' * 32,
+                                        'resources': [resource], 'zipEntries': [{'name': 'secret/layer.dxf', 'crc': 10}]}]}
+        before = copy.deepcopy(raw);seen = []
+        def sanitize(value, secrets):
+            self.assertNotIn(prefix, value)
+            self.assertIn('secret', value)  # A second pass over the shown value fails.
+            seen.append(value)
+            return value.replace('secret', 'shown')
+        with patch.object(w, 'redact', sanitize):
+            shown = w.result_view(raw, prefix, requested, ['secret'])
+        self.assertEqual(raw, before)
+        self.assertEqual(seen.count('\\secret-name.png'), 3)
+        self.assertEqual(seen.count('secret/layer.dxf'), 1)
+        self.assertEqual(shown['artifacts'][0]['path'], prefix + '\\shown-name.png')
+        self.assertEqual(shown['artifacts'][1]['resources'][0]['path'], prefix + '\\shown-name.png')
+        self.assertEqual(shown['artifacts'][1]['zipEntries'][0]['name'], 'shown/layer.dxf')
+        self.assertIsNot(shown['artifacts'][0], shown['artifacts'][1]['resources'][0])
+        self.assertEqual(shown['artifacts'][1]['path'], requested)
+        self.assertEqual(shown['artifacts'][0]['sha256'], 'a0' * 32)
+        self.assertEqual(shown['requestIdentity'], 'a0' * 32);self.assertEqual(shown['status'], 'completed')
 
 
 class RequestIdentityTests(unittest.TestCase):

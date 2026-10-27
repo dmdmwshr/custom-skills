@@ -1,4 +1,17 @@
-当前写入者：无（WPS-MEMBER-SKILL-20261027-v1 v3/a3 精确源码修改、自测及交接定稿完成；在末次提交前释放；提交/推送/正式交付与后续独验发布以本批仓外回执为准）。
+当前写入者：无（WPS-MEMBER-SKILL-20261027-v1 v3/a5 R2精确返工、自测及交接定稿完成，末次提交前释放；提交推送、正式交付与后续独验发布以本批仓外回执为准）。
+
+## 2026-10-27 用户直接指令：WPS 原生派生名称去敏返工（v3/a5 / R2）
+
+- 来源：原用户已授权 WPS-MEMBER-SKILL-20261027/v1 全链路，现行 specVersion=3；Claude g3 对 `de0a033ee964350dcbca148361fb44b734af568c` 的正式审查事件 `wps-v3-a3-review-rework-01` 要求修正 R2。上一版11组 Windows 定向检查通过，但产物/未绑定名称汇点实际泄漏，Claude另确认资源和ZIP条目汇点；本节不把该批写成 accepted。旧失败、Windows/Claude原证据和旧已发布 v2/a2 均保留。
+- 本批为正式 attempt `WPS-MEMBER-SKILL-20261027-v1-a5`，executionId `dispatch-cc6e50d9c5d67b67b38054e1d3a7fc95`，仍由原 WSL Codex `01a15701-c0b2-7c12-ab6b-9e9256ce3e92` g1 单写。a4 未起新回合且已由 main 按原协议 stop/资源对账/restart 结清，证据 `D:/12070/Documents/工作台管理报告/WPS会员功能Skill-20261027/02-25-entry/A4_SETTLEMENT_READBACK.json`；本批不重放旧预留或更换入口。已完成本批 delivered→snapshot→started。
+- 现场起点 main/实时远端同为 `de0a033ee964350dcbca148361fb44b734af568c`，工作树干净；正式 expectedSource 为该返工基线，冻结 spec 中的 `6e755933` 是旧已验收基线。全局、项目、协作及 Skill 规则摘要与本线程已读版本一致，实际本回合仍 never/danger-full-access；不宣称热加载。
+- 仅改封装、对应测试、runtime.md 和本交接。持久化/stdout 前用原始观察的复制视图，保留请求解析后的输出范围前缀及精确请求路径，只对原生相对名称去敏，覆盖 artifacts.path、resources.path、ZIP条目名与 unboundFiles；原生事件的已知路径字段同样区分公开路径与派生名称。共享资源对象不原地修改，每个派生字符串每个出口只处理一次，回读不按新密码再次处理。
+- 展示路径/ZIP条目明确标 pathRedacted/nameRedacted，另有 nativeNamesRedacted/unboundFilesRedacted；实际文件、Markdown引用、ZIP原件不改名或改写，真实摘要/大小/CRC保持。去敏展示值不是可用路径，无可逆映射，可能不能唯一定位，须在授权 outputScope 内本地按原回执和摘要核对，不重放。长密码和合法短密码0/a均覆盖，键、status、requestIdentity及已知请求路径保持精确。
+- 新结果标 nativeNameViewVersion=1；缺标记的旧 schema2 结果可能已有R2原生名称，旧密码不可从新请求推断，故只回读有限 unknown/preNameViewRecord 提示，不返回旧正文、重写原件或执行。R1身份、schema2意图/fsync、argv传密、非秘密冲突、同号改密码不重放、schema1安全回读不退回；共35个顶层函数相对本批基线逐段复核未变。
+- 自测：WSL Python3.14.4 的5项针对性方法通过，涵盖11个名称汇点场景（文件/Markdown资源/ZIP×长密码/0/a，以及非零/超时）、3个公开请求路径场景、2个短密码新解释器场景，最终源字节共产生16份真实自建进程回执；另有共享对象复制/单次处理与旧schema2原件/mtime不变用例。日志 `implementation/secret-hardening-a5/targeted-self-tests-final.json`；前一候选日志保留。13份冻结输入、a3已过11组与旧v2/a2证据仅按SHA绑定复用，不重跑原生28help、旧17组或完整28项套件。
+- 原规格活动报告仍为 `/srv/work/tasks/WPS-MEMBER-SKILL-20261027-v1/formal-v1/implementation/secret-hardening-a3/IMPLEMENTATION_REPORT.json`；本批报告原件及提交号、父提交、推送/实时远端、9项交付摘要、runtimeIdentity、真实权限/解释器、保护对象和未测层，统一回读 `implementation/secret-hardening-a5/IMPLEMENTATION_REPORT.json`（同一任务formal-v1根）。旧a3报告已核SHA `ea3be9f3a28cd33a14cc862405caf23c2addf1ff397980d523869aa9a93ef9d0`，冻结于 `formal-v1/non-wps-tests/secret-hardening-a3/FROZEN_IMPLEMENTATION_REPORT-v3-a3.json`；仅按本批授权原子更新活动报告，旧件不改。正式交付回执为a5同目录 `DELIVERY_COMPLETION.json`。
+- 用户“先只查接口，我继续使用”仍有效：无WPS/COM/GUI/转换/编辑/AI、共享进程控制或真实资料外传。CAD缺图失败、OCR变化/photo2pdf兼容部分、CAJ及新封装原生转换/COM/AI/窗口隔离未验均保留。AGENTS/CLAUDE、其他Skill、cloud-docs/README/platforms、忽略pyc、安装副本/旧脏检出及原terminal_unknown不动。交接在末次提交前定稿释放，最终push后不再追加源码/交接差异；delivery进入review即停写，由main组织准确新字节的Windows独验和Claude审查，accepted前不发布，原03-05后续仅更新wps-office。
+
 
 ## 2026-10-27 用户直接指令：WPS 密码身份增量修正（v3/a3）
 
