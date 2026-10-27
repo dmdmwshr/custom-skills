@@ -511,6 +511,7 @@
     "server-traffic-sync": {
       "category": "business_specific",
       "execution_platforms": [
+        "windows",
         "wsl",
         "linux"
       ],
@@ -519,11 +520,11 @@
       ],
       "managed_wsl": true,
       "validation": {
-        "wsl": "manual_cycle_with_login_recovery_and_downloads_verified; scheduled_trigger_not_yet_observed",
-        "linux": "runtime_unverified",
-        "windows": "not_supported_by_current_workflow"
+        "wsl": "historical_manual_cycles_verified; old_heartbeat_paused_after_windows_migration; readonly_recovery_pointer",
+        "linux": "readonly_recovery_pointer; no_active_collector",
+        "windows": "ego_two_provider_native_full_cycle_and_eight_downloads_verified_20261027; heartbeat_active; natural_trigger_pending"
       },
-      "dependencies": "Authorized Codex in-app browser with imported login, server-traffic-sync project and its registered Meifu SSH/ingest. Use project runtime configuration; no CN2 operations."
+      "dependencies": "Current Windows project D:/ws/03-env/03-10-clash-config, native project Python/SSH, authorized Ego profile and existing Meifu ingest. WSL/Linux retain a readonly migration pointer only; no CN2 operations."
     },
     "linux-computer-control": {
       "category": "platform_specific",
