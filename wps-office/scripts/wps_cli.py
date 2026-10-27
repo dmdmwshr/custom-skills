@@ -487,13 +487,20 @@ def sha_file(path):
 
 def secret_values(value):
     found = []
+    def collect(obj):
+        if isinstance(obj, str) and obj:
+            found.append(obj)
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                collect(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                collect(v)
     def visit(obj):
         if isinstance(obj, dict):
             for k, v in obj.items():
                 if k in SECRET_KEYS:
-                    for item in (v if isinstance(v, list) else [v]):
-                        if isinstance(item, str) and item:
-                            found.append(item)
+                    collect(v)
                 visit(v)
         elif isinstance(obj, list):
             for item in obj:
@@ -517,10 +524,23 @@ def redact(value, secrets):
     return value
 
 
-def durable_json(path, value, secrets=(), exclusive=False):
-    """只写本工具自建记录；排他 intent 落盘后才能启动任何进程。"""
+def native_event_view(event, secrets):
+    """只去敏原生载荷；保留已知事件字段及枚举，不改封装的公开身份/状态。"""
+    public_keys = {'type', 'status', 'input', 'output', 'file', 'page_count',
+                   'is_scan_document', 'code', 'message', 'progress'}
+    result = {}
+    for key, value in event.items():
+        public_enum = (key == 'type' and isinstance(value, str) and
+                       value in {'started', 'progress', 'completed', 'error'}) or (
+                       key == 'status' and isinstance(value, str) and value in {'success', 'failed'})
+        result[key if key in public_keys else redact(key, secrets)] = value if public_enum else redact(value, secrets)
+    return result
+
+
+def durable_json(path, value, exclusive=False):
+    """调用方先去敏原生载荷；公开结构不作密码相关替换。intent 排他 fsync 后才启动。"""
     path = Path(path)
-    data = json_bytes(redact(value, secrets))
+    data = json_bytes(value)
     if exclusive:
         with path.open('xb') as f:
             f.write(data)
@@ -1060,28 +1080,51 @@ def collect_artifacts(rows, scope, command, resolver=None):
     return result, list(dict.fromkeys(unknowns)), unbound
 
 
-def request_digest(request):
-    return hashlib.sha256(json_bytes(request)).hexdigest()
+def request_identity(request):
+    """身份只依赖非秘密语义和固定存在/形状标记，绝不查看密码值或其子串。"""
+    def view(value):
+        if isinstance(value, dict):
+            return {k: ({'secretPresent': True,
+                         'shape': 'array' if isinstance(v, list) else 'object' if isinstance(v, dict) else 'scalar'}
+                        if k in SECRET_KEYS else view(v)) for k, v in value.items()}
+        if isinstance(value, list):
+            return [view(v) for v in value]
+        return value
+    return hashlib.sha256(json_bytes(view(request))).hexdigest()
 
 
-def replay_record(run_dir, digest):
+def replay_record(run_dir, identity):
     if not run_dir.exists():
         return None
     try:
         intent = json.loads((run_dir / 'intent.json').read_text(encoding='ascii'))
-        require(intent['requestDigest'] == digest, 'run_id_request_conflict')
-    except Rejected:
-        raise
-    except (OSError, ValueError, KeyError):
+        require(isinstance(intent, dict), 'invalid_intent')
+    except (OSError, ValueError, Rejected):
         return {'status': 'unknown', 'replayed': False, 'unknowns': ['existing_incomplete_intent'], 'stateDir': str(run_dir)}
+    if intent.get('schemaVersion') != 2 or 'requestIdentity' not in intent:
+        # Never compare/recompute the legacy password-derived digest, return its body, or rewrite it.
+        legacy_status = None
+        try:
+            old = json.loads((run_dir / 'result.json').read_text(encoding='ascii'))
+            status = old.get('status') if isinstance(old, dict) else None
+            if isinstance(status, str) and status in {'completed', 'unknown', 'rejected'}:
+                legacy_status = status
+        except (OSError, ValueError):
+            pass
+        return {'schemaVersion': 2, 'status': 'unknown', 'replayed': False, 'existingRun': True,
+                'legacyRecord': True, 'legacyResultStatus': legacy_status,
+                'unknowns': ['legacy_record_identity_not_compared'], 'stateDir': str(run_dir)}
+    require(intent['requestIdentity'] == identity, 'run_id_request_conflict')
     result_path = run_dir / 'result.json'
     if result_path.is_file():
         try:
-            r = json.loads(result_path.read_text(encoding='ascii'));r['replayed'] = False;r['existingRun'] = True
-            return r
+            r = json.loads(result_path.read_text(encoding='ascii'))
+            if isinstance(r, dict) and r.get('schemaVersion') == 2 and r.get('requestIdentity') == identity and 'requestDigest' not in r:
+                r['replayed'] = False;r['existingRun'] = True
+                return r
         except (OSError, ValueError):
             pass
-    return {'status': 'unknown', 'replayed': False, 'requestDigest': digest,
+    return {'schemaVersion': 2, 'status': 'unknown', 'replayed': False, 'requestIdentity': identity,
             'unknowns': ['intent_exists_reconcile_without_replay'], 'stateDir': str(run_dir)}
 
 
@@ -1089,12 +1132,12 @@ def run_request(request):
     secrets = secret_values(request)
     require_windows()
     command, options, shape = validate_request(request)
-    digest = request_digest(request)
+    identity_key = request_identity(request)
     root = state_root()
     run_dir = root / request['runId']
-    existing = replay_record(run_dir, digest)
+    existing = replay_record(run_dir, identity_key)
     if existing is not None:
-        return redact(existing, secrets)
+        return existing
     inputs = [winpath(p) for p in request['inputs']]
     for p in inputs:
         require(p.is_file() and p.stat().st_size <= 200 * 1024 * 1024, 'input_missing_or_too_large')
@@ -1131,14 +1174,14 @@ def run_request(request):
     try:
         run_dir.mkdir(exist_ok=False)
     except FileExistsError:
-        return redact(replay_record(run_dir, digest), secrets)
-    intent = {'schemaVersion': 1, 'runId': request['runId'], 'requestDigest': digest, 'status': 'intent',
-              'command': command, 'inputHashes': hashes, 'secretFieldsPresent': [k for k in SECRET_KEYS if k in request],
+        return replay_record(run_dir, identity_key)
+    intent = {'schemaVersion': 2, 'runId': request['runId'], 'requestIdentity': identity_key, 'status': 'intent',
+              'command': command, 'inputHashes': hashes, 'secretFieldsPresent': sorted(k for k in SECRET_KEYS if k in request),
               'binary': {'path': str(binary), 'sha256': sha_file(binary)},
               'outputScope': str(scope) if scope else None, 'evidenceDir': str(evidence),
               'cloudAuthorizationBasis': request.get('cloudAuthorizationBasis') if needs_cloud else None}
-    durable_json(run_dir / 'intent.json', intent, secrets, exclusive=True)
-    result = {'schemaVersion': 1, 'runId': request['runId'], 'requestDigest': digest, 'status': 'unknown',
+    durable_json(run_dir / 'intent.json', intent, exclusive=True)
+    result = {'schemaVersion': 2, 'runId': request['runId'], 'requestIdentity': identity_key, 'status': 'unknown',
               'observedBinary': {**intent['binary'], 'wrapperSha256': sha_file(__file__), 'versionVerified': False},
               'process': {'spawned': False}, 'nativeEvents': [], 'commands': [], 'artifacts': [], 'unknowns': [],
               'verification': {'contentQuality': 'not-assessed'},
@@ -1158,7 +1201,7 @@ def run_request(request):
         require(not scope or not any(scope.iterdir()), 'output_scope_no_longer_empty')
         require(all(sha_file(p) == h['sha256'] for p, h in zip(protected, hashes)), 'input_changed_before_launch')
         require(sha_file(binary) == intent['binary']['sha256'], 'binary_changed_before_launch')
-        durable_json(run_dir / 'launched.json', {'status': 'launched', 'requestDigest': digest}, secrets, exclusive=True)
+        durable_json(run_dir / 'launched.json', {'schemaVersion': 2, 'status': 'launched', 'requestIdentity': identity_key}, exclusive=True)
         timeout = request.get('parentTimeoutSeconds', min(86400, options.get('timeout', 300) * len(inputs) + 15))
         process, out, err = capture_process(argv, evidence, timeout)
         result['process'] = process
@@ -1204,15 +1247,22 @@ def run_request(request):
     if result['unknowns']:
         result['status'] = 'unknown'
     result['unknowns'] = list(dict.fromkeys(result['unknowns']))
-    result = redact(result, secrets)
-    durable_json(run_dir / 'result.json', result, secrets)
+    result['nativeEvents'] = [{'line': item['line'], 'event': native_event_view(item['event'], secrets)}
+                              for item in result['nativeEvents']]
+    for row in result['commands']:
+        for key in ('completed', 'error'):
+            if key in row:
+                row[key] = native_event_view(row[key], secrets)
+    if 'stderr' in result:
+        result['stderr'] = redact(result['stderr'], secrets)
+    durable_json(run_dir / 'result.json', result)
     if evidence_created:
         try:
             stable_directory(evidence, evidence_identity)
-            durable_json(evidence / 'receipt.json', result, secrets, exclusive=True)
+            durable_json(evidence / 'receipt.json', result, exclusive=True)
         except (OSError, Rejected):
             result['status'] = 'unknown';result['unknowns'].append('evidence_receipt_not_saved')
-            durable_json(run_dir / 'result.json', result, secrets)
+            durable_json(run_dir / 'result.json', result)
     return result
 
 
@@ -1257,13 +1307,13 @@ def main(argv=None):
         else:
             request = read_request(sys.stdin.buffer)
             result = probe(request) if action == 'probe' else run_request(request)
-        sys.stdout.buffer.write(json_bytes(redact(result, secret_values(request))))
+        sys.stdout.buffer.write(json_bytes(result))
         return 0 if result.get('status') != 'unknown' else 3
     except Exception as e:
         # Never stringify subprocess exceptions, which may carry secret argv.
         code = str(e) if isinstance(e, Rejected) else 'wrapper_error_reconcile_existing_intent'
         status = 'rejected' if isinstance(e, Rejected) or action != 'run' else 'unknown'
-        sys.stdout.buffer.write(json_bytes(redact({'status': status, 'reason': code}, secret_values(request))))
+        sys.stdout.buffer.write(json_bytes({'status': status, 'reason': code}))
         return 2 if status == 'rejected' else 3
 
 

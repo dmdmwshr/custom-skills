@@ -1,4 +1,16 @@
-当前写入者：无（WPS-MEMBER-SKILL-20261027-v1 / v2/a2 本批源码与离线自测完成，精确范围释放；提交、协议交付、独验及发布状态以本批仓外报告和原协议回读为准，不影响其他任务）。
+当前写入者：无（WPS-MEMBER-SKILL-20261027-v1 v3/a3 精确源码修改、自测及交接定稿完成；在末次提交前释放；提交/推送/正式交付与后续独验发布以本批仓外回执为准）。
+
+## 2026-10-27 用户直接指令：WPS 密码身份增量修正（v3/a3）
+
+- 来源：用户已授权 WPS-MEMBER-SKILL-20261027/v1 的探索、集成、交付及独验，主责将原密码保护目标内 R1 缺陷纳入现行 specVersion=3 / attemptId=WPS-MEMBER-SKILL-20261027-v1-a3；原 WSL Codex `01a15701-c0b2-7c12-ab6b-9e9256ce3e92` g1 单写者，executionId `dispatch-b68564e44889fc9d8191b3729800b4d3`。已沿原协议 delivered→snapshot→started，不重放旧 claim 或管理批次。
+- 基线：`6e7559338baf2db92efcb54b21955768e7016339`。原 v2/a2 accepted 及 Windows 已发布基线按现行任务单保留，不回滚、不重装或重跑旧业务；源码开始时 main 干净。旧交接、历史回执、原 terminal_unknown 及其批次映射缺口保持，不据本次修正解除未知。
+- 最小改动仅 `wps-office/scripts/wps_cli.py`、`wps-office/tests/test_wps_cli.py`、`wps-office/references/runtime.md` 与本交接：新记录采用 schemaVersion=2 / requestIdentity，身份只取非秘密字段与固定秘密存在/形状标记，任何深度的密码子树均不参与；同号改密码只回读，非秘密变化（含 evidenceDir/水印文本/秘密存在或形状）明确冲突，先于任何子进程。旧格式只返回有限 unknown 提示，不比较/返回旧含密摘要，不改写或重放原文件。
+- 密码不再参与公开身份或结构化元数据的替换；原生回显载荷和 stderr 仍去敏。合法短密码 a/0 不破坏键、状态、摘要与回读；原生 argv 传密、排他 fsync 意图和超时/未知保护保留。固定28命令目录及31个其他顶层函数逐段比对未变，含参数校验、argv、进程捕获、原生帮助探测、事件绑定和产物边界。cloud-docs、platforms.json、README、AGENTS.md、CLAUDE.md、安装副本/缓存未改；忽略的 pyc 原字节和时间保持。
+- 本次自测：WSL Python3.14.4 的11项必要用例通过，覆盖两个不同合成密码、批次仅一个密码变化、open/edit/source、嵌套身份/拒绝、秘密与公开文本/路径碰撞、不同 evidenceDir、合法短密码在新解释器的 stdin/stdout 与持久 JSON、旧记录字节/mtime 不变，以及真实自建子进程超时/非零/崩溃/并发不重放。最新测试原件 `targeted-self-tests-final.json`；先前候选测试也保留。旧17组 Windows 离线独验、28项 WSL 用例、16项管理器与原生28帮助证据仅按 SHA 绑定复用，未重跑，不能替代本次新字节的 Windows 增量独验。
+- 当前用户“先只查接口，我继续使用”仍有效：本轮未启动、附着或控制 WPS/COM，未转换、编辑、GUI、AI 或结束共享进程。CAD缺图仍为内容失败，OCR变化/photo2pdf兼容为部分通过，CAJ、新封装原生转换/COM/AI/隔离窗口及会员权益未验。离线合成进程不冒充真实 WPS。
+- 本批最终提交号、父提交、精确推送/实时远端回读、全部8项源码 artifact 和入口/测试/catalog 摘要、真实宿主与权限、自测及旧证据复用，统一回读 `/srv/work/tasks/WPS-MEMBER-SKILL-20261027-v1/formal-v1/implementation/secret-hardening-a3/IMPLEMENTATION_REPORT.json`；正式 delivery 回执在同目录 `DELIVERY_COMPLETION.json`。交接于最终提交前定稿，最终 push 后不再追加源码/交接脏差异。
+- 交付进入 review 后停止写源，未实施 Windows Codex 对同一 runtimeIdentity 的准确源字节做针对性子进程独验，Claude g3 正式审查；验收前不发布。后续仅原03-05维护者精确更新 wps-office，本轮不重复 cloud-docs 或操作安装目录。当前源码自测通过不代表新版本独验、安装发现或业务验收已通过。
+
 
 ## 2026-10-27 用户直接指令：WPS 会员能力 Skill WPS-MEMBER-SKILL-20261027-v1（v2/a2）
 

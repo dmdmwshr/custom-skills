@@ -1,5 +1,6 @@
 """离线行为测试；设置 WPS_TEST_ROOT 为本任务已批准的仓外测试目录。"""
 import concurrent.futures
+import copy
 import hashlib
 import importlib.util
 import io
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import uuid
@@ -130,12 +132,133 @@ class Harness(unittest.TestCase):
             req['authorizedInputHashes'] = {p: w.sha_file(self.resolve(p)) for p in inputs}
         return req
 
-    def assert_no_password(self, secret, result):
+    def assert_no_password(self, secret, result, request=None):
         serialized = w.json_bytes(result)
-        forbidden = [secret.encode(), secret.encode('utf-16le'), json.dumps(secret)[1:-1].encode()]
+        forbidden = [secret.encode(), secret.encode('utf-16le'), json.dumps(secret)[1:-1].encode(),
+                     hashlib.sha256(secret.encode()).hexdigest().encode(), b'"requestDigest"']
+        if request is not None:
+            forbidden.append(hashlib.sha256(w.json_bytes(request)).hexdigest().encode())
         for raw in [serialized] + [p.read_bytes() for p in self.base.rglob('*') if p.is_file()]:
             for token in forbidden:
                 self.assertNotIn(token, raw)
+
+    def main_call(self, request):
+        output = io.BytesIO()
+        with patch.object(w.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(w.json_bytes(request)))), \
+                patch.object(w.sys, 'stdout', SimpleNamespace(buffer=output)):
+            code = w.main(['run'])
+        return code, json.loads(output.getvalue())
+
+    def test_secret_changes_arrays_and_pairs_read_existing_without_spawn(self):
+        for command, count in [('pdfwatermark', 1), ('pdf2word', 2), ('pdfencrypt', 1)]:
+            with self.subTest(command=command):
+                r = self.request(command, count)
+                first_secret, second_secret = '秘密_' + uuid.uuid4().hex, 'changed_' + uuid.uuid4().hex
+                batch_other = 'batch_' + uuid.uuid4().hex
+                r['password'] = [first_secret, batch_other] if count > 1 else first_secret
+                if command == 'pdfencrypt':
+                    r['openPassword'] = first_secret;r['editPassword'] = first_secret
+                before = len(self.calls)
+                code, first = self.main_call(r)
+                self.assertEqual((code, first['status']), (0, 'completed'))
+                self.assertEqual(first['requestIdentity'], w.request_identity(r))
+                argv = self.calls[-1][0]
+                self.assertEqual(argv[argv.index('--password') + 1], ';'.join(r['password']) if count > 1 else first_secret)
+                self.assert_no_password(first_secret, first, r)
+                if count > 1:self.assert_no_password(batch_other, first, r)
+                changed = copy.deepcopy(r)
+                changed['password'] = [second_secret, batch_other] if count > 1 else second_secret
+                if command == 'pdfencrypt':
+                    changed['openPassword'] = second_secret;changed['editPassword'] = second_secret
+                code, second = self.main_call(changed)
+                self.assertEqual(code, 0);self.assertEqual(second['requestIdentity'], first['requestIdentity'])
+                self.assertEqual(second['artifacts'], first['artifacts'])
+                self.assertTrue(second['existingRun']);self.assertIs(second['replayed'], False)
+                self.assertEqual(len(self.calls), before + 1)
+                self.assert_no_password(second_secret, second, changed)
+
+    def test_secret_identity_conflicts_preserve_record_and_never_spawn(self):
+        r = self.request('pdfwatermark');r['password'] = 'source_' + uuid.uuid4().hex
+        self.main_call(r)
+        baseline = {p: p.read_bytes() for p in self.base.rglob('*.json')}
+        for change in ('evidenceDir', 'text', 'presence', 'shape'):
+            changed = copy.deepcopy(r)
+            if change == 'evidenceDir':changed['evidenceDir'] += '-other'
+            elif change == 'text':changed['options']['text'] += '-other'
+            elif change == 'presence':changed.pop('password')
+            else:changed['password'] = [changed['password']]
+            if change in {'evidenceDir', 'text'}:changed['password'] = 'different_' + uuid.uuid4().hex
+            code, out = self.main_call(changed)
+            self.assertEqual((code, out), (2, {'status': 'rejected', 'reason': 'run_id_request_conflict'}))
+            self.assertEqual(len(self.calls), 1)
+            self.assertEqual({p: p.read_bytes() for p in self.base.rglob('*.json')}, baseline)
+            self.assertFalse(self.resolve(r['evidenceDir'] + '-other').exists())
+
+    def test_legacy_records_readback_only_without_digest_or_rewrite(self):
+        r = self.request('pdfencrypt');secret = 'legacy_' + uuid.uuid4().hex;r['openPassword'] = secret
+        old_digest = hashlib.sha256(w.json_bytes(r)).hexdigest()
+        run_dir = w.state_root() / r['runId'];run_dir.mkdir(parents=True)
+        for name, status in [('intent', 'intent'), ('launched', 'launched'), ('result', 'completed')]:
+            (run_dir / (name + '.json')).write_bytes(w.json_bytes(
+                {'schemaVersion': 1, 'requestDigest': old_digest, 'status': status, 'oldUnsafeEcho': secret}))
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in run_dir.iterdir()}
+        for password in (secret, 'another_' + uuid.uuid4().hex):
+            r['openPassword'] = password
+            code, out = self.main_call(r)
+            self.assertEqual((code, out['status']), (3, 'unknown'))
+            self.assertTrue(out['legacyRecord']);self.assertEqual(out['legacyResultStatus'], 'completed')
+            self.assertIs(out['replayed'], False)
+            for token in (old_digest, secret, 'requestDigest'):
+                self.assertNotIn(token.encode(), w.json_bytes(out))
+        self.assertEqual(self.calls, []);self.assertFalse(self.resolve(r['evidenceDir']).exists())
+        self.assertEqual({p: (p.read_bytes(), p.stat().st_mtime_ns) for p in run_dir.iterdir()}, before)
+
+    def test_nested_secret_rejections_have_stable_public_error(self):
+        for key, value in [('password', {'nested': ['a', '0']}),
+                           ('options', {'password': {'nested': 'a'}}),
+                           ('unexpected', {'items': [{'openPassword': ['0', 'a']}]})]:
+            r = self.request();r[key] = value
+            code, out = self.main_call(r)
+            self.assertEqual(code, 2);self.assertEqual(out['status'], 'rejected')
+            self.assertIn(out['reason'], {'invalid_string_value', 'option_not_allowed_for_command', 'unknown_request_field'})
+            self.assertEqual(set(out), {'status', 'reason'})
+        self.assertEqual(self.calls, []);self.assertFalse(w.state_root().exists())
+
+    def test_short_password_main_in_fresh_process_keeps_public_schema(self):
+        for secret in ('0', 'a'):
+            with self.subTest(secret=secret):
+                with REAL_POPEN([sys.executable, '-I', '-B', str(Path(__file__).resolve()), '--secret-fixture-worker'],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as p:
+                    stdout, stderr = p.communicate(w.json_bytes({'secret': secret}), timeout=15)
+                self.assertEqual(p.returncode, 0, stderr.decode())
+                observed = json.loads(stdout)
+                self.assertEqual(observed['calls'], 1);self.assertTrue(observed['argvSecretReceived'])
+                self.assertEqual(observed['codes'], [0, 0])
+                first, second = observed['first'], observed['second']
+                self.assertEqual(first['status'], 'completed');self.assertEqual(second['status'], 'completed')
+                self.assertTrue(second['existingRun']);self.assertIs(second['replayed'], False)
+                identity = first['requestIdentity'];self.assertRegex(identity, r'^[0-9a-f]{64}$')
+                self.assertEqual(identity, second['requestIdentity'])
+                for record in observed['records']:
+                    self.assertEqual(record['schemaVersion'], 2);self.assertEqual(record['requestIdentity'], identity)
+                    self.assertNotIn('requestDigest', record)
+                    self.assertIn(record['status'], {'intent', 'launched', 'completed'})
+                self.assertEqual(first['commands'][0]['status'], 'success')
+                self.assertEqual(first['commands'][0]['completed']['status'], 'success')
+                self.assertEqual(first['artifacts'][0]['sha256'], hashlib.sha256(b'fixture-pdf').hexdigest())
+                self.assertIn('[REDACTED]', str(first['commands'][0]['completed']['echo']))
+
+    def test_concurrent_changed_secrets_claim_only_once(self):
+        r = self.request('pdfencrypt');changed = dict(r, openPassword='other_' + uuid.uuid4().hex)
+        self.mode = 'slow'
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            rows = list(pool.map(w.run_request, [r, changed]))
+        self.assertEqual(len(self.marker.read_text().splitlines()), 1)
+        self.assertTrue(any(row['status'] == 'completed' for row in rows))
+        self.assertEqual(w.request_identity(r), w.request_identity(changed))
+        before = len(self.calls)
+        self.assertEqual(w.run_request(changed)['status'], 'completed')
+        self.assertEqual(len(self.calls), before)
 
     def test_catalog_exact_28_and_no_passthrough(self):
         names = {'word2pdf','excel2pdf','ppt2pdf','pdf2word','pdf2excel','pdf2ppt','pdf2txt','pdf2md','pdf2photo',
@@ -285,7 +408,7 @@ class Harness(unittest.TestCase):
             self.mode=mode;r=self.request('pdfencrypt');secret='秘密_'+uuid.uuid4().hex
             r['openPassword']=secret;r['password']='src_'+uuid.uuid4().hex
             if mode=='timeout':r['parentTimeoutSeconds']=1
-            out=w.run_request(r);self.assert_no_password(secret,out);self.assert_no_password(r['password'],out)
+            out=w.run_request(r);self.assert_no_password(secret,out,r);self.assert_no_password(r['password'],out,r)
             self.assertEqual(out['status'],'completed' if mode=='success' else 'unknown')
             # Same timeout run cannot launch again.
             before=len(self.calls);w.run_request(r);self.assertEqual(len(self.calls),before)
@@ -407,5 +530,53 @@ class PureEvidenceTests(unittest.TestCase):
                 self.assertEqual([sorted(x) for x in terminals],[sorted(x['keys']) for x in f['terminalSchemas']])
 
 
+class RequestIdentityTests(unittest.TestCase):
+    def test_identity_ignores_secret_values_even_when_public_text_collides(self):
+        request = {'schemaVersion': 1, 'runId': 'a0', 'command': 'pdfwatermark',
+                   'inputs': ['T:/data/alpha0.pdf'], 'evidenceDir': 'T:/data/evidence',
+                   'options': {'text': 'alpha public watermark'}, 'password': 'first',
+                   'openPassword': 'first', 'editPassword': ['first'],
+                   'nested': [{'open-pwd': {'inside': ['first']}}, {'edit-pwd': ['first']}]}
+        expected = w.request_identity(request)
+        for secret in ('0', 'a', 'alpha', 'alpha public watermark', 'T:/data/alpha0.pdf', '秘密\\"值'):
+            changed = copy.deepcopy(request)
+            changed.update(password=secret, openPassword=secret, editPassword=[secret])
+            changed['nested'] = [{'open-pwd': {'completelyDifferentKeys': [secret, {'leaf': secret}]}},
+                                 {'edit-pwd': [secret, secret]}]
+            self.assertEqual(w.request_identity(changed), expected)
+        for key in ('evidenceDir', 'inputs', 'options'):
+            changed = copy.deepcopy(request)
+            changed[key] = {'text': 'changed'} if key == 'options' else ['T:/other.pdf'] if key == 'inputs' else 'T:/other'
+            self.assertNotEqual(w.request_identity(changed), expected)
+        for change in ('absent', 'array'):
+            changed = copy.deepcopy(request)
+            if change == 'absent':changed.pop('password')
+            else:changed['password'] = ['first']
+            self.assertNotEqual(w.request_identity(changed), expected)
+        self.assertEqual(set(w.secret_values({'password': {'nested': ['one', {'value': 'two'}]}})), {'one', 'two'})
+
+
+def short_password_worker():
+    """测试进程适配器；生产封装无主机/状态/任意程序旁路。"""
+    secret = json.loads(sys.stdin.buffer.read())['secret']
+    harness = Harness('runTest');harness.setUp()
+    try:
+        request = harness.request('pdfencrypt');request['password'] = secret;request['openPassword'] = secret
+        code1, first = harness.main_call(request)
+        changed = dict(request, password='different-fixture-secret', openPassword='different-fixture-secret')
+        code2, second = harness.main_call(changed)
+        records = [json.loads(p.read_bytes()) for p in sorted(harness.base.rglob('*.json'))]
+        argv = harness.calls[0][0]
+        print(json.dumps({'codes': [code1, code2], 'first': first, 'second': second, 'records': records,
+                          'calls': len(harness.calls),
+                          'argvSecretReceived': argv[argv.index('--password') + 1] == secret and
+                                                argv[argv.index('--open-pwd') + 1] == secret}))
+    finally:
+        harness.doCleanups()
+
+
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    if sys.argv[1:] == ['--secret-fixture-worker']:
+        short_password_worker()
+    else:
+        unittest.main(verbosity=2)

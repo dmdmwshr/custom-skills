@@ -52,13 +52,17 @@ python -I -B scripts/wps_cli.py run < 本次请求.json
 
 `photo2word/photo2excel/photo2ppt` 和 PDF→Word/Excel/PPT 的 scanned/ai-fix 分支要求同时提供：`cloudProcessingAuthorized:true`、非空 `cloudAuthorizationBasis`、`authorizedInputHashes:{原请求输入路径:实际SHA256}`。摘要集合须精确匹配当前输入，校验在任何子进程启动前完成。`engine=auto/ai` 的帮助称本地引擎，不据名称推断云或断网隐私保证。其他未标云命令也没有离线承诺。
 
-密码通过本机进程标准输入临时进入封装，但原生 CLI 只接受命令行密码；同用户进程、管理员、命令行审计或 EDR 可能看到其 argv。封装不能消除产品接口这层可见性。封装不保存原请求或完整 argv，intent 只保存密码字段存在性和请求整体摘要；原生事件、stderr、异常及返回 JSON 中的密码值和 JSON 转义值去敏，子进程异常不得直接字符串化。
+密码通过本机进程标准输入临时进入封装，但原生 CLI 只接受命令行密码；同用户进程、管理员、命令行审计或 EDR 可能看到其 argv。封装不能消除产品接口这层可见性。封装不保存原请求或完整 argv，新记录不生成含密请求摘要或密码摘要。`requestIdentity` 仅对非秘密字段及固定的秘密存在/形状标记求摘要；任意深度的密码字段子树均不参与计算，不能先按密码值替换其他字段再求摘要。密码字段存在性按固定顺序记录。
+
+原生事件载荷、stderr 中的密码值及 JSON 转义值去敏，子进程异常不得直接字符串化。封装自身的键、状态、身份、文件摘要及已知公开路径属于结构化元数据，不按密码字符替换；原生事件的已知字段名和合法类型/状态枚举也保留。合法短密码如 `a`、`0` 不得破坏 JSON 或回读。公开元数据偶然含有相同字符不表示密码回显；非秘密字段仍应按原用途提供，不能把其他秘密塞入公开字段。
 
 ## 持久意图与恢复
 
 固定状态根为当前 Windows 用户 `%LOCALAPPDATA%/dmdmwshr/wps-office/runs`，不由请求 evidenceDir 决定，也没有 JSON stateRoot/任意程序旁路。每个 runId 排他建立目录与 intent，文件 fsync 后才启动版本/帮助或命令；随后记录 launched、result。该机制只防封装误重放，不代替正式任务单、角色或资源准入。
 
-同号同摘要只回读既有结果，`replayed=false`；同号不同请求（包括换 evidenceDir）明确冲突。目录已存在但 intent/结果不完整时返回 unknown，不重新创建或执行。进程超时、非零、部分失败、缺产物、输入变化及无法绑定事件，均保留已知子项并返回 unknown。不能以换 runId、删除目录或重放业务来恢复；先按原回执核实际结果。
+新 intent/launched/result/receipt 的 `schemaVersion=2`，请求输入仍为版本1。同号且非秘密身份相同只回读既有结果，`replayed=false`、`existingRun=true`；只换密码（包括数组元素和 open/edit 密码）也不执行、不验证新密码。同号非秘密字段、密码存在/形状变化（包括换 evidenceDir、options 文本）明确冲突，先于任何子进程。需要纠正密码时先核原运行实际效果，再按新任务授权决定后续，不以新号盲重试。
+
+旧版本记录只作保守回读：返回 unknown、`legacyRecord=true` 和有限状态提示，不比较旧含密摘要、不返回旧正文或 `requestDigest`、不执行或改写旧文件。旧记录已含的敏感摘要仍原样保留，须沿原证据保护。目录已存在但 intent/结果不完整时同样返回 unknown。进程超时、非零、部分失败、缺产物、输入变化及无法绑定事件，均保留已知子项并返回 unknown。不能删除目录或重放业务来恢复；先按原回执核实际结果。
 
 ## 输出封套与产物
 
