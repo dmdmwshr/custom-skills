@@ -8,7 +8,7 @@ metadata:
 
 # Clash 配置与面板流量维护
 
-目标是统一维护订阅规则、节点与生成链，并让每轮可追溯的供应商面板观察驱动正确流量展示和余额保护。2026-10-27 用户将现行任务迁至 Windows `D:/ws/03-env/03-10-clash-config`，使用 Windows 原生 Python/SSH 与 Ego；真实两站同步及八份订阅下载已验收，首次自然触发单独记录。旧 WSL 03-08 是恢复历史，原流量 heartbeat 已暂停，不从旧目录并行采集或发布；其他主机仅可只读核对指针，不复制认证或启动另一采集者。
+目标是统一维护订阅规则、节点与生成链，并让每轮可追溯的供应商面板观察驱动正确流量展示和余额保护。2026-10-27 用户将现行任务迁至 Windows `D:/ws/03-env/03-10-clash-config`，使用 Windows 原生 Python/SSH 与 Ego；真实两站同步及八份订阅下载已验收，首次自然触发单独记录。旧 WSL 03-08 的源码目录与原流量 heartbeat 已按用户指令删除，旧会话已归档，完整恢复档案位置见现行项目 `PROJECT_HANDOFF.md`；不复建旧采集或发布入口；其他主机仅可只读核对指针，不复制认证或启动另一采集者。
 
 在现行 Windows 项目先读 `AGENTS.md`、`PROJECT_HANDOFF.md`、`config/runtime.json`、`docs/AUTOMATION.md` 和 `docs/IAB_CAPTURE.md`；`PROJECT_STATUS.md` 只保留迁移前历史。核对实际 cwd 与产品项目登记，不固定任务 ID、浏览器编号或临时页面。来源、服务器绑定和输出映射由项目维护。定时运行复用已登记 Windows heartbeat，不另加 cron/timer 或并行采集者；正常运行不加载全部历史验收。
 

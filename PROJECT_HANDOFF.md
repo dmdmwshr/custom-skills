@@ -1,5 +1,11 @@
 当前写入者：无（FIRE-STANDARDS-20261026/v1 源码实现和本机验证已完成，精确提交、发布及发现状态以本轮仓外回执为准；不影响其他任务）。
 
+## 2026-10-27 用户直接指令：流量任务迁移及旧 WSL 入口清理
+
+- Windows/Ego 迁移已发布提交3139ec6bfd473bf318205f5f4dc46ebc1083e8b5；用户后续明确要求清理相关WSL项目、会话和目录。本批仅修正server-traffic-sync入口与运行恢复说明中的旧“暂停/目录保留”状态；原WSL任务及目录已删除、会话归档，恢复位置以现行03-10交接为准。
+- 现行Windows真实两站同步及八份订阅核验已通过，原业务代码不再变更或重复采集。03-08编号保留、应用移除留用户操作。受管发布按同一Skill精确同步到Windows/WSL，保留客户端开关，核对逐文件摘要及新进程skills/list；本批提交号、发布与发现回读见D:/ws/05-temp/20261027_server-traffic-win-migration/wsl-retirement/skill-publication.json。业务清理细节只维护03-10唯一交接。
+
+
 ## 2026-10-26 用户直接指令：消防产品标准维护 FIRE-STANDARDS-20261026/v1
 
 - 用户要求修正当前业务疏漏、优化对应 Skill、每周更新并控制磁盘与清理，浏览器优先 Ego。实际源码实施者 Windows Codex，唯一源仓不变，基线74429966b6f3df6537ede7ad3777a7db836bf6b9；本轮仅 xf-product-standards、platforms.json 对应依赖及本交接。
