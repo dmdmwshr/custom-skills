@@ -666,6 +666,19 @@
       },
       "dependencies": "Routes to installed Kingsoft kdocs-cli, WPS365 CLI and Feishu CLI skills (Tencent Docs removed 2026-10-24); accounts/tokens are user-owned; no cloud write exercised by source checks."
     },
+    "feishu-bitable": {
+      "category": "platform_specific",
+      "execution_platforms": [
+        "windows"
+      ],
+      "managed_wsl": false,
+      "validation": {
+        "wsl": "not_supported_by_current_workflow",
+        "linux": "runtime_unverified",
+        "windows": "source_review_and_13_synthetic_tests_passed_cli_validation_passed_limited_ego_cloud_observations_require_separate_publication_and_business_acceptance"
+      },
+      "dependencies": "Windows workflow: Feishu official CLI (lark-cli, built-in Base skills) when it has the needed capability, otherwise the authorized Ego browser (read the current ego-browser skill first). Multi-account row permissions, form submission and CLI Base writes were not verified; paid permission features are checked per account and not purchased or trialed without user authorization. preflight_bitable.py is stdlib JSON-only, read-only, no Feishu API calls."
+    },
     "notion-workflows": {
       "category": "platform_specific",
       "execution_platforms": [

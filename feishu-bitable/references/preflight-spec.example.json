@@ -1,0 +1,21 @@
+{
+  "tables": {
+    "单位": {
+      "primary_key": "单位名称",
+      "columns": {"单位名称": "text"},
+      "expected_count": 2
+    },
+    "案卷": {
+      "primary_key": "案卷号",
+      "columns": {"案卷号": "text", "所属单位": "relation", "初查日期": "date", "是否网售": "tri", "产品数": "number", "分类依据": "text"},
+      "relations": [{"column": "所属单位", "target": "单位", "required": true}],
+      "tri_evidence": {"是否网售": "分类依据"},
+      "date_range": {"初查日期": ["2026-01-01", "2026-12-31"]}
+    },
+    "检查": {
+      "primary_key": "检查键",
+      "columns": {"检查键": "text", "案卷号": "relation", "阶段": "select", "检查日期": "date"},
+      "relations": [{"column": "案卷号", "target": "案卷", "required": true, "min_children": 1}]
+    }
+  }
+}

@@ -17,6 +17,7 @@ metadata:
 | 金山文档 / WPS 个人云文档 | 官方 `kdocs-cli`（用户级安装；未进当前桌面 PATH 时用绝对路径或重启后短命令；令牌入系统密钥链，禁止明文入对话/日志/文件） | 官方 Skill 快照 `C:\Users\12070\.cc-switch\skills\kdocs\SKILL.md`（来源 kdocs-app/kdocs-skill@master，`references/` 按需） |
 | WPS 365 企业版 | 官方 `wps365-cli` 0.3.6（`C:\Users\12070\.local\bin\wps365-cli.exe`）；其内置 MCP 条目 `wps365` 当前 `enabled=false`；企业授权曾因应用权限审核中返回 `invalid_scope`，**当前授权状态须先 `wps365-cli` 状态读取，不假定可用**；个人版与企业版账号独立 | 安装与授权记录 `C:\Users\12070\.cc-switch\skill-sources\official-wps365-20261006\INSTALLATION.md`；无官方 Skill 实体 |
 | 飞书文档/日历 | 飞书官方 CLI 内置技能 | 登录、授权、能力核验读 `feishu-operations` 与其 `references/official-cli.md`；文档/日历具体操作按 CLI 内置技能路由 |
+| 飞书多维表格（Base） | 同上；建模、导入、统计、对账另有专用流程 | 读 `feishu-bitable` |
 
 读取后端 Skill 用文件读取方式，不要为此把后端 Skill 重新开启发现。路径是 CC 安装实体（稳定），不是客户端链接。
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "飞书多维表格台账"
+  short_description: "多维表格建模、规范导入填报、增量维护、统计与导出对账"
+  default_prompt: "使用 $feishu-bitable 为这项业务设计或维护飞书多维表格，并核对导入结果。"

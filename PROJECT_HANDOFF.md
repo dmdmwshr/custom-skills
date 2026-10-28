@@ -1,5 +1,12 @@
 当前写入者：无（WPS-MEMBER-SKILL-20261027-v1 v3/a5 R2精确返工、自测及交接定稿完成，末次提交前释放；提交推送、正式交付与后续独验发布以本批仓外回执为准）。
 
+## 2026-10-28 用户直接指令：飞书多维表格填报 Skill（FEISHU-CASE-20261028 v1 / B02）
+
+- 来源：用户直接指令，Codex 派发给 Claude（Sonnet 5.5）实施；基线 main `0c90cec38eaef090176a0f41e852ca46b71844cd`。写入范围仅 `feishu-bitable/`（新）、`platforms.json` 对应新项、`cloud-docs/SKILL.md` 一行指向、本节。
+- 内容：飞书多维表格建模、规范导入填报、增量维护、统计与导出对账；`scripts/preflight_bitable.py` 为标准库 JSON 预检/导出对账（只读，不调飞书接口），匿名合成数据测试 13 项。消防案卷模型只在 `references/fire-product-case-schema.md`（匿名）。
+- 支持声明：Windows 工作流（`managed_wsl=false`），云端实操为 Codex 经 Ego 在测试/正式 Base 的有限观察。已实测并写入 `references/import-and-verification.md`：文本键转双向关联的一次匿名探针（唯一首列文本主键、交叉顺序两条匹配成功、双向反向数量对账一致，选“不保留未匹配”），原生日期导入导出保留，导入后须核表头首行/字段类型/长文本（说明类列曾被识别为多选而改写标点），导入入口曾新建 Base。未验证：重复键、大小写/空格/前缀匹配，多账号权限、表单提交、CLI Base 写入，公式在正式 Base 的实测。
+- 状态：B03/B04/B05 经验增补完成；Claude 实施，根 Codex 完成源审查、Windows Python312 quick_validate 与 13 项测试，WSL Python3 13 项测试和 git diff --check 通过。源验收通过，进入精确提交推送与发布；提交、安装摘要和独立客户端发现以本批仓外回执为准。Claude 占位已释放。
+
 ## 2026-10-27 用户直接指令：WPS 原生派生名称去敏返工（v3/a5 / R2）
 
 - 来源：原用户已授权 WPS-MEMBER-SKILL-20261027/v1 全链路，现行 specVersion=3；Claude g3 对 `de0a033ee964350dcbca148361fb44b734af568c` 的正式审查事件 `wps-v3-a3-review-rework-01` 要求修正 R2。上一版11组 Windows 定向检查通过，但产物/未绑定名称汇点实际泄漏，Claude另确认资源和ZIP条目汇点；本节不把该批写成 accepted。旧失败、Windows/Claude原证据和旧已发布 v2/a2 均保留。
