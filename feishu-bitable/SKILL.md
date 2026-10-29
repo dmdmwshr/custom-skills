@@ -46,5 +46,6 @@ metadata:
 
 - [建模与权限](references/modeling-and-permissions.md)：实体拆分、主键、角色与分权方案、验证身份矩阵。
 - [导入与验证](references/import-and-verification.md)：数据准备、Excel 导入、关联、公式与统计、导出对账、验证分级。
+- [填报层、完整性与核实](references/filling-and-verification.md)：给填报人建同底表视图、缺项公式、逐级汇总、人工核实与其边界、年度派生；做大队/单位填报界面时读。
 - [消防产品案卷示例 schema](references/fire-product-case-schema.md)：只有需要案卷/检查/产品/月度统计这类模型时读，匿名示例，不含真实数据。
 - `scripts/preflight_bitable.py`：标准库 JSON 预检与导出对账，示例规格见 `references/preflight-spec.example.json`；不调用任何飞书接口、不写云端。
