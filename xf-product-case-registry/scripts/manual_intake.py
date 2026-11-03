@@ -14,9 +14,11 @@ from typing import Any
 from pypdf import PdfReader
 
 if __package__:
+    from . import image_pdf
     from . import source_intake as source
     from . import workspace_state as ws
 else:
+    import image_pdf
     import source_intake as source
     import workspace_state as ws
 
@@ -501,13 +503,100 @@ def gaps_acknowledged(source_state: dict[str, Any]) -> bool:
     )
 
 
+def _recorded(layout: Any, value: str) -> Path:
+    return layout.root / str(value).replace("\\", "/")
+
+
+def rebind_classification_evidence(
+    layout: Any, project: str, intake_id: str, reason: str
+) -> dict[str, Any]:
+    """Bind a real manual intake as the replacement for a lost classification evidence file.
+
+    The old recorded digest and its missing/mismatching state stay in the ledger as facts. Nothing
+    is reconstructed or rehashed; the replacement is the case's own reviewed manual intake receipt
+    (same ZIP digest, readable screenshot) and is bound by its own digest.
+    """
+    project = ws._project_no(project)
+    if not isinstance(reason, str) or not reason.strip():
+        raise ws.WorkspaceStateError("新绑定来源证据必须记录明确原因")
+    with ws._waterline_lock(layout):
+        data = ws.load_waterline(layout)
+        record = data.get("cases", {}).get(project)
+        if not record:
+            raise ws.WorkspaceStateError("总账没有该项目")
+        state = record.get("source") or {}
+        classification = state.get("classification") or {}
+        if not classification.get("evidencePath") or not classification.get("evidenceSha256"):
+            raise ws.WorkspaceStateError("该案没有需要重新绑定的分类证据记录")
+        old_path = _recorded(layout, classification["evidencePath"])
+        actual = source._sha256(old_path) if old_path.is_file() else None
+        if actual == classification["evidenceSha256"]:
+            raise ws.WorkspaceStateError("原分类证据文件仍然完整，无需重新绑定")
+        binding = (state.get("manualIntakes") or {}).get(intake_id)
+        if not binding:
+            raise ws.WorkspaceStateError("总账没有该手动交件")
+        receipt_path = _recorded(layout, binding["evidencePath"])
+        if not receipt_path.is_file() or source._sha256(receipt_path) != binding["evidenceSha256"]:
+            raise ws.WorkspaceStateError("手动交件回执缺失或摘要不符，不能作为新绑定来源")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if (
+            receipt.get("schemaVersion") != "ManualCaseIntakeReceiptV1"
+            or (receipt.get("fields") or {}).get("projectNo") != project
+        ):
+            raise ws.WorkspaceStateError(
+                "手动交件回执缺少基础身份记录（版本/项目编号），不能作为新绑定来源"
+            )
+        package = _recorded(layout, receipt["package"]["relativePath"])
+        screenshot = _recorded(layout, receipt["screenshot"]["relativePath"])
+        if (
+            receipt.get("projectNo") != project
+            or receipt["package"]["sha256"] != binding["packageSha256"]
+            or binding["packageSha256"] != state.get("packageSha256")
+            or not package.is_file()
+            or source._sha256(package) != binding["packageSha256"]
+            or not screenshot.is_file()
+            or source._sha256(screenshot) != binding["screenshotSha256"]
+        ):
+            raise ws.WorkspaceStateError("手动交件与本案当前原始 ZIP/截图不一致，拒绝新绑定")
+        try:
+            size = image_pdf.decodable_png_size(screenshot.read_bytes())
+        except image_pdf.ImageNormalizationError as error:
+            raise ws.WorkspaceStateError(f"手动交件截图不是可解码的 PNG：{error}") from error
+        if list(size) != list((receipt.get("screenshot") or {}).get("dimensions") or size):
+            raise ws.WorkspaceStateError("手动交件截图实际尺寸与回执记录不符，拒绝新绑定")
+        replacement = {
+            "status": "REPLACED_BY_MANUAL_INTAKE",
+            "intakeId": intake_id,
+            "evidencePath": receipt_path.relative_to(layout.root).as_posix(),
+            "evidenceSha256": binding["evidenceSha256"],
+            "packageSha256": binding["packageSha256"],
+            "screenshotSha256": binding["screenshotSha256"],
+            "reason": reason.strip(),
+            "replacedAt": ws._utc_now(),
+            "supersededEvidencePath": classification["evidencePath"],
+            "supersededEvidenceSha256": classification["evidenceSha256"],
+            "supersededEvidenceState": "MISSING" if actual is None else "DIGEST_MISMATCH",
+            **({"supersededActualSha256": actual} if actual else {}),
+        }
+        old = classification.get("evidenceReplacement")
+        if old:
+            same = ("intakeId", "evidenceSha256", "supersededEvidenceSha256")
+            if all(old.get(k) == replacement[k] for k in same):
+                return {"status": "REUSED", "projectNo": project, "intakeId": intake_id}
+            raise ws.WorkspaceStateError("该案已绑定其他替代证据，拒绝覆盖")
+        ws._deep_merge(record, {"source": {"classification": {"evidenceReplacement": replacement}}})
+        ws._save_waterline_unlocked(layout, data)
+    return {"status": "REBOUND", "projectNo": project, "intakeId": intake_id,
+            "supersededEvidenceState": replacement["supersededEvidenceState"]}
+
+
 def relocated_original_bindings(
     layout: Any, source_state: dict[str, Any], previous: Path, archived: Path
 ) -> dict[str, Any]:
     """Relocate exact evidence references after a verified move, keeping receipt bytes."""
     changes: dict[str, Any] = {}
     for key, binding in (source_state.get("manualIntakes") or {}).items():
-        old_path = layout.root / binding["evidencePath"]
+        old_path = _recorded(layout, binding["evidencePath"])
         if not old_path.is_relative_to(previous):
             continue
         new_path = archived / old_path.relative_to(previous)
@@ -521,19 +610,32 @@ def relocated_original_bindings(
         }
     for field in ("packageRelativePath", "screenshotRelativePath"):
         value = source_state.get(field)
-        if value and (layout.root / value).is_relative_to(previous):
-            path = archived / (layout.root / value).relative_to(previous)
+        if value and _recorded(layout, value).is_relative_to(previous):
+            path = archived / _recorded(layout, value).relative_to(previous)
             if not path.is_file():
                 raise ws.WorkspaceStateError("归档后的手动原件不存在")
             changes[field] = path.relative_to(layout.root).as_posix()
     classification = source_state.get("classification") or {}
     evidence = classification.get("evidencePath")
-    if evidence and (layout.root / evidence).is_relative_to(previous):
-        new_path = archived / (layout.root / evidence).relative_to(previous)
-        if source._sha256(new_path) != classification.get("evidenceSha256"):
+    if evidence and _recorded(layout, evidence).is_relative_to(previous):
+        new_path = archived / _recorded(layout, evidence).relative_to(previous)
+        replacement = classification.get("evidenceReplacement")
+        if new_path.is_file() and source._sha256(new_path) == classification.get("evidenceSha256"):
+            changes["classification"] = {
+                **classification,
+                "evidencePath": new_path.relative_to(layout.root).as_posix(),
+            }
+        elif replacement and replacement.get("status") == "REPLACED_BY_MANUAL_INTAKE":
+            # The original evidence file never existed in the archived folder: keep the recorded
+            # old digest as a fact and relocate the real replacement instead of failing.
+            rebound = dict(replacement)
+            old_replacement = _recorded(layout, replacement["evidencePath"])
+            if old_replacement.is_relative_to(previous):
+                moved = archived / old_replacement.relative_to(previous)
+                if not moved.is_file() or source._sha256(moved) != replacement["evidenceSha256"]:
+                    raise ws.WorkspaceStateError("归档后的替代来源证据摘要不一致")
+                rebound["evidencePath"] = moved.relative_to(layout.root).as_posix()
+            changes["classification"] = {**classification, "evidenceReplacement": rebound}
+        else:
             raise ws.WorkspaceStateError("归档后的分类证据摘要不一致")
-        changes["classification"] = {
-            **classification,
-            "evidencePath": new_path.relative_to(layout.root).as_posix(),
-        }
     return changes

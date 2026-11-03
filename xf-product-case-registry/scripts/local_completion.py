@@ -14,11 +14,22 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from . import local_validity, manual_intake
+    from . import (
+        amendment,
+        local_brigade,
+        local_validity,
+        manual_intake,
+        normalized_sources,
+        supplements,
+    )
     from . import workspace_state as ws
 else:
+    import amendment
+    import local_brigade
     import local_validity
     import manual_intake
+    import normalized_sources
+    import supplements
     import workspace_state as ws
 
 SCHEMA_VERSION = "LocalVerificationV1"
@@ -72,13 +83,14 @@ def _raw_package_digest(api: Any, layout: Any, work: Path, project: str) -> tupl
     }
 
 
-def _split_chain(api: Any, layout: Any, work: Path) -> dict[str, Any] | None:
+def _split_chain(api: Any, layout: Any, work: Path, project: str) -> dict[str, Any] | None:
     path = work / "split-index.json"
     if not path.is_file():
         return None
     index = layout.project_recorded_paths(api.read_json(path))
     inventory = layout.project_recorded_paths(api.read_json(work / "inventory.json"))
     sources = {f["relativePath"]: f for f in inventory.get("files", []) if isinstance(f, dict)}
+    sources.update({e["relativePath"]: e for e in supplements.entries(layout, project)})
     items = index.get("items")
     if not isinstance(items, list) or not items:
         raise api.RegistryError("split-index.json 没有拆分记录")
@@ -99,15 +111,76 @@ def _split_chain(api: Any, layout: Any, work: Path) -> dict[str, Any] | None:
     return {"indexSha256": _sha(path), "items": len(items)}
 
 
-def _field_resolution(api: Any, work: Path, project: str) -> dict[str, Any] | None:
+def _field_resolution(
+    api: Any, work: Path, project: str, amendment_id: str | None = None
+) -> dict[str, Any] | None:
     path = work / "field-resolution.json"
     if not path.is_file():
+        if amendment_id:
+            raise api.RegistryError(
+                "修订必须提供重新核对的 field-resolution.json（含 amendmentId）"
+            )
         return None
     value = api.read_json(path)
+    if amendment_id and value.get("amendmentId") != amendment_id:
+        raise api.RegistryError("field-resolution.json 没有绑定当前修订（amendmentId 不符）")
     unresolved = value.get("unresolvedFields") or value.get("unresolved") or []
     if value.get("projectNo") not in (None, project) or unresolved:
         raise api.RegistryError("字段裁决仍有未解决项或项目编号不一致，暂不形成本地核验凭证")
     return {"sha256": _sha(path), "unresolvedFields": 0}
+
+
+def _image_sources(api: Any, layout: Any, work: Path, project: str) -> dict[str, dict[str, Any]]:
+    entries = {
+        f["relativePath"]: f
+        for f in layout.project_recorded_paths(api.read_json(work / "inventory.json")).get(
+            "files", []
+        )
+    }
+    entries.update({e["relativePath"]: e for e in supplements.entries(layout, project)})
+    return entries
+
+
+def _image_proof(
+    api: Any, layout: Any, work: Path, project: str, files: dict[str, Any]
+) -> dict[str, Any]:
+    try:
+        index = normalized_sources.load(work)
+    except (ValueError, KeyError, OSError) as error:
+        raise api.RegistryError(f"image-normalization.json 无法读取：{error}") from error
+    used = {
+        ref: index[item["workRelativePath"]]
+        for ref, item in files.items()
+        if item["workRelativePath"] in index
+    }
+    if not used:
+        return {}
+    entries = _image_sources(api, layout, work, project)
+    reasons: list[str] = []
+    for item in used.values():
+        reasons += normalized_sources.verify_item(work, item, api.image_source_bytes(work, entries))
+    if reasons:
+        raise api.RegistryError(
+            "图片规范化与源图片不一致：\n- " + "\n- ".join(sorted(set(reasons)))
+        )
+    return {
+        ref: {
+            k: item[k]
+            for k in (
+                "sourceRelativePath",
+                "sourceKind",
+                "sourceSha256",
+                "sourceSizeBytes",
+                "pixelWidth",
+                "pixelHeight",
+                "pageSizePt",
+                "method",
+                "outputSha256",
+                "converter",
+            )
+        }
+        for ref, item in sorted(used.items())
+    }
 
 
 def build_verification(api: Any, layout: Any, project: str, *, now: str | None = None) -> dict:
@@ -135,6 +208,12 @@ def build_verification(api: Any, layout: Any, project: str, *, now: str | None =
 
     record = (ws.load_waterline(layout).get("cases") or {}).get(project)
     source = (record or {}).get("source") or {}
+    local_brigade.check_case(layout, project, manifest["case"])
+    supplement_problems = supplements.verify_bindings(layout, project)
+    if supplement_problems:
+        raise api.RegistryError("补采材料校验失败：" + "；".join(supplement_problems))
+    open_amendment = (record or {}).get("amendment") or {}
+    open_amendment = open_amendment if open_amendment.get("status") == "OPEN" else {}
     if not source.get("packageSha256") and package["containerKind"] == "ARCHIVE":
         raise api.RegistryError("总账缺少该案来源包摘要，来源映射无法绑定")
     if source.get("packageSha256") and source["packageSha256"] != package_sha:
@@ -164,6 +243,34 @@ def build_verification(api: Any, layout: Any, project: str, *, now: str | None =
     if not files:
         raise api.RegistryError("清单没有任何文件，不能形成本地核验凭证")
 
+    amendment_proof = None
+    if open_amendment:
+        parent_problems = amendment.parent_problems(layout, open_amendment["parent"])
+        if parent_problems:
+            raise api.RegistryError("修订父代已变化：" + "；".join(parent_problems))
+        parent_manifest = api.read_json(
+            layout.resolve_recorded_path(open_amendment["parent"]["workspacePath"])
+            / "manifest.json"
+        )
+        amendment_proof = {
+            "id": open_amendment["id"],
+            "reason": open_amendment["reason"],
+            "parentGeneration": open_amendment["parent"]["generation"],
+            "parentManifestSha256": open_amendment["parent"]["manifestSha256"],
+            "parentPackageSha256": open_amendment["parent"]["packageSha256"],
+            "changes": amendment.summarize_changes(parent_manifest, manifest),
+        }
+    supplement_items = [
+        {
+            "relativePath": entry["relativePath"],
+            "sha256": entry["sha256"],
+            "sourceType": entry["sourceType"],
+            "sourceDocumentId": entry["sourceDocumentId"],
+            "receiptSha256": entry["receiptSha256"],
+        }
+        for entry in supplements.entries(layout, project)
+    ]
+    case = manifest["case"]
     return {
         "schemaVersion": SCHEMA_VERSION,
         "status": "LOCAL_VERIFIED",
@@ -179,8 +286,20 @@ def build_verification(api: Any, layout: Any, project: str, *, now: str | None =
             "rwid": source.get("rwid"),
         },
         "files": files,
-        "split": _split_chain(api, layout, work),
-        "fieldResolution": _field_resolution(api, work, project),
+        "split": _split_chain(api, layout, work, project),
+        "fieldResolution": _field_resolution(
+            api, work, project, open_amendment.get("id") if open_amendment else None
+        ),
+        "supplements": supplement_items,
+        "imageNormalization": _image_proof(api, layout, work, project, files),
+        "brigade": {
+            "code": case["brigadeCode"],
+            "scope": "LOCAL_ONLY"
+            if case["brigadeCode"] in local_brigade.LOCAL_ONLY_BRIGADES
+            else "CLOUD_EIGHT",
+            "cloudReportingPermissionChanged": False,
+        },
+        **({"amendment": amendment_proof} if amendment_proof else {}),
         "serverUploadClaimed": False,
         "nasVerificationClaimed": False,
     }
@@ -253,6 +372,11 @@ def verify_and_archive(api: Any, layout: Any, project: str, *, archive: bool) ->
         )
         result["status"] = "COMPLETED"
     else:
-        ws.upsert_case(layout, project, state="LOCAL_VERIFIED_PENDING_ARCHIVE",
-                       local={"status": "LOCAL_VERIFIED"}, errorSummary=None)
+        ws.upsert_case(
+            layout,
+            project,
+            state="LOCAL_VERIFIED_PENDING_ARCHIVE",
+            local={"status": "LOCAL_VERIFIED"},
+            errorSummary=None,
+        )
     return result

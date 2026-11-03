@@ -62,9 +62,11 @@
             "HUISHAN",
             "BINHU",
             "XINWU",
-            "JINGKAI"
+            "JINGKAI",
+            "SHUISHANG"
           ]
         },
+        "brigadeName": { "enum": ["水上大队"] },
         "unitName": { "type": "string", "minLength": 1 },
         "unitAddress": { "type": "string" },
         "inspectionForm": {

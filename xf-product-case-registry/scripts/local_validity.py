@@ -14,8 +14,10 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
+    from . import normalized_sources
     from . import workspace_state as ws
 else:
+    import normalized_sources
     import workspace_state as ws
 
 UNTRUSTED_ISSUE = "LOCAL_COMPLETION_UNTRUSTED"
@@ -149,6 +151,54 @@ def validate_local_completion(layout: Any, project: str, record: dict[str, Any])
                 reasons.append("归档原始材料目录已被改动")
         else:
             reasons.append("核验凭证的原始材料种类未知")
+        reasons.extend(
+            _extension_reasons(layout, project, receipt, embedded, work, original, files)
+        )
     except (OSError, ValueError, ws.WorkspaceStateError, AttributeError, TypeError) as error:
         reasons.append(f"深度核验无法完成：{type(error).__name__}")
+    return reasons
+
+
+def _extension_reasons(
+    layout: Any, project: str, receipt: dict[str, Any], embedded: dict[str, Any],
+    work: Path, original: Path, files: dict[str, Any],
+) -> list[str]:
+    """Supplements, image normalization and amendment parents: older proofs simply lack them."""
+    reasons: list[str] = []
+    folder = original / "补采材料"
+    for item in embedded.get("supplements") or []:
+        file = original / item["relativePath"]
+        if not file.is_file() or _sha(file) != item["sha256"]:
+            reasons.append(f"归档补采文件缺失或被改动：{item['relativePath']}")
+        if not any(_sha(r) == item["receiptSha256"] for r in folder.glob("*.receipt.json")):
+            reasons.append(f"归档补采回执缺失或被改动：{item['relativePath']}")
+    images = embedded.get("imageNormalization") or {}
+    if images:
+        try:
+            index = normalized_sources.load(work)
+        except (ValueError, KeyError, OSError):
+            index = {}
+            reasons.append("归档工作区的图片规范化记录无法读取")
+
+        def source_bytes(item: dict[str, Any]) -> bytes:
+            relative = item["sourceRelativePath"]
+            for base in (work / "source", original):
+                candidate = base / relative
+                if candidate.is_file():
+                    return candidate.read_bytes()
+            raise OSError(relative)
+
+        for ref, proof in images.items():
+            item = index.get(files.get(ref, {}).get("workRelativePath", ""))
+            if item is None or item.get("outputSha256") != proof.get("outputSha256"):
+                reasons.append(f"图片规范化记录与核验凭证不符：{ref}")
+                continue
+            reasons.extend(normalized_sources.verify_item(work, item, source_bytes))
+    parent = (receipt.get("amendment") or {}).get("parent")
+    if parent:
+        if __package__:
+            from . import amendment
+        else:
+            import amendment
+        reasons.extend(f"修订{problem}" for problem in amendment.parent_problems(layout, parent))
     return reasons

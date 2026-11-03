@@ -17,15 +17,17 @@ from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
 if __package__:
-    from . import ledger_views
+    from . import image_pdf, ledger_views, normalized_sources
     from .ocr_runtime import OcrError, run_ocr
     from .workflow_reporting import ReportingError, record_timing, render_report, write_report
 else:
+    import image_pdf
     import ledger_views
+    import normalized_sources
     from ocr_runtime import OcrError, run_ocr
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -45,6 +47,9 @@ UUID = re.compile(
 SHA256 = re.compile(r"^sha256:[a-f0-9]{64}$")
 CLIENT_REF = re.compile(r"^[a-z][a-z0-9:_-]{0,159}$")
 BRIGADES = {"JIANGYIN", "YIXING", "LIANGXI", "XISHAN", "HUISHAN", "BINHU", "XINWU", "JINGKAI"}
+# Local business entities beyond the eight cloud brigades; they never widen cloud reporting scopes.
+LOCAL_ONLY_BRIGADES = {"SHUISHANG": "水上大队"}
+LOCAL_BRIGADES = BRIGADES | set(LOCAL_ONLY_BRIGADES)
 FORMS = {"ROUTINE", "SPECIAL", "COMPLAINT", "OTHER", "UNKNOWN"}
 METHODS, RESULTS, TRI = (
     {"ONSITE", "SAMPLING"},
@@ -297,6 +302,34 @@ def pdf_parts(item: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def local_layout(args: argparse.Namespace, work: Path) -> tuple[Any, str] | None:
+    resolved = resolve_local_case_workspace(args, work)
+    return (resolved[1], resolved[2]) if resolved else None
+
+
+def supplement_entries(args: argparse.Namespace, work: Path) -> list[dict[str, Any]]:
+    """Verified real external supplements (own source kind, never ZIP members)."""
+    located = local_layout(args, work)
+    if located is None:
+        return []
+    layout, project = located
+    module = importlib.import_module(f"{__package__}.supplements" if __package__ else "supplements")
+    try:
+        return module.entries(layout, project)
+    except workspace_api().WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+
+
+def image_source_bytes(work: Path, entries: dict[str, dict[str, Any]]) -> Any:
+    def read(item: dict[str, Any]) -> bytes:
+        entry = entries.get(item["sourceRelativePath"])
+        if entry is None or entry.get("sha256") != item.get("sourceSha256"):
+            raise OSError("source image not in verified material")
+        return Path(entry["absolutePath"]).read_bytes()
+
+    return read
+
+
 def split_command(args: argparse.Namespace) -> None:
     work, plan = Path(args.work_dir).resolve(), read_json(Path(args.plan).resolve())
     enforce_local_workspace_preflight(args, work)
@@ -304,6 +337,10 @@ def split_command(args: argparse.Namespace) -> None:
     by_rel = {
         item["relativePath"]: item for item in inventory.get("files", []) if isinstance(item, dict)
     }
+    for entry in supplement_entries(args, work):
+        if entry["relativePath"] in by_rel:
+            raise RegistryError(f"补采文件名与 ZIP 成员冲突：{entry['relativePath']}")
+        by_rel[entry["relativePath"]] = entry
     planned: list[tuple[dict[str, Any], Path, list[dict[str, Any]]]] = []
     seen: set[Path] = set()
     normalized = (work / "normalized").resolve()
@@ -319,7 +356,9 @@ def split_command(args: argparse.Namespace) -> None:
             if not source or source.get("mimeType") != "application/pdf":
                 raise RegistryError("拆分来源必须是 inventory 中的 PDF")
             source_path = Path(source["absolutePath"]).resolve()
-            if not inside(source_path, Path(inventory["sourceRoot"]).resolve()):
+            if source.get("sourceKind") != "EXTERNAL_SUPPLEMENT" and not inside(
+                source_path, Path(inventory["sourceRoot"]).resolve()
+            ):
                 raise RegistryError("PDF 拆分来源路径越界")
             sha, pages = pdf_info(source_path)
             if sha != source.get("sha256"):
@@ -358,6 +397,9 @@ def split_command(args: argparse.Namespace) -> None:
         result.append(
             {
                 **item,
+                "sourceKinds": sorted(
+                    {by_rel[p["sourceRelativePath"]].get("sourceKind", "ZIP_MEMBER") for p in parts}
+                ),
                 "relativePath": target.relative_to(work).as_posix(),
                 "absolutePath": str(target),
                 "sha256": sha,
@@ -379,6 +421,75 @@ def split_command(args: argparse.Namespace) -> None:
         state="ORGANIZING",
         local_status="ORGANIZING",
     )
+
+
+def normalize_images_command(args: argparse.Namespace) -> None:
+    """Faithfully convert selected PNG/JPEG originals to single-page PDFs with a source mapping."""
+    work = Path(args.work_dir).resolve()
+    enforce_local_workspace_preflight(args, work)
+    inventory = project_local_path_fields(read_json(work / "inventory.json"), work, args)
+    sources = {
+        item["relativePath"]: item for item in inventory.get("files", []) if isinstance(item, dict)
+    }
+    for entry in supplement_entries(args, work):
+        sources.setdefault(entry["relativePath"], entry)
+    try:
+        index = normalized_sources.load(work)
+    except (ValueError, KeyError, OSError) as error:
+        raise RegistryError(f"image-normalization.json 无法读取：{error}") from error
+    if not args.relative_path:
+        raise RegistryError("必须用 --relative-path 明确选择要转换的图片，不批量猜测")
+    produced = []
+    for requested in args.relative_path:
+        relative = safe_relative(requested)
+        entry = sources.get(relative)
+        if not entry or entry.get("mimeType") not in {"image/png", "image/jpeg"}:
+            raise RegistryError(f"只能转换 inventory 或补采材料中的 PNG/JPEG：{relative}")
+        path = Path(entry["absolutePath"]).resolve()
+        if entry.get("sourceKind") != "EXTERNAL_SUPPLEMENT" and not inside(
+            path, Path(inventory["sourceRoot"]).resolve()
+        ):
+            raise RegistryError("图片来源路径越界")
+        data = path.read_bytes()
+        if image_pdf.sha256(data) != entry.get("sha256"):
+            raise RegistryError(f"源图片哈希已变化：{relative}")
+        try:
+            pdf, mapping = image_pdf.build_pdf(data)
+        except image_pdf.ImageNormalizationError as error:
+            raise RegistryError(f"{relative} 无法忠实转换：{error}") from error
+        stem = re.sub(r"[^\w.\-]+", "_", PurePosixPath(relative).stem, flags=re.UNICODE)[:60]
+        output = f"normalized/image_{mapping['sourceSha256'][7:19]}_{stem}.pdf"
+        target = (work / output).resolve()
+        if not inside(target, (work / "normalized").resolve()):
+            raise RegistryError("图片规范化输出越界")
+        if target.exists():
+            problems = image_pdf.verify_pdf(target.read_bytes(), data, mapping)
+            if problems:
+                raise RegistryError(f"规范化目标已存在且与源图片不符，拒绝覆盖：{output}")
+            status = "REUSED"
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("xb") as stream:
+                stream.write(pdf)
+            status = "CREATED"
+        sha, pages = pdf_info(target)
+        item = {
+            **mapping,
+            "sourceRelativePath": relative,
+            "sourceKind": entry.get("sourceKind", "ZIP_MEMBER"),
+            "outputRelativePath": output,
+            "outputSha256": sha,
+            "outputPageCount": pages,
+            "normalizedAt": utc_now(),
+        }
+        previous = index.get(output)
+        if previous and previous.get("outputSha256") == sha:
+            item["normalizedAt"] = previous.get("normalizedAt", item["normalizedAt"])
+        index[output] = item
+        produced.append({"status": status, "source": relative, "output": output, "sha256": sha})
+    normalized_sources.save(work, index, utc_now())
+    update_local_case_waterline(args, work, state="ORGANIZING", local_status="ORGANIZING")
+    print(json.dumps({"status": "NORMALIZED", "items": produced}, ensure_ascii=False))
 
 
 def ocr_command(args: argparse.Namespace) -> None:
@@ -507,14 +618,20 @@ def validate_manifest(
             "documentRecipient",
             "criminalCaseOverride",
             "notificationTarget",
+            "brigadeName",
         },
         "case",
         errors,
     )
     if not isinstance(case.get("projectNo"), str) or not PROJECT_NO.fullmatch(case["projectNo"]):
         errors.append("case.projectNo 不合法")
-    if case.get("brigadeCode") not in BRIGADES:
+    if case.get("brigadeCode") not in LOCAL_BRIGADES:
         errors.append("case.brigadeCode 不合法")
+    elif case["brigadeCode"] in LOCAL_ONLY_BRIGADES:
+        if case.get("brigadeName") != LOCAL_ONLY_BRIGADES[case["brigadeCode"]]:
+            errors.append("本地大队案卷必须填写与来源一致的 brigadeName")
+    elif "brigadeName" in case:
+        errors.append("八个云端大队不得填写 brigadeName")
     if not text(case.get("unitName")) or not case["unitName"].strip():
         errors.append("case.unitName 不能为空")
     for key in ("unitAddress", "handler", "inspector", "legalRepresentative", "documentRecipient"):
@@ -845,6 +962,26 @@ def compose_command(args: argparse.Namespace) -> None:
                 if isinstance(item, dict)
             }
         )
+    for entry in supplement_entries(args, work):
+        if entry["relativePath"] in sources:
+            raise RegistryError(f"补采文件名与 ZIP 成员冲突：{entry['relativePath']}")
+        sources[entry["relativePath"]] = entry
+    try:
+        image_items = normalized_sources.load(work)
+    except (ValueError, KeyError, OSError) as error:
+        raise RegistryError(f"image-normalization.json 无法读取：{error}") from error
+    for relative, item in image_items.items():
+        reasons = normalized_sources.verify_item(work, item, image_source_bytes(work, sources))
+        if reasons:
+            raise RegistryError("图片规范化校验失败：\n- " + "\n- ".join(reasons))
+        sources[relative] = {
+            "relativePath": relative,
+            "absolutePath": str((work / relative).resolve()),
+            "sha256": item["outputSha256"],
+            "mimeType": "application/pdf",
+            "pageCount": 1,
+            "sourceKind": "IMAGE_NORMALIZED",
+        }
     manifest = {key: value for key, value in data.items() if key != "packageSha256"}
     manifest.update(
         {
@@ -879,6 +1016,8 @@ def compose_command(args: argparse.Namespace) -> None:
             )
         source_refs.add(source_rel)
         source = sources.get(source_rel)
+        if source and source.get("sourceKind") == "EXTERNAL_SUPPLEMENT":
+            raise RegistryError(f"补采文件必须先经 split 生成规范化 PDF 后再引用：{source_rel}")
         if not source or source.get("mimeType") != "application/pdf":
             raise RegistryError(f"sourceRelativePath 必须指向 inventory/split 中 PDF：{source_rel}")
         sha, pages = pdf_info(Path(source["absolutePath"]))
@@ -900,6 +1039,15 @@ def compose_command(args: argparse.Namespace) -> None:
     errors = validate_manifest(manifest, upload)
     if errors:
         raise RegistryError("compose 校验失败：\n- " + "\n- ".join(errors))
+    located = local_layout(args, work)
+    if located is not None:
+        brigade = importlib.import_module(
+            f"{__package__}.local_brigade" if __package__ else "local_brigade"
+        )
+        try:
+            brigade.check_case(located[0], manifest["case"]["projectNo"], manifest["case"])
+        except workspace_api().WorkspaceStateError as error:
+            raise RegistryError(str(error)) from error
     write_json(work / "manifest.json", manifest)
     write_json(work / "upload-map.json", {"files": upload})
     update_local_case_waterline(
@@ -1358,6 +1506,42 @@ def source_acknowledge_gaps_command(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False))
 
 
+def _source_module(name: str) -> Any:
+    return importlib.import_module(f"{__package__}.{name}" if __package__ else name)
+
+
+def _run_source_module(args: argparse.Namespace, module: str, function: str, *call: Any) -> None:
+    workspace = workspace_api()
+    try:
+        result = getattr(_source_module(module), function)(resolve_source_layout(args), *call)
+    except (workspace.WorkspaceStateError, source_intake_api().SourceIntakeError) as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def source_amend_archived_command(args: argparse.Namespace) -> None:
+    _run_source_module(args, "amendment", "amend", args.project, args.reason)
+
+
+def source_abandon_amendment_command(args: argparse.Namespace) -> None:
+    _run_source_module(args, "amendment", "abandon", args.project, args.reason)
+
+
+def source_attach_supplement_command(args: argparse.Namespace) -> None:
+    _run_source_module(args, "supplements", "attach", args.project, args.file, args.receipt)
+
+
+def source_rebind_evidence_command(args: argparse.Namespace) -> None:
+    _run_source_module(
+        args,
+        "manual_intake",
+        "rebind_classification_evidence",
+        args.project,
+        args.intake_id,
+        args.reason,
+    )
+
+
 def source_snapshot_downloads_command(args: argparse.Namespace) -> None:
     source = source_intake_api()
     workspace = workspace_api()
@@ -1504,6 +1688,13 @@ def build_parser() -> argparse.ArgumentParser:
     split.add_argument("--plan", required=True)
     add_workspace_resolution_options(split)
     split.set_defaults(func=split_command, workspace_required=True)
+    normalize = sub.add_parser(
+        "normalize-images", help="把选定的 PNG/JPEG 原图忠实转换为单页 PDF 并保存源映射"
+    )
+    normalize.add_argument("--work-dir", required=True)
+    normalize.add_argument("--relative-path", action="append")
+    add_workspace_resolution_options(normalize)
+    normalize.set_defaults(func=normalize_images_command, workspace_required=True)
     compose = sub.add_parser("compose")
     compose.add_argument("--work-dir", required=True)
     compose.add_argument("--case-data", required=True)
@@ -1627,6 +1818,46 @@ def build_parser() -> argparse.ArgumentParser:
     acknowledge.add_argument("--project", required=True)
     acknowledge.add_argument("--reason", required=True)
     acknowledge.set_defaults(func=source_acknowledge_gaps_command)
+
+    amend_archived = source_sub.add_parser(
+        "amend-archived",
+        help="对已归档案卷（同一 ZIP）显式开启字段/分类修订：保留父代并建立独立新代际工作材料",
+    )
+    add_workspace_resolution_options(amend_archived)
+    amend_archived.add_argument("--project", required=True)
+    amend_archived.add_argument("--reason", required=True, help="修订原因（写入总账与回执）")
+    amend_archived.set_defaults(func=source_amend_archived_command)
+
+    abandon_amendment = source_sub.add_parser(
+        "abandon-amendment",
+        help="放弃未完成的修订：恢复父代完成记录，修订副本移入保留目录而不删除",
+    )
+    add_workspace_resolution_options(abandon_amendment)
+    abandon_amendment.add_argument("--project", required=True)
+    abandon_amendment.add_argument("--reason", required=True)
+    abandon_amendment.set_defaults(func=source_abandon_amendment_command)
+
+    attach_supplement = source_sub.add_parser(
+        "attach-supplement",
+        help="绑定真实外加补采文件及其来源回执（不属于 ZIP 成员），供拆分/组装/核验使用",
+    )
+    add_workspace_resolution_options(attach_supplement)
+    attach_supplement.add_argument("--project", required=True)
+    attach_supplement.add_argument("--file", required=True, help="补采文件绝对路径")
+    attach_supplement.add_argument(
+        "--receipt", required=True, help="SourceDocumentRecoveryV1 回执绝对路径"
+    )
+    attach_supplement.set_defaults(func=source_attach_supplement_command)
+
+    rebind_evidence = source_sub.add_parser(
+        "rebind-evidence",
+        help="分类证据文件已丢失时，以本案真实手动交件回执显式新绑定；不改旧摘要、不构造旧证据",
+    )
+    add_workspace_resolution_options(rebind_evidence)
+    rebind_evidence.add_argument("--project", required=True)
+    rebind_evidence.add_argument("--intake-id", required=True)
+    rebind_evidence.add_argument("--reason", required=True)
+    rebind_evidence.set_defaults(func=source_rebind_evidence_command)
 
     source_snapshot = source_sub.add_parser(
         "snapshot-downloads",
@@ -1863,6 +2094,7 @@ def record_command_timing(
         "ocr",
         "split",
         "compose",
+        "normalize-images",
         "source",
     }:
         return

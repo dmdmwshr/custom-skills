@@ -1382,6 +1382,11 @@ def _assert_safe_tree(path: Path, boundary: Path, label: str) -> Path:
     return path
 
 
+def _has_open_amendment(layout: BusinessLayout, project: str) -> bool:
+    record = load_waterline(layout).get("cases", {}).get(project) or {}
+    return (record.get("amendment") or {}).get("status") == "OPEN"
+
+
 def archive_verified_case(
     layout: BusinessLayout,
     project_no: str,
@@ -1415,20 +1420,30 @@ def archive_verified_case(
     stamp = _timestamp_slug(verified_at)
     manifest_short = manifest_sha256.removeprefix("sha256:")[:12]
     package_short = package_sha256.removeprefix("sha256:")[:12]
-    generation = f"{stamp}-{package_short}"
+    # The same ZIP can have several generations (amendments): those are told apart by the
+    # manifest digest so two generations created within one second never collide.
+    generation_short = manifest_short if _has_open_amendment(layout, project) else package_short
+    generation = f"{stamp}-{generation_short}"
 
     pending_source = layout.pending_case_dir(project)
     work_source = layout.work_case_dir(project)
     completed_parent = layout.completed_case_dir(project)
     completed_target = completed_parent / generation
-    history_target = layout.history_workspaces / f"{project}-{stamp}-{package_short}"
+    history_target = layout.history_workspaces / f"{project}-{stamp}-{generation_short}"
     evidence_target = layout.verification_records / f"{project}-{stamp}-{manifest_short}.json"
     with _waterline_lock(layout):
         source_state = load_waterline(layout).get("cases", {}).get(project, {}).get("source") or {}
         if __package__:
+            from . import amendment as amendment_api
+            from . import supplements as supplements_api
             from .manual_intake import gaps_acknowledged, relocated_original_bindings
         else:
+            import amendment as amendment_api
+            import supplements as supplements_api
             from manual_intake import gaps_acknowledged, relocated_original_bindings
+        open_amendment = amendment_api.preflight_archive(
+            layout, project, load_waterline(layout).get("cases", {}).get(project, {}), verification
+        )
         retained_source_issues = gaps_acknowledged(source_state)
         if source_state.get("materialGaps") and not retained_source_issues:
             raise WorkspaceStateError("来源材料仍有明确缺口，保留已核验断点，暂不归档")
@@ -1512,6 +1527,15 @@ def archive_verified_case(
                 "archivedOriginal": str(completed_target),
                 "archivedWorkspace": str(history_target),
                 "sourceIssuesRetained": retained_source_issues,
+                **(
+                    {
+                        "amendment": amendment_api.completed_block(
+                            open_amendment, generation, verified_at
+                        )
+                    }
+                    if open_amendment
+                    else {}
+                ),
                 **({"sourceMaterialGaps": deepcopy(source_state["materialGaps"]),
                     "materialGapDisposition": deepcopy(source_state["materialGapDisposition"])}
                    if retained_source_issues else {}),
@@ -1550,8 +1574,24 @@ def archive_verified_case(
                     "workspacePath": str(history_target),
                     "verificationRecord": str(evidence_target),
                     "completionMode": "LOCAL_V1",
+                    **(
+                        {"amendment": {"id": open_amendment["id"],
+                                       "parentGeneration": open_amendment["parent"]["generation"]}}
+                        if open_amendment
+                        else {}
+                    ),
                 }
             )
+            if open_amendment:
+                history.setdefault("amendments", []).append(
+                    {"id": open_amendment["id"], "status": "COMPLETED",
+                     "parentGeneration": open_amendment["parent"]["generation"],
+                     "newGeneration": generation, "reason": open_amendment["reason"],
+                     "completedAt": verified_at}
+                )
+                record["amendment"] = amendment_api.completed_block(
+                    open_amendment, generation, verified_at
+                )
             _deep_merge(
                 record,
                 {
@@ -1568,9 +1608,14 @@ def archive_verified_case(
                     "completedAt": verified_at,
                     "lastSeenAt": verified_at,
                     "errorSummary": None,
-                    "source": relocated_original_bindings(
-                        layout, source_state, pending_source, completed_target
-                    ),
+                    "source": {
+                        **relocated_original_bindings(
+                            layout, source_state, pending_source, completed_target
+                        ),
+                        **supplements_api.relocated(
+                            layout, source_state, pending_source, completed_target
+                        ),
+                    },
                     "archive": {
                         "generation": generation,
                         "originalPath": str(completed_target),
