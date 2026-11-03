@@ -15,7 +15,7 @@ This repository is the source of truth for self-built skills. Windows installati
 - **视频**：video-intake（唯一核心）；video-download、bilinote-video-note 为兼容桩，仍被机器人路径和提示引用
 - **文档与资料（Windows）**：wps-office（内置 CLI 28 命令与编辑需求评估；Windows 原生运行/会员权益分层验收）、drawio-local（官方 draw.io Desktop CLI）、docling-local、mineru-local、zerox-local、obsidian-notes、summarize-link-note、wechat-mp-tools、wx-cli、pyweixin-rpa、xfrhtx-cli
 - **本机环境（Windows）**：cc-switch、flclash-proxy-toggle、browser-tamer、localvault-credentials、serena-local、windows-task-scheduler、wsl-backup-audit、wsl-system-lifecycle、comfyui-on-demand、comfyui-production-manager、applio-rvc-manager、meifu-resumable-download
-- **消防业务（Windows）**：xf-expert-review、xf-information-file-manager、xf-product-case-registry（来源采集、字段校验、本地核验归档统一入口）、xf-product-standards、xf-report-filler（飞书结构化统计快照）；xf-product-case-filler 仅保留退役转向说明，不再写表或删除截图
+- **消防业务（Windows）**：xf-expert-review、xf-information-file-manager、xf-product-case-registry（来源采集、字段校验、本地核验归档统一入口）、xf-product-standards、xf-report-filler（飞书结构化统计快照）
 
 ## Windows management notes
 

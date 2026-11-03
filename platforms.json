@@ -416,19 +416,6 @@
       },
       "dependencies": "Local DOCX/XLS templates, expert roster and selected historical labor sheets; python-docx/lxml, openpyxl/xlrd and pywin32; Microsoft Word and Excel for rendering and recalculation."
     },
-    "xf-product-case-filler": {
-      "category": "platform_specific",
-      "execution_platforms": [
-        "windows"
-      ],
-      "managed_wsl": false,
-      "validation": {
-        "wsl": "not_supported_by_current_workflow",
-        "linux": "runtime_unverified",
-        "windows": "retired_redirect_only_fields_merged_into_registry_20261103"
-      },
-      "dependencies": "No active execution. Use xf-product-case-registry fields validate; historical source retained by Git. No workbook writes or screenshot deletion."
-    },
     "xf-product-case-registry": {
       "category": "platform_specific",
       "execution_platforms": [

@@ -1,4 +1,0 @@
-interface:
-  display_name: "消防产品案卷填表（已并入统一入口）"
-  short_description: "已并入 xf-product-case-registry；仅保留兼容转向说明"
-  default_prompt: "使用 $xf-product-case-registry 处理案卷字段校验、本地核验和归档；本 Skill 已退役，不再写 Excel 或改名删除截图。"
