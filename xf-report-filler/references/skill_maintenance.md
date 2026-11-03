@@ -11,7 +11,7 @@
 - **脚本行为修复类**：修复解析、生成、审计、模板同步或目录整理脚本；必须保留 dry-run 能力。
 - **模板快照同步类**：用户更新外部模板后，把外部事实源同步到 skill 快照。
 - **真实材料重生成/修复类**：用户明确要求修复或重新生成真实通报材料时才执行。
-- **安装同步类**：源仓库提交推送后，验证并同步 `C:\Users\12070\.cc-switch\skills\xf-report-filler` 安装副本。
+- **安装同步类**：受管源码仓（`/srv/workspaces/02-software/02-25-custom-skills`）提交推送后，由受管发布流程验证并同步 `C:\Users\12070\.cc-switch\skills\xf-report-filler` 安装副本。
 
 ## 渐进加载
 
@@ -24,7 +24,7 @@
 
 ## 修改边界
 
-- 只改源仓库 `C:\Users\12070\.cc-switch\skills\自建skills\xf-report-filler`。
+- 只改受管唯一源码仓 `/srv/workspaces/02-software/02-25-custom-skills` 中的 `xf-report-filler`；旧 Windows 目录 `C:\Users\12070\.cc-switch\skills\自建skills` 有独立消费者，不作开发根、不 pull、不覆盖。
 - 不直接把安装副本 `C:\Users\12070\.cc-switch\skills\xf-report-filler` 当源码改。
 - 小改动只碰对应对象文档、必要配置、相关脚本和测试。
 - 新业务条线必须与既有条线解耦；除入口路由和维护说明外，不修改无关月度流程。

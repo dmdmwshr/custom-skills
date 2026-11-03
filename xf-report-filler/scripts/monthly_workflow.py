@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 
 
@@ -184,6 +185,42 @@ def data_source_path(name, config=None):
     config = config or load_config()
     value = config["data_sources"][name]["path"]
     return path_from_config(value)
+
+
+def case_source_path(config=None):
+    """Configured Feishu snapshot directory, or None when nothing is configured.
+
+    Order: environment variable, then the local per-user config file (``snapshot_dir``), then a
+    path in the packaged config (empty by default: no export is baked into the skill).
+    """
+    config = config or load_config()
+    entry = config["data_sources"]["case_snapshot"]
+    explicit = os.environ.get(entry.get("override_env", ""))
+    if explicit:
+        return path_from_config(explicit)
+    local = Path(
+        os.environ.get(entry.get("local_config_env", ""))
+        or os.path.expanduser(entry.get("local_config_default", ""))
+    )
+    if entry.get("local_config_default") and local.is_file():
+        try:
+            value = json.loads(local.read_text(encoding="utf-8-sig")).get("snapshot_dir")
+        except (OSError, ValueError, AttributeError):
+            value = None
+        if value:
+            return path_from_config(os.path.expanduser(value))
+    return path_from_config(entry["path"]) if entry.get("path") else None
+
+
+def case_source_unconfigured_message(config=None):
+    config = config or load_config()
+    entry = config["data_sources"]["case_snapshot"]
+    return (
+        "未配置飞书统计快照目录：请用 --case-data <目录>、环境变量 "
+        f"{entry.get('override_env')} 或本机配置文件 {entry.get('local_config_default')} "
+        '（内容 {"snapshot_dir": "<目录>"}）指定含 cases/checks/products/monthly.ndjson 的导出目录；'
+        "导出时间与完整性见 references/monthly/source_feishu_case_snapshot.md。"
+    )
 
 
 def reference_docs(config=None):

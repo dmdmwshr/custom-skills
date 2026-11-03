@@ -39,6 +39,11 @@ if __package__:
 else:
     from office_package_guard import is_safe_docx_package
 
+if __package__:
+    from . import local_validity
+else:
+    import local_validity
+
 try:  # 包导入与直接加载脚本两种方式都要可用。
     from .workspace_state import BusinessLayout, load_waterline, upsert_case
 except (ImportError, ModuleNotFoundError):  # pragma: no cover - 由独立加载测试覆盖行为
@@ -659,7 +664,7 @@ def record_download_baseline(
         raise SourceIntakeError(f"该 RWID 已合并，请使用主记录 {record['aliasOf']}")
     collecting_annual = _material_collection_active(layout, state, record_key, record)
     if record.get("skippedAsUnchanged") and not collecting_annual:
-        raise SourceIntakeError("详情项目编号已在水位中完成并通过飞牛核验，无需下载案卷包")
+        raise SourceIntakeError("详情项目编号已在水位中完成并通过完成核验，无需下载案卷包")
     detail = record.get("collectionDetail") if collecting_annual else record.get("detail")
     if not detail:
         raise SourceIntakeError("必须先进入详情读取项目编号并保存完整截图，才能建立下载基线")
@@ -1369,7 +1374,7 @@ def _material_collection_active(
     ):
         raise SourceIntakeError("年度材料采集请求与当前批次、RWID 或项目绑定不一致")
     if _verified_completed_waterline(layout, str(record.get("projectNo") or "")):
-        raise SourceIntakeError("该项目已完成并通过飞牛核验，沿用原断点，不重新采集")
+        raise SourceIntakeError("该项目已完成并通过完成核验，沿用原断点，不重新采集")
     if load_waterline is not None:
         if __package__:
             from .ledger_views import describe
@@ -1421,7 +1426,7 @@ def request_case_material_collection(
     if bindings.get(key) != {project} or project not in ledger.get("cases", {}):
         raise SourceIntakeError("年度身份与项目总账绑定不一致，拒绝提升")
     if _verified_completed_waterline(layout, project):
-        raise SourceIntakeError("该项目已完成并通过飞牛核验，沿用原断点，不重新采集")
+        raise SourceIntakeError("该项目已完成并通过完成核验，沿用原断点，不重新采集")
     if describe(layout, project, ledger["cases"][project])["initialResult"] != "UNQUALIFIED":
         raise SourceIntakeError("当前入口只提升已确认初查不合格案，待确认或合格案保留最小索引")
     if record.get("materialCollection") is not None:
@@ -2217,12 +2222,24 @@ def _raise_case_identity_mismatch(
 
 
 def _verified_completed_waterline(layout: Any, project_no: str) -> dict[str, Any] | None:
+    """Return a completed record only when it carries a valid completion proof.
+
+    Local completion (LocalVerificationV1) and historical server+NAS VERIFIED are both
+    recognized; the evidence level stays distinguishable in the record itself.
+    """
+
     if load_waterline is None:
         return None
     value = load_waterline(layout)
     record = (value.get("cases") or {}).get(project_no)
     if not isinstance(record, dict) or record.get("state") != "COMPLETED":
         return None
+    completion = record.get("completion") or {}
+    if completion.get("mode") == "LOCAL_V1":
+        # Deep check: corrupt/missing archived files or changePending never count as complete.
+        if local_validity.validate_local_completion(layout, project_no, record):
+            return None
+        return record
     upload = record.get("upload") or {}
     nas = record.get("nasVerification") or {}
     if upload.get("status") != "VERIFIED" or nas.get("status") != "VERIFIED":
@@ -2337,7 +2354,7 @@ def add_detail(
     if record.get("skippedAsUnchanged") and (
         state["filters"].get("selectionMode") != "ANNUAL_CASE_BASELINE"
     ):
-        raise SourceIntakeError("详情项目编号已在水位中完成并通过飞牛核验")
+        raise SourceIntakeError("详情项目编号已在水位中完成并通过完成核验")
     clean_detail = _clean_evidence(_json_input(detail, "案卷详情"))
     project_raw = _find_first(clean_detail, _PROJECT_KEYS)
     if project_raw in (None, ""):
@@ -2828,6 +2845,9 @@ def add_detail(
                 "PENDING_ORGANIZATION",
                 "READY_FOR_COMPOSE",
                 "READY_FOR_UPLOAD",
+                "READY_FOR_LOCAL_VERIFY",
+                "PENDING_LOCAL_VERIFY",
+                "LOCAL_VERIFIED_PENDING_ARCHIVE",
                 "UPLOADING",
                 "UPLOADED_PENDING_NAS_VERIFY",
             }:
@@ -3258,7 +3278,7 @@ def attach_package(
         raise SourceIntakeError(f"该 RWID 已合并，请使用主记录 {record['aliasOf']}")
     collecting_annual = _material_collection_active(layout, state, record_key, record)
     if record.get("skippedAsUnchanged") and not collecting_annual:
-        raise SourceIntakeError("详情项目编号已在水位中完成并通过飞牛核验，无需重新下载")
+        raise SourceIntakeError("详情项目编号已在水位中完成并通过完成核验，无需重新下载")
     if collecting_annual and not record.get("collectionDetail"):
         raise SourceIntakeError("年度材料采集必须先保存本案完整详情与截图")
     expected_project = record.get("projectNo") or (record.get("detail") or {}).get("projectNo")

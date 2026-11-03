@@ -57,9 +57,9 @@ def upload_state(*, status="UPLOADING", uploaded=None):
     ("record", "expected"),
     [
         ({"state": "NEEDS_MANUAL_REVIEW"}, "MANUAL_REVIEW"),
-        ({"upload": {"status": "UPLOADING"}}, "RESUME_UPLOAD"),
-        ({"state": "UPLOADED_AWAITING_NAS"}, "VERIFY"),
-        ({"state": "VERIFIED_PENDING_ARCHIVE"}, "ARCHIVE"),
+        # Retired upload states never offer upload, verification or resume actions again.
+        ({"upload": {"status": "UPLOADING"}}, "INVENTORY"),
+        ({"state": "UPLOADED_AWAITING_NAS"}, "INVENTORY"),
         (
             {
                 "state": "COMPLETED",
@@ -70,7 +70,7 @@ def upload_state(*, status="UPLOADING", uploaded=None):
         ),
     ],
 )
-def test_upload_next_action_is_derived_without_restarting_anything(layout, record, expected):
+def test_next_action_is_derived_without_offering_retired_actions(layout, record, expected):
     before = snapshot(layout.root)
     assert describe(layout, record)["nextAction"]["code"] == expected
     assert snapshot(layout.root) == before
@@ -86,14 +86,15 @@ def test_upload_receipt_counts_projection_refs_and_report_lists_missing_files(la
         "missingFiles": ["文书/通知书.pdf"],
         "reason": None,
     }
-    assert result["nextAction"]["code"] == "RESUME_UPLOAD"
+    assert result["nextAction"]["code"] == "INVENTORY"
+    assert result["nextAction"]["requiresCurrentAuthorization"] is False
     markdown = report.render_report(
         {
             "generatedAt": "2099-01-01T00:00:00Z",
             "batch": {},
             "waterline": {"caseCount": 1},
             "storage": {"packageProjects": 1},
-            "upload": {"successfulSystemCases": 0, "nasVerifiedCases": 0},
+            "upload": {"successfulSystemCases": 0, "nasVerifiedCases": 0, "localVerifiedCases": 0},
             "cases": [result],
             "timings": {},
         }
@@ -116,20 +117,20 @@ def test_report_distinguishes_complete_upload_from_archive_pending_verification(
         },
     )
     assert result["uploadProgress"]["status"] == "COMPLETE"
-    assert "已建档，核验未完成（待核验" in result["nextAction"]["reason"]
+    assert result["nextAction"]["code"] not in {"VERIFY", "WAIT_VERIFY", "RESUME_UPLOAD", "UPLOAD"}
     markdown = report.render_report(
         {
             "generatedAt": "2099-01-01T00:00:00Z",
             "batch": {},
             "waterline": {"caseCount": 1},
             "storage": {"packageProjects": 1},
-            "upload": {"successfulSystemCases": 0, "nasVerifiedCases": 0},
+            "upload": {"successfulSystemCases": 0, "nasVerifiedCases": 0, "localVerifiedCases": 0},
             "cases": [result],
             "timings": {},
         }
     )
     assert "文件已接收：2/2" in markdown
-    assert "已建档，核验未完成（待核验" in markdown
+    assert "旧服务已退役" in markdown
 
 
 @pytest.mark.parametrize(
@@ -206,105 +207,16 @@ def test_completed_verified_case_with_invalid_local_evidence_requires_inspection
     assert result["nextAction"]["code"] == "INSPECT_STATE"
 
 
-def test_pending_nas_does_not_skip_upload_resume_without_finalized_evidence(layout):
-    result = describe(
-        layout,
-        {
-            "upload": {"status": "UPLOADING"},
-            "nasVerification": {"status": "PENDING"},
-        },
-    )
-    assert result["nextAction"]["code"] == "RESUME_UPLOAD"
 
 
-def test_rate_limit_report_keeps_server_wait_and_parsed_timestamps(layout):
-    result = describe(
-        layout,
-        {
-            "upload": {"status": "FINALIZED_UNVERIFIED"},
-            "nasVerification": {
-                "status": "RATE_LIMITED",
-                "retryAfterSeconds": 120,
-                "retryAt": "2099-01-01T12:00:00+08:00",
-                "observedAt": "2099-01-01T11:58:00Z",
-            },
-        },
-    )
-    assert "服务端原等待 120 秒" in result["nextAction"]["reason"]
-    assert "可重试时间：2099-01-01T12:00:00+08:00" in result["nextAction"]["reason"]
-    assert "观测时间：2099-01-01T11:58:00+00:00" in result["nextAction"]["reason"]
-    assert result["nasVerification"]["retryAt"] == "2099-01-01T12:00:00+08:00"
-    assert result["nasVerification"]["observedAt"] == "2099-01-01T11:58:00+00:00"
 
 
-def test_invalid_retry_timestamp_is_unknown_without_current_time_guess(layout):
-    result = describe(
-        layout,
-        {
-            "upload": {"status": "FINALIZED_UNVERIFIED"},
-            "nasVerification": {
-                "status": "RATE_LIMITED",
-                "retryAfterSeconds": 120,
-                "retryAt": "2099-01-01T12:00:00",
-                "observedAt": "not-an-iso-time",
-            },
-        },
-    )
-    assert "服务端原等待 120 秒" in result["nextAction"]["reason"]
-    assert "可重试时间：未知" in result["nextAction"]["reason"]
-    assert "观测时间：未知" in result["nextAction"]["reason"]
-    assert result["nasVerification"]["retryAt"] is None
-    assert result["nasVerification"]["observedAt"] is None
 
 
-@pytest.mark.parametrize("status", ["WAIT_TIMEOUT", "NETWORK_WAIT", "PENDING"])
-def test_nas_wait_statuses_are_visible_without_claiming_verification(layout, status):
-    result = describe(
-        layout,
-        {
-            "upload": {"status": "FINALIZED_UNVERIFIED"},
-            "nasVerification": {"status": status},
-        },
-    )
-    assert result["nextAction"]["code"] == "WAIT_VERIFY"
-    labels = {"WAIT_TIMEOUT": "等待超时", "NETWORK_WAIT": "网络等待", "PENDING": "待核验"}
-    assert result["nextAction"]["reason"] == (
-        f"已建档，核验未完成（{labels[status]}；观测时间：未知）"
-    )
 
 
-def test_rate_limit_wait_does_not_guess_missing_retry_header(layout):
-    result = describe(
-        layout,
-        {
-            "upload": {"status": "FINALIZED_UNVERIFIED"},
-            "nasVerification": {"status": "RATE_LIMITED", "retryAfterSeconds": None},
-        },
-    )
-    assert result["nextAction"]["code"] == "WAIT_VERIFY"
-    assert "服务端等待时间未知" in result["nextAction"]["reason"]
-    assert "可重试时间：未知" in result["nextAction"]["reason"]
 
 
-def test_rate_limit_wait_uses_explicit_retry_seconds_and_failed_wins(layout):
-    result = describe(
-        layout,
-        {
-            "upload": {"status": "FINALIZED_UNVERIFIED"},
-            "nasVerification": {"status": "RATE_LIMITED", "retryAfterSeconds": 30},
-        },
-    )
-    assert result["nextAction"]["reason"] == (
-        "已建档，限流到期后再核验（服务端原等待 30 秒；可重试时间：未知；观测时间：未知）"
-    )
-    failed = describe(
-        layout,
-        {
-            "upload": {"status": "VERIFIED"},
-            "nasVerification": {"status": "FAILED"},
-        },
-    )
-    assert failed["nextAction"]["code"] == "MANUAL_REVIEW"
 
 
 def test_local_stage_order_and_pending_ocr(layout):
@@ -331,10 +243,29 @@ def test_local_stage_order_and_pending_ocr(layout):
     assert describe(layout)["nextAction"]["code"] == "COMPOSE"
     put(work / "manifest.json", {"case": {"projectNo": PROJECT}})
     put(work / "upload-map.json", {"version": 1})
-    assert describe(layout)["nextAction"]["code"] == "VALIDATE"
-    result = describe(layout, {"local": {"status": "READY_FOR_UPLOAD"}})
-    assert result["nextAction"]["code"] == "UPLOAD"
-    assert result["nextAction"]["requiresCurrentAuthorization"] is True
+    result = describe(layout, {"local": {"status": "READY_FOR_LOCAL_VERIFY"}})
+    assert result["nextAction"]["code"] == "LOCAL_VERIFY"
+    assert result["nextAction"]["requiresCurrentAuthorization"] is False
+    manifest_sha = "sha256:" + hashlib.sha256((work / "manifest.json").read_bytes()).hexdigest()
+    put(
+        work / "local-verification.json",
+        {
+            "schemaVersion": "LocalVerificationV1",
+            "status": "LOCAL_VERIFIED",
+            "projectNo": PROJECT,
+            "manifestSha256": manifest_sha,
+            "files": {"f": {}},
+        },
+    )
+    proven = describe(layout, {"local": {"status": "LOCAL_VERIFIED"}})
+    assert proven["nextAction"]["code"] == "ARCHIVE"
+    assert "LOCAL_VERIFIED" in proven["completedStages"]
+    assert proven["localVerification"]["status"] == "LOCAL_VERIFIED"
+    # A proof bound to another manifest never counts.
+    put(work / "manifest.json", {"case": {"projectNo": PROJECT}, "changed": True})
+    stale = describe(layout, {"local": {"status": "LOCAL_VERIFIED"}})
+    assert stale["nextAction"]["code"] == "LOCAL_VERIFY"
+    assert "LOCAL_VERIFIED" not in stale["completedStages"]
 
 
 @pytest.mark.parametrize(
@@ -444,10 +375,8 @@ def test_report_and_status_cli_are_pure_local_queries(layout, monkeypatch, capsy
     def forbidden(*args, **kwargs):
         raise AssertionError("Read-only query attempted an external or write operation")
 
-    monkeypatch.setattr(cli.httpx, "Client", forbidden)
     monkeypatch.setattr(cli, "record_timing", forbidden)
     monkeypatch.setattr(cli, "ocr_command", forbidden)
-    monkeypatch.setattr(cli, "upload_command", forbidden)
     before = snapshot(layout.root)
     for command in ("status", "report"):
         assert cli.main(["ledger", command, "--work-root", str(layout.root)]) == 0

@@ -1,6 +1,6 @@
-# 工作目录、本地水位与 V2 映射
+# 工作目录、本地水位与案卷清单
 
-`CaseImportManifestV2.schema.json` 是上传字段的唯一契约。本文件规定真实业务数据如何在可切换工作根中落盘，以及来源证据如何与 V2 manifest 隔离。
+`CaseImportManifestV2.schema.json` 是本地案卷清单字段的唯一契约（旧上传接口已退役，清单仅用于本地校验与核验）。本文件规定真实业务数据如何在可切换工作根中落盘，以及来源证据如何与清单隔离。案卷文件只保存在本地，统计数据由飞书维护。
 
 ## 工作根解析与目录
 
@@ -16,23 +16,23 @@
 
 - `原始案卷/案卷目录截图/<批次>`：筛选条件、列表页截图及人工核查证据；
 - `原始案卷/待处理案卷/<项目编号>`：来源详情截图、唯一的原始 ZIP 和原始案卷文件；下载目录只作临时接收，绑定并复核成功后不保留同一 ZIP 副本；
-- `原始案卷/已处理案卷/<项目编号>/<时间>-<包哈希>`：仅 VERIFIED 后归档的不可覆盖原始证据代际；
+- `原始案卷/已处理案卷/<项目编号>/<时间>-<包哈希>`：仅本地核验（`local-verify`）通过后归档的不可覆盖原始证据代际（历史 VERIFIED 代际同样保留）；
 - `工作区/采集批次/<批次>`：浏览器分页清单、稳定性轮次和断点；
 - `工作区/采集批次/<批次>/staging`：只保存尚未完成本地接收的临时 `详情_<RWID>.json/.png` 和 `下载交付异常_<RWID>.json`；不是 inventory、compose 或上传输入；
 - `工作区/采集批次/<批次>/验收样本/<项目编号>`：真实单案下载验收的隔离截图、来源证据和 ZIP；不属于正式待处理案卷；
 - `工作区/<项目编号>`：解压、清点、OCR、拆分、`normalized/`、`case-data.json`、完整 manifest、V6 上传状态，以及字段发生差异时的 `field-resolution.json` 和必要时固定命名的缺失补录清单/映射/状态；
 - `工作区/核验记录/<项目编号>-<时间>-<清单哈希>.json`：不可覆盖的最终核验摘要；
-- `工作区/历史工作区/<项目编号>-<时间>-<包哈希>`：VERIFIED 后的项目工作产物；
+- `工作区/历史工作区/<项目编号>-<时间>-<包哈希>`：归档后的项目工作产物；
 - `案卷水位记录.json`：`CaseWaterlineV1` 唯一机器事实源；
 - `案卷水位记录表.xlsx`：从 JSON 生成的人工查看投影。
 
-真实案卷、截图、OCR、清单、水位和状态只能进入工作根，不得写入 Skill 源仓库、安装副本或消防产品案卷信息登记系统代码仓库。登记系统认证仍固定在 `%LOCALAPPDATA%\xf-product-case-registry\admin-upload-config.toml`，不进入工作根。
+真实案卷、截图、OCR、清单、水位和状态只能进入工作根，不得写入 Skill 源仓库、安装副本或消防产品案卷信息登记系统代码仓库。旧登记系统认证配置（`admin-upload-config.toml`）已随登记系统退役，不再读取或创建；工作根不保存任何认证。
 
 正式详情截图固定命名为 `原始案卷/待处理案卷/<项目编号>/案卷详情_<截图SHA-256前12位>.png`；原始 ZIP 固定命名为 `<项目编号>_案卷包_<ZIP SHA-256前12位>.zip`，同目录另存 `source-evidence.json`。项目处理产物只写 `工作区/<项目编号>`。任何执行单元都不得从兄弟项目目录或批次 staging 猜选输入；临时捕获在 SourceEvidence 已记录正式路径和相同哈希前不得删除，完成对账后可清理。
 
 `下载交付异常_<RWID>.json` 只表达本案下载断点，不是 ZIP 或上传输入。外部 Edge 顺序取流失败时固定使用错误码 `EDGE_CDP_STREAM_UNAVAILABLE`，只允许保存项目编号、RWID、预期字节数、已接收字节数、失败阶段、发生时间和 `nonBlocking=true`；不得保存请求 ID、来源 URL、响应建议名、响应头全文、Cookie、令牌、浏览器存储或配置。对应 `CaseWaterlineV1` 仍为 `DETAIL_CAPTURED / PACKAGE_WAITING / NOT_STARTED`，单案异常不改变其他项目水位。
 
-每个项目工作区只保留一套当前根级控制文件：`inventory.json`、`ocr-result.json`、`split-plan.json`、`split-index.json`、按需生成的 `field-resolution.json`、`case-data.json`、`manifest.json`、`upload-map.json`、`upload-state.json`、`content-verification.json`，以及 `normalized/` 下的规范 PDF。已有案卷进入正式 `MISSING_ONLY` 补录时，另固定生成 `supplement-manifest.json`、`supplement-upload-map.json`、`supplement-state.json`；三者只记录本次服务器快照确认缺失的文件版本和可续传断点，不能替代完整 manifest。CLI/OCR 生成的结构化诊断文件、文本层清单和专用输出子目录可按原名保留，不得改成另一套事实源。同一项目编号同时只能有一个写执行单元；跨项目并行时，每个执行单元显式绑定项目编号和上述两个项目目录。不得在工作根散落一次性上传包装脚本、第二份完整 manifest、手工复制的状态文件或以“第几行”命名的业务文件。登记系统明确允许清理 FAILED 任务并重建时，旧状态只按 `upload-state.failed-before-recreate-<UTC>.json` 留一份只读证据，然后由正式 CLI 创建新 V6 状态。
+每个项目工作区只保留一套当前根级控制文件：`inventory.json`、`ocr-result.json`、`split-plan.json`、`split-index.json`、按需生成的 `field-resolution.json`、`case-data.json`、`manifest.json`、`upload-map.json`（clientRef 到本地 PDF 的文件映射，沿用原名）、`local-verification.json`（LocalVerificationV1 本地核验凭证）；历史 `upload-state.json`、`content-verification.json` 只读保留，以及 `normalized/` 下的规范 PDF。已有案卷进入正式 `MISSING_ONLY` 补录时，另固定生成 `supplement-manifest.json`、`supplement-upload-map.json`、`supplement-state.json`；三者只记录本次服务器快照确认缺失的文件版本和可续传断点，不能替代完整 manifest。CLI/OCR 生成的结构化诊断文件、文本层清单和专用输出子目录可按原名保留，不得改成另一套事实源。同一项目编号同时只能有一个写执行单元；跨项目并行时，每个执行单元显式绑定项目编号和上述两个项目目录。不得在工作根散落一次性上传包装脚本、第二份完整 manifest、手工复制的状态文件或以“第几行”命名的业务文件。登记系统明确允许清理 FAILED 任务并重建时，旧状态只按 `upload-state.failed-before-recreate-<UTC>.json` 留一份只读证据，然后由正式 CLI 创建新 V6 状态。
 
 ## BrowserCaptureV1
 
@@ -72,9 +72,9 @@ RWID 只用于来源去重和追溯，不进入 V2 manifest。Cookie、令牌、
 
 `CaseWaterlineV1` 按经来源证据确认的项目编号维护一条全局水位，包含来源标识集合、独立的来源日期/核对时间/本地处理时间、包摘要、系统绑定和明确归档代际。先复用已验证的 RWID 与项目绑定；只有身份缺失、来源变化或未完成断点才进入必要详情。不同 RWID 对应同一项目时合并，尚未取得项目编号的来源项保留待关联。来源登记、材料采集、系统登记、正文核验、归档完成分别计算；来源指纹未变且有效证据齐全时复用，不重复下载。旧状态主线继续用于断点兼容：
 
-`已发现 → 详情已采集 → 案卷包就绪 → 待整理 → 待上传 → 上传中 → 已上传待飞牛核验 → 已完成`
+`已发现 → 详情已采集 → 案卷包就绪 → 待整理 → 待本地核验（READY_FOR_LOCAL_VERIFY） → 已完成`；历史案卷保留旧状态 `待上传 → 上传中 → 已上传待飞牛核验`，只读展示，不再推进
 
-异常状态为“需人工处理”或“采集失败”，只暂停对应案卷。状态更新应先原子写 JSON；单案处理到一个可恢复里程碑立即写 JSON，批量上传结束或向用户报告进度前运行一次 `ledger export` 生成 `案卷水位记录表.xlsx`。VERIFIED 自动归档也会重建 Excel。Excel 不是事实源，用户占用文件导致导出失败时不得回滚已成功的 JSON，关闭 Excel 后可重新生成。
+异常状态为“需人工处理”或“采集失败”，只暂停对应案卷。状态更新应先原子写 JSON；单案处理到一个可恢复里程碑立即写 JSON，批量整理结束或向用户报告进度前运行一次 `ledger export` 生成 `案卷水位记录表.xlsx`。本地核验归档也会重建 Excel。Excel 不是事实源，用户占用文件导致导出失败时不得回滚已成功的 JSON，关闭 Excel 后可重新生成。
 
 Excel 至少展示项目编号、单位、大队、标签、来源进度、本地整理、上传、飞牛核验、完成时间和错误摘要，并能回读验证行数、项目编号和关键状态与 JSON 一致。
 
@@ -96,7 +96,7 @@ Excel 至少展示项目编号、单位、大队、标签、来源进度、本�
 - `原始案卷/案卷目录截图/<批次>`：列表截图物理文件数；
 - `原始案卷/待处理案卷/<项目编号>`：正式详情截图、`SourceEvidenceV1` 和唯一 ZIP；批次 `staging` 的副本单独列出，不能重复计入正式截图；
 - `CaseWaterlineV1`：所选范围案卷的五项独立状态、来源年度成员关系、待关联与覆盖缺口；
-- 活动 `工作区/<项目编号>/upload-state.json`：V6 任务创建、文件投影、已传文件、finalize 与 VERIFIED 里程碑；历史完成仅沿总账中明确的归档工作区引用读取，不递归猜测归档代际。
+- 历史 `工作区/<项目编号>/upload-state.json`（旧上传任务，只读）；新流程以 `local-verification.json` 为准。历史完成仅沿总账中明确的归档工作区引用读取，不递归猜测归档代际。
 
 “已下载案卷”只指已有唯一正式 ZIP 的项目数；“已上传系统”必须进一步拆成已创建任务、全部文件已传、finalize 成功、存在冲突、飞牛已核验。对外回答的“系统成功案卷数”只使用 `successfulSystemCases`：V6 状态为 `FINALIZED_UNVERIFIED` 或 `VERIFIED`，且服务端摘要同时满足 `created=true`、冲突数为 0、跳过数为 0。仅创建任务、仅上传完文件、HTTP 500 后本地仍为 `UPLOADING`，均不得称为上传成功。
 
@@ -122,13 +122,25 @@ Excel 至少展示项目编号、单位、大队、标签、来源进度、本�
 
 可核实的本地执行耗时保存为本案或本批次 `diagnostics/timings/timing-<随机标识>.json`（`WorkflowTimingV1`）；浏览器阶段计时使用批次的 `阶段_*.json`。这些文件只含类别、起止时间、耗时、结果和范围键，不存正文、身份凭据或业务响应。查询、离线验证、dry-run、只读计划不生成计时记录；已归档或缺失的活动工作区不因补记耗时而重建，未记录阶段保持未知。
 
+## LocalVerificationV1 本地核验凭证
+
+`local-verify --project <项目编号>` 生成并保存 `工作区/<项目编号>/local-verification.json`：
+
+- 绑定项目编号、当前 `manifest.json` 摘要、原始材料 `packageSha256`（ZIP 或目录清点重新计算，必须仍等于 inventory）、inventory 摘要和总账来源映射（来源包摘要、相对路径、接收模式、RWID）；
+- 每份文件记录 clientRef、清单相对路径、工作区内真实相对路径、SHA-256、页数、字节数；拆分链记录拆分索引摘要并逐件重算摘要与页数、核对来源 PDF；
+- `field-resolution.json` 如存在，其 `unresolvedFields` 必须为空；来源材料缺口仍须有用户口径确认才允许归档；
+- 固定声明 `serverUploadClaimed=false`、`nasVerificationClaimed=false`，不冒充历史服务器或飞牛 VERIFIED；
+- 同内容重复运行复用原凭证；内容变化时旧凭证保留为 `local-verification.superseded-<时间>.json`。
+
+归档沿用原有目录/重解析点/代际保护：原件移入 `原始案卷/已处理案卷/<项目>/<代际>`，工作区移入 `工作区/历史工作区`，回执 `recordVersion=2`、`completionMode=LOCAL_V1` 写入 `工作区/核验记录`；任一步失败则回滚移动、回执和总账，目标已存在拒绝覆盖。归档后总账 `completion` 与回执、凭证、清单摘要必须互相绑定，任何一项被改动，总账视图显示 `LOCAL_COMPLETION_UNTRUSTED`（附具体原因）并恢复为待办。`scripts/local_validity.py` 是 `local-verify`、总账视图和来源跳过共用的深度校验：重算归档 PDF 与原始 ZIP/目录摘要、清单、核验凭证和回执，以清单（而非可变的凭证）为完整文件集合，核对凭证/回执 files 与 `completion.fileCount` 的集合、数量及每项 clientRef/路径/SHA/页数绑定，另检查 `changePending`；只读，不修复，不删证据。
+
 ## 本地证据到 manifest
 
 - `packageSha256` 来自原始 ZIP 或目录清点；同一包重试时保持不变。
 - `case`、`initialInspection`、可选 `recheckInspection` 和产品字段优先使用详情页结构化采集值；同一文书电子版与手写或扫描版不一致时使用电子版字段。存在差异但已按该顺序裁决时，把全部候选和决定保存在 `field-resolution.json`，manifest 只接收裁决后的单值。
-- `files` 只列将上传的规范 PDF，包含稳定 `clientRef`、上传相对路径、SHA-256、PDF MIME 类型和页数。
+- `files` 只列案卷的规范 PDF，包含稳定 `clientRef`、规范相对路径（逻辑路径，不代表上传）、SHA-256、PDF MIME 类型和页数。
 - `documentSlots` 使用现有 51 个固定槽位；`otherAttachments` 只接收明确不属于固定槽位的独立 PDF。
-- 供 `compose` 使用的 `case-data.json` 允许 `files[]` 额外使用 `sourceRelativePath` 指向 inventory 或 split 的真实 PDF；`relativePath` 是上传路径。`compose` 重新校验 PDF、页数与哈希，并删除本地辅助字段后生成正式 manifest。
+- 供 `compose` 使用的 `case-data.json` 允许 `files[]` 额外使用 `sourceRelativePath` 指向 inventory 或 split 的真实 PDF；`relativePath` 是规范相对路径。`compose` 重新校验 PDF、页数与哈希，并删除本地辅助字段后生成正式 manifest。
 - 浏览器截图、筛选截图、来源路径、RWID、来源 HTML、OCR 原文、人工笔记、水位和错误记录均不得进入 manifest 或上传状态。
 
 没有可靠证据时省略可选字段；只有 Schema 明确允许未知值的字段才填 `UNKNOWN`。运行时若示例与服务端校验不同，以当前生产 Schema 和服务端校验为准：检查级槽位只填 `inspectionRef`，产品级槽位只填 `productRef`，通报槽位只填 `notificationTarget`，案卷级槽位不填归属字段。
@@ -139,7 +151,7 @@ Excel 至少展示项目编号、单位、大队、标签、来源进度、本�
 - 产品 `clientRef` 在清单中稳定。`repairSiteId` 只有证据明确时填写；非空 UUID 必须同时 `maintenance: "YES"`。
 - 产品为 `UNQUALIFIED` 时按 Schema 提供检查方式和非空问题描述；只有抽样送检才能填写复检申请或结果。
 - 普通槽位的 `ELECTRONIC` 和 `SCANNED` 各最多一个；现场照片只能有一个 `SCANNED`。截图、原 ZIP 和组合件不能直接作为正式版本。
-- 每个 `files` 条目必须恰好被一个槽位版本或 `OTHER_ATTACHMENT` 引用。一个来源对应多个槽位时生成独立规范 PDF、独立 `fileRef` 和独立上传路径。
+- 每个 `files` 条目必须恰好被一个槽位版本或 `OTHER_ATTACHMENT` 引用。一个来源对应多个槽位时生成独立规范 PDF、独立 `fileRef` 和独立规范路径。
 - 拆分目标只能位于项目工作区的 `normalized/`，不得覆盖原件或已有文件；空白页不生成规范 PDF。
 
 

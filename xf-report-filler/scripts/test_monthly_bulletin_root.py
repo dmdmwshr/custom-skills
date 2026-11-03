@@ -169,28 +169,31 @@ class MonthlyBulletinRootTests(unittest.TestCase):
                 "row": 1,
                 "columns": {
                     "B": {"value": "1次（8）", "count": 1},
-                    "C": {"value": "0份", "count": 0},
-                    "D": {"value": "0份", "count": 0},
-                    "E": {"value": "0份", "count": 0},
                     "F": {"value": "0次", "count": 0},
-                    "G": {"value": "0份", "count": 0},
                 },
             }
             cases[brigade] = {
-                "unique_projects": 1,
-                "unqualified_projects": 0,
-                "unqualified_rows": 0,
-                "sample_rows": 0,
-                "micro_rows": 0,
-                "administrative_case_year": 0,
+                "initial_checks": 1,
+                "date_unknown_initial_checks": 0,
+                "micro_checks_confirmed": 0,
+                "micro_checks_unknown": 0,
             }
         stats["江阴大队"]["columns"]["B"] = {"value": "6次（12）", "count": 6}
-        cases["江阴大队"]["unique_projects"] = 11
+        cases["江阴大队"]["initial_checks"] = 11
         result = root.audit_product_stats(stats, cases)
         warnings = result["warnings"]
         self.assertEqual(result["blockers"], [])
-        self.assertTrue(result["warnings"])
-        self.assertTrue(any(item.get("type") == "product_stats_mismatch" and item.get("brigade") == "江阴大队" for item in warnings))
+        self.assertTrue(
+            any(
+                item.get("type") == "product_stats_mismatch"
+                and item.get("brigade") == "江阴大队"
+                and item.get("column") == "B"
+                for item in warnings
+            )
+        )
+        self.assertFalse(
+            any(item.get("type") == "product_stats_mismatch" and item.get("brigade") != "江阴大队" for item in warnings)
+        )
 
     def test_read_product_stats_includes_new_manual_columns(self):
         class FakeSheet:

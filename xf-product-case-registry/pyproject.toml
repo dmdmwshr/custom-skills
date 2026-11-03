@@ -1,7 +1,7 @@
 [project]
 name = "xf-product-case-registry"
-version = "1.12.1"
-description = "消防产品案卷浏览器采集、本地整理、PDF 清点与 V2 接口导入工具"
+version = "2.0.0"
+description = "消防产品案卷浏览器采集、本地整理、PDF 清点、字段校验与本地核验归档工具"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "httpx>=0.28,<0.29",

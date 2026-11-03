@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import math
@@ -18,36 +19,25 @@ STAGE_LABELS = {
     "PACKAGE": "案卷包",
     "INVENTORY": "清点",
     "OCR": "已记录的识别校验",
-    "MANIFEST": "上传清单",
-    "FINALIZED": "正式建档",
-    "NAS_VERIFIED": "飞牛核验",
+    "MANIFEST": "案卷清单",
+    "FINALIZED": "历史正式建档（已退役）",
+    "NAS_VERIFIED": "历史飞牛核验（已退役）",
+    "LOCAL_VERIFIED": "本地核验",
     "ARCHIVED": "本地归档",
 }
 ACTIONS = {
     "NONE": ("已完成，无需重做", None, False),
     "MANUAL_REVIEW": ("核查本案异常，不自动重试", "存在未解决异常或身份冲突", False),
-    "VERIFY": ("继续核验同一案卷", "已建档，核验尚未完成", True),
-    "WAIT_VERIFY": ("等待核验条件满足后继续核验", "核验尚未完成", True),
-    "ARCHIVE": ("继续本地归档", "核验已通过，归档尚未完成", False),
-    "RESUME_UPLOAD": ("回读同一任务后续传缺失文件", "已有上传断点，不新建替代任务", True),
+    "ARCHIVE": ("继续本地归档", "本地核验已通过，归档尚未完成", False),
     "COLLECT_DETAIL": ("采集并核对来源详情", "尚无正式详情证据", False),
     "AWAIT_PACKAGE": ("按本案下载基线核对案卷包", "尚无唯一正式案卷包", False),
     "INVENTORY": ("清点本案原始材料", "本地清点尚未完成", False),
     "OCR_RESUME": ("仅补做未确认的识别文件", "识别仍有未完成项", False),
     "ORGANIZE": ("分类文书并整理案卷字段", "尚未形成完整案卷数据", False),
-    "COMPOSE": ("生成并校验上传清单", "已有案卷数据，清单尚未生成", False),
-    "VALIDATE": ("校验清单与文件映射", "尚未确认具备上传条件", False),
-    "UPLOAD": ("按本次授权执行正式导入", "已具备本地上传条件", True),
+    "COMPOSE": ("生成并校验案卷清单", "已有案卷数据，清单尚未生成", False),
+    "LOCAL_VERIFY": ("执行本地核验并归档", "清单已生成，本地核验凭证尚未形成", False),
     "INSPECT_STATE": ("核对本地状态证据", "状态文件缺失、损坏或归属不一致", False),
 }
-
-_NAS_WAIT_STATUSES = {"RATE_LIMITED", "WAIT_TIMEOUT", "NETWORK_WAIT", "PENDING"}
-_NAS_WAIT_LABELS = {
-    "WAIT_TIMEOUT": "等待超时",
-    "NETWORK_WAIT": "网络等待",
-    "PENDING": "待核验",
-}
-
 
 def _unknown_upload_receipt(reason: str | None = None) -> dict[str, Any]:
     return {
@@ -149,23 +139,6 @@ def _upload_receipt(upload_state: Mapping[str, Any]) -> tuple[dict[str, Any], st
     }, None
 
 
-def _nas_wait_reason(nas_value: Mapping[str, Any], *, finalized: bool = False) -> str:
-    status = str(nas_value.get("status") or "UNKNOWN")
-    retry_at = _iso_with_timezone(nas_value.get("retryAt")) or "未知"
-    observed_at = _iso_with_timezone(nas_value.get("observedAt")) or "未知"
-    if status == "RATE_LIMITED":
-        retry_after = nas_value.get("retryAfterSeconds")
-        if type(retry_after) is int and retry_after >= 0:
-            wait_text = f"服务端原等待 {retry_after} 秒"
-        else:
-            wait_text = "服务端等待时间未知"
-        reason = f"限流到期后再核验（{wait_text}；可重试时间：{retry_at}；观测时间：{observed_at}）"
-    else:
-        label = _NAS_WAIT_LABELS.get(status, "等待")
-        reason = f"核验未完成（{label}；观测时间：{observed_at}）"
-    return f"已建档，{reason}" if finalized else reason
-
-
 class ReportingError(RuntimeError):
     pass
 
@@ -182,6 +155,14 @@ def _safe(path: Path, root: Path) -> Path:
     if not candidate.resolve().is_relative_to(root.resolve()):
         raise ReportingError("报告证据路径解析后越界")
     return candidate
+
+
+def _manifest_sha(work: Path) -> str | None:
+    path = work / "manifest.json"
+    try:
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def _read(path: Path, root: Path) -> dict[str, Any] | None:
@@ -353,7 +334,6 @@ def describe_case(
 ) -> dict[str, Any]:
     issues = []
     stage_list = []
-    local = _status(record, "local")
     uploaded, nas = _status(record, "upload"), _status(record, "nasVerification")
     state = str(record.get("state", "UNKNOWN"))
     work = layout.work_case_dir(project)
@@ -442,34 +422,40 @@ def describe_case(
         and nas == "VERIFIED"
     ):
         stage_list.append("FINALIZED")
-    if uploaded == "VERIFIED" and nas == "VERIFIED":
+    legacy_verified = uploaded == "VERIFIED" and nas == "VERIFIED"
+    if legacy_verified:
         stage_list.append("NAS_VERIFIED")
-    if state == "COMPLETED" and "NAS_VERIFIED" in stage_list:
+    completion = record.get("completion")
+    completion = completion if isinstance(completion, Mapping) else {}
+    local_proof: dict[str, Any] = {}
+    if inputs:
+        try:
+            local_proof = _read(work / "local-verification.json", layout.root) or {}
+        except ReportingError:
+            issues.append("LOCAL_VERIFICATION_UNTRUSTED")
+    local_verified = bool(
+        manifest
+        and local_proof.get("schemaVersion") == "LocalVerificationV1"
+        and local_proof.get("status") == "LOCAL_VERIFIED"
+        and local_proof.get("projectNo") == project
+        and local_proof.get("manifestSha256") == _manifest_sha(work)
+    )
+    if local_verified:
+        stage_list.append("LOCAL_VERIFIED")
+    if state == "COMPLETED" and (
+        "NAS_VERIFIED" in stage_list
+        or (completion.get("mode") == "LOCAL_V1" and "LOCAL_VERIFIED" in stage_list)
+    ):
         stage_list.append("ARCHIVED")
 
-    finalized_evidence = (
-        state == "UPLOADED_AWAITING_NAS"
-        or job_status in {"FINALIZED_UNVERIFIED", "VERIFIED"}
-        or "FINALIZED" in stage_list
-    )
     if issues:
         action = "INSPECT_STATE"
     elif "ARCHIVED" in stage_list:
         action = "NONE"
-    elif (
-        state == "NEEDS_MANUAL_REVIEW"
-        or job_status in {"FAILED", "FINALIZED_WITH_CONFLICTS"}
-        or nas_status == "FAILED"
-    ):
+    elif state == "NEEDS_MANUAL_REVIEW" or job_status in {"FAILED", "FINALIZED_WITH_CONFLICTS"}:
         action = "MANUAL_REVIEW"
-    elif nas_status in _NAS_WAIT_STATUSES and finalized_evidence:
-        action = "WAIT_VERIFY"
-    elif state == "VERIFIED_PENDING_ARCHIVE" or (uploaded == "VERIFIED" and nas == "VERIFIED"):
+    elif local_verified:
         action = "ARCHIVE"
-    elif state == "UPLOADED_AWAITING_NAS" or job_status == "FINALIZED_UNVERIFIED":
-        action = "VERIFY"
-    elif job_status in {"CREATED", "UPLOADING", "MANIFEST_RECEIVED"}:
-        action = "RESUME_UPLOAD"
     elif not has_detail:
         action = "COLLECT_DETAIL"
     elif not has_package:
@@ -482,16 +468,9 @@ def describe_case(
         action = "ORGANIZE"
     elif "MANIFEST" not in stage_list:
         action = "COMPOSE"
-    elif local == "READY_FOR_UPLOAD":
-        action = "UPLOAD"
     else:
-        action = "VALIDATE"
+        action = "LOCAL_VERIFY"
     label, reason, authorization = ACTIONS[action]
-    if action == "WAIT_VERIFY":
-        reason = _nas_wait_reason(
-            nas_value,
-            finalized=finalized_evidence,
-        )
     try:
         timings = timing_projection(work, layout.root, f"project:{project}")
     except ReportingError:
@@ -528,6 +507,11 @@ def describe_case(
             "recordedMappings": len(mappings),
             "pendingFiles": len(pending),
         },
+        "localVerification": {
+            "status": "LOCAL_VERIFIED" if local_verified else "NOT_VERIFIED",
+            "completionMode": completion.get("mode"),
+            "fileCount": len(local_proof.get("files") or {}) if local_verified else None,
+        },
         "uploadProgress": upload_receipt,
         "nasVerification": {
             "status": nas_status,
@@ -562,12 +546,13 @@ def render_report(progress: dict[str, Any]) -> str:
         f"生成时间：{_cell(progress['generatedAt'])}",
         f"来源文书记录：{_cell(batch.get('sourceDocumentRecords'))}；唯一来源导航记录：{_cell(batch.get('uniqueRwids'))}；"
         f"当前批次案卷：{progress['waterline']['caseCount']}。",
-        f"已接收案卷包：{progress['storage']['packageProjects']}；系统成功：{uploaded['successfulSystemCases']}；"
-        f"飞牛已核验：{uploaded['nasVerifiedCases']}。",
+        f"已接收案卷包：{progress['storage']['packageProjects']}；本地核验：{uploaded['localVerifiedCases']}；"
+        f"历史服务端建档：{uploaded['successfulSystemCases']}；历史飞牛核验：{uploaded['nasVerifiedCases']}"
+        "（旧服务已退役，只读历史）。",
         "",
         "## 逐案下一步",
         "",
-        "| 项目编号 | 单位 | 已确认阶段 | 上传接收 | 下一步／等待原因 |",
+        "| 项目编号 | 单位 | 已确认阶段 | 历史上传接收 | 下一步／等待原因 |",
         "| --- | --- | --- | --- | --- |",
     ]
     for case in progress.get("cases", []):

@@ -1,108 +1,22 @@
 ---
 name: xf-product-case-filler
-description: 从消防产品案卷截图或 OCR 结果抽取字段，按项目编号和初查或复查阶段更新“产品案卷数据.xlsx”，处理复查不合格行案标记并重命名截图。用于案卷截图、监督检查记录、月度台账和复查；V2 网站导入改用 xf-product-case-registry。
+description: 已并入 xf-product-case-registry（兼容转向说明）：案卷截图/OCR 字段抽取校验改用 registry 的 `fields validate` 与 references/field-rules.md；本 Skill 不再写 Excel、不重命名或删除截图，保留仅为精确卸载收口。
+metadata:
+  x-custom-skill: true
+  x-source-repo: dmdmwshr/custom-skills
 ---
 
-# 消防产品案卷填表
+# 消防产品案卷填表（已并入统一案卷入口）
 
-执行平台：Windows。先核对本机依赖及用户配置；WSL/Linux 不直接套用此入口，远程载荷须单独核验。安装、发现和业务验收按目标平台分别报告，以对应记录及当前实测为准。
+本 Skill 已退役，不再是任何活动流程的依赖。请改用 **xf-product-case-registry**：
 
-这个 skill 用于把各大队产品案卷截图整理成 Excel 数据。它不负责浏览器自动化，默认先用本机 `zerox-local` 把截图转成 Markdown，或在小批量场景由 Codex 直接查看图片抽取字段，再用本 skill 的脚本做校验、写表和截图原地改名。
+| 原用途 | 现入口 |
+| --- | --- |
+| 抽取 JSON 校验 | `registry_cli.py fields validate <extractions.json> [--image-dir <目录>]`（只读，不改输入） |
+| 字段规则、枚举、行案判定、缺值与三态 | xf-product-case-registry `references/field-rules.md` |
+| 项目编号＋初查/复查去重、多产品对应、复查日期来源、人工裁决保护 | 同上，由 `fields validate` 执行 |
+| 本地整理、核验与归档 | `inventory`/`ocr`/`split`/`compose`/`validate` 后 `local-verify` |
 
-## 标准流程
+不再提供：写入 `产品案卷数据.xlsx`、批量写表、同步工作表模板、截图原地改名，以及“写表成功后删除旧截图”的行为（原图一律保留）。统计数据在飞书维护，案卷文件只在本地保存。需要旧脚本的历史行为时，从源仓库基线提交 7cee8270205648adf82e15c4409da5286e99490c 读取，不要从本目录恢复。
 
-1. 确认工作目录结构：
-   - 工作簿：`产品案卷数据.xlsx`
-   - 截图目录：`产品检查案卷汇总\<大队名>`
-   - 工作表：与大队名一致，例如 `江阴大队`
-2. 如果模板工作表新增列或调整列位，先同步其他大队工作表：
-   ```powershell
-   python scripts/sync_workbook_template.py --workbook "<产品案卷数据.xlsx>" --template "江阴大队"
-   ```
-3. 按重复命名分组截图：数字组如 `1.png`、`11.png`、`111.png` 属于同一案；字母组如 `a.png`、`aa.png`、`aaa.png` 属于同一案。不要仅按文件名判断截图类型，要根据标题和内容识别 `案卷清单`、`检查记录表` 或 `其他附件`。同一项目编号最多生成两行：`初查` 和 `复查`。
-4. 抽取字段并生成 JSON。优先用 `zerox-local`：
-   ```powershell
-   D:\Program_Files\zerox\bin\zerox-local.cmd --input "<截图路径>" --output "<输出目录>"
-   ```
-   小批量、OCR 结果明显不佳或用户直接要求时，可以由 Codex 查看图片并手工整理同一 JSON。
-5. 读取 `references/field-rules.md`，按字段规则整理 JSON。关键点：
-   - `立卷人` 取主承办人。
-   - `检查人` 取审批人。
-   - `初查/复查` 默认写 `初查`；清单体现 `产品复查`、`[复查]`、`复查合格` 或 `复查不合格`，且初查为不合格时，额外生成 `复查` 行。
-   - `标称生产者` 与 `消防产品` 同顺序写入数组。
-   - 多个消防产品用数组表示，写入 Excel 时脚本会换行。
-   - `检查时间` 初查写完整日期 `YYYY-MM-DD`；复查行因通常没有复查监督检查记录表，固定留空并标红。
-   - `是否合格` 初查看初查结果；复查行按清单中 `[复查]` 结果写入。
-   - `是否为行案/刑案` 只在同一项目存在复查且复查结果为不合格时写 `行案`；该项目初查、复查两行都写 `行案` 并标黄。`[罚]`、`罚字`、处罚文书或行政处罚线索不再作为自动行案依据。能明确是刑案时才写 `刑案`。
-   - 下拉列只能使用表内允许值；不能确定时留空。
-6. 校验抽取 JSON：
-   ```powershell
-   python scripts/validate_extractions.py "<extractions.json>" --image-dir "<截图目录>"
-   ```
-7. 写入工作簿并原地重命名截图：
-   ```powershell
-   python scripts/fill_workbook.py --workbook "<产品案卷数据.xlsx>" --brigade "<大队名>" --image-dir "<截图目录>" --extractions "<extractions.json>"
-   ```
-   多个大队已有抽取 JSON 时，可批量调用：
-   ```powershell
-   python scripts/batch_fill_workbook.py --workbook "<产品案卷数据.xlsx>" --cases-root "<产品检查案卷汇总>" --extractions-dir "<抽取JSON目录>"
-   ```
-
-## JSON 格式
-
-JSON 可以是案件数组，也可以是包含 `cases` 数组的对象。每个案件对象固定使用这些字段：
-
-```json
-{
-  "project_no": "32002221C202600002",
-  "inspection_phase": "初查",
-  "unit_name": "江阴市长之橙酒店管理有限公司",
-  "unit_address": "无锡市江阴市澄江街道梅园社区应天河路199号",
-  "nominal_producers": ["广州旺府应急消防科技有限公司", "广州旺府应急消防科技有限公司"],
-  "case_handler": "缪晓清",
-  "inspector": "周晓昌",
-  "inspection_date": "2026-01-09",
-  "products": ["过滤式消防自救呼吸器(TZL30A)", "过滤式消防自救呼吸器(TZL 30A)"],
-  "station_or_team": "否",
-  "method": "抽样送检",
-  "qualified": "不合格",
-  "case_type": "否",
-  "online_sale": "",
-  "source_files": ["1.png", "11.png"],
-  "file_roles": {
-    "1.png": "检查记录表",
-    "11.png": "案卷清单"
-  },
-  "missing_fields": ["online_sale"],
-  "notes": ""
-}
-```
-
-## 写表规则
-
-- 脚本按 `--brigade` 匹配工作表，按表头定位 `项目编号` 和 `初查/复查` 列去重。同一项目同阶段已存在时更新同一行；同一项目最多允许 `初查`、`复查` 各一行。
-- 新案件写入第一个目标字段全空的行；如果模板行已满，脚本复制末行样式追加新行并延续序号。
-- 只写目标字段对应的数据列，不改无关单元格。
-- `初查/复查`、`是否为微型消防站或快速处置队`、`现场判定或抽样送检`、`是否合格`、`是否为行案/刑案`、`是否为网售` 只写入允许值。非法值会被留空并标红。
-- `检查时间` 写完整日期；复查行检查时间留空标红。
-- 每次写入后默认按初查日期升序排序，同项目复查行紧跟初查行。
-- 只有同一项目存在复查且复查结果为不合格时，脚本才写入 `行案`；该项目初查、复查两行都会写 `行案` 并标黄。没有复查不合格时，如果 JSON 错给 `case_type=行案`，校验会报错，写表兜底也会改为 `否` 并输出 warning。
-- 没有数据的目标单元格留空并设置浅红底色 `FFFFC7CE`；后续补入数据时清除该红底。
-- 写入前自动备份工作簿，备份命名为 `产品案卷数据_自动填充备份_yyyyMMdd_HHmmss.xlsx`。
-
-## 截图命名
-
-- 已成功写入的案件截图在原目录原地改名，不删除图片。
-- 文件名格式：
-  - `YYYY-MM-DD_项目编号_单位名称_案卷清单.png`
-  - `YYYY-MM-DD_项目编号_单位名称_检查记录表.png`
-  - `YYYY-MM-DD_项目编号_单位名称_其他附件.png`
-- 日期优先取检查记录表中的监督检查时间，也就是 JSON 的 `inspection_date`。缺少完整日期时使用 `未知日期`。
-- 单位名称会自动清理 Windows 文件名非法字符；同名冲突时追加 `_2`、`_3`。
-- 成功写表后，脚本会删除同目录旧的 `*_<项目编号>_*` 图片；全量迁移旧命名时，也会删除同单位同角色但未列入本次 `source_files` 的旧命名重复图，再重命名本次 `source_files`，实现同项目新截图覆盖旧截图。
-
-## 资源
-
-- `references/field-rules.md`：字段映射、下拉值、截图分类和缺失处理规则。
-- `scripts/validate_extractions.py`：校验抽取 JSON。
-- `scripts/fill_workbook.py`：备份、写入 Excel、标红缺失单元格、原地重命名截图。
+卸载本 Skill 由 Codex 按受管流程核定单项入口后执行；在此之前保留本说明作为兼容转向。

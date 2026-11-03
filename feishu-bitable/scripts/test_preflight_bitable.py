@@ -140,6 +140,83 @@ class Diff(unittest.TestCase):
         self.assertEqual([i["column"] for i in iss if i["code"] == "value_mismatch"], ["案卷号"])
 
 
+class Delta(unittest.TestCase):
+    """增量计划：稳定键、未知不覆盖、人工/快照列保护、不得上传原件列。"""
+
+    def spec(self):
+        sp = copy.deepcopy(SPEC)
+        sp["tables"]["案卷"]["columns"]["附件路径"] = "text"
+        sp["tables"]["案卷"]["manual_columns"] = ["分类依据"]
+        sp["tables"]["案卷"]["snapshot_columns"] = ["产品数"]
+        sp["tables"]["案卷"]["never_upload_columns"] = ["附件路径"]
+        return sp
+
+    def test_new_changed_and_cloud_only_records(self):
+        sp = self.spec()
+        local, cloud = copy.deepcopy(DATA), copy.deepcopy(DATA)
+        local["案卷"].append({"案卷号": "A-9999", "所属单位": "甲单位", "初查日期": "2026-03-01"})
+        local["案卷"][0]["初查日期"] = "2026-02-02"
+        cloud["案卷"].append({"案卷号": "CLOUD-ONLY", "所属单位": "甲单位"})
+        plan, issues = P.delta(sp, local, cloud)
+        t = plan["案卷"]
+        self.assertEqual(issues, [])
+        self.assertEqual([c["key"] for c in t["creates"]], ["A-9999"])
+        self.assertEqual(t["update"], 1)
+        self.assertEqual(t["updates"][0]["changes"]["初查日期"]["to"], "2026-02-02")
+        self.assertEqual(t["cloud_only_kept"], 1)  # 云端独有记录只保留，不删除
+
+    def test_blank_local_never_overwrites_cloud_and_manual_snapshot_columns_are_protected(self):
+        sp = self.spec()
+        local, cloud = copy.deepcopy(DATA), copy.deepcopy(DATA)
+        local["案卷"][0]["初查日期"] = None  # 本地未知
+        local["案卷"][0]["分类依据"] = "系统推导"
+        local["案卷"][0]["产品数"] = 99
+        cloud["案卷"][0]["分类依据"] = "人工核实"
+        cloud["案卷"][0]["产品数"] = 3
+        plan, _ = P.delta(sp, local, cloud)
+        t = plan["案卷"]
+        self.assertEqual(t["update"], 0)
+        self.assertGreaterEqual(t["kept_cloud_over_blank_local"], 1)
+        clash = {c for item in t["conflicts"] for c in item["columns"]}
+        self.assertEqual(clash, {"分类依据", "产品数"})
+
+    def test_forbidden_columns_and_attachment_types_are_errors(self):
+        sp = self.spec()
+        local = copy.deepcopy(DATA)
+        local["案卷"][0]["附件路径"] = "D:/案卷/原件.zip"
+        _, issues = P.delta(sp, local, copy.deepcopy(DATA))
+        self.assertIn("forbidden_column_value", codes(issues))
+        self.assertIn("forbidden_column_value", codes(P.check(sp, local)))
+        sp["tables"]["案卷"]["columns"]["原件"] = "attachment"
+        self.assertIn("attachment_not_allowed", codes(P.check(sp, DATA)))
+        sp["tables"]["案卷"]["derived_columns"] = ["产品数"]
+        self.assertIn("snapshot_derived_overlap", codes(P.check(sp, DATA)))
+
+    def test_creates_never_carry_forbidden_columns(self):
+        sp = self.spec()
+        local = copy.deepcopy(DATA)
+        local["案卷"].append({"案卷号": "A-9998", "所属单位": "甲单位", "附件路径": "x.zip"})
+        plan, issues = P.delta(sp, local, copy.deepcopy(DATA))
+        created = {c["key"]: c["values"] for c in plan["案卷"]["creates"]}
+        self.assertNotIn("附件路径", created["A-9998"])
+        self.assertIn("forbidden_column_value", codes(issues))
+
+    def test_cli_delta_is_read_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            sp, lp, ep = (os.path.join(td, n) for n in ("s.json", "l.json", "e.json"))
+            wr(sp, self.spec())
+            wr(lp, DATA)
+            wr(ep, DATA)
+            before = {n: rd(os.path.join(td, n), "rb") for n in os.listdir(td)}
+            r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "preflight_bitable.py"), "delta", sp, lp, ep],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout)
+            report = json.loads(r.stdout)
+            self.assertFalse(report["writes"])
+            self.assertEqual(report["tables"]["案卷"]["unchanged"], len(DATA["案卷"]))
+            self.assertEqual(before, {n: rd(os.path.join(td, n), "rb") for n in os.listdir(td)})
+
+
 class ReadOnlyIdempotent(unittest.TestCase):
     def test_cli_does_not_modify_inputs_and_is_repeatable(self):
         with tempfile.TemporaryDirectory() as td:

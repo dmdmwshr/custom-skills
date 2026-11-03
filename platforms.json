@@ -425,9 +425,9 @@
       "validation": {
         "wsl": "not_supported_by_current_workflow",
         "linux": "runtime_unverified",
-        "windows": "runtime_unverified_this_change"
+        "windows": "retired_redirect_only_fields_merged_into_registry_20261103"
       },
-      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+      "dependencies": "No active execution. Use xf-product-case-registry fields validate; historical source retained by Git. No workbook writes or screenshot deletion."
     },
     "xf-product-case-registry": {
       "category": "platform_specific",
@@ -438,9 +438,9 @@
       "validation": {
         "wsl": "not_supported_by_current_workflow",
         "linux": "runtime_unverified",
-        "windows": "runtime_unverified_this_change"
+        "windows": "independent_native_local_lifecycle_manual_generations_integrity_failure_and_legacy_retirement_passed_20261103"
       },
-      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+      "dependencies": "Windows Python 3.12 managed runtime; local D business root and unique waterline, existing source browser and optional local MinerU. Local ZIP/PDF/field verification and archive need no retired website/NAS credentials or network. Formal business batches require separate evidence."
     },
     "xf-report-filler": {
       "category": "platform_specific",
@@ -451,9 +451,9 @@
       "validation": {
         "wsl": "not_supported_by_current_workflow",
         "linux": "runtime_unverified",
-        "windows": "runtime_unverified_this_change"
+        "windows": "independent_native_pending_final_audit_IJK_preservation_snapshot_oracle_and_full_sheet_render_passed_20261103"
       },
-      "dependencies": "Check actual project, tools, authentication scope and service bindings before execution."
+      "dependencies": "Local official Feishu structured snapshots configured explicitly; source gaps remain unknown, manual reported values preserved. Existing workbook templates and native Excel for generation/rendering; template inherited wide print pagination retained. No case-file upload."
     },
     "zerox-local": {
       "category": "platform_specific",
@@ -677,7 +677,7 @@
         "linux": "runtime_unverified",
         "windows": "source_review_and_13_synthetic_tests_passed_cli_validation_passed_limited_ego_cloud_observations_require_separate_publication_and_business_acceptance"
       },
-      "dependencies": "Windows workflow: Feishu official CLI (lark-cli, built-in Base skills) when it has the needed capability, otherwise the authorized Ego browser (read the current ego-browser skill first). Multi-account row permissions, form submission and CLI Base writes were not verified; paid permission features are checked per account and not purchased or trialed without user authorization. preflight_bitable.py is stdlib JSON-only, read-only, no Feishu API calls."
+      "dependencies": "Windows workflow: Feishu official CLI (lark-cli, built-in Base skills) when it has the needed capability, otherwise the authorized Ego browser (read the current ego-browser skill first). Multi-account row permissions, form submission and CLI Base writes were not verified; paid permission features are checked per account and not purchased or trialed without user authorization. preflight_bitable.py is stdlib JSON-only, read-only, no Feishu API calls. Case documents remain local; cloud stores statistical structured values, stable keys and provenance. S1 adds static boundary checks only; live cloud writes and dashboard correctness require business-batch validation."
     },
     "notion-workflows": {
       "category": "platform_specific",

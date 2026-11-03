@@ -105,7 +105,7 @@
 1. 先完成当前案卷两轮身份回读、叶子全选核对和独立下载基线。在点击前，以当前 Edge 页的 CDP 会话启用 `Fetch` 的 Response 阶段拦截，URL pattern 必须精确限定为 `/api/blade-fileserver/api/fileserver/usualDownloadFile`；同时启动同一基线的 `source await-download --attach`。受控浏览器的 raw CDP 还须显式限定非页面资源类型 `XHR`、`Fetch`，不能拦截由浏览器管理的 Document 导航。不要读取或记录事件中的请求头、Cookie、令牌、请求体、浏览器存储或配置。
 2. 只接收当前点击产生的唯一暂停响应。必须同时满足 HTTP 200、`Content-Type` 为 ZIP 或 `application/octet-stream`、存在合法且不超过 2 GiB 的 `Content-Length`，并且当前页面 RWID、详情项目编号和下载基线仍与断点一致；零个、多个或任一身份不一致都取消本案接收。响应建议名只作审计，落盘使用当前 RWID 生成的安全直接 `.zip` 名，不允许目录、覆盖或跨案卷复用。
 3. 对该暂停响应立即调用 `Fetch.takeResponseBodyAsStream`，再由 `receiveEdgeCdpZip` 使用不带 offset 的顺序 `IO.read`。程序以排他 `.edge-stream.part` 文件增量写入、同步到磁盘并计算 SHA-256；只有流到 EOF、实际字节数精确等于 `Content-Length`、文件头为 ZIP 且目标不存在时，才用硬链接原子生成下载目录中的最终 ZIP。完成后关闭 IO 流并以 `Fetch.failRequest(Aborted)` 结束原页面请求，使页面退出等待；取流后不得再 `continueRequest`，接收结束前不得停用 Fetch。受控 raw CDP 用 `Fetch.enable({patterns: []})` 清除本轮拦截，不调用被保留的 `Fetch.disable`。
-4. 仍由并行等待的 `source await-download --attach` 做最终门禁：相对基线唯一、连续稳定、ZIP 可打开、哈希规范命名、工作根复核和下载临时副本清理。Edge 接收程序成功不等于案卷已下载，只有该命令把水位更新为 `PACKAGE_RECEIVED` 才能进入整理和上传。
+4. 仍由并行等待的 `source await-download --attach` 做最终门禁：相对基线唯一、连续稳定、ZIP 可打开、哈希规范命名、工作根复核和下载临时副本清理。Edge 接收程序成功不等于案卷已下载，只有该命令把水位更新为 `PACKAGE_RECEIVED` 才能进入整理和本地核验。
 5. 流在 EOF 前被页面或网络取消、`IO.read` 失败、长度超出或不足、MIME/状态不符、出现多个响应、临时写入失败、目标已存在或 ZIP 校验失败时，程序必须关闭句柄并删除 `.edge-stream.part`；保存 `下载交付异常_<RWID>.json`，错误码为 `EDGE_CDP_STREAM_UNAVAILABLE`，只记录项目编号、RWID、预期字节数、已接收字节数、失败阶段、发生时间和非阻塞标记。请求 ID、URL、响应建议名、响应头全文及任何认证数据都不得持久化。该案保持 `PACKAGE_WAITING`，不得再次点击；关闭或换新当前页面以注销残留监听后，才可继续下一案卷。
 
 ### 模块 E：下一案卷与断点恢复
@@ -217,8 +217,8 @@
 - 批次 `staging/详情_<RWID>.json/.png` 只是提交 `source add-detail` 前的临时捕获；正式接收后以项目编号目录中的 `案卷详情_<截图哈希前12位>.png` 和 `source-evidence.json` 为准。本地整理或上传不得读取 staging 或兄弟项目目录。
 - 会话过期时按前述登录授权分支恢复，随后从最后一个未确认步骤继续；不得因为重新登录而新建重复案卷。
 - 单案采集失败、下载异常或字段冲突不阻塞其他案卷，但必须保留明确错误摘要和重试次数。
-- 来源采集完成不等于 V2 上传完成；最终进度以 `CaseWaterlineV1` 为准，只有登记系统飞牛核验达到 `VERIFIED` 才能进入已完成和自动归档。
-- `acceptance` 样本完成只表示“真实浏览器下载和本地接收链路通过”；其证据留在 `工作区/采集批次/<批次>/验收样本`，不进入正式队列，不允许继续执行 `inventory` 或上传。
+- 来源采集完成不等于本地整理完成；最终进度以 `CaseWaterlineV1` 为准，只有 `local-verify` 形成本地核验凭证（`completion.mode=LOCAL_V1`）才能进入已完成和归档，历史 VERIFIED 记录继续有效。
+- `acceptance` 样本完成只表示“真实浏览器下载和本地接收链路通过”；其证据留在 `工作区/采集批次/<批次>/验收样本`，不进入正式队列，不允许继续执行 `inventory` 或本地核验归档。
 
 ## ZIP 与来源正文逐项对应
 

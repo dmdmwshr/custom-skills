@@ -3,11 +3,15 @@
 
   preflight_bitable.py check SPEC.json DATA.json     # 导入前检查本地标准数据
   preflight_bitable.py diff  SPEC.json LOCAL.json EXPORT.json   # 云端导出对账
+  preflight_bitable.py delta SPEC.json LOCAL.json EXPORT.json   # 增量差异计划（只读，供官方 CLI 精确维护）
 
 SPEC: {"tables": {表名: {"primary_key": 列, "columns": {列: text|date|tri|number|relation|select},
        "relations": [{"column": 列, "target": 表, "required": false, "min_children": 0}],
        "tri_values": ["是","否","待核实"], "tri_evidence": {三态列: 依据列},
-       "date_range": {日期列: ["2026-01-01","2026-12-31"]}, "expected_count": N}}}
+       "date_range": {日期列: ["2026-01-01","2026-12-31"]}, "expected_count": N,
+       "manual_columns": [人工维护列], "snapshot_columns": [外部快照列], "derived_columns": [明细派生列],
+       "never_upload_columns": [原件/附件/路径/个人信息列]}}}
+列类型 attachment 不允许：本工具只做统计与业务键维护，原始文书、ZIP、图像留在本地，不进云端。
 DATA: {表名: [行对象, ...]}（日期用 ISO 文本 YYYY-MM-DD 或 null）。
 退出码：0 无错误，1 有错误，2 输入不可读。输出 JSON 报告到标准输出。
 """
@@ -115,6 +119,16 @@ def check(spec, data):
                 elif ty == "number" and not blank(v):
                     if isinstance(v, bool) or not isinstance(v, (int, float)):
                         add("error", "number_invalid", t, k, c, f"不是数字: {v!r}")
+        for c, ty in cols.items():
+            if ty == "attachment":
+                add("error", "attachment_not_allowed", t, None, c, "统计表不接收附件列；原件保留本地")
+        both = set(ts.get("snapshot_columns", [])) & set(ts.get("derived_columns", []))
+        for c in sorted(both):
+            add("error", "snapshot_derived_overlap", t, None, c, "同一列不能既是外部快照列又是明细派生列")
+        for r in rows:
+            for c in ts.get("never_upload_columns", []):
+                if not blank(r.get(c)):
+                    add("error", "forbidden_column_value", t, r.get(pk), c, "该列属于原件/附件/路径/个人信息，不得进入云端统计表")
         for rel in ts.get("relations", []):
             c, tgt = rel["column"], rel["target"]
             children = {}
@@ -195,13 +209,80 @@ def diff(spec, local, export, max_samples=5):
     return out, issues
 
 
+def delta(spec, local, export, max_samples=20):
+    """按稳定主键生成增量计划：新增、可更新的派生列、人工/快照列冲突；不删除云端独有记录。
+
+    本地空值不覆盖云端已有值（未知不等于清空）；人工列和外部快照列在既有记录上永不写入，
+    本地与云端不同只列为冲突交人工裁决。计划本身不调用任何接口。
+    """
+    out, issues = {}, []
+    for t, ts in spec["tables"].items():
+        pk, cols = ts["primary_key"], ts.get("columns", {})
+        protected = set(ts.get("manual_columns", [])) | set(ts.get("snapshot_columns", []))
+        forbidden = set(ts.get("never_upload_columns", []))
+        L, E, dup = {}, {}, set()
+        for r in local.get(t, []):
+            k = r.get(pk)
+            if blank(k):
+                issues.append({"level": "error", "code": "pk_missing", "table": t, "key": None, "column": pk, "detail": "本地主键为空"})
+            elif k in L:
+                dup.add(k)
+            else:
+                L[k] = r
+            for c in forbidden:
+                if not blank(r.get(c)):
+                    issues.append({"level": "error", "code": "forbidden_column_value", "table": t, "key": k, "column": c,
+                                   "detail": "该列不得进入云端统计表"})
+        for k in sorted(dup):
+            issues.append({"level": "error", "code": "pk_duplicate", "table": t, "key": k, "column": pk, "detail": "本地主键重复"})
+        for r in export.get(t, []):
+            k = r.get(pk)
+            if not blank(k):
+                E[k] = r
+        creates, updates, conflicts, unchanged, kept = [], [], [], 0, 0
+        for k, row in L.items():
+            if k in dup:
+                continue
+            if k not in E:
+                creates.append({"key": k, "values": {c: v for c, v in row.items() if c not in forbidden and not blank(v)}})
+                continue
+            change, clash = {}, {}
+            for c, ty in cols.items():
+                if c == pk or c in forbidden:
+                    continue
+                a, b = norm(row.get(c), ty), norm(E[k].get(c), ty)
+                if a == b:
+                    continue
+                if a is None:
+                    kept += 1  # 本地未知，保留云端值
+                elif c in protected:
+                    if b is None:
+                        continue  # 人工/快照列即使云端为空也不由派生流程写入
+                    clash[c] = {"local": a, "cloud": b}
+                else:
+                    change[c] = {"from": b, "to": a}
+            if change:
+                updates.append({"key": k, "changes": change})
+            else:
+                unchanged += 1
+            if clash:
+                conflicts.append({"key": k, "columns": clash})
+        out[t] = {
+            "create": len(creates), "update": len(updates), "conflict": len(conflicts), "unchanged": unchanged,
+            "kept_cloud_over_blank_local": kept, "cloud_only_kept": len(set(E) - set(L)),
+            "creates": creates[:max_samples], "updates": updates[:max_samples], "conflicts": conflicts[:max_samples],
+            "truncated": max(len(creates), len(updates), len(conflicts)) > max_samples,
+        }
+    return out, issues
+
+
 def load(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
 def main(argv):
-    if len(argv) < 4 or argv[1] not in ("check", "diff"):
+    if len(argv) < 4 or argv[1] not in ("check", "diff", "delta"):
         print(__doc__)
         return 2
     try:
@@ -210,6 +291,10 @@ def main(argv):
             issues = check(spec, load(argv[3]))
             report = {"mode": "check", "errors": sum(i["level"] == "error" for i in issues),
                       "warnings": sum(i["level"] == "warn" for i in issues), "issues": issues}
+        elif argv[1] == "delta":
+            plan, issues = delta(spec, load(argv[3]), load(argv[4]))
+            report = {"mode": "delta", "writes": False, "errors": sum(i["level"] == "error" for i in issues),
+                      "tables": plan, "issues": issues}
         else:
             stats, issues = diff(spec, load(argv[3]), load(argv[4]))
             issues = issues + []

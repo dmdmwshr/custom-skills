@@ -13,6 +13,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
+import feishu_case_source as snapshot_source
 import monthly_grade_register as grade_register
 import monthly_workflow as workflow
 
@@ -25,7 +26,7 @@ if hasattr(sys.stderr, "reconfigure"):
 CONFIG = workflow.load_config()
 DEFAULT_TEMPLATE_DIR = workflow.template_root(CONFIG)
 DEFAULT_WORK_PLAN = workflow.data_source_path("work_plan", CONFIG)
-DEFAULT_CASE_DATA = workflow.data_source_path("case_data", CONFIG)
+UNCONFIGURED_CASE_DATA = Path("(未配置飞书统计快照)")
 
 PENDING_PREFIX = CONFIG["naming"]["pending_prefix"]
 RED_RGB = "FFFF0000"
@@ -361,7 +362,8 @@ def read_work_plan_month_tasks(work_plan, month, blockers=None):
     return tasks
 
 
-def read_case_counts(case_data, year, month):
+def read_case_counts_excel(case_data, year, month):
+    """Legacy Excel reader kept for historical queries; the default source is the Feishu snapshot."""
     start, end = previous_month_window(year, month)
     year_start = date(year, 1, 1)
     workbook = load_workbook(case_data, read_only=True, data_only=True)
@@ -427,6 +429,10 @@ def read_case_counts(case_data, year, month):
                     unqualified_rows += 1
                     unqualified_projects.add(project_key)
         result[brigade] = {
+            "initial_checks": rows,
+            "date_unknown_initial_checks": 0,
+            "micro_checks_confirmed": micro_rows,
+            "micro_checks_unknown": 0,
             "rows": rows,
             "unique_projects": len(unique_projects),
             "unqualified_projects": len(unqualified_projects),
@@ -439,6 +445,33 @@ def read_case_counts(case_data, year, month):
         }
     workbook.close()
     return result
+
+
+def read_case_source(case_data, year, month):
+    """Return counts plus coverage for the configured case source.
+
+    A directory (or any non-Excel path) is read as the official Feishu statistical snapshot;
+    an .xlsx path uses the legacy workbook reader and reports no coverage gaps it cannot know.
+    """
+    if snapshot_source.is_snapshot_source(case_data):
+        snapshot = snapshot_source.load_snapshot(case_data)
+        result = snapshot_source.case_counts(snapshot, year, month)
+        return {
+            "counts": result["counts"],
+            "gaps": result["gaps"],
+            "reported": snapshot_source.reported_values(snapshot, year, month),
+            "coverage": snapshot_source.coverage_summary(snapshot, result["gaps"], result["coverage"]),
+        }
+    return {
+        "counts": read_case_counts_excel(case_data, year, month),
+        "gaps": [],
+        "reported": {},
+        "coverage": {"kind": "legacy_excel", "path": str(case_data)},
+    }
+
+
+def read_case_counts(case_data, year, month):
+    return read_case_source(case_data, year, month)["counts"]
 
 
 def value_at(values, index):
@@ -529,7 +562,16 @@ def timeliness_count_from_stats(stats, brigade, staff_counts):
     return required, actual
 
 
-def audit_product_stats(stats, case_counts):
+def audit_product_stats(stats, case_counts, reported=None):
+    """Compare brigade-reported statistics with confirmed case fields; never rewrites anything.
+
+    Only columns whose meaning is a case/check count are compared. Confirmed records are a
+    trustworthy lower bound: a reported value below it is a lower-bound conflict. When the source
+    reports cases it cannot place (no dated initial check, unknown brigade) the confirmed count is
+    never an upper bound, so higher values are pending/uncovered, not mismatches; only complete
+    coverage (or a legacy workbook with explicit unknown counts) allows an upper-bound mismatch.
+    Document-count and manually reported columns are listed for manual review. ``reported`` carries the Feishu 外部月报 values for reference only.
+    """
     blockers = []
     warnings = []
     mapping = CONFIG.get("case_data_mapping", {}).get("product_stats_audit", {})
@@ -545,31 +587,82 @@ def audit_product_stats(stats, case_counts):
             continue
         row_stats = stats[brigade]
         row_cases = case_counts.get(brigade, {})
-        for column, case_key in mapping.items():
-            actual = row_stats.get("columns", {}).get(column, {}).get("count")
-            expected = row_cases.get(case_key)
-            value = row_stats.get("columns", {}).get(column, {}).get("value")
+        for column, spec in mapping.items():
+            cell = row_stats.get("columns", {}).get(column, {})
+            actual, value = cell.get("count"), cell.get("value")
+            confirmed = row_cases.get(spec["case_field"])
+            if confirmed is None:
+                continue
+            unknown = row_cases.get(spec.get("unknown_field", ""), 0) or 0
+            unresolved = row_cases.get("unresolved_initial_cases")
+            # Snapshot sources report how many cases lack a dated initial check; those cases are
+            # not an upper bound, they only mean the confirmed count is a lower bound.
+            covered = unresolved is not None
+            incomplete = bool(unknown) or bool(unresolved)
+            detail = {
+                "brigade": brigade,
+                "column": column,
+                "case_field": spec["case_field"],
+                "case_confirmed": confirmed,
+                "case_unknown": unknown,
+                **({"unresolved_cases": unresolved} if covered else {}),
+            }
             if actual is None:
                 warnings.append(
                     {
                         "type": "product_stats_unfilled",
                         "message": "消防产品监督统计表未填写可核对数据",
-                        "brigade": brigade,
-                        "column": column,
                         "value": value,
-                        "case_field": case_key,
+                        **detail,
                     }
                 )
-            elif expected is not None and actual != expected:
+            elif covered and actual < confirmed:
+                warnings.append(
+                    {
+                        "type": "product_stats_lower_bound_conflict",
+                        "message": "上报值低于案卷已确认的最低数，存在可信下限冲突，需核对",
+                        "stat_count": actual,
+                        "case_count": confirmed,
+                        **detail,
+                    }
+                )
+            elif incomplete and (covered or actual <= confirmed + unknown):
+                warnings.append(
+                    {
+                        "type": "product_stats_coverage_pending",
+                        "message": "案卷来源覆盖不足，已确认数只是下限，无法据此判定上报值是否一致，待核/未覆盖",
+                        "stat_count": actual,
+                        **detail,
+                    }
+                )
+            elif actual < confirmed or actual > confirmed + (0 if covered else unknown):
                 warnings.append(
                     {
                         "type": "product_stats_mismatch",
                         "message": "消防产品监督统计表与案卷数据不一致",
+                        "stat_count": actual,
+                        "case_count": confirmed,
+                        "case_upper_bound": confirmed + (0 if covered else unknown),
+                        **detail,
+                    }
+                )
+        for column, snapshot_values in (reported or {}).get(brigade, {}).items():
+            cell = row_stats.get("columns", {}).get(column)
+            first = next((item for item in snapshot_values if item is not None), None)
+            if cell is None or first is None or not isinstance(first, int):
+                continue
+            file_count = cell.get("count")
+            if file_count is not None and column in {"B", "C", "D", "E", "F", "G"} and (
+                file_count != first
+            ):
+                warnings.append(
+                    {
+                        "type": "reported_snapshot_differs",
+                        "message": "统计表上报值与飞书月表外部月报快照不同，以用户上报为准，不自动改写",
                         "brigade": brigade,
                         "column": column,
-                        "stat_count": actual,
-                        "case_count": expected,
-                        "case_field": case_key,
+                        "table_value": file_count,
+                        "snapshot_value": first,
                     }
                 )
         for column, reason in manual_columns.items():
@@ -587,6 +680,18 @@ def audit_product_stats(stats, case_counts):
                 }
             )
     return {"blockers": blockers, "warnings": warnings}
+
+
+def record_case_coverage(case_source, warnings):
+    """Surface unknown dates/brigades/flags as warnings; they are never silently zero."""
+    coverage = case_source["coverage"]
+    if coverage.get("kind") == "feishu_snapshot":
+        warnings.append({"type": "case_source_coverage", "message": "案卷来源覆盖摘要", **coverage})
+    for gap in case_source["gaps"]:
+        detail = {key: value for key, value in gap.items() if key != "type"}
+        warnings.append(
+            {"type": "case_coverage_gap", "gap_type": gap["type"], "message": "案卷来源存在未覆盖或未知项", **detail}
+        )
 
 
 def pending_copy_roots(bulletin_dir, template_dir, year, month, actions, blockers, apply):
@@ -846,7 +951,13 @@ def mark_pending_cells(
     monitor_details = None
     product_stats = {}
     if Path(case_data).exists():
-        case_counts = read_case_counts(case_data, year, month)
+        try:
+            case_source = read_case_source(case_data, year, month)
+        except snapshot_source.SnapshotError as error:
+            add_blocker(blockers, "飞书统计快照不可用", path=case_data, error=str(error))
+            return
+        case_counts = case_source["counts"]
+        record_case_coverage(case_source, warnings)
         stats_path = paths["product_stats"]["pending"] if paths["product_stats"]["pending"].exists() else paths["product_stats"]["normal"]
         if stats_path.exists():
             product_stats = read_product_stats(stats_path)
@@ -854,14 +965,14 @@ def mark_pending_cells(
             for brigade, row_stats in product_stats.items():
                 if brigade in staff_counts:
                     row_stats.get('columns', {}).get('B', {})['required'] = staff_counts[brigade]
-            stats_audit = audit_product_stats(product_stats, case_counts)
+            stats_audit = audit_product_stats(product_stats, case_counts, case_source["reported"])
             blockers.extend(stats_audit["blockers"])
             warnings.extend(stats_audit["warnings"])
         elif apply:
             add_blocker(blockers, "消防产品监督统计表不存在，无法先核对后生成产品工作实效", path=stats_path)
         timeliness_by_brigade = build_timeliness_by_brigade(work_plan, year, month, product_stats, staff_counts, blockers)
     else:
-        add_blocker(blockers, "产品案卷数据不存在，无法预填产品工作实效和产品统计口径", path=case_data)
+        add_blocker(blockers, "飞书统计快照（或历史案卷数据）不存在，无法预填产品工作实效和产品统计口径", path=case_data)
     if score_dir:
         sources, product_records, monitor_details = read_score_office_content(score_dir, score_month or month, blockers)
         actions.append({"kind": "resolve_score_sources_for_root_office", "status": "done", "sources": {key: str(value) if value else None for key, value in sources.items()}})
@@ -927,7 +1038,10 @@ def run(args):
     bulletin_dir = Path(args.bulletin_dir)
     template_dir = Path(args.template_dir)
     work_plan = Path(args.work_plan)
-    case_data = Path(args.case_data)
+    case_data = Path(args.case_data) if args.case_data else workflow.case_source_path(CONFIG)
+    if case_data is None:
+        add_blocker(blockers, workflow.case_source_unconfigured_message(CONFIG))
+        case_data = UNCONFIGURED_CASE_DATA
     score_dir = Path(args.score_dir) if getattr(args, "score_dir", None) else None
     score_month = getattr(args, "score_month", None)
 
@@ -959,11 +1073,19 @@ def run(args):
         if not stats_path.exists():
             add_blocker(blockers, "消防产品监督统计表不存在，无法核对", path=stats_path)
         if not case_data.exists():
-            add_blocker(blockers, "产品案卷数据不存在，无法核对", path=case_data)
+            add_blocker(blockers, "飞书统计快照（或历史案卷数据）不存在，无法核对", path=case_data)
         if not blockers:
-            audit = audit_product_stats(read_product_stats(stats_path), read_case_counts(case_data, args.year, args.month))
-            blockers.extend(audit["blockers"])
-            warnings.extend(audit["warnings"])
+            try:
+                case_source = read_case_source(case_data, args.year, args.month)
+            except snapshot_source.SnapshotError as error:
+                add_blocker(blockers, "飞书统计快照不可用，无法核对", path=case_data, error=str(error))
+            else:
+                record_case_coverage(case_source, warnings)
+                audit = audit_product_stats(
+                    read_product_stats(stats_path), case_source["counts"], case_source["reported"]
+                )
+                blockers.extend(audit["blockers"])
+                warnings.extend(audit["warnings"])
         if not blockers:
             remove_pending_prefixes(bulletin_dir, args.year, args.month, actions, blockers, apply)
 
@@ -991,7 +1113,10 @@ def main():
     parser.add_argument("--year", type=int, required=True)
     parser.add_argument("--month", type=int, required=True)
     parser.add_argument("--work-plan", default=str(DEFAULT_WORK_PLAN))
-    parser.add_argument("--case-data", default=str(DEFAULT_CASE_DATA))
+    parser.add_argument(
+        "--case-data",
+        help="飞书统计快照目录；缺省依次读环境变量 XF_FEISHU_SNAPSHOT_DIR、本机配置文件，均无则提示未配置。也可指向历史 产品案卷数据.xlsx 作兼容查询。",
+    )
     parser.add_argument("--template-dir", default=str(DEFAULT_TEMPLATE_DIR))
     parser.add_argument("--score-dir", help="成绩月份巡查目录，用于预填根层科室月考核情况记录表的产品/联网核查行。")
     parser.add_argument("--score-year", type=int, help="成绩月份年份；默认与通报年份一致。")

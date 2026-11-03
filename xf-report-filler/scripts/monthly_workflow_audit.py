@@ -6,6 +6,7 @@ from pathlib import Path
 import xlrd
 from openpyxl import load_workbook
 
+import feishu_case_source as snapshot_source
 import monthly_grade_register as grade_register
 import monthly_workflow as workflow
 import template_resolver
@@ -117,7 +118,10 @@ def run(args):
     network_stats = Path(network_dir) / "联网监测统计表.xls" if network_dir else None
     base_info = find_base_info(score_dir, network_dir, args.score_year, args.score_month)
     work_plan = Path(args.work_plan) if args.work_plan else workflow.data_source_path("work_plan", config)
-    case_data = Path(args.case_data) if args.case_data else workflow.data_source_path("case_data", config)
+    case_data = Path(args.case_data) if args.case_data else workflow.case_source_path(config)
+    case_unconfigured = case_data is None
+    if case_unconfigured:
+        case_data = Path("(未配置飞书统计快照)")
 
     root_files = {}
     pending_text_hits = []
@@ -159,10 +163,21 @@ def run(args):
         ("联网监测统计表", network_stats),
         ("基础信息考评截图", base_info),
         ("工作计划", work_plan),
-        ("产品案卷数据", case_data),
+        ("飞书统计快照（或历史案卷数据）", case_data),
     ]:
-        if not path or not Path(path).exists():
+        if path is case_data and case_unconfigured:
+            blockers.append({"message": workflow.case_source_unconfigured_message(config)})
+        elif not path or not Path(path).exists():
             blockers.append({"message": f"{label}不存在", "path": str(path) if path else ""})
+
+    case_source_status = None
+    if Path(case_data).exists() and snapshot_source.is_snapshot_source(case_data):
+        try:
+            loaded = snapshot_source.load_snapshot(case_data)
+            case_source_status = {"ok": True, "files": loaded["files"]}
+        except snapshot_source.SnapshotError as exc:
+            case_source_status = {"ok": False, "error": str(exc)}
+            blockers.append({"message": "飞书统计快照结构校验失败", "path": str(case_data), "error": str(exc)})
 
     for hit in pending_text_hits:
         warnings.append({"message": "根层表仍包含单元格文本【待补】，应改为红底标记并保留/预填业务值。", **hit})
@@ -209,6 +224,7 @@ def run(args):
         "data_sources": {
             "work_plan": existing_status(work_plan),
             "case_data": existing_status(case_data),
+            "case_snapshot": case_source_status,
         },
         "templates": {
             "policy": "external_template_source_is_authoritative; skill_snapshot_is_for_hash_verification",
@@ -231,7 +247,7 @@ def main():
     parser.add_argument("--score-month", type=int, required=True)
     parser.add_argument("--template-dir", default=str(workflow.template_root()))
     parser.add_argument("--work-plan")
-    parser.add_argument("--case-data")
+    parser.add_argument("--case-data", help="飞书统计快照目录（默认）或历史 产品案卷数据.xlsx")
     args = parser.parse_args()
     result = run(args)
     print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -1,6 +1,6 @@
 ---
 name: "xf-report-filler"
-description: "根据消防产品底册、联网监测源表和月度模板整理通报目录，生成产品或联网成绩登记材料、年度问题汇总及旧版 .doc 档案。用于月度通报、成绩登记和年度汇总；案卷截图台账与 V2 导入分别使用对应专用 skill。"
+description: "根据消防产品底册、联网监测源表和月度模板整理通报目录，生成产品或联网成绩登记材料、年度问题汇总及旧版 .doc 档案。用于月度通报、成绩登记和年度汇总；案卷来源整理、本地核验与归档使用 xf-product-case-registry。"
 metadata:
   x-custom-skill: true
   x-source-repo: dmdmwshr/custom-skills
@@ -135,6 +135,7 @@ python scripts/sync_monthly_templates.py --apply
 - 根层两张表在当月 25 号最终数据确认前，文件名前加 `【待补】`；表格内不写 `【待补】`，待确认单元格只用红色底色标记。
 - 正常生成默认不写联网通报历史；只有本次材料已经验收且用户明确确认后，才可使用 `--update-history`。根层待补、工作动态资料待补和已完成的编制交付分别报告，不把生成成功写成整月定稿。
 - R02《消防产品监督统计表》待补范围为 B:K：B 列只补大队人员要求数；I 列网售消防产品检查、J 列维修后灭火器检查、K 列加油和加气站点消防产品检查由人工按“总次数（不合格次数）”填写，不自动推算或覆盖。旧表缺少新增列时保留原结构，仅提示人工核对。
+- R01/R02 的案卷类来源是飞书统计快照（`data_sources.case_snapshot`，目录含 `cases/checks/products/monthly.ndjson`，目录不内置：用 `--case-data <目录>`、`XF_FEISHU_SNAPSHOT_DIR` 或本机配置 `~/.xf-report-filler/feishu-snapshot.json` 指定，未配置会明确提示；导出来源/时间/完整性见 `snapshot.info.json`），经 `scripts/feishu_case_source.py` 在 pending 和 final-audit 入口只读使用，口径见 `references/monthly/source_feishu_case_snapshot.md`：统计窗口为上月 26 日至当月 25 日，复查不计入初查类统计，检查、项目、产品行分别计数；日期、大队或标记未知的记录单独列出，不计 0；C、D、E、G 为文书份数，快照没有逐份文书记录，不用不合格案数等代理列比较，只列人工核对；用户上报数和 I、J、K 人工列不被明细推导覆盖。历史 Excel 案卷数据只在显式 `--case-data xxx.xlsx` 时作兼容查询。
 - 产品底册黄色高亮问题属于私账：不进入成品，不参与扣分。
 - 产品公开问题描述只写底册括号前内容；括号内、`ps` 后、字段级细节只用于内部定位。
 - 联网公开描述中 CAD 类写“缺点位图”，PDF 类写“缺火灾防控图”。
@@ -178,4 +179,4 @@ python scripts/writer.py `
 
 任何优化、细化、修复本 skill 前，先读 `references/skill_maintenance.md`，按变更类型选择需要加载的对象文档、配置和测试。
 
-只修改源仓库 `C:\Users\12070\.cc-switch\skills\自建skills\xf-report-filler`。完成后提交并推送，再验证安装副本 `C:\Users\12070\.cc-switch\skills\xf-report-filler` 是否同步。
+只修改受管唯一源码仓 `/srv/workspaces/02-software/02-25-custom-skills` 中的 `xf-report-filler`（不使用旧 Windows 目录 `…\.cc-switch\skills\自建skills` 作开发根，也不在其中 pull 或覆盖）。完成后由 Codex 按受管流程提交推送、发布，再验证安装副本 `C:\Users\12070\.cc-switch\skills\xf-report-filler` 是否同步。

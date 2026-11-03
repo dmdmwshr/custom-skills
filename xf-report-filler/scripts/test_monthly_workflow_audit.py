@@ -74,6 +74,45 @@ class MonthlyWorkflowAuditTests(unittest.TestCase):
         self.assertEqual(result["score"]["input_files"]["product_register"].split("\\")[-1], "2026年6月产品巡查底册（不发）.docx")
         self.assertIn("monthly_report", result["score"]["outputs"])
 
+    def audit_with_case_source(self, prepare):
+        from test_feishu_case_source import standard
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            template_dir = base / "模板文件"
+            bulletin_dir = base / "26年" / "7月通报"
+            score_dir = bulletin_dir / "6月巡查"
+            network_dir = score_dir / "2026年6月联网监测基础信息考评明细表"
+            network_dir.mkdir(parents=True)
+            write_fake_template_tree(template_dir)
+            (score_dir / "2026年6月产品巡查底册（不发）.docx").write_bytes(b"product")
+            (score_dir / "2026年6月基础信息考评截图（不发）.xls").write_bytes(b"base")
+            (network_dir / "联网监测统计表.xls").write_bytes(b"stats")
+            (base / "plan.xls").write_bytes(b"work")
+            snapshot = base / "snapshot"
+            standard().save(snapshot)
+            prepare(snapshot)
+            return audit.run(
+                argparse.Namespace(
+                    bulletin_dir=str(bulletin_dir), bulletin_year=2026, bulletin_month=7,
+                    score_year=2026, score_month=6, template_dir=str(template_dir),
+                    work_plan=str(base / "plan.xls"), case_data=str(snapshot),
+                )
+            )
+
+    def test_audit_validates_the_feishu_snapshot_read_only(self):
+        result = self.audit_with_case_source(lambda snapshot: None)
+        self.assertTrue(result["ok"], result["blockers"])
+        status = result["data_sources"]["case_snapshot"]
+        self.assertTrue(status["ok"])
+        self.assertEqual(set(status["files"]), {"cases", "checks", "products", "monthly"})
+
+    def test_audit_blocks_when_the_snapshot_is_structurally_broken(self):
+        result = self.audit_with_case_source(lambda snapshot: (snapshot / "products.ndjson").unlink())
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["data_sources"]["case_snapshot"]["ok"])
+        self.assertTrue(any("飞书统计快照结构校验失败" in b["message"] for b in result["blockers"]))
+
 
 if __name__ == "__main__":
     unittest.main()

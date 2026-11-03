@@ -1222,11 +1222,17 @@ def workspace_progress(layout: BusinessLayout, *, batch_id: str | None = None) -
 
     upload_waterline_counts = _status_counts(current_records, "upload")
     nas_waterline_counts = _status_counts(current_records, "nasVerification")
-    ready_for_upload = sum(
+    ready_for_local_verify = sum(
         1
         for record in current_records
-        if _status(record, "local") == "READY_FOR_UPLOAD"
+        if _status(record, "local") in {"READY_FOR_LOCAL_VERIFY", "READY_FOR_UPLOAD"}
         and _status(record, "upload") == "NOT_STARTED"
+    )
+    local_verified_cases = sum(
+        1
+        for record in current_records
+        if isinstance(record.get("completion"), Mapping)
+        and record["completion"].get("status") == "LOCAL_VERIFIED"
     )
     failed_cases = upload_waterline_counts.get("FAILED", 0)
     not_started_cases = upload_waterline_counts.get("NOT_STARTED", 0)
@@ -1296,7 +1302,8 @@ def workspace_progress(layout: BusinessLayout, *, batch_id: str | None = None) -
             "nasVerification": nas_waterline_counts,
         },
         "upload": {
-            "readyForUploadCases": ready_for_upload,
+            "readyForLocalVerifyCases": ready_for_local_verify,
+            "localVerifiedCases": local_verified_cases,
             "notStartedCases": not_started_cases,
             "inProgressCases": max(in_progress_cases, 0),
             "failedCases": failed_cases,
@@ -1379,28 +1386,29 @@ def archive_verified_case(
     layout: BusinessLayout,
     project_no: str,
     *,
-    upload_status: str,
     verification: Mapping[str, Any],
     manifest_sha256: str,
     package_sha256: str,
     verified_at: str | None = None,
 ) -> dict[str, Any]:
-    """Archive one verified formal case, preserving its original import identity."""
+    """Archive one locally verified case (LocalVerificationV1), preserving its source identity.
+
+    The completion never claims a server upload or NAS check: those historical fields are left
+    exactly as recorded and the new proof is stored under ``completion``.
+    """
 
     project = _project_no(project_no)
-    case_id = verification.get("caseId")
-    files_verified = verification.get("filesVerified")
+    files = verification.get("files")
     if (
-        upload_status != "VERIFIED"
-        or verification.get("status") != "VERIFIED"
-        or not isinstance(case_id, str)
-        or not case_id.strip()
-        or type(files_verified) is not int
-        or files_verified < 0
+        verification.get("schemaVersion") != "LocalVerificationV1"
+        or verification.get("status") != "LOCAL_VERIFIED"
+        or verification.get("projectNo") != project
+        or not isinstance(files, Mapping)
+        or not files
+        or verification.get("manifestSha256") != manifest_sha256
+        or verification.get("packageSha256") != package_sha256
     ):
-        raise WorkspaceStateError(
-            "仅服务端上传和飞牛落盘核验均为 VERIFIED，且核验摘要完整时才能归档"
-        )
+        raise WorkspaceStateError("仅本地核验凭证完整、且绑定当前清单和原包摘要时才能归档")
     if not SHA256.fullmatch(manifest_sha256) or not SHA256.fullmatch(package_sha256):
         raise WorkspaceStateError("归档需要完整的 manifest 和案卷包 SHA-256")
     verified_at = verified_at or _utc_now()
@@ -1493,14 +1501,14 @@ def archive_verified_case(
             _assert_safe_tree(history_target, layout.root, "历史工作区目标")
 
             verified_evidence = deepcopy(dict(verification))
-            verified_evidence["status"] = "VERIFIED"
             evidence = {
-                "recordVersion": 1,
+                "recordVersion": 2,
+                "completionMode": "LOCAL_V1",
                 "projectNo": project,
                 "verifiedAt": verified_at,
                 "manifestSha256": manifest_sha256,
                 "packageSha256": package_sha256,
-                "verification": verified_evidence,
+                "localVerification": verified_evidence,
                 "archivedOriginal": str(completed_target),
                 "archivedWorkspace": str(history_target),
                 "sourceIssuesRetained": retained_source_issues,
@@ -1541,6 +1549,7 @@ def archive_verified_case(
                     "originalPath": str(completed_target),
                     "workspacePath": str(history_target),
                     "verificationRecord": str(evidence_target),
+                    "completionMode": "LOCAL_V1",
                 }
             )
             _deep_merge(
@@ -1548,8 +1557,14 @@ def archive_verified_case(
                 {
                     "state": "COMPLETED",
                     "local": {"status": "ARCHIVED"},
-                    "upload": {"status": "VERIFIED"},
-                    "nasVerification": verified_evidence,
+                    "completion": {
+                        "mode": "LOCAL_V1",
+                        "status": "LOCAL_VERIFIED",
+                        "verifiedAt": verified_at,
+                        "manifestSha256": manifest_sha256,
+                        "packageSha256": package_sha256,
+                        "fileCount": len(files),
+                    },
                     "completedAt": verified_at,
                     "lastSeenAt": verified_at,
                     "errorSummary": None,

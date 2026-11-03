@@ -61,13 +61,30 @@ def _record(rwid: str, project_no: str = PROJECT_A, **fields: object) -> dict[st
 
 def _verified_summary(**changes: object) -> dict[str, object]:
     value: dict[str, object] = {
-        "status": "VERIFIED",
-        "caseId": "fixture-case-id",
-        "filesVerified": 1,
-        "nasVerifiedAt": FIXED_NOW,
+        "schemaVersion": "LocalVerificationV1",
+        "status": "LOCAL_VERIFIED",
+        "files": {"file:one": {"sha256": "sha256:" + "c" * 64, "pageCount": 1}},
     }
     value.update(changes)
     return value
+
+
+def _archive(layout, project, *, verification, manifest_sha256, package_sha256, verified_at=None):
+    """Bind the fixture proof to the project and digests exactly like the real verifier does."""
+    proof = {
+        "projectNo": project,
+        "manifestSha256": manifest_sha256,
+        "packageSha256": package_sha256,
+        **verification,
+    }
+    return workspace.archive_verified_case(
+        layout,
+        project,
+        verification=proof,
+        manifest_sha256=manifest_sha256,
+        package_sha256=package_sha256,
+        verified_at=verified_at,
+    )
 
 
 def _begin_and_stabilize(
@@ -472,7 +489,7 @@ def test_workspace_progress_uses_current_formal_project_milestones(
     assert result["upload"]["successfulSystemCases"] == 1
     assert result["upload"]["nasVerifiedCases"] == 1
     assert result["upload"]["failedCases"] == 1
-    assert result["upload"]["readyForUploadCases"] == 1
+    assert result["upload"]["readyForLocalVerifyCases"] == 1
 
 
 def test_excel_export_forces_source_text_to_strings_without_mutating_json(
@@ -1063,6 +1080,126 @@ def test_completed_case_is_queued_until_detail_project_number_is_verified(
         assert waterline[key] == completed_before[key]
     assert {k: v for k, v in waterline["source"].items() if k != "lastObservedAt"} == completed_before["source"]
     assert resolved_record["detail"]["completedProjectObservation"] is True
+
+
+def _detail_for_completed(layout, tmp_path, batch_id, rwid):
+    started = _begin_and_stabilize(layout, [_record(rwid, status="复查文书")], batch_id=batch_id)
+    assert started["actionRwids"] == [rwid]
+    screenshot = tmp_path / f"{rwid}.png"
+    screenshot.write_bytes(b"detail screenshot")
+    return source.add_detail(
+        layout,
+        batch_id,
+        rwid,
+        {
+            "项目编号": PROJECT_A,
+            "单位名称": "测试单位",
+            "大队代码": "FIXTURE",
+            "文书目录": ["初查", "复查"],
+        },
+        f"https://source.example/#/detail?RWID={rwid}",
+        screenshot,
+        captured_at=FIXED_NOW,
+    )
+
+
+def _real_local_completion(layout: workspace.BusinessLayout) -> dict[str, Path]:
+    """Archive a minimal but genuine LocalVerificationV1 completion (real files and digests)."""
+    import hashlib
+    import json
+
+    def sha(path: Path) -> str:
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+    pending = layout.pending_case_dir(PROJECT_A)
+    work = layout.work_case_dir(PROJECT_A)
+    pending.mkdir(parents=True)
+    work.mkdir(parents=True)
+    package = pending / "package.zip"
+    package.write_bytes(b"PK-fixture-package")
+    (work / "normalized").mkdir()
+    pdf = work / "normalized" / "a.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fixture")
+    (work / "manifest.json").write_text(
+        json.dumps({"files": [{"clientRef": "file:a", "relativePath": "normalized/a.pdf",
+                               "sha256": sha(pdf), "pageCount": 1}]}),
+        encoding="utf-8",
+    )
+    (work / "inventory.json").write_text('{"inventory": true}', encoding="utf-8")
+    proof = {
+        "schemaVersion": "LocalVerificationV1",
+        "status": "LOCAL_VERIFIED",
+        "projectNo": PROJECT_A,
+        "manifestSha256": sha(work / "manifest.json"),
+        "packageSha256": sha(package),
+        "package": {
+            "containerKind": "ARCHIVE",
+            "sourceInput": package.relative_to(layout.root).as_posix(),
+            "inventorySha256": sha(work / "inventory.json"),
+        },
+        "files": {
+            "file:a": {
+                "workRelativePath": "normalized/a.pdf",
+                "relativePath": "normalized/a.pdf",
+                "pageCount": 1,
+                "sha256": sha(pdf),
+                "sizeBytes": pdf.stat().st_size,
+            }
+        },
+    }
+    (work / "local-verification.json").write_text(json.dumps(proof), encoding="utf-8")
+    workspace.upsert_case(layout, PROJECT_A, source={"status": "COMPLETED"})
+    result = workspace.archive_verified_case(
+        layout,
+        PROJECT_A,
+        verification=proof,
+        manifest_sha256=proof["manifestSha256"],
+        package_sha256=proof["packageSha256"],
+    )
+    return {"pdf": Path(result["archivedWorkspace"]) / "normalized" / "a.pdf",
+            "zip": Path(result["archivedOriginal"]) / "package.zip"}
+
+
+def test_locally_verified_completion_skips_unchanged_source_like_historical_completion(
+    layout: workspace.BusinessLayout, tmp_path: Path
+) -> None:
+    _real_local_completion(layout)
+    before = workspace.load_waterline(layout)["cases"][PROJECT_A]
+    resolved = _detail_for_completed(layout, tmp_path, "local-complete-skip", "fixture-local-skip")
+    assert resolved["actionRwids"] == []
+    assert resolved["records"]["fixture-local-skip"]["skippedAsCompletedProject"] is True
+    after = workspace.load_waterline(layout)["cases"][PROJECT_A]
+    for key in ("state", "completedAt", "local", "completion", "archive"):
+        assert after[key] == before[key]
+    assert after["upload"]["status"] == "NOT_STARTED"  # still never claimed as uploaded
+
+
+@pytest.mark.parametrize("target", ["pdf", "zip"])
+def test_corrupt_local_completion_is_not_a_source_skip(
+    layout: workspace.BusinessLayout, tmp_path: Path, target: str
+) -> None:
+    files = _real_local_completion(layout)
+    files[target].write_bytes(files[target].read_bytes() + b"damage")
+    resolved = _detail_for_completed(layout, tmp_path, "local-corrupt", "fixture-local-corrupt")
+    assert resolved["actionRwids"] == ["fixture-local-corrupt"]
+    assert workspace.load_waterline(layout)["cases"][PROJECT_A]["completion"]["status"] == "LOCAL_VERIFIED"
+
+
+def test_completion_without_any_proof_is_not_skipped(
+    layout: workspace.BusinessLayout, tmp_path: Path
+) -> None:
+    workspace.upsert_case(
+        layout,
+        PROJECT_A,
+        state="COMPLETED",
+        source={"status": "COMPLETED"},
+        local={"status": "ARCHIVED"},
+        archive={"verificationRecord": "fixture-record"},
+    )
+    resolved = _detail_for_completed(layout, tmp_path, "no-proof", "fixture-no-proof")
+    record = resolved["records"]["fixture-no-proof"]
+    assert not record.get("skippedAsCompletedProject")
+    assert resolved["actionRwids"] == ["fixture-no-proof"]
 
 
 def test_capture_marks_continuously_changing_list_without_false_completion(
@@ -2081,10 +2218,9 @@ def test_archive_requires_both_pending_and_work_sources(tmp_path: Path, missing:
         (active / "manifest.json").write_text("{}", encoding="utf-8")
 
     with pytest.raises(workspace.WorkspaceStateError, match="不存在"):
-        workspace.archive_verified_case(
+        _archive(
             case_layout,
             PROJECT_A,
-            upload_status="VERIFIED",
             verification=_verified_summary(),
             manifest_sha256="sha256:" + "a" * 64,
             package_sha256="sha256:" + "b" * 64,
@@ -2096,7 +2232,7 @@ def test_archive_requires_both_pending_and_work_sources(tmp_path: Path, missing:
     assert not list(case_layout.history_workspaces.glob(f"{PROJECT_A}-*"))
 
 
-def test_archive_requires_complete_verified_summary_without_rewriting_existing_status(
+def test_archive_requires_complete_local_proof_without_rewriting_existing_status(
     layout: workspace.BusinessLayout,
 ) -> None:
     pending = layout.pending_case_dir(PROJECT_A)
@@ -2106,32 +2242,35 @@ def test_archive_requires_complete_verified_summary_without_rewriting_existing_s
     workspace.upsert_case(
         layout,
         PROJECT_A,
-        state="UPLOADED_PENDING_NAS",
-        nasVerification=_verified_summary(),
+        state="PENDING_LOCAL_VERIFY",
+        upload={"status": "NOT_STARTED"},
+        nasVerification={"status": "NOT_STARTED"},
     )
     invalid_summaries = [
         _verified_summary(status=None),
-        {"status": "VERIFIED", "filesVerified": 1},
-        {"status": "VERIFIED", "caseId": "", "filesVerified": 1},
-        {"status": "VERIFIED", "caseId": "fixture", "filesVerified": True},
-        {"status": "VERIFIED", "caseId": "fixture", "filesVerified": -1},
-        {"status": "VERIFIED", "caseId": "fixture", "filesVerified": "1"},
+        _verified_summary(status="VERIFIED"),
+        _verified_summary(schemaVersion="ContentVerificationV1"),
+        _verified_summary(files={}),
+        _verified_summary(files=[]),
+        _verified_summary(projectNo="99999999X999999999"),
+        _verified_summary(manifestSha256="sha256:" + "d" * 64),
+        _verified_summary(packageSha256="sha256:" + "d" * 64),
     ]
     for summary in invalid_summaries:
-        with pytest.raises(workspace.WorkspaceStateError, match="核验摘要完整"):
-            workspace.archive_verified_case(
+        with pytest.raises(workspace.WorkspaceStateError, match="本地核验凭证"):
+            _archive(
                 layout,
                 PROJECT_A,
-                upload_status="VERIFIED",
                 verification=summary,
                 manifest_sha256="sha256:" + "a" * 64,
                 package_sha256="sha256:" + "b" * 64,
                 verified_at=FIXED_NOW,
             )
     assert pending.is_dir() and active.is_dir()
-    saved = workspace.load_waterline(layout)["cases"][PROJECT_A]["nasVerification"]
-    assert saved["status"] == "VERIFIED"
-    assert saved["caseId"] == "fixture-case-id"
+    saved = workspace.load_waterline(layout)["cases"][PROJECT_A]
+    assert saved["upload"]["status"] == "NOT_STARTED"
+    assert saved["nasVerification"]["status"] == "NOT_STARTED"
+    assert "completion" not in saved
 
 
 def test_archive_rejects_out_of_boundary_and_reparse_targets(
@@ -2147,7 +2286,6 @@ def test_archive_rejects_out_of_boundary_and_reparse_targets(
     outside.mkdir()
     unsafe_layout = replace(layout, completed_cases=outside)
     arguments = {
-        "upload_status": "VERIFIED",
         "verification": _verified_summary(),
         "manifest_sha256": "sha256:" + "a" * 64,
         "package_sha256": "sha256:" + "b" * 64,
@@ -2155,7 +2293,7 @@ def test_archive_rejects_out_of_boundary_and_reparse_targets(
     }
 
     with pytest.raises(workspace.WorkspaceStateError, match="超出工作根"):
-        workspace.archive_verified_case(unsafe_layout, PROJECT_A, **arguments)
+        _archive(unsafe_layout, PROJECT_A, **arguments)
     assert pending.is_dir() and active.is_dir()
 
     original = workspace._is_reparse
@@ -2165,7 +2303,7 @@ def test_archive_rejects_out_of_boundary_and_reparse_targets(
         lambda path: Path(path) == layout.completed_cases or original(Path(path)),
     )
     with pytest.raises(workspace.WorkspaceStateError, match="重解析点"):
-        workspace.archive_verified_case(layout, PROJECT_A, **arguments)
+        _archive(layout, PROJECT_A, **arguments)
     assert pending.is_dir() and active.is_dir()
 
 
@@ -2185,10 +2323,9 @@ def test_archive_preserves_two_generations_for_same_project(
         (pending / f"original-{index}.zip").write_bytes(f"original-{index}".encode())
         (active / f"manifest-{index}.json").write_text("{}", encoding="utf-8")
         results.append(
-            workspace.archive_verified_case(
+            _archive(
                 layout,
                 PROJECT_A,
-                upload_status="VERIFIED",
                 verification=_verified_summary(caseId=f"fixture-case-{index}"),
                 manifest_sha256="sha256:" + manifest_char * 64,
                 package_sha256="sha256:" + package_char * 64,
@@ -2225,10 +2362,9 @@ def test_archive_rejects_legacy_flat_completed_case_content(
     (completed_parent / "legacy-flat.zip").write_bytes(b"legacy")
 
     with pytest.raises(workspace.WorkspaceStateError, match="旧版平铺内容.*人工"):
-        workspace.archive_verified_case(
+        _archive(
             layout,
             PROJECT_A,
-            upload_status="VERIFIED",
             verification=_verified_summary(),
             manifest_sha256="sha256:" + "a" * 64,
             package_sha256="sha256:" + "b" * 64,
@@ -2239,7 +2375,7 @@ def test_archive_rejects_legacy_flat_completed_case_content(
     assert (completed_parent / "legacy-flat.zip").read_bytes() == b"legacy"
 
 
-def test_archive_requires_verified_fn_os_and_never_overwrites(
+def test_archive_requires_local_proof_and_never_overwrites(
     layout: workspace.BusinessLayout,
 ) -> None:
     pending = layout.pending_case_dir(PROJECT_A)
@@ -2252,21 +2388,10 @@ def test_archive_requires_verified_fn_os_and_never_overwrites(
     manifest_sha = "sha256:" + "a" * 64
     package_sha = "sha256:" + "b" * 64
 
-    with pytest.raises(workspace.WorkspaceStateError, match="均为 VERIFIED"):
-        workspace.archive_verified_case(
+    with pytest.raises(workspace.WorkspaceStateError, match="本地核验凭证"):
+        _archive(
             layout,
             PROJECT_A,
-            upload_status="FINALIZED_UNVERIFIED",
-            verification=_verified_summary(),
-            manifest_sha256=manifest_sha,
-            package_sha256=package_sha,
-            verified_at=FIXED_NOW,
-        )
-    with pytest.raises(workspace.WorkspaceStateError, match="均为 VERIFIED"):
-        workspace.archive_verified_case(
-            layout,
-            PROJECT_A,
-            upload_status="VERIFIED",
             verification=_verified_summary(status="PENDING"),
             manifest_sha256=manifest_sha,
             package_sha256=package_sha,
@@ -2274,10 +2399,9 @@ def test_archive_requires_verified_fn_os_and_never_overwrites(
         )
     assert pending.is_dir() and active.is_dir()
 
-    result = workspace.archive_verified_case(
+    result = _archive(
         layout,
         PROJECT_A,
-        upload_status="VERIFIED",
         verification=_verified_summary(),
         manifest_sha256=manifest_sha,
         package_sha256=package_sha,
@@ -2291,18 +2415,22 @@ def test_archive_requires_verified_fn_os_and_never_overwrites(
     history = Path(result["archivedWorkspace"])
     evidence_path = Path(result["verificationRecord"])
     assert (history / "manifest.json").is_file()
-    assert _read_json(evidence_path)["verification"]["status"] == "VERIFIED"
-    assert workspace.load_waterline(layout)["cases"][PROJECT_A]["state"] == "COMPLETED"
+    receipt = _read_json(evidence_path)
+    assert receipt["recordVersion"] == 2 and receipt["completionMode"] == "LOCAL_V1"
+    assert receipt["localVerification"]["status"] == "LOCAL_VERIFIED"
+    saved = workspace.load_waterline(layout)["cases"][PROJECT_A]
+    assert saved["state"] == "COMPLETED"
+    assert saved["completion"]["mode"] == "LOCAL_V1"
+    assert saved["upload"]["status"] == "NOT_STARTED"  # never claimed as a server upload
 
     pending.mkdir()
     active.mkdir()
     (pending / "new.zip").write_bytes(b"new")
     (active / "new.json").write_text("{}", encoding="utf-8")
     with pytest.raises(workspace.WorkspaceStateError, match="拒绝覆盖"):
-        workspace.archive_verified_case(
+        _archive(
             layout,
             PROJECT_A,
-            upload_status="VERIFIED",
             verification=_verified_summary(),
             manifest_sha256=manifest_sha,
             package_sha256=package_sha,

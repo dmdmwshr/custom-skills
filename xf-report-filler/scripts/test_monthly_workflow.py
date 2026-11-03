@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import unittest
@@ -26,6 +27,22 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
         self.assertIn("26年产品科技工作计划.xls", config["data_sources"]["work_plan"]["path"])
         self.assertIn("26年\\2、案卷信息采集\\产品案卷数据.xlsx", config["data_sources"]["case_data"]["path"])
 
+    def test_case_source_defaults_to_feishu_snapshot_with_env_override(self):
+        config = workflow.load_config()
+        self.assertEqual(config["data_sources"]["case_snapshot"]["kind"], "feishu_ndjson_snapshot")
+        self.assertEqual(
+            config["data_sources"]["case_snapshot"]["files"],
+            ["cases.ndjson", "checks.ndjson", "products.ndjson", "monthly.ndjson"],
+        )
+        self.assertEqual(config["data_sources"]["case_data"]["required_for"], ["legacy_excel_history"])
+        with patch.dict(os.environ, {"HOME": "/nonexistent-home"}, clear=False):
+            os.environ.pop("XF_FEISHU_SNAPSHOT_DIR", None)
+            os.environ.pop("XF_FEISHU_SNAPSHOT_CONFIG", None)
+            self.assertIsNone(config["data_sources"]["case_snapshot"]["path"])
+            self.assertIsNone(workflow.case_source_path(config))  # nothing baked in; message guides
+        with patch.dict(os.environ, {"XF_FEISHU_SNAPSHOT_DIR": "/tmp/snap"}):
+            self.assertEqual(workflow.case_source_path(config), Path("/tmp/snap"))
+
     def test_template_and_real_score_dir_names_are_centralized(self):
         config = workflow.load_config()
         base = Path("模板文件")
@@ -50,6 +67,14 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
         self.assertIn("work_dynamic", external_keys)
         self.assertIn("monthly_product_supervision_stats_work_check", external_keys)
         self.assertEqual(config["pending_rules"]["product_stats_required_counts"]["pending_columns"], "B:K")
+        audit = config["case_data_mapping"]["product_stats_audit"]
+        # Only check-count columns are compared; document-count columns are manual, never proxies.
+        self.assertEqual(set(audit), {"B", "F"})
+        manual = config["case_data_mapping"]["manual_review_columns"]
+        for column in "CDEGHIJK":
+            self.assertIn(column, manual)
+        for column in "CDEG":
+            self.assertIn("文书份数", manual[column])
         self.assertIn("加油、加气站点消防产品检查次数", config["case_data_mapping"]["manual_review_columns"]["K"])
         self.assertIn("网售消防产品检查次数", config["case_data_mapping"]["manual_review_columns"]["I"])
         self.assertIn("维修后的灭火器检查次数", config["case_data_mapping"]["manual_review_columns"]["J"])

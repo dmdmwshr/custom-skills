@@ -12,9 +12,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 if __package__:
+    from . import local_validity
     from . import source_coverage as coverage_api
     from . import workspace_state as ws
 else:
+    import local_validity
     import source_coverage as coverage_api
     import workspace_state as ws
 
@@ -368,6 +370,33 @@ def _content_evidence(
     return path.parent, expanded, {**state, "manifestSha256": bundle["manifestSha256"]}
 
 
+def _local_completion_valid(
+    layout: Any,
+    project: str,
+    record: dict[str, Any],
+    work: Path,
+    manifest: dict[str, Any],
+    archive: dict[str, Any],
+    issues: list[str],
+) -> bool:
+    """A local completion counts only while receipt, proof and manifest still bind each other."""
+    completion = record.get("completion") or {}
+    if (
+        completion.get("mode") != "LOCAL_V1"
+        or completion.get("status") != "LOCAL_VERIFIED"
+        or record.get("state") != "COMPLETED"
+        or not archive.get("verificationRecord")
+        or not manifest
+    ):
+        return False
+    reasons = local_validity.validate_local_completion(layout, project, record)
+    if reasons:
+        issues.append(local_validity.UNTRUSTED_ISSUE)
+        issues.extend(f"本地完成需复核：{reason}" for reason in reasons)
+        return False
+    return True
+
+
 def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any]:
     work, manifest, state, issues = case_inputs(layout, project, record)
     source = record.get("source") or {}
@@ -481,8 +510,12 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         except (OSError, ws.WorkspaceStateError):
             archived = False
             issues.append("ARCHIVE_RECEIPT_UNTRUSTED")
+    local_complete = _local_completion_valid(
+        layout, project, record, work, manifest, archive, issues
+    )
+    archived = archived or local_complete
     # Historical completion is retained, but never upgraded to deep-content proof.
-    historical_complete = record.get("state") == "COMPLETED" and archived
+    historical_complete = record.get("state") == "COMPLETED" and archived and not local_complete
     projection = state.get("filesProjection") or []
     projected = {f.get("clientRef") for f in projection if isinstance(f, dict)} - {None}
     received = set(state.get("uploadedFileRefs") or []) & projected
@@ -501,12 +534,14 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         "materialsCollected": not material_gaps
         and (
             source.get("status") in {"PACKAGE_READY", "PACKAGE_RECEIVED"}
-            or bool(manifest.get("packageSha256") and state)
+            or bool(manifest.get("packageSha256") and (state or local_complete))
         ),
         "systemRegistered": registered,
         "bodyVerified": body_verified,
+        "localVerified": local_complete,
         "archived": archived,
     }
+    verified_chain = (registered and body_verified) or local_complete
     classification = qualification(manifest)
     if (
         binding.get("exists")
@@ -555,9 +590,21 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         "unitName": record.get("unitName"),
         **classification,
         "stages": stages,
-        "complete": all(stages.values()) and not source.get("changePending") and not system_changed,
-        "availableMaterialWorkflowComplete": bool(archived and registered and body_verified
+        "complete": bool(
+            stages["sourceRegistered"]
+            and stages["materialsCollected"]
+            and stages["archived"]
+            and verified_chain
+            and not source.get("changePending")
+            and not system_changed
+        ),
+        "availableMaterialWorkflowComplete": bool(archived and verified_chain
             and not source.get("changePending") and not system_changed),
+        "completionMode": "LOCAL_V1"
+        if local_complete
+        else "LEGACY_V2_NAS"
+        if historical_complete
+        else None,
         "sourceIssuesRetained": retained_source_issues,
         "historicalComplete": historical_complete,
         "activePending": system_changed
@@ -565,11 +612,14 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         or bool(source.get("changePending"))
         or (
             not historical_complete
+            and not local_complete
             and not (
                 source.get("indexOnly") is True and classification["initialResult"] == "QUALIFIED"
             )
         ),
-        "evidenceLevel": "DEEP_CONTENT"
+        "evidenceLevel": "LOCAL_VERIFIED"
+        if local_complete
+        else "DEEP_CONTENT"
         if body_verified
         else "LEGACY_UNSPECIFIED"
         if historical_complete
@@ -629,6 +679,7 @@ def ledger_view(
         "materialsCollected",
         "systemRegistered",
         "bodyVerified",
+        "localVerified",
         "archived",
     )
     return {
@@ -685,7 +736,8 @@ def render_ledger_report(value: dict[str, Any], *, include_all: bool = False) ->
         + "这些数量分别计数，不用文书或来源标识代替案卷总数。",
         "",
         f"本视图 {counts['cases']} 案；材料已采集 {counts['materialsCollected']}；"
-        f"系统已登记 {counts['systemRegistered']}；正文已核验 {counts['bodyVerified']}；"
+        f"本地核验 {counts['localVerified']}；历史系统登记 {counts['systemRegistered']}；"
+        f"历史正文核验 {counts['bodyVerified']}；"
         f"归档 {counts['archived']}；全部完成 {counts['complete']}。",
         f"已知来源文书 {counts['knownSourceDocuments']} 份；"
         f"来源已登记 {counts['sourceRegistered']} 案；"
@@ -693,8 +745,8 @@ def render_ledger_report(value: dict[str, Any], *, include_all: bool = False) ->
         f"{counts['legacyEvidenceIncomplete']} 案缺少新式逐份正文回执，"
         "保留原完成记录，不默认重做。",
         "",
-        "|项目编号|初查结果|初查日期|来源登记|材料采集|系统登记|正文核验|归档|当前处理|",
-        "|---|---|---|---|---|---|---|---|---|",
+        "|项目编号|初查结果|初查日期|来源登记|材料采集|历史系统登记|历史正文核验|本地核验|归档|当前处理|",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     report_rows = (
         value["cases"]
@@ -713,6 +765,7 @@ def render_ledger_report(value: dict[str, Any], *, include_all: bool = False) ->
                 "materialsCollected",
                 "systemRegistered",
                 "bodyVerified",
+                "localVerified",
                 "archived",
             )
         ]
@@ -732,6 +785,8 @@ def render_ledger_report(value: dict[str, Any], *, include_all: bool = False) ->
                     if row["activePending"]
                     else "历史证据复用"
                     if row["historicalComplete"]
+                    else "本地完成"
+                    if row["completionMode"] == "LOCAL_V1"
                     else "仅建索引",
                 ]
             )
@@ -744,6 +799,8 @@ def _excel_evidence_note(row: dict[str, Any]) -> str:
     notes = [
         "历史完成，缺少新版正文回执，默认复用"
         if row["evidenceLevel"] == "LEGACY_UNSPECIFIED"
+        else "本地核验凭证已核对（不含服务端或飞牛）"
+        if row["evidenceLevel"] == "LOCAL_VERIFIED"
         else "逐份正文回执已核对"
         if row["evidenceLevel"] == "DEEP_CONTENT"
         else "待处理"
@@ -785,8 +842,9 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
         "统计年份",
         "来源已登记",
         "材料已采集",
-        "系统已登记",
-        "正文已核验",
+        "历史系统已登记",
+        "历史正文已核验",
+        "本地已核验",
         "归档已完成",
         "活动待办",
         "来源有变化",
@@ -801,6 +859,7 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
         "materialsCollected",
         "systemRegistered",
         "bodyVerified",
+        "localVerified",
         "archived",
     )
     for index, (name, rows) in enumerate(groups):
@@ -898,10 +957,11 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
         ("去重案卷", lambda r: True),
         ("来源已登记", lambda r: r["stages"]["sourceRegistered"]),
         ("材料已采集", lambda r: r["stages"]["materialsCollected"]),
-        ("系统已登记", lambda r: r["stages"]["systemRegistered"]),
-        ("正文已核验", lambda r: r["stages"]["bodyVerified"]),
+        ("历史系统已登记", lambda r: r["stages"]["systemRegistered"]),
+        ("历史正文已核验", lambda r: r["stages"]["bodyVerified"]),
+        ("本地已核验", lambda r: r["stages"]["localVerified"]),
         ("归档累计", lambda r: r["stages"]["archived"]),
-        ("全部完成（含正文证据）", lambda r: r["complete"]),
+        ("全部完成（含核验证据）", lambda r: r["complete"]),
         ("活动待办", lambda r: r["activePending"]),
     ]
     for label, include in metrics:
@@ -960,7 +1020,7 @@ def scan_plan(
                     )
                     if row["sourceChanged"]
                     else [],
-                    "action": "RECONCILE"
+                    "action": "LOCAL_VERIFY"
                     if row["stages"]["systemRegistered"] or row["systemChanged"]
                     else "COLLECT"
                     if row["initialResult"] == "UNQUALIFIED"
@@ -999,16 +1059,16 @@ def scan_plan(
             previous = source.get("observationsByRwid", {}).get(rwid, {})
             incoming = {document_fingerprint(a) for a in observation.get("sourceAppearances", [])}
             same = bool(incoming and incoming <= set(previous.get("documentFingerprints") or []))
-            unchanged_complete = (
-                same
+            row = describe(layout, project, record) if project else None
+            unchanged_complete = bool(
+                row
+                and same
                 and not source.get("changePending")
-                and not describe(layout, project, record)["systemChanged"]
+                and not row["systemChanged"]
                 and (
-                    describe(layout, project, record)["historicalComplete"]
-                    or (
-                        source.get("indexOnly") is True
-                        and describe(layout, project, record)["initialResult"] == "QUALIFIED"
-                    )
+                    row["historicalComplete"]
+                    or row["completionMode"] == "LOCAL_V1"
+                    or (source.get("indexOnly") is True and row["initialResult"] == "QUALIFIED")
                 )
             )
             actions.append(

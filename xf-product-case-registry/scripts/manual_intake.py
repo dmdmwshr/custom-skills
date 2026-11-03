@@ -264,6 +264,209 @@ def accept(layout: Any, review: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+RESOLVED_STATUSES = {"RESOLVED_IDENTICAL", "RESOLVED_NO_NEW_MATERIAL", "RESOLVED_COMPLETED"}
+
+
+def _member_digests(package: Path) -> dict[str, str]:
+    """Safe-inspect a ZIP and map normalized member name -> content digest (files only)."""
+    source.inspect_zip_package(package)
+    digests: dict[str, str] = {}
+    with zipfile.ZipFile(package) as archive:
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            name, _key = source._zip_member_name(info)
+            digests[name] = "sha256:" + hashlib.sha256(archive.read(info)).hexdigest()
+    return digests
+
+
+def _baseline_packages(layout: Any, record: dict[str, Any]) -> list[Path]:
+    """Original ZIPs of earlier generations whose bytes still match their recorded digest."""
+    known: set[str] = set()
+    folders: list[Path] = []
+    state = record.get("source") or {}
+    if state.get("packageSha256"):
+        known.add(state["packageSha256"])
+    for entry in (record.get("history") or {}).get("completions") or []:
+        if entry.get("packageSha256"):
+            known.add(entry["packageSha256"])
+        if entry.get("originalPath"):
+            folders.append(layout.resolve_recorded_path(entry["originalPath"]))
+    archive = record.get("archive") or {}
+    if archive.get("originalPath"):
+        folders.append(layout.resolve_recorded_path(archive["originalPath"]))
+    for previous in state.get("previousGenerations") or []:
+        if previous.get("packageSha256"):
+            known.add(previous["packageSha256"])
+    found: dict[str, Path] = {}
+    candidates: list[Path] = []
+    if state.get("packageRelativePath"):
+        candidates.append(layout.root / state["packageRelativePath"])
+    for folder in folders:
+        if folder.is_dir():
+            candidates.extend(sorted(folder.rglob("*.zip")))
+    for path in candidates:
+        if path.is_file():
+            digest = source._sha256(path)
+            if digest in known:
+                found.setdefault(digest, path)
+    return list(found.values())
+
+
+def resolve_pending(layout: Any, project: str, intake_id: str | None = None) -> dict[str, Any]:
+    """Compare PENDING_COMPARISON manual material with earlier generations and continue.
+
+    Identical or already-covered material is only marked resolved (nothing is reprocessed).
+    New material starts a new pending generation next to the untouched earlier ones; the
+    normal inventory -> compose -> local-verify -> archive path then completes it. Every step
+    is idempotent and re-runnable; the original package, old workspace, archive generation and
+    manual fields are never moved, rewritten or removed.
+    """
+    project = ws._project_no(project)
+    with ws._waterline_lock(layout):
+        data = ws.load_waterline(layout)
+        record = data.get("cases", {}).get(project)
+        if not record:
+            raise ws.WorkspaceStateError("总账没有该项目")
+        intakes = (record.get("source") or {}).get("manualIntakes") or {}
+        wanted = [intake_id] if intake_id else sorted(intakes)
+        if intake_id and intake_id not in intakes:
+            raise ws.WorkspaceStateError("总账没有该手动交件")
+        before = json.dumps(data, sort_keys=True)
+        results = [
+            _resolve_one(layout, data, project, record, key, intakes[key])
+            for key in wanted
+            if intakes[key].get("status") not in {"PRIMARY_RECEIVED", "ARCHIVED_PRIMARY"}
+        ]
+        if json.dumps(data, sort_keys=True) != before:  # re-runs of a resolved intake write nothing
+            ws._save_waterline_unlocked(layout, data)
+    return {"projectNo": project, "results": results, "nothingToCompare": not results}
+
+
+def _resolve_one(
+    layout: Any, data: dict[str, Any], project: str, record: dict[str, Any], key: str,
+    binding: dict[str, Any],
+) -> dict[str, Any]:
+    out = {"intakeId": key}
+    status = binding.get("status")
+    package_sha = binding["packageSha256"]
+    if status in RESOLVED_STATUSES:
+        return {**out, "status": "REUSED", "resolution": status}
+    if status not in {"PENDING_COMPARISON", "NEW_GENERATION_STARTED"}:
+        return {**out, "status": "SKIPPED", "reason": f"状态 {status} 不需要比对"}
+    receipt_path = layout.root / binding["evidencePath"]
+    if not receipt_path.is_file() or source._sha256(receipt_path) != binding["evidenceSha256"]:
+        raise ws.WorkspaceStateError("手动交件回执无法对账，保持待比对")
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    package = layout.root / receipt["package"]["relativePath"]
+    screenshot = layout.root / receipt["screenshot"]["relativePath"]
+    if source._sha256(package) != package_sha or source._sha256(screenshot) != binding[
+        "screenshotSha256"
+    ]:
+        raise ws.WorkspaceStateError("手动交件原件摘要已变化，保持待比对")
+    completion = record.get("completion") or {}
+    if status == "NEW_GENERATION_STARTED" and (
+        record.get("state") == "COMPLETED" and completion.get("packageSha256") == package_sha
+    ):
+        binding.update(
+            status="RESOLVED_COMPLETED",
+            resolvedAt=ws._utc_now(),
+            completedGeneration=(record.get("archive") or {}).get("generation"),
+        )
+        return {**out, "status": "RESOLVED_COMPLETED", "generation": binding["completedGeneration"]}
+
+    baselines = _baseline_packages(layout, record)
+    if status == "PENDING_COMPARISON" and not baselines:
+        return {
+            **out,
+            "status": "BASELINE_MISSING",
+            "reason": "找不到摘要仍与总账一致的既有原始 ZIP，无法证明相同或不同；保持待比对",
+        }
+    new_members = _member_digests(package)
+    old_members: dict[str, set[str]] = {}
+    for path in baselines:
+        for name, digest in _member_digests(path).items():
+            old_members.setdefault(name, set()).add(digest)
+    added = sorted(n for n in new_members if n not in old_members)
+    changed = sorted(
+        n for n, d in new_members.items() if n in old_members and d not in old_members[n]
+    )
+    removed = sorted(n for n in old_members if n not in new_members)
+    diff = {"added": added, "changed": changed, "removedFromNew": removed}
+    if status == "PENDING_COMPARISON" and not added and not changed:
+        resolution = "RESOLVED_IDENTICAL" if not removed else "RESOLVED_NO_NEW_MATERIAL"
+        binding.update(
+            status=resolution,
+            resolvedAt=ws._utc_now(),
+            comparedAgainst=[source._sha256(p) for p in baselines],
+            diff=diff,
+        )
+        return {**out, "status": resolution, "diff": diff}
+
+    # New material: needs a finished earlier generation and a free pending slot.
+    pending = layout.pending_case_dir(project)
+    if record.get("state") != "COMPLETED" and status == "PENDING_COMPARISON":
+        return {
+            **out,
+            "status": "BLOCKED_ACTIVE_CASE",
+            "reason": "原案卷仍在处理中，先完成或明确处置它再续接新增材料；保持待比对",
+            "diff": diff,
+        }
+    target_package = pending / package.name
+    target_screenshot = pending / screenshot.name
+    if pending.exists():
+        own = {package.name, screenshot.name}
+        others = [c.name for c in pending.iterdir() if c.name not in own]
+        if others:
+            return {
+                **out,
+                "status": "BLOCKED_PENDING_OCCUPIED",
+                "reason": "待处理目录已有其他内容，不覆盖；保持待比对",
+                "diff": diff,
+            }
+    ws._validated_workspace_path(pending, layout.root, "新代际待处理目录", must_exist=False)
+    pending.mkdir(parents=True, exist_ok=True)
+    source._copy_immutable(package, target_package)
+    source._copy_immutable(screenshot, target_screenshot)
+    now = ws._utc_now()
+    state = record.setdefault("source", {})
+    if state.get("packageSha256") != package_sha:
+        state.setdefault("previousGenerations", []).append(
+            {
+                "packageSha256": state.get("packageSha256"),
+                "packageRelativePath": state.get("packageRelativePath"),
+                "archiveGeneration": (record.get("archive") or {}).get("generation"),
+                "supersededAt": now,
+            }
+        )
+    state.update(
+        packageSha256=package_sha,
+        packageRelativePath=target_package.relative_to(layout.root).as_posix(),
+        screenshotRelativePath=target_screenshot.relative_to(layout.root).as_posix(),
+        status="PACKAGE_READY",
+    )
+    record.update(
+        state="PENDING_ORGANIZATION",
+        local={"status": "PENDING_ORGANIZATION"},
+        errorSummary=None,
+        workflowUpdatedAt=now,
+        lastSeenAt=now,
+    )
+    binding.update(
+        status="NEW_GENERATION_STARTED",
+        startedAt=binding.get("startedAt") or now,
+        diff=diff,
+        pendingPackagePath=target_package.relative_to(layout.root).as_posix(),
+    )
+    return {
+        **out,
+        "status": "NEW_GENERATION_STARTED",
+        "diff": diff,
+        "pendingPackage": str(target_package),
+        "next": "inventory -> compose -> local-verify；完成后再次运行 source resolve-manual 收口",
+    }
+
+
 def acknowledge_gaps(layout: Any, project: str, reason: str) -> dict[str, Any]:
     """Record explicit user direction; retain gaps and bind the precise current list."""
     project = ws._project_no(project)

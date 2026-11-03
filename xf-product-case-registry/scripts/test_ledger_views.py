@@ -336,8 +336,14 @@ def test_source_material_gap_prevents_archive_even_after_body_verification(layou
         ws.archive_verified_case(
             layout,
             A,
-            upload_status="VERIFIED",
-            verification={"status": "VERIFIED", "caseId": "fixture-case", "filesVerified": 1},
+            verification={
+                "schemaVersion": "LocalVerificationV1",
+                "status": "LOCAL_VERIFIED",
+                "projectNo": A,
+                "manifestSha256": "sha256:" + "a" * 64,
+                "packageSha256": "sha256:" + "b" * 64,
+                "files": {"file:one": {"sha256": "sha256:" + "c" * 64}},
+            },
             manifest_sha256="sha256:" + "a" * 64,
             package_sha256="sha256:" + "b" * 64,
         )
@@ -683,9 +689,9 @@ def test_excel_body_proof_does_not_hide_source_material_gap(layout):
     with closing(load_workbook(ws.export_waterline_xlsx(layout))) as book:
         row = book["所有案卷"]
         assert row["G2"].value == "未确认" and row["I2"].value == "是"
-        assert "来源材料缺件" in row["O2"].value
+        assert "来源材料缺件" in row["P2"].value
         summary = {r[0].value: r[1].value for r in book["年度来源覆盖"] if r[0].value}
-        assert summary["材料已采集"] == 0 and summary["正文已核验"] == 1
+        assert summary["材料已采集"] == 0 and summary["历史正文已核验"] == 1
 
 
 def native_qualified_fields():

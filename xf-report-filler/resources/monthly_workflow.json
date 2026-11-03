@@ -17,15 +17,33 @@
     "case_data": {
       "path": "D:\\工作备份\\移动硬盘\\1、工作\\2、产品科技联网\\1、产品监督\\26年\\2、案卷信息采集\\产品案卷数据.xlsx",
       "required_for": [
-        "bulletin_root_pending",
-        "bulletin_root_final_audit"
-      ]
+        "legacy_excel_history"
+      ],
+      "note": "历史 Excel 兼容查询来源，不再是默认来源。"
     },
     "monitor_history": {
       "path": "resources/history/monitor_report_history.json",
       "required_for": [
         "monthly_grade_register"
       ]
+    },
+    "case_snapshot": {
+      "path": null,
+      "kind": "feishu_ndjson_snapshot",
+      "files": [
+        "cases.ndjson",
+        "checks.ndjson",
+        "products.ndjson",
+        "monthly.ndjson"
+      ],
+      "override_env": "XF_FEISHU_SNAPSHOT_DIR",
+      "local_config_env": "XF_FEISHU_SNAPSHOT_CONFIG",
+      "local_config_default": "~/.xf-report-filler/feishu-snapshot.json",
+      "required_for": [
+        "bulletin_root_pending",
+        "bulletin_root_final_audit"
+      ],
+      "note": "飞书官方导出的只读统计快照；默认流程的案卷来源。目录不写入技能包：用 --case-data、环境变量 XF_FEISHU_SNAPSHOT_DIR 或本机配置文件 {\"snapshot_dir\": \"...\"} 指定，未配置时报明确提示。"
     }
   },
   "directory_model": {
@@ -249,14 +267,22 @@
     "case_type_column": "是否为行案/刑案",
     "review_column": "是否为复查",
     "product_stats_audit": {
-      "B": "unique_projects",
-      "C": "unqualified_projects",
-      "D": "unqualified_rows",
-      "E": "sample_rows",
-      "F": "micro_rows",
-      "G": "administrative_case_year"
+      "B": {
+        "case_field": "initial_checks",
+        "unknown_field": "date_unknown_initial_checks",
+        "label": "26日至25日窗口内非复查检查次数（检查粒度，初查日期未知另列）"
+      },
+      "F": {
+        "case_field": "micro_checks_confirmed",
+        "unknown_field": "micro_checks_unknown",
+        "label": "微型消防站检查次数（案卷标记待核实的另列为未知）"
+      }
     },
     "manual_review_columns": {
+      "C": "下发责令限期改正通知书份数是文书份数，飞书案卷快照没有逐份文书记录，不能用不合格案数或产品行数代替，需人工核对。",
+      "D": "现场判定不合格通知书份数是文书份数，不能用不合格产品行数代替，需人工核对。",
+      "E": "抽样单份数是文书份数，不能用抽样送检检查次数代替，需人工核对。",
+      "G": "立案审批表份数是文书份数，不能用累计行案数代替，需人工核对。",
       "H": "光伏、锂离子电池等相关企业与消防处置力量配备次数需人工核对。",
       "I": "网售消防产品检查次数需人工核对，按总次数（检查出不合格次数）填写。",
       "J": "维修后的灭火器检查次数需人工核对，按总次数（检查出不合格次数）填写。",
@@ -309,7 +335,8 @@
       "monitor_history": "references/monthly/source_monitor_stats.md",
       "product_register": "references/monthly/source_product_register.md",
       "monitor_base_info": "references/monthly/source_monitor_base_info.md",
-      "monitor_stats": "references/monthly/source_monitor_stats.md"
+      "monitor_stats": "references/monthly/source_monitor_stats.md",
+      "case_snapshot": "references/monthly/source_feishu_case_snapshot.md"
     },
     "templates": {
       "T01": "references/monthly/source_product_register.md",
