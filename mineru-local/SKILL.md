@@ -1,6 +1,6 @@
 ---
 name: mineru-local
-description: 仅在 Zerox 转 Markdown 效果不佳或用户明确指定时，使用 D:/Program_Files/MinerU-Docker 的 Docker MinerU 4 处理中文扫描件、长篇文档和密集表格；默认 standard 档位。不得使用已退役的本地 pipeline 安装。
+description: 使用 D:/Program_Files/MinerU-Docker 的 Docker MinerU 4 在本机处理中文扫描件、长篇文档和密集表格；用于材料限本地处理、无云端授权，或 WPS 评估后不适用时的本地路径，也可由用户明确指定；默认 standard 档位。不得使用已退役的本地 pipeline 安装。
 metadata:
   x-custom-skill: true
   x-source-repo: dmdmwshr/custom-skills
@@ -12,7 +12,7 @@ metadata:
 
 ## 路由与固定入口
 
-1. 文档转 Markdown 仍优先 zerox-local；用户指定 MinerU，或 Zerox 结果不佳时使用本技能。
+1. 本技能是纯本地专用路径，不会自动调用 WPS。需要 OCR 或扫描识别时先评估 `wps-office` 的实际命令、权益和数据去向；本次对该材料有明确云处理授权才使用其在线 OCR。材料限本地处理、无该授权、复杂表格或 WPS 评估后不适用时，直接使用本技能，无需先上云试失败；用户明确指定 MinerU 时同样直接使用。Zerox 经远端模型，仅限已明确云端授权的专用解析，不再默认首选。
 2. 根目录：D:/Program_Files/MinerU-Docker。
 3. 一次性转换：run-mineru-docker.cmd 或 run-mineru-docker.ps1。中文和空格路径加引号。
 4. 常驻 API：start-api.cmd，端口 18000；可选网页界面沿用 start-gradio.cmd，端口 7860，此入口同时启用 API。
