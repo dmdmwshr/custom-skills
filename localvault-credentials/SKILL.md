@@ -1,6 +1,9 @@
 ---
 name: localvault-credentials
-description: 管理本机 LocalVault 中由 SecretManagement 和 SecretStore 保存的凭据，包括新增、更新、元数据检查、精确删除和向当前用户批准的本地自动化程序经标准输入临时注入。不得输出明文凭据或传给远程、不明程序。
+description: 管理本机 LocalVault 中由 SecretManagement 和 SecretStore 保存的凭据，包括新增、更新、元数据检查、精确删除和向当前用户批准的本地自动化程序经标准输入临时注入；也提供用户授权后的普通图片验证码自动登录（Ego 主入口、本地离线 OCR、持久提交计数）。不得输出明文凭据或传给远程、不明程序。
+metadata:
+  x-custom-skill: true
+  x-source-repo: dmdmwshr/custom-skills
 ---
 
 # LocalVault 凭据管理
@@ -16,7 +19,7 @@ description: 管理本机 LocalVault 中由 SecretManagement 和 SecretStore 保
 - `Info` 只显示密钥名称、类型、密钥库和映射信息；不要用会把密码打印到终端的调用方式。
 - 运行时调用只允许传给用户明确批准的本地程序，并通过标准输入发送一次性 JSON；不要把凭据发给远程命令、网络接口或不明程序。
 - 不读取、删除或修改浏览器 Cookie、密码库、配置文件或会话存储；LocalVault 与浏览器自动填充保持分离。
-- 验证码等挑战按用户明确授权和当前工具限制处理；默认请用户完成。用户明确授权普通图片验证码输入时可按页面完成，不绕过挑战、MFA 或工具强制限制。
+- 验证码等挑战默认请用户完成。用户明确授权“普通图片验证码”自动识别后，只走下文“授权普通图片验证码自动登录”的本地离线 OCR 路径；短信/邮箱验证码、MFA、滑块/行为验证等其他挑战仍由用户完成，不绕过，也不降级去读浏览器数据或工具强制限制。
 - 真实登录前确认目标网站、账号映射和本地自动化程序均由用户明确指定；一次只运行一个凭据自动化任务。
 
 ## 初始化
@@ -31,7 +34,7 @@ Install-Module Microsoft.PowerShell.SecretStore -Scope CurrentUser
 使用本技能附带的脚本：
 
 ```powershell
-$skillRoot = 'C:\Users\12070\.cc-switch\skills\自建skills\localvault-credentials'
+$skillRoot = 'C:\Users\12070\.codex\skills\localvault-credentials'
 ```
 
 脚本路径为 `$skillRoot\scripts\Manage-LocalVaultCredential.ps1`。脚本会导入模块，并在 `LocalVault` 尚未注册时注册它；首次访问可能要求输入密钥库解锁密码。
@@ -82,9 +85,17 @@ $skillRoot = 'C:\Users\12070\.cc-switch\skills\自建skills\localvault-credentia
 
 脚本不会把密码放到命令行参数或环境变量中，也不会把子程序输出中的密码原样回显。只调用可信的本地程序；不要把 `CommandPath` 指向下载后未经核验的脚本。
 
-对于浏览器登录，优先使用独立的临时 Edge/Playwright 上下文，运行时填写账号和密码，等待用户手动完成验证码，再由脚本提交并验证页面结果。这个调用链不等于把 LocalVault 接入 Codex 内置浏览器。
+用户明确指定临时 Edge/Playwright 手动路径时，可使用独立的临时 Edge/Playwright 上下文：运行时填写账号和密码，由用户手动完成验证码，再由脚本提交并验证页面结果。这个调用链不等于把 LocalVault 接入 Codex 内置浏览器；网页登录的默认浏览器是 Ego，授权普通图片验证码的自动路径见下一节。
 
 用户明确指定已连接的 Chrome/Edge 配置时，优先配合 `playwright-browser-control` 的 `scripts/vault_login.cjs` 复用官方 CLI 扩展会话；按其 `references/vault-login.md` 创建非秘密请求文件，经本技能 `Invoke` 注入凭据。此路径不读取浏览器密码库、不增加调试端口或常驻服务。不要用普通 CLI `fill` 传密码，也不要在填密码后、提交前保存页面快照；密码框的圆点不代表快照已经脱敏。真实登录必须回读业务导航，结果未知不重复提交。
+
+## 授权普通图片验证码自动登录
+
+用户明确授权普通图片验证码（4 位数字图片）自动识别，并指定目标站点、LocalVault 密钥和调用方已准备好的 Ego TaskSpace/Page 后，使用本技能的 `scripts/captcha-login.mjs`：经 `Manage-LocalVaultCredential.ps1 -Action Invoke` 从标准输入注入凭据，在**现有** Ego 页面内刷新验证码，用 `scripts/captcha-ocr.py`（离线 RapidOCR，仅 ASCII 四位数字且置信度不低于 0.8）识别后填写提交，并在刷新页面后核对目标 URL、期望账号和业务入口才算成功。
+
+- 任务 ID 绑定固定的目标/账号/密钥/上限，提交计数先于点击持久化（当前任务最多 5 次实际提交，续跑不重置）；点击后结果未知保持待对账，不自动再点；只有本次提交产生的明确验证码错误才刷新重试，账号/密码错误、访问限制和核验失败会持久阻断，需附证据对账后才能再次提交。成功核验要求调用方显式提供账号控件与业务入口控件的选择器（`--account-selector`、`--business-selector`，纳入任务绑定，缺失则失败关闭、不回退整页文本）。
+- 凭据、验证码和图片只在内存；不 claim 他人 Ego 空间、不新建/关闭页面、不注销。
+- 完整参数、初始化（需显式历史已用次数与证据）、对账、结果码和示例见 [references/captcha-login.md](references/captcha-login.md)。依赖（离线 OCR、Ego）不可用时如实报告未覆盖，不降级冒充通过。
 
 ## 映射式浏览器登录
 
@@ -102,8 +113,9 @@ Git 精确忽略，所以修改映射不会形成技能版本更新。
 ```
 
 只有用户明确指定目标站点并要求真实登录时，才使用下面的入口。`Info` 仅显示密钥元数据；
-`Save` 通过系统凭据提示框保存；`Login` 才会读取一次性凭据并打开临时浏览器窗口。验证码、
-MFA 和邮箱验证码仍必须由用户手动完成。
+`Save` 通过系统凭据提示框保存；`Login` 才会读取一次性凭据并打开临时浏览器窗口。该临时窗口路径
+不含自动识别：验证码、MFA 和邮箱验证码由用户手动完成；已授权普通图片验证码时改走上一节的
+Ego 自动路径。
 
 ```powershell
 & "$skillRoot\scripts\Invoke-LocalVaultWebLogin.ps1" `
