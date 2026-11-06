@@ -39,6 +39,59 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(1, len(list((self.root / fm.LIVE / '版本变更说明').glob('*.txt'))))
         self.assertEqual(self.frozen, fm.protected(self.root))
 
+    def test_office_owner_file_blocks_submission_without_changing_materials(self):
+        fm.apply(self.root, self.manifest(self.document()))
+        saved = fm.load(self.root / fm.RECORDS[0])
+        before = fm.scan(self.root, fm.MANAGED)
+        records = fm.record_snapshot(self.root)
+        transactions = list((self.root / fm.MGMT / '事务').iterdir())
+        owner = self.root / fm.LIVE / fm.SECTIONS[0] / '~$管理办法.docx'
+        owner.write_bytes(b'office owner')
+        for operation in (lambda: fm.check(self.root, saved),
+                          lambda: fm.make_plan(self.root, saved),
+                          lambda: fm.apply(self.root, saved)):
+            with self.assertRaisesRegex(ValueError, 'Office 临时锁文件'):
+                operation()
+        self.assertEqual(b'office owner', owner.read_bytes())
+        self.assertEqual(records, fm.record_snapshot(self.root))
+        self.assertEqual(transactions, list((self.root / fm.MGMT / '事务').iterdir()))
+        owner.unlink()
+        self.assertEqual(before, fm.scan(self.root, fm.MANAGED))
+        self.assertTrue(fm.check(self.root, saved)['verified'])
+
+    def test_office_owner_cannot_be_selected_as_a_member(self):
+        doc = self.document()
+        owner = self.root / '~$输入.docx'
+        owner.write_bytes(b'owner')
+        doc['members'][0].update(source=owner.name, sha256=fm.digest(owner))
+        with self.assertRaisesRegex(ValueError, 'Office 临时锁文件'):
+            fm.make_plan(self.root, self.manifest(doc))
+        ordinary = self.root / fm.ARCHIVES[0] / '~$原始说明.txt'
+        ordinary.write_bytes(b'ordinary material')
+        self.assertIn(ordinary.relative_to(self.root).as_posix(), fm.scan(self.root, fm.MANAGED))
+
+    def test_owner_opened_during_prepare_keeps_original_materials(self):
+        fm.apply(self.root, self.manifest(self.document()))
+        saved = fm.load(self.root / fm.RECORDS[0])
+        before = fm.scan(self.root, fm.MANAGED)
+        records = fm.record_snapshot(self.root)
+        saved['documents'].append(self.document('D2', '新增制度', 'new'))
+        owner = self.root / fm.LIVE / fm.SECTIONS[0] / '~$管理办法.docx'
+        copy_snapshot = fm.copy_snapshot
+
+        def open_document_after_backup(*args):
+            copy_snapshot(*args)
+            owner.write_bytes(b'office owner')
+
+        with patch.object(fm, 'copy_snapshot', side_effect=open_document_after_backup):
+            with self.assertRaisesRegex(RuntimeError, 'Office 临时锁文件'):
+                fm.apply(self.root, saved)
+        self.assertEqual(records, fm.record_snapshot(self.root))
+        self.assertEqual(b'office owner', owner.read_bytes())
+        owner.unlink()
+        self.assertEqual(before, fm.scan(self.root, fm.MANAGED))
+        self.assertFalse((self.root / fm.MGMT / '.执行锁').exists())
+
     def test_replace_preserves_history_and_renumbers_attachment(self):
         d = self.document()
         attachment = self.root / '附件1.docx'; attachment.write_bytes(b'attachment')

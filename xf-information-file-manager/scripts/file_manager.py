@@ -25,6 +25,8 @@ VOID_STATUSES = {'已作废', '已替代'}
 VOID_PREFIX = '【作废】'
 MGMT = '归档管理'
 RECORDS = [MGMT + '/文件台账.json', MGMT + '/当前目录.txt', MGMT + '/待核实事项.txt']
+OFFICE_SUFFIXES = {'.doc', '.docx', '.docm', '.xls', '.xlsx', '.xlsm', '.xlsb',
+                   '.ppt', '.pptx', '.pptm', '.wps', '.et', '.dps'}
 
 
 def digest(p):
@@ -65,6 +67,11 @@ def safe(root, rel):
     return p
 
 
+def reject_office_owner_file(path):
+    if path.name.startswith('~$') and path.suffix.lower() in OFFICE_SUFFIXES:
+        raise ValueError('检测到 Office 临时锁文件，请保存并关闭对应文档后重试，位置 ' + str(path))
+
+
 def scan(root, prefixes):
     files = {}
     for prefix in prefixes:
@@ -75,6 +82,7 @@ def scan(root, prefixes):
             rel = p.relative_to(root).as_posix()
             safe(root, rel)
             if p.is_file():
+                reject_office_owner_file(p)
                 files[rel] = digest(p)
     return files
 
@@ -171,6 +179,7 @@ def validate(root, manifest):
             if m['role'] not in ('main', 'attachment'):
                 raise ValueError('成员类型错误')
             p = safe(root, m['source'])
+            reject_office_owner_file(p)
             if not p.is_file() or digest(p) != m['sha256']:
                 raise ValueError('输入文件缺失或内容变化：' + m['source'])
             member_key = (m['sha256'], m['role'], m.get('name', '') if m['role'] == 'attachment' else '')
