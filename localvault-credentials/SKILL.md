@@ -93,9 +93,9 @@ $skillRoot = 'C:\Users\12070\.codex\skills\localvault-credentials'
 
 用户明确授权普通图片验证码（4 位数字图片）自动识别，并指定目标站点、LocalVault 密钥和调用方已准备好的 Ego TaskSpace/Page 后，使用本技能的 `scripts/captcha-login.mjs`：经 `Manage-LocalVaultCredential.ps1 -Action Invoke` 从标准输入注入凭据，在**现有** Ego 页面内刷新验证码，用 `scripts/captcha-ocr.py`（离线 RapidOCR，仅 ASCII 四位数字且置信度不低于 0.8）识别后填写提交，并在刷新页面后核对目标 URL、期望账号和业务入口才算成功。
 
-- 任务 ID 绑定固定的目标/账号/密钥/上限，提交计数先于点击持久化（当前任务最多 5 次实际提交，续跑不重置）；点击后结果未知保持待对账，不自动再点；只有本次提交产生的明确验证码错误才刷新重试，账号/密码错误、访问限制和核验失败会持久阻断，需附证据对账后才能再次提交。成功核验要求调用方显式提供账号控件与业务入口控件的选择器（`--account-selector`、`--business-selector`，纳入任务绑定，缺失则失败关闭、不回退整页文本）。
+- 任务 ID 绑定固定的目标/账号/密钥/上限，提交计数先于点击持久化（按“每轮”计：一次重新登录为一轮，每轮连续最多 5 次实际提交，跨命令和重启连续、不重置；完整刷新核验成功后本轮归零，下次过期重新登录重新享有 5 次，累计总数 `total` 另行保留）；点击后结果未知保持待对账，不自动再点；只有本次提交产生的明确验证码错误才刷新重试，账号/密码错误、访问限制和核验失败会持久阻断，需附证据对账后才能再次提交。成功核验要求调用方显式提供账号控件与业务入口控件的选择器（`--account-selector`、`--business-selector`，纳入任务绑定，缺失则失败关闭、不回退整页文本）。
 - 凭据、验证码和图片只在内存；不 claim 他人 Ego 空间、不新建/关闭页面、不注销。
-- 完整参数、初始化（需显式历史已用次数与证据）、对账、结果码和示例见 [references/captcha-login.md](references/captcha-login.md)。依赖（离线 OCR、Ego）不可用时如实报告未覆盖，不降级冒充通过。
+- 完整参数、初始化（需显式历史已用次数与证据）、对账、旧账 `migrate` 迁移、结果码和示例见 [references/captcha-login.md](references/captcha-login.md)。依赖（离线 OCR、Ego）不可用时如实报告未覆盖，不降级冒充通过。
 
 ## 映射式浏览器登录
 

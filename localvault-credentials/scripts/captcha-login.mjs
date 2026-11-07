@@ -11,7 +11,8 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const IS_WIN = process.platform === 'win32';
-const SCHEMA = 1;
+const SCHEMA = 2; // 2 = 每轮连续计数 + 累计分列；1 = 旧“整任务累计”，只读/对账/迁移可识别，login/verify 要求先 migrate
+const LEGACY_SCHEMA = 1;
 const MIN_SCORE = 0.8;
 const CODE_RE = /^[0-9]{4}$/;
 const TASK_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -190,14 +191,41 @@ function requireStateExists(p) {
   if (!fs.existsSync(p.state)) throw new Stop('state_missing', EXIT.state, { hint: 'run init explicitly; state is never rebuilt silently' });
 }
 
-function loadState(p, binding) {
+const isCount = (v) => Number.isInteger(v) && v >= 0;
+const intentNo = (intent) => { const m = /#(\d+)$/.exec(String(intent ?? '')); return m ? Number(m[1]) : null; };
+
+function checkFields(state) {
+  const bad = (reason) => { throw new Stop('state_corrupt', EXIT.state, { reason }); };
+  const plain = (v) => v && typeof v === 'object' && !Array.isArray(v);
+  if (!plain(state) || !plain(state.binding) || !plain(state.historical) || !isCount(state.historical.used) || !isCount(state.used) || !isCount(state.max)) bad('fields');
+  if (state.used > state.max || state.max !== state.binding.maxSubmissions || sha256(canonical(state.binding)) !== state.bindingSha256) bad('fields');
+  // 结构校验对 schema 1 / 2 一视同仁，且必须发生在任何写入（含 schema 1 备份）之前：事件日志是数组、seq 为合法计数且与长度一致、事件序号连续。
+  if (!isCount(state.seq) || !Array.isArray(state.events) || state.events.length !== state.seq) bad('events');
+  for (let i = 0; i < state.events.length; i += 1) {
+    const e = state.events[i];
+    if (!plain(e) || e.seq !== i + 1 || typeof e.kind !== 'string') bad('events');
+  }
+  for (const key of ['pending', 'blocked']) if (state[key] != null && !plain(state[key])) bad('fields');
+  if (state.schema === LEGACY_SCHEMA) {
+    if (state.used < state.historical.used) bad('fields');
+    return;
+  }
+  // schema 2：used = 本轮连续已用；total = 累计实际提交；intentSeq 单调不退，保证意图编号唯一。
+  if (!isCount(state.total) || !isCount(state.intentSeq) || !isCount(state.roundsCompleted)) bad('fields');
+  if (state.used > state.total || state.total < state.historical.used || state.intentSeq < state.total) bad('fields');
+  if (state.pending && (intentNo(state.pending.intent) === null || intentNo(state.pending.intent) > state.intentSeq || state.used < 1)) bad('pending');
+}
+
+// legacy: true 的命令（status / reconcile / migrate）可读取 schema 1；login / verify 遇到 schema 1 要求先 migrate，绝不静默套用新语义。
+function loadState(p, binding, { legacy = false } = {}) {
   requireStateExists(p);
   let state;
   try { state = JSON.parse(fs.readFileSync(p.state, 'utf8')); } catch { throw new Stop('state_corrupt', EXIT.state, { reason: 'unparseable' }); }
-  const { integrity, ...body } = state;
-  if (state.schema !== SCHEMA || typeof integrity !== 'string' || integrity !== sha256(canonical(body))) throw new Stop('state_corrupt', EXIT.state, { reason: 'integrity' });
-  if (!Number.isInteger(state.used) || state.used < state.historical.used || state.used > state.max || sha256(canonical(state.binding)) !== state.bindingSha256) throw new Stop('state_corrupt', EXIT.state, { reason: 'fields' });
+  const { integrity, ...body } = state ?? {};
+  if (![LEGACY_SCHEMA, SCHEMA].includes(state?.schema) || typeof integrity !== 'string' || integrity !== sha256(canonical(body))) throw new Stop('state_corrupt', EXIT.state, { reason: 'integrity' });
+  checkFields(state);
   if (binding && state.bindingSha256 !== sha256(canonical(binding))) throw new Stop('binding_mismatch', EXIT.state, { hint: 'task id is bound to a fixed target/account/secret/max' });
+  if (state.schema === LEGACY_SCHEMA && !legacy) throw new Stop('migration_required', EXIT.state, { schema: LEGACY_SCHEMA, hint: 'state uses the old whole-task cumulative count; run `migrate` once (same binding arguments) before login/verify' });
   return state;
 }
 
@@ -458,8 +486,22 @@ async function recognize(args, dataUrl) {
 }
 
 // ---- 子命令 ----
+// used / max / remaining 是“本轮连续”口径；total 是累计实际提交（旧 schema 1 里 used 本身就是累计，显示为 total 的同值）。
 function snapshot(state) {
-  return { taskId: state.taskId, used: state.used, max: state.max, remaining: state.max - state.used, historicalUsed: state.historical.used };
+  return {
+    taskId: state.taskId, schema: state.schema, used: state.used, max: state.max, remaining: state.max - state.used,
+    total: state.total ?? state.used, roundsCompleted: state.roundsCompleted ?? null, historicalUsed: state.historical.used,
+  };
+}
+
+// 完整刷新成功后结束当前一轮：连续计数归零，累计、历史、事件全部保留。pending / blocked 存在时绝不归零。
+function closeRoundIfVerified(state, via) {
+  if (state.used === 0 || state.pending || state.blocked) return false;
+  const roundSubmissions = state.used;
+  state.used = 0;
+  state.roundsCompleted += 1;
+  pushEvent(state, 'round_reset', { via, roundSubmissions, total: state.total, roundsCompleted: state.roundsCompleted });
+  return true;
 }
 
 async function cmdInit(args) {
@@ -473,7 +515,8 @@ async function cmdInit(args) {
     if (fs.existsSync(p.state)) throw new Stop('state_exists', EXIT.state, { hint: 'init never overwrites an existing task state' });
     const state = {
       schema: SCHEMA, taskId, binding, bindingSha256: sha256(canonical(binding)), max: binding.maxSubmissions,
-      used: historicalUsed, historical: { used: historicalUsed, evidenceRef: evidence.ref, evidenceSha256: evidence.sha256, at: isoNow() },
+      used: historicalUsed, total: historicalUsed, intentSeq: historicalUsed, roundsCompleted: 0,
+      historical: { used: historicalUsed, evidenceRef: evidence.ref, evidenceSha256: evidence.sha256, at: isoNow() },
       pending: null, blocked: null, seq: 0, events: [],
     };
     pushEvent(state, 'init', { historicalUsed, max: state.max });
@@ -485,8 +528,76 @@ async function cmdInit(args) {
 async function cmdStatus(args) {
   const taskId = taskIdOf(args);
   const p = paths(taskId);
-  const state = loadState(p, null);
-  return { outcome: 'status', exit: EXIT.ok, ...snapshot(state), pending: state.pending, blocked: state.blocked ?? null, lock: lockInfo(p), bindingSha256: state.bindingSha256, stateRootKind: p.kind };
+  const state = loadState(p, null, { legacy: true }); // 严格只读：不迁移、不写任何文件
+  const legacy = state.schema === LEGACY_SCHEMA ? { migrationRequired: true, migrationWouldReset: assessLegacy(state).eligible } : {};
+  return { outcome: 'status', exit: EXIT.ok, ...snapshot(state), ...legacy, pending: state.pending, blocked: state.blocked ?? null, lock: lockInfo(p), bindingSha256: state.bindingSha256, stateRootKind: p.kind };
+}
+
+// ---- schema 1 → 2 迁移：只据旧事件里完整、可信的最后一次刷新成功才归零，其余一律原样延续连续消耗 ----
+const isFullSuccess = (e) => e.kind === 'verify' && e.outcome === 'login_verified' && e.urlOk === true && e.loginForm === false && e.accountState === 'ok' && e.markerState === 'ok';
+const NON_CONSUMING = new Set(['ocr_rejected', 'ocr_failed', 'captcha_not_refreshed', 'stale_lock_cleared']);
+
+function assessLegacy(state) {
+  const none = (reason) => ({ eligible: false, reason, completed: 0, maxIntent: state.historical.used, verifySeq: null });
+  const events = state.events;
+  if (!Array.isArray(events) || events.length !== state.seq) return none('event_log_inconsistent');
+  let replay = state.historical.used;
+  let open = false;
+  let completed = 0;
+  let maxIntent = state.historical.used;
+  let lastSuccess = -1;
+  for (let i = 0; i < events.length; i += 1) {
+    const e = events[i];
+    if (!e || typeof e !== 'object' || e.seq !== i + 1 || typeof e.kind !== 'string') return none('event_log_inconsistent');
+    if (e.kind === 'submit_intent') { replay += 1; open = true; maxIntent = Math.max(maxIntent, intentNo(e.intent) ?? 0); }
+    else if (e.kind === 'intent_released_pre_click' || (e.kind === 'reconciled' && e.resolution === 'not-submitted')) replay -= 1;
+    else if (isFullSuccess(e)) { if (open) { completed += 1; open = false; } lastSuccess = i; }
+  }
+  const base = { completed, maxIntent, verifySeq: lastSuccess >= 0 ? events[lastSuccess].seq : null };
+  if (replay !== state.used) return { ...base, eligible: false, reason: 'used_mismatch' };
+  if (lastSuccess < 0) return { ...base, eligible: false, reason: 'no_trusted_success' };
+  if (state.pending) return { ...base, eligible: false, reason: 'pending_kept' };
+  if (state.blocked) return { ...base, eligible: false, reason: 'blocked_kept' };
+  for (let i = lastSuccess + 1; i < events.length; i += 1) {
+    if (!NON_CONSUMING.has(events[i].kind) && !isFullSuccess(events[i])) return { ...base, eligible: false, reason: 'unfinished_after_success' };
+  }
+  return { ...base, eligible: true, reason: 'trusted_success_no_later_consumption' };
+}
+
+async function cmdMigrate(args) {
+  const taskId = taskIdOf(args);
+  const binding = bindingOf(args); // 绑定不符 → binding_mismatch，不写任何文件
+  const p = paths(taskId);
+  requireStateExists(p);
+  const release = acquireLock(p);
+  try {
+    const rawBytes = fs.readFileSync(p.state);
+    const state = loadState(p, binding, { legacy: true }); // 完整性 / 字段 / 绑定校验失败 → state_corrupt / binding_mismatch，保持原文件
+    if (state.schema === SCHEMA) return { outcome: 'already_migrated', exit: EXIT.ok, ...snapshot(state), migration: state.migration ?? null, stateRootKind: p.kind };
+    const a = assessLegacy(state);
+    if (a.reason === 'event_log_inconsistent') throw new Stop('state_corrupt', EXIT.state, { reason: 'events' }); // 结构已在 loadState 校验；这里是防御，绝不带着坏事件日志继续落盘
+    const previousFileSha256 = sha256(rawBytes);
+    const backupName = `state.schema1-${previousFileSha256.slice(0, 16)}.json`;
+    const backup = path.join(p.dir, backupName);
+    const migrated = {
+      schema: SCHEMA, taskId: state.taskId, binding: state.binding, bindingSha256: state.bindingSha256, max: state.max,
+      used: a.eligible ? 0 : state.used, total: state.used,
+      intentSeq: Math.max(state.used, a.maxIntent, intentNo(state.pending?.intent) ?? 0), roundsCompleted: a.completed,
+      historical: state.historical, pending: state.pending ?? null, blocked: state.blocked ?? null, seq: state.seq, events: [...state.events],
+      migration: { fromSchema: LEGACY_SCHEMA, at: isoNow(), previousIntegrity: state.integrity, previousFileSha256, backup: backupName, previousUsed: state.used, previousSeq: state.seq, reset: a.eligible, reason: a.reason, trustedVerifySeq: a.verifySeq },
+    };
+    pushEvent(migrated, 'migrated_schema', { fromSchema: LEGACY_SCHEMA, toSchema: SCHEMA, previousIntegrity: state.integrity, previousFileSha256, reset: a.eligible, reason: a.reason, trustedVerifySeq: a.verifySeq, usedBefore: state.used, usedAfter: migrated.used, total: migrated.total });
+    checkFields(migrated); // 新状态必须满足同一 runner 的完整字段约束，否则不写备份也不换状态（失败 → state_corrupt）
+    if (fs.existsSync(backup)) { // 上次迁移写了备份但没来得及换状态：只接受字节完全相同的备份，不覆盖
+      if (sha256(fs.readFileSync(backup)) !== previousFileSha256) throw new Stop('state_corrupt', EXIT.state, { reason: 'backup_conflict' });
+    } else {
+      const fd = fs.openSync(backup, 'wx', 0o600);
+      try { fs.writeSync(fd, rawBytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      fsyncDir(p.dir);
+    }
+    saveState(p, migrated);
+    return { outcome: 'migrated', exit: EXIT.ok, ...snapshot(migrated), reset: a.eligible, reason: a.reason, backup: backupName, previousFileSha256, pending: migrated.pending, blocked: migrated.blocked, stateRootKind: p.kind };
+  } finally { release(); }
 }
 
 // 对账命令之间的互斥：同一时刻只有一个 reconcile，且清锁、取锁、读状态都在其保护内完成。
@@ -532,7 +643,7 @@ async function cmdReconcile(args) {
     } else if (resolution === 'clear-stale-lock') throw new Stop('usage_error', EXIT.usage, { reason: 'no_lock' });
     const release = acquireLock(p);
     try {
-      const state = loadState(p, null); // 取得排他锁之后才读取最新状态
+      const state = loadState(p, null, { legacy: true }); // 取得排他锁之后才读取最新状态
       if (resolution === 'clear-stale-lock') {
         if (state.pending) throw new Stop('pending_reconcile_required', EXIT.pending, { hint: 'resolve the pending submission first' });
         pushEvent(state, 'stale_lock_cleared', { holderPid: holder.pid ?? null });
@@ -543,10 +654,17 @@ async function cmdReconcile(args) {
       } else {
         if (!state.pending) throw new Stop('usage_error', EXIT.usage, { reason: 'nothing_pending' });
         if (resolution === 'not-submitted') {
-          if (state.used - 1 < state.historical.used) throw new Stop('state_corrupt', EXIT.state, { reason: 'refund_below_history' });
-          state.used -= 1;
+          // 只退还这次待对账、已证未点击的意图；它一定属于当前一轮，不会跨成功轮退款。
+          if (state.schema === LEGACY_SCHEMA) {
+            if (state.used - 1 < state.historical.used) throw new Stop('state_corrupt', EXIT.state, { reason: 'refund_below_history' });
+            state.used -= 1;
+          } else {
+            if (state.used < 1 || state.total - 1 < state.historical.used) throw new Stop('state_corrupt', EXIT.state, { reason: 'refund_below_history' });
+            state.used -= 1;
+            state.total -= 1;
+          }
         }
-        pushEvent(state, 'reconciled', { resolution, intent: state.pending.intent, evidenceSha256: evidence.sha256, used: state.used });
+        pushEvent(state, 'reconciled', { resolution, intent: state.pending.intent, evidenceSha256: evidence.sha256, used: state.used, ...(state.schema === SCHEMA ? { total: state.total } : {}) });
         state.pending = null;
       }
       saveState(p, state);
@@ -611,7 +729,8 @@ async function cmdLogin(args) {
     const pre = egoGate(await ego.call('preflight'), 'preflight');
     if (pre.kind === 'business') {
       const verdict = await verifySession(ego);
-      pushEvent(state, 'verify', { via: 'already-on-business-page', outcome: verdict.outcome });
+      pushEvent(state, 'verify', { via: 'already-on-business-page', outcome: verdict.outcome, ...(verdict.verify ?? {}) });
+      if (verdict.outcome === 'login_verified') closeRoundIfVerified(state, 'already-on-business-page'); // 已有正确会话：有未归零的本轮消耗才归零，已是 0 则不重复记轮
       saveState(p, state);
       return { ...verdict, outcome: verdict.outcome === 'login_verified' ? 'already_logged_in_verified' : verdict.outcome, submissionsThisRun: 0, ...snapshot(state) };
     }
@@ -656,10 +775,12 @@ async function cmdLogin(args) {
 
       // 先持久化提交意图（计数+1、待对账），再做不可逆的点击。
       state.used += 1;
+      state.total += 1;
+      state.intentSeq += 1;
       run.submissions += 1;
-      const intent = `${taskId}#${state.used}`;
+      const intent = `${taskId}#${state.intentSeq}`; // 单调唯一：本轮归零或退款都不会复用编号
       state.pending = { intent, at: isoNow(), stage: 'intent' };
-      pushEvent(state, 'submit_intent', { intent, used: state.used, max: state.max, score: ocr.score, ocrMs: ocr.ocrMs });
+      pushEvent(state, 'submit_intent', { intent, used: state.used, total: state.total, max: state.max, score: ocr.score, ocrMs: ocr.ocrMs });
       saveState(p, state);
       const launchedMs = Date.now() - ocrStarted;
       const submitStarted = Date.now();
@@ -670,8 +791,9 @@ async function cmdLogin(args) {
         || (r && r.ok === false && (r.clickInvoked === false || ['space_not_agent_owned', 'page_missing', 'not_on_login'].includes(r.reason)));
       if (preClick) { // 脚本明确声明点击未发生：释放这次计数
         state.used -= 1;
+        state.total -= 1;
         state.pending = null;
-        pushEvent(state, 'intent_released_pre_click', { intent, used: state.used });
+        pushEvent(state, 'intent_released_pre_click', { intent, used: state.used, total: state.total });
         saveState(p, state);
         throw new Stop(res.spawnFailed ? 'ego_unavailable' : 'fill_failed', EXIT.stop, { step: 'submit', released: true, ...snapshot(state) });
       }
@@ -686,7 +808,7 @@ async function cmdLogin(args) {
       const stopCategory = f.restricted ? 'access_restricted' : f.credential ? 'credential_error' : null;
       const classification = stopCategory
         ?? (r.leftLogin ? 'left_login' : (f.captcha && !f.other ? 'captcha_error' : 'unknown'));
-      pushEvent(state, 'submit_outcome', { intent, classification, used: state.used, ...timing });
+      pushEvent(state, 'submit_outcome', { intent, classification, used: state.used, total: state.total, ...timing });
       if (classification === 'unknown') {
         state.pending = { ...state.pending, stage: 'unknown' };
         saveState(p, state);
@@ -705,12 +827,13 @@ async function cmdLogin(args) {
       }
       const verdict = await verifySession(ego);
       pushEvent(state, 'verify', { outcome: verdict.outcome, ...(verdict.verify ?? {}) });
-      if (verdict.outcome !== 'login_verified') { // 点击后核验失败/错误账号同样不默认获得下一次提交权限
+      let roundClosed = false;
+      if (verdict.outcome !== 'login_verified') { // 点击后核验失败/错误账号同样不默认获得下一次提交权限，也不归零
         state.blocked = { reason: verdict.outcome, intent, at: isoNow() };
         pushEvent(state, 'blocked', { reason: verdict.outcome, intent });
-      }
+      } else roundClosed = closeRoundIfVerified(state, 'login'); // 完整刷新核验成功：本轮结束，连续计数归零（与 verify 事件同一次原子写）
       saveState(p, state);
-      return { ...verdict, submissionsThisRun: run.submissions, rounds: run.rounds, ocrRejected: run.rejected, ...snapshot(state) };
+      return { ...verdict, submissionsThisRun: run.submissions, rounds: run.rounds, ocrRejected: run.rejected, roundClosed, ...snapshot(state) };
     }
     throw new Stop('ocr_rounds_exhausted', EXIT.stop, { rounds: run.rounds, ocrRejected: run.rejected, submissionsThisRun: run.submissions, ...snapshot(state) });
   } finally { release(); }
@@ -728,12 +851,13 @@ async function cmdVerify(args) {
     egoGate(await ego.call('preflight'), 'preflight');
     const verdict = await verifySession(ego);
     pushEvent(state, 'verify', { outcome: verdict.outcome, ...(verdict.verify ?? {}) });
+    const roundClosed = verdict.outcome === 'login_verified' ? closeRoundIfVerified(state, 'verify') : false; // 同样要求完整核验；pending / blocked 存在时不归零
     saveState(p, state);
-    return { ...verdict, submissionsThisRun: 0, ...snapshot(state) };
+    return { ...verdict, submissionsThisRun: 0, roundClosed, ...snapshot(state) };
   } finally { release(); }
 }
 
-const COMMANDS = { init: cmdInit, status: cmdStatus, reconcile: cmdReconcile, login: cmdLogin, verify: cmdVerify };
+const COMMANDS = { init: cmdInit, status: cmdStatus, migrate: cmdMigrate, reconcile: cmdReconcile, login: cmdLogin, verify: cmdVerify };
 
 async function main() {
   let result;

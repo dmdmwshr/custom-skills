@@ -32,18 +32,54 @@
 状态根固定为 `%LOCALAPPDATA%\LocalVaultCredentials\captcha-login-state\<taskId>\`（`state.json` + 排他锁 `lock`）。`CAPTCHA_LOGIN_STATE_ROOT` 仅测试可用（须同时设 `CAPTCHA_LOGIN_ALLOW_TEST_ROOT=1`），生产调用不得改根，输出中的 `stateRootKind` 应为 `default`。同一许可下还有测试专用的 `CAPTCHA_LOGIN_TEST_PAUSE_BEFORE_RECONCILE_LOCK_MS`（用于确定性复现对账竞态），生产调用不得设置。
 
 1. **绑定**：任务 ID 绑定固定的目标 URL、期望账号显示名、业务入口标记、密钥名和提交上限；同任务换任何一项返回 `binding_mismatch`，不会重置计数。
-2. **初始化必须显式**：`init` 要求 `--historical-used`（历史已用次数，无默认 0）以及不可变证据文件 `--evidence-ref` + `--evidence-sha256`；已存在状态不覆盖（`state_exists`），缺失状态不静默重建（`state_missing`），篡改/损坏返回 `state_corrupt`。
-3. **先记账再点击**：确认 OCR 通过后，先原子写入（临时文件 + fsync + rename）“提交意图”，计数 +1 并置待对账，再点击提交。实际提交次数与 OCR 刷新轮次分开计；当前任务最多 5 次实际提交，每次运行另有上限 `--run-submission-cap`（默认 3）。
+2. **初始化必须显式**：`init` 要求 `--historical-used`（起始时已计入本轮的连续次数，同时记入累计，无默认 0）以及不可变证据文件 `--evidence-ref` + `--evidence-sha256`；已存在状态不覆盖（`state_exists`），缺失状态不静默重建（`state_missing`），篡改/损坏返回 `state_corrupt`。新建状态为 `schema: 2`（见下“每轮预算与累计”）。
+3. **先记账再点击**：确认 OCR 通过后，先原子写入（临时文件 + fsync + rename）“提交意图”，计数 +1 并置待对账，再点击提交。实际提交次数与 OCR 刷新轮次分开计（OCR 刷新不扣提交次数，且受 `--max-ocr-rounds` 限制）；**每轮**最多 5 次实际提交（`--max-submissions`），每次运行另有上限 `--run-submission-cap`（默认 3）。提交意图编号 `<taskId>#<n>` 由单调递增的 `intentSeq` 生成，本轮归零或退款都不会复用编号。
 4. **只重试本次提交产生的明确验证码错误**：点击前先记录页面已有提示（已有提示最多等约 4 秒消失），点击后只统计**新增**的提示；仅新增的验证码类提示才刷新重试。点击前就存在且未变化的“验证码错误”不是本次反馈，没有新增反馈即为未知。新增账号/密码类（`credential_error`）、限制类（`access_restricted`）立即停止；新增提示夹杂其他内容、或无法归类，同样按未知处理，不重试。
 5. **明确失败持久阻断**：`credential_error`、`access_restricted`，以及点击后刷新核验失败（`account_mismatch`、`not_logged_in`、`verify_failed`），都会把任务置为“阻断”（`blocked`）。阻断写在状态文件里，新进程的 `login` 返回 `blocked_reconcile_required` 且不触碰浏览器；只有现场核对后附证据执行 `reconcile --resolution blocked-reviewed` 才能解除，计数不退款、不复位。
 6. **未知保持待对账**：点击后超时、脚本异常、结果无法分类、进程崩溃，均保留“待对账”和已记的计数，**不自动再点**；`login` 此时返回 `pending_reconcile_required`，且不触碰浏览器。仅当脚本明确声明点击尚未发生（点击前失败）才自动释放这次计数。
 7. **锁**：并发的第二个运行器返回 `locked`；崩溃遗留的锁永不自动清除。`reconcile` 之间由 `reconcile.lock` 互斥（同样不自动清除），在其保护内先确认持有进程已不存在、再清理旧锁、取得排他锁后才读取最新状态；活跃持有者或被替换的锁不会被删除。
 
+## 每轮预算与累计（a20，当前口径）
+
+用户澄清的口径：**“5 次”是一轮重新登录里连续尝试的次数，不是整个业务任务的累计。** 一轮 = 从需要重新登录起，到完整刷新核验成功为止；每轮最多 5 次实际提交，成功后本轮归零，下一次会话过期、重新登录仍有完整的 5 次。此前文档里“整任务累计 5 次”“已用 3/5”等描述属于旧语义下的历史记录，不再代表当前规则。
+
+| 字段（`status` / 每次输出） | 含义 |
+| --- | --- |
+| `used` / `max` / `remaining` | **本轮**连续已用 / 每轮上限 / 本轮剩余；旧调用方继续读这三项即可 |
+| `total` | **累计**实际提交次数；成功归零不影响它。只会因“已证明未点击”的意图退款而减少 |
+| `roundsCompleted` | 已完成（完整核验成功）的轮数 |
+| `historicalUsed` | `init` 记录的起点，保留来源证据 |
+| `schema` | 状态格式：2 为本口径；1 为旧“整任务累计”口径 |
+
+规则：
+
+- **何时归零**：只有完整成功判据（目标 URL 精确源、账号控件、业务入口控件、无登录表单，且是刷新后的核验）全部通过，才结束本轮并 `used → 0`，同时写 `round_reset` 事件（与本次 `verify` 事件同一次原子写）。`login` 提交后的核验、`login` 发现已在正确会话、以及独立的 `verify` 命令都适用同一规则；已是 0 时不重复记轮，重复核验是幂等的。任一项不通过（账号/业务入口/URL/刷新）都不归零，仍按原规则阻断或待对账。
+- **失败不补额度**：验证码错误消耗本轮次数；连续失败 5 次后 `submission_budget_exhausted`，重新运行、`status`、重启、换进程都不会获得新额度；也没有通用的 reset、删除状态或换 task/根补额度的入口。第 5 次提交若成功，仍会完成核验并归零。
+- **受保护状态**：`pending`（结果未知）、`unknown`、`blocked` 存在时，成功核验、迁移、`status`、重启都不会清除它们，也不会归零；`reconcile --resolution not-submitted` 只退还这一次已证明未点击的意图（`used` 与 `total` 各 -1），不会跨已完成的成功轮退款。
+- **`status` 严格只读**：不写任何文件，不迁移。对 schema 1 状态它显示旧口径数字并附 `migrationRequired: true` 与 `migrationWouldReset`（预判，不写入）。
+
+### 旧账（schema 1）迁移：`migrate`
+
+`login` / `verify` 遇到 schema 1 状态返回 `migration_required`（退出码 31），不触碰浏览器，也不静默套用新口径。迁移是**唯一**的写入口，需带与 `login` 相同的绑定参数（账号/业务入口选择器等），在持有任务排他锁时原子写入，可重复执行：
+
+```powershell
+node captcha-login.mjs migrate --task-id <taskId> --target-url '<登录页 URL>' --expected-account '<账号显示名>' `
+  --business-marker '<业务入口文字>' --account-selector '<账号控件 CSS 选择器>' --business-selector '<业务入口控件 CSS 选择器>' `
+  --secret-name '<LocalVault 密钥名>' --max-submissions 5
+```
+
+- 先校验完整性、字段与绑定：损坏返回 `state_corrupt`，绑定不符返回 `binding_mismatch`，两者都不写任何文件。
+- **只有**同时满足下列条件才据证归零（`reset: true`）：旧事件里最后一次 `verify` 是可信的完整成功（`login_verified` 且 `urlOk`、`loginForm=false`、`accountState=ok`、`markerState=ok` 都有记录，仅有结果字符串、离开登录页或正文描述不算）；其后没有任何新增消耗/失败/未知事件（仅允许 OCR 拒绝、验证码未刷新、清理旧锁、再次完整成功）；没有 `pending`/`blocked`；事件回放得到的已用数与状态一致。此时 `total` 保留旧累计，`used` 归零。
+- 其余情形（无可信成功、成功后又有失败或未知、有 `pending`/`blocked`、回放不一致）**不补额度**：`used` 原样延续为本轮连续消耗，`total` 同值，`pending`/`blocked` 原样保留，`reason` 说明原因。
+- 迁移前把原文件字节原样备份为同目录 `state.schema1-<sha前16位>.json`（不覆盖），状态里保存 `migration` 摘要（旧完整性值、旧文件 sha256、旧 used/seq、是否归零、依据的 verify 序号），并追加 `migrated_schema` 事件；原有全部历史事件和绑定保留。
+- 重复执行返回 `already_migrated`，状态不变；并发执行只有一个会写入，其余得到 `already_migrated` 或 `locked`。
+- 迁移只处理你指定任务根里的状态文件；现场实际账的迁移需在受管发布后由来源协调者执行，测试阶段只在隔离根的副本上演练。
+
 对账（需现场核实结果后再执行，附证据文件）：
 
 ```powershell
 node captcha-login.mjs reconcile --task-id <taskId> --resolution submitted      --evidence-ref <证据> --evidence-sha256 <sha256>   # 确认已提交：保留计数
-node captcha-login.mjs reconcile --task-id <taskId> --resolution not-submitted  --evidence-ref <证据> --evidence-sha256 <sha256>   # 确认未提交：计数 -1
+node captcha-login.mjs reconcile --task-id <taskId> --resolution not-submitted  --evidence-ref <证据> --evidence-sha256 <sha256>   # 确认未提交：仅退这一次意图（本轮 used 与累计 total 各 -1）
 node captcha-login.mjs reconcile --task-id <taskId> --resolution blocked-reviewed --evidence-ref <证据> --evidence-sha256 <sha256>  # 明确失败/核验失败后，现场核对并获授权后解除阻断：计数不变
 node captcha-login.mjs reconcile --task-id <taskId> --resolution clear-stale-lock                                                   # 仅清理已退出持有者的锁（无待对账时）
 ```
@@ -57,6 +93,7 @@ node captcha-login.mjs reconcile --task-id <taskId> --resolution clear-stale-loc
 - **账号控件**：`--account-selector` 指定的 CSS 选择器必须恰好命中**一个可见**元素（隐藏元素不计入），且该元素规范化（合并空白、去首尾空白）后的文本与期望账号显示名**完全相等**。命中 0 个（`missing`）、多个（`ambiguous`）、文本不等（`mismatch`）都不通过；页面其他位置出现同名文字（如“历史经办 钱奡”）不能代替当前账号控件。
 - **业务入口控件**：`--business-selector` 同理，必须恰好命中一个可见元素且文本与业务入口标记完全相等。
 - 不使用整页文本，选择器缺失时不回退（见下一节）。
+- 以上全部通过才算成功，并只有此时才结束当前一轮、本轮计数归零（见“每轮预算与累计”）。
 
 ## 必填：账号与业务入口的控件定位
 
@@ -78,7 +115,7 @@ node captcha-login.mjs reconcile --task-id <taskId> --resolution clear-stale-loc
 - 仍然只在退出码 0、未超时时采信结果。`@@STAGE@@click-begin` 出现在任一路都表示点击阶段已开始：此后若超时、非零退出或没有结果行，一律是“结果未知并保持待对账”，不退还计数、不自动重放；只有脚本明确声明 `clickInvoked:false`（或进程根本没能启动）才释放点击前的计数。
 - OCR worker 的协议不变：只读它的 stdout JSON，stderr 不采信。
 
-`verify` 子命令只刷新并核验，不提交、不改计数。
+`verify` 子命令只刷新并核验，不提交；完整核验成功且没有 `pending`/`blocked` 时，会结束尚未归零的本轮（本轮 `used → 0`，见“每轮预算与累计”），否则不改计数。
 
 ## 调用示例
 
@@ -128,6 +165,8 @@ $run   = "$skill\scripts\captcha-login.mjs"
 | `ego_unavailable` / `ego_space_not_agent_owned` / `ego_page_missing` / `unexpected_page` / `fill_failed` / `ego_error` | 10 | 浏览器对象不符合调用约定；修正对象后再来，运行器不会自行 claim 或新建 |
 | `submit_result_unknown` / `pending_reconcile_required` | 20 | 先现场核实是否已提交，再 `reconcile`；不盲重放 |
 | `usage_error` / `binding_mismatch` / `state_missing` / `state_exists` / `state_corrupt` / `locked` | 30–32 | 参数、状态或锁问题，计数未变 |
+| `migration_required` | 31 | 状态仍是旧“整任务累计”格式（schema 1）；先执行 `migrate`（见“每轮预算与累计”），计数未变 |
+| `migrated` / `already_migrated` | 0 | `migrate` 的结果；`reset` 字段说明是否据证归零 |
 
 ## 兼容与边界
 

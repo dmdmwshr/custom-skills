@@ -225,14 +225,14 @@ async function main() {
     const c = await makeCase('happy', { submits: ['ok'] });
     const r = await c.login();
     const f = r.final;
-    check('L4-happy-verified', 'behavior', 'login with OCR accepted, one submission, reload verify', 'login_verified; used 2->3; URL+account+marker checked after reload', { outcome: f.result, used: f.used, verify: f.verify }, f.result === 'login_verified' && f.used === 3 && f.verify?.urlOk && f.verify?.accountState === 'ok' && f.verify?.markerState === 'ok' && !f.verify?.loginForm && r.code === 0);
+    check('L4-happy-verified', 'behavior', 'login with OCR accepted, one submission, reload verify', 'login_verified; total 2->3 and the round closes (used 0, remaining 5); URL+account+marker checked after reload', { outcome: f.result, used: f.used, total: f.total, remaining: f.remaining, verify: f.verify }, f.result === 'login_verified' && f.total === 3 && f.used === 0 && f.remaining === 5 && f.verify?.urlOk && f.verify?.accountState === 'ok' && f.verify?.markerState === 'ok' && !f.verify?.loginForm && r.code === 0);
     const calls = c.calls();
     check('L4-reload-before-verdict', 'behavior', 'calls order', 'verify step (reload) runs after the submit step', calls.map((x) => x.step), calls.map((x) => x.step).join(',') === 'preflight,fill,refresh,submit,verify');
     const fills = c.page().fills;
     check('L3-credentials-used-correctly', 'behavior', 'fake page compared sha256 of filled values', 'username/password/captcha filled exactly once with expected values', fills, fills.userOk && fills.passOk && fills.codeOk);
     check('L3-password-only-in-fill-script', 'behavior', 'which generated scripts contain the password', 'only the fill step carries credentials; no step carries the captcha code except submit', calls.map((x) => [x.step, x.hasPassword, x.hasCode]), calls.every((x) => x.hasPassword === (x.step === 'fill')) && calls.every((x) => x.hasCode === (x.step === 'submit')));
     const ev = c.state().events.map((e) => e.kind);
-    check('L2-events-whitelist', 'behavior', 'state events', 'intent persisted before outcome and verify', ev, ev.join(',') === 'init,submit_intent,submit_outcome,verify');
+    check('L2-events-whitelist', 'behavior', 'state events', 'intent persisted before outcome and verify, then the round closes (round_reset)', ev, ev.join(',') === 'init,submit_intent,submit_outcome,verify,round_reset');
   }
   {
     const c = await makeCase('wrongaccount', { submits: ['ok'], accountText: 'someone-else' });
@@ -252,7 +252,7 @@ async function main() {
     // 已在业务页：先把假页面置为已登录
     fs.writeFileSync(path.join(c.dir, 'page.json'), JSON.stringify({ url: BUSINESS, acct: false, pw: false, code: '', imgIdx: 0, imgSrc: 'data:image/png;base64,FAKEIMG0', submits: 0, loggedIn: true, messages: [], fills: {} }));
     const r = await c.login();
-    check('L4-already-logged-in', 'behavior', 'start on business page', 'already_logged_in_verified, zero submissions, count unchanged', { outcome: r.final.result, used: r.final.used, submits: c.page().submits }, r.final.result === 'already_logged_in_verified' && r.final.used === 2 && c.page().submits === 0);
+    check('L4-already-logged-in', 'behavior', 'start on business page', 'already_logged_in_verified, zero submissions, total unchanged (2); the verified session closes the open round (used 0)', { outcome: r.final.result, used: r.final.used, total: r.final.total, submits: c.page().submits }, r.final.result === 'already_logged_in_verified' && r.final.total === 2 && r.final.used === 0 && c.page().submits === 0);
   }
 
   {
@@ -265,7 +265,7 @@ async function main() {
   {
     const c = await makeCase('captcha-retry', { submits: ['captcha_error', 'ok'] });
     const r = await c.login();
-    check('L2-captcha-error-retries', 'behavior', 'captcha_error then ok', 'second refresh+submit, used 2->4, login_verified', { outcome: r.final.result, used: r.final.used, refresh: count(c.calls(), 'refresh'), submits: c.page().submits }, r.final.result === 'login_verified' && r.final.used === 4 && count(c.calls(), 'refresh') === 2 && c.page().submits === 2);
+    check('L2-captcha-error-retries', 'behavior', 'captcha_error then ok', 'second refresh+submit, total 2->4, login_verified, round closed (used 0)', { outcome: r.final.result, used: r.final.used, total: r.final.total, refresh: count(c.calls(), 'refresh'), submits: c.page().submits }, r.final.result === 'login_verified' && r.final.total === 4 && r.final.used === 0 && count(c.calls(), 'refresh') === 2 && c.page().submits === 2);
   }
   for (const [name, outcome, expected] of [['credential', 'credential_error', 'credential_error'], ['restricted', 'restricted', 'access_restricted']]) {
     const c = await makeCase(`stop-${name}`, { submits: [outcome, 'ok'] });
@@ -280,7 +280,7 @@ async function main() {
     const unblock = await runIt(['reconcile', '--task-id', c.task, '--resolution', 'blocked-reviewed', '--evidence-ref', EVIDENCE, '--evidence-sha256', EVIDENCE_SHA]);
     check(`L2-${name}-unblock-keeps-count`, 'behavior', 'blocked-reviewed with evidence', 'unblocked, count stays 3 (no reset/refund)', { outcome: unblock.final.result, used: c.state().used, blocked: c.state().blocked }, unblock.final.result === 'reconciled' && c.state().used === 3 && c.state().blocked === null);
     const next = await c.login();
-    check(`L2-${name}-login-possible-only-after-unblock`, 'behavior', 'login after the evidence-backed unblock', 'proceeds (second click) and succeeds, count 4', { outcome: next.final.result, used: c.state().used, submits: c.page().submits }, next.final.result === 'login_verified' && c.state().used === 4 && c.page().submits === 2);
+    check(`L2-${name}-login-possible-only-after-unblock`, 'behavior', 'login after the evidence-backed unblock', 'proceeds (second click) and succeeds, total 4, round closed (used 0)', { outcome: next.final.result, used: c.state().used, total: c.state().total, submits: c.page().submits }, next.final.result === 'login_verified' && c.state().total === 4 && c.state().used === 0 && c.page().submits === 2);
   }
   {
     const c = await makeCase('mixed-toast', { submits: ['other_toast', 'ok'] });
@@ -300,12 +300,12 @@ async function main() {
   {
     const c = await makeCase('stale-plus-new', { submits: ['captcha_error', 'ok'], staleMessages: ['验证码错误'] });
     const r = await c.login();
-    check('L2-new-captcha-feedback-beside-stale-retries', 'behavior', 'stale alert present AND a new captcha error appears after the click', 'new feedback counts: retry once more and succeed, count 4', { outcome: r.final.result, used: r.final.used, submits: c.page().submits }, r.final.result === 'login_verified' && r.final.used === 4 && c.page().submits === 2);
+    check('L2-new-captcha-feedback-beside-stale-retries', 'behavior', 'stale alert present AND a new captcha error appears after the click', 'new feedback counts: retry once more and succeed, total 4, round closed', { outcome: r.final.result, used: r.final.used, total: r.final.total, submits: c.page().submits }, r.final.result === 'login_verified' && r.final.total === 4 && r.final.used === 0 && c.page().submits === 2);
   }
   {
     const c = await makeCase('stale-credential', { submits: ['captcha_error', 'ok'], staleMessages: ['用户名或密码错误'] });
     const r = await c.login();
-    check('L2-stale-credential-alert-does-not-stop-new-captcha-retry', 'behavior', 'stale credential alert unchanged, genuine new captcha error', 'classified by the new feedback only (captcha_error then success)', { outcome: r.final.result, used: r.final.used }, r.final.result === 'login_verified' && r.final.used === 4);
+    check('L2-stale-credential-alert-does-not-stop-new-captcha-retry', 'behavior', 'stale credential alert unchanged, genuine new captcha error', 'classified by the new feedback only (captcha_error then success)', { outcome: r.final.result, used: r.final.used, total: r.final.total }, r.final.result === 'login_verified' && r.final.total === 4 && r.final.used === 0);
   }
 
   // --- R3：URL 精确源、账号/入口整词匹配 ---
@@ -433,12 +433,12 @@ async function main() {
   {
     const c = await makeCase('chan-stderr-success', { submits: ['ok'], channel: 'stderr' });
     const r = await c.login();
-    check('L4-stderr-only-markers-success', 'behavior', 'every Ego step prints its @@R@@/@@STAGE@@ markers only on stderr (as the real Ego does), exit 0', 'login_verified through the normal runner path; count 2→3', { outcome: r.final.result, used: r.final.used, steps: c.calls().map((x) => x.step) }, r.final.result === 'login_verified' && r.final.used === 3 && c.calls().map((x) => x.step).join(',') === 'preflight,fill,refresh,submit,verify');
+    check('L4-stderr-only-markers-success', 'behavior', 'every Ego step prints its @@R@@/@@STAGE@@ markers only on stderr (as the real Ego does), exit 0', 'login_verified through the normal runner path; total 2→3, round closed', { outcome: r.final.result, used: r.final.used, total: r.final.total, steps: c.calls().map((x) => x.step) }, r.final.result === 'login_verified' && r.final.total === 3 && r.final.used === 0 && c.calls().map((x) => x.step).join(',') === 'preflight,fill,refresh,submit,verify');
   }
   {
     const c = await makeCase('chan-stderr-noise', { submits: ['ok'], channel: 'stderr', noiseStderr: true, noiseHuge: true });
     const r = await c.login();
-    check('L4-stderr-noise-and-oversize-ignored', 'behavior', 'stderr also carries plain noise, a mid-line “[log] @@R@@…”, marker-prefixed non-JSON/array lines BEFORE the real result, 3000 long noise lines, one 4.5 MB line and an echo of the script secret', 'only the exact real marker lines count: login_verified; nothing from stderr is echoed or persisted (global scan below)', { outcome: r.final.result, used: r.final.used }, r.final.result === 'login_verified' && r.final.used === 3);
+    check('L4-stderr-noise-and-oversize-ignored', 'behavior', 'stderr also carries plain noise, a mid-line “[log] @@R@@…”, marker-prefixed non-JSON/array lines BEFORE the real result, 3000 long noise lines, one 4.5 MB line and an echo of the script secret', 'only the exact real marker lines count: login_verified; nothing from stderr is echoed or persisted (global scan below)', { outcome: r.final.result, used: r.final.used, total: r.final.total }, r.final.result === 'login_verified' && r.final.total === 3 && r.final.used === 0);
   }
   {
     const c = await makeCase('chan-both-same', { submits: ['ok'], channel: 'both' });
@@ -488,6 +488,328 @@ async function main() {
     check('L2-click-marker-without-result-is-unknown', 'behavior', 'stderr has click-begin but no result line', 'submit_result_unknown + pending, count 3', { outcome: r.final.result, used: c.state().used, pending: c.state().pending?.stage }, r.final.result === 'submit_result_unknown' && c.state().used === 3 && c.state().pending?.stage === 'unknown');
   }
 
+  // --- a20：每轮连续 5 次（成功归零）、累计 total 单列、schema 1 → 2 迁移 ---
+  const readState = (task) => JSON.parse(fs.readFileSync(path.join(STATE_ROOT, task, 'state.json'), 'utf8'));
+  const stateFile = (task) => path.join(STATE_ROOT, task, 'state.json');
+  const fileSha = (f) => sha(fs.readFileSync(f));
+  const expire = (c) => { // 模拟会话过期：回到登录页，保留已提交次数
+    const f = path.join(c.dir, 'page.json');
+    const s = JSON.parse(fs.readFileSync(f, 'utf8'));
+    Object.assign(s, { loggedIn: false, url: LOGIN, acct: false, pw: false, code: '', messages: [] });
+    fs.writeFileSync(f, JSON.stringify(s));
+  };
+  const intents = (task) => readState(task).events.filter((e) => e.kind === 'submit_intent').map((e) => e.intent);
+  const strictlyIncreasing = (list) => list.every((v, i) => i === 0 || Number(v.split('#').pop()) > Number(list[i - 1].split('#').pop()));
+  const canon = (value) => JSON.stringify(value, (_k, v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]])) : v));
+  const BINDING_OBJ = { profile: 'fire-supervision', targetUrl: LOGIN, expectedAccount: ACCOUNT, businessMarker: MARKER, accountSelector: '.account-name', businessSelector: '.business-marker', secretName: 'synthetic-secret-name', maxSubmissions: 5 };
+  const stamp = (state) => { const { integrity: _x, ...body } = state; state.integrity = sha(canon(body)); return state; };
+  const fullOk = { outcome: 'login_verified', urlOk: true, loginForm: false, accountState: 'ok', markerState: 'ok' };
+  // 构造一个“旧 schema 1”状态：steps 依次是 intent / outcome / verifyOK / verifyBare / verifyFail / unknownOutcome / blocked
+  function legacyState(task, binding, steps, { hist = 3, pending = false, blocked = false } = {}) {
+    const s = { schema: 1, taskId: task, binding, bindingSha256: sha(canon(binding)), max: binding.maxSubmissions, used: hist, historical: { used: hist, evidenceRef: EVIDENCE, evidenceSha256: EVIDENCE_SHA, at: '2026-11-06T00:00:00.000Z' }, pending: null, blocked: null, seq: 0, events: [] };
+    const push = (kind, f = {}) => { s.seq += 1; s.events.push({ seq: s.seq, at: '2026-11-06T00:00:0' + (s.seq % 10) + '.000Z', kind, ...f }); };
+    push('init', { historicalUsed: hist, max: s.max });
+    for (const step of steps) {
+      if (step === 'intent') { s.used += 1; push('submit_intent', { intent: `${task}#${s.used}`, used: s.used, max: s.max, score: 0.9, ocrMs: 5 }); }
+      else if (step === 'outcome') push('submit_outcome', { intent: `${task}#${s.used}`, classification: 'left_login', used: s.used });
+      else if (step === 'unknownOutcome') push('submit_unknown', { intent: `${task}#${s.used}` });
+      else if (step === 'verifyOK') push('verify', fullOk);
+      else if (step === 'verifyBare') push('verify', { via: 'already-on-business-page', outcome: 'login_verified' });
+      else if (step === 'verifyFail') push('verify', { outcome: 'account_mismatch', urlOk: true, loginForm: false, accountState: 'mismatch', markerState: 'ok' });
+      else if (step === 'blockedEvent') push('blocked', { reason: 'verify_failed', intent: `${task}#${s.used}` });
+    }
+    if (pending) s.pending = { intent: `${task}#${s.used}`, at: '2026-11-06T00:00:00.000Z', stage: 'unknown' };
+    if (blocked) s.blocked = { reason: 'credential_error', intent: `${task}#${s.used}`, at: '2026-11-06T00:00:00.000Z' };
+    return stamp(s);
+  }
+  const putLegacy = (c, state) => fs.writeFileSync(stateFile(c.task), JSON.stringify(state, null, 2));
+  const migrateArgs = (c) => ['migrate', '--task-id', c.task, ...c.bind];
+
+  // (1) 同 task 两次完整成功：每次归零，累计单调，过期后再次登录仍有完整 5 次
+  {
+    const c = await makeCase('a20-two-rounds', { submits: ['ok', 'ok'] }, null, { historical: 0 });
+    const r1 = await c.login();
+    const s1 = c.state();
+    check('A20-1-first-success-zeroes', 'behavior', 'fresh task (0), one captcha attempt then full reload-verified success', 'login_verified; used 0 remaining 5 total 1 roundsCompleted 1; round_reset event; nothing pending/blocked', { outcome: r1.final.result, used: s1.used, total: s1.total, rounds: s1.roundsCompleted, remaining: r1.final.remaining, pending: s1.pending, blocked: s1.blocked }, r1.final.result === 'login_verified' && s1.used === 0 && s1.total === 1 && s1.roundsCompleted === 1 && r1.final.remaining === 5 && r1.final.total === 1 && !s1.pending && !s1.blocked && s1.events.some((e) => e.kind === 'round_reset'));
+    const again = await c.login();
+    check('A20-1-already-session-idempotent', 'behavior', 'login again while the correct session is still open', 'already_logged_in_verified, zero submissions, no new round (roundsCompleted stays 1, no second round_reset)', { outcome: again.final.result, rounds: c.state().roundsCompleted, resets: c.state().events.filter((e) => e.kind === 'round_reset').length, submits: c.page().submits }, again.final.result === 'already_logged_in_verified' && c.state().roundsCompleted === 1 && c.state().events.filter((e) => e.kind === 'round_reset').length === 1 && c.page().submits === 1);
+    expire(c);
+    const r2 = await c.login();
+    const s2 = c.state();
+    check('A20-1-second-round-after-expiry', 'behavior', 'session expired, login again, success', 'login_verified; used 0 remaining 5; total 2 (monotonic); roundsCompleted 2; intents unique and strictly increasing', { outcome: r2.final.result, used: s2.used, total: s2.total, rounds: s2.roundsCompleted, intents: intents(c.task) }, r2.final.result === 'login_verified' && s2.used === 0 && s2.total === 2 && s2.roundsCompleted === 2 && new Set(intents(c.task)).size === 2 && strictlyIncreasing(intents(c.task)));
+    // 第三次过期登录：全是验证码错误，仍可完整提交 5 次，不因累计 2 次而少
+    expire(c);
+    const r3 = await c.login(['--run-submission-cap', '5']);
+    check('A20-1-fresh-five-after-two-successes', 'behavior', 'third login (expired again), every captcha wrong, run cap 5', 'exactly 5 more submissions in this round, then submission_budget_exhausted; used 5 total 7', { outcome: r3.final.result, used: c.state().used, total: c.state().total, submits: c.page().submits }, r3.final.result === 'submission_budget_exhausted' && c.state().used === 5 && c.state().total === 7 && c.page().submits === 7);
+  }
+
+  // (2) 验证码错误跨进程累计 5 次后停；刷新不扣提交且有界
+  {
+    const c = await makeCase('a20-captcha-5', { submits: [] }, [{ code: CODE, score: 0.5 }, { code: CODE, score: 0.93 }], { historical: 0 });
+    const a = await c.login(['--run-submission-cap', '2']);
+    const b = await c.login(['--run-submission-cap', '2']);
+    const d = await c.login(['--run-submission-cap', '2']);
+    const e = await c.login(['--run-submission-cap', '2']);
+    const rejected = c.state().events.filter((x) => x.kind === 'ocr_rejected').length;
+    check('A20-2-captcha-errors-accumulate-across-processes', 'behavior', 'four separate CLI processes, every submission a captcha error, OCR alternates reject/accept, cap 2 per run', 'runs stop at 2,2,1 submissions (cap, cap, budget); 4th process stops before filling; the round never exceeds 5', { outcomes: [a, b, d, e].map((x) => x.final.result), used: c.state().used, total: c.state().total, submits: c.page().submits, fillsInLastRun: e.final.step ?? null }, [a, b].every((x) => x.final.result === 'run_submission_cap_reached') && d.final.result === 'submission_budget_exhausted' && e.final.result === 'submission_budget_exhausted' && c.state().used === 5 && c.state().total === 5 && c.page().submits === 5);
+    check('A20-2-refresh-not-counted-and-bounded', 'behavior', 'OCR rejected rounds between submissions', 'rejections never consumed submissions (used equals real clicks); every run bounded by max-ocr-rounds', { rejected, used: c.state().used, clicks: c.page().submits }, rejected >= 4 && c.state().used === c.page().submits);
+    const bounded = await makeCase('a20-refresh-bounded', { submits: [] }, [{ code: CODE, score: 0.3 }], { historical: 0 });
+    const rb = await bounded.login(['--max-ocr-rounds', '4']);
+    check('A20-2-ocr-refresh-bounded-no-spend', 'behavior', 'OCR never accepts, max-ocr-rounds 4', 'ocr_rounds_exhausted after exactly 4 refresh rounds; used and total stay 0', { outcome: rb.final.result, refresh: count(bounded.calls(), 'refresh'), used: bounded.state().used, total: bounded.state().total }, rb.final.result === 'ocr_rounds_exhausted' && count(bounded.calls(), 'refresh') === 4 && bounded.state().used === 0 && bounded.state().total === 0);
+  }
+
+  // (3) 第 5 次成功仍可核验并归零；连续失败 5 次后下一命令不补额度
+  {
+    const c = await makeCase('a20-fifth-success', { submits: ['captcha_error', 'captcha_error', 'captcha_error', 'captcha_error', 'ok'] }, null, { historical: 0 });
+    const r = await c.login(['--run-submission-cap', '5']);
+    check('A20-3-fifth-submission-success-zeroes', 'behavior', 'four wrong captchas then the fifth attempt succeeds', 'login_verified with full reload check; used 0 remaining 5 total 5; round closed after 5 submissions', { outcome: r.final.result, used: c.state().used, total: c.state().total, closed: r.final.roundClosed }, r.final.result === 'login_verified' && c.state().used === 0 && c.state().total === 5 && r.final.roundClosed === true);
+    const f = await makeCase('a20-fifth-failure', { submits: [] }, null, { historical: 0 });
+    await f.login(['--run-submission-cap', '5']);
+    const before = f.calls().length;
+    const next = await f.login(['--run-submission-cap', '5']);
+    const stat = await f.status();
+    check('A20-3-five-failures-no-new-round', 'behavior', 'five consecutive captcha errors, then another login and a status call', 'next login stops with submission_budget_exhausted before any fill/refresh/submit; used stays 5 remaining 0; status read-only does not refill', { outcome: next.final.result, newSteps: f.calls().slice(before).map((x) => x.step), used: f.state().used, status: { used: stat.final.used, remaining: stat.final.remaining } }, next.final.result === 'submission_budget_exhausted' && f.calls().slice(before).every((x) => x.step === 'preflight') && f.state().used === 5 && stat.final.used === 5 && stat.final.remaining === 0);
+  }
+
+  // (4) 账号 / 业务 / URL / 刷新 任一不通过：不归零
+  for (const [name, extra, outcomes] of [
+    ['wrong-account', { submits: ['ok'], accountText: '别人' }, ['account_mismatch']],
+    ['missing-business', { submits: ['ok'], markerNodes: [] }, ['verify_failed']],
+    ['wrong-url', { submits: ['ok'], okUrl: 'http://elsewhere.invalid/#/wel/index' }, ['verify_failed', 'submit_result_unknown']],
+    ['reload-loses-session', { submits: ['ok'], reloadLosesSession: true }, ['not_logged_in']],
+  ]) {
+    const c = await makeCase(`a20-nozero-${name}`, extra, null, { historical: 0 });
+    const r = await c.login();
+    const s = c.state();
+    check(`A20-4-${name}-does-not-zero`, 'behavior', `submission leaves the login page but the full reload check fails (${name})`, `${outcomes.join(' or ')}, protected (blocked or pending), used stays 1 (no zero), roundsCompleted 0, no round_reset`, { outcome: r.final.result, used: s.used, total: s.total, rounds: s.roundsCompleted, blocked: s.blocked?.reason, pending: s.pending?.stage, resets: s.events.filter((e) => e.kind === 'round_reset').length }, outcomes.includes(r.final.result) && s.used === 1 && s.total === 1 && s.roundsCompleted === 0 && (!!s.blocked || !!s.pending) && s.events.every((e) => e.kind !== 'round_reset'));
+  }
+  {
+    const c = await makeCase('a20-verify-cmd', { startUrl: BUSINESS, accountText: '别人' }, null, { historical: 2 });
+    fs.writeFileSync(path.join(c.dir, 'page.json'), JSON.stringify({ url: BUSINESS, acct: false, pw: false, code: '', imgIdx: 0, imgSrc: 'data:image/png;base64,FAKEIMG0', submits: 0, loggedIn: true, messages: [], fills: {} }));
+    const bad = await runIt(['verify', '--task-id', c.task, ...c.bind, ...c.ego], { env: c.env });
+    check('A20-4-verify-command-mismatch-keeps-count', 'behavior', 'verify on a business page with a different account label', 'account_mismatch; used stays 2, no zero', { outcome: bad.final.result, used: c.state().used }, bad.final.result === 'account_mismatch' && c.state().used === 2 && c.state().roundsCompleted === 0);
+    const good = await makeCase('a20-verify-cmd-ok', { startUrl: BUSINESS }, null, { historical: 2 });
+    fs.writeFileSync(path.join(good.dir, 'page.json'), JSON.stringify({ url: BUSINESS, acct: false, pw: false, code: '', imgIdx: 0, imgSrc: 'data:image/png;base64,FAKEIMG0', submits: 0, loggedIn: true, messages: [], fills: {} }));
+    const v1 = await runIt(['verify', '--task-id', good.task, ...good.bind, ...good.ego], { env: good.env });
+    const v2 = await runIt(['verify', '--task-id', good.task, ...good.bind, ...good.ego], { env: good.env });
+    check('A20-4-verify-command-zeroes-once', 'behavior', 'two verify commands on a correct session carrying 2 open attempts', 'first closes the round (used 0, total 2, roundsCompleted 1); second is idempotent (still 1, one round_reset)', { first: v1.final.roundClosed, second: v2.final.roundClosed, state: { used: good.state().used, total: good.state().total, rounds: good.state().roundsCompleted }, resets: good.state().events.filter((e) => e.kind === 'round_reset').length }, v1.final.roundClosed === true && v2.final.roundClosed === false && good.state().used === 0 && good.state().total === 2 && good.state().roundsCompleted === 1 && good.state().events.filter((e) => e.kind === 'round_reset').length === 1);
+  }
+
+  // (5) pending / unknown / blocked 不被成功、迁移、status 清除；not-submitted 只退本次意图；intent 编号唯一
+  {
+    const c = await makeCase('a20-protected', { submits: ['ok', 'unknown', 'ok'] }, null, { historical: 0 });
+    await c.login();
+    expire(c);
+    const u = await c.login();
+    check('A20-5-unknown-pending-after-closed-round', 'behavior', 'round 1 succeeds (closed), round 2 submission result unknown', 'submit_result_unknown, pending kept; used 1 total 2', { outcome: u.final.result, used: c.state().used, total: c.state().total, pending: c.state().pending?.stage }, u.final.result === 'submit_result_unknown' && c.state().used === 1 && c.state().total === 2 && c.state().pending?.stage === 'unknown');
+    const fsBefore = fileSha(stateFile(c.task));
+    const stat = await c.status();
+    check('A20-5-status-strictly-read-only', 'behavior', 'status on a pending schema 2 state', 'state bytes unchanged, pending still reported', { same: fileSha(stateFile(c.task)) === fsBefore, pending: stat.final.pending?.stage }, fileSha(stateFile(c.task)) === fsBefore && stat.final.pending?.stage === 'unknown');
+    fs.writeFileSync(path.join(c.dir, 'page.json'), JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(c.dir, 'page.json'), 'utf8')), loggedIn: true, url: BUSINESS }));
+    const ver = await runIt(['verify', '--task-id', c.task, ...c.bind, ...c.ego], { env: c.env });
+    check('A20-5-success-verify-cannot-clear-pending', 'behavior', 'a full verify success while the unknown submission is still pending', 'login_verified but pending kept, no zero (used 1), no round_reset for it', { outcome: ver.final.result, closed: ver.final.roundClosed, used: c.state().used, pending: c.state().pending?.stage }, ver.final.result === 'login_verified' && ver.final.roundClosed === false && c.state().used === 1 && c.state().pending?.stage === 'unknown' && c.state().roundsCompleted === 1);
+    const refuse = await c.login();
+    check('A20-5-pending-blocks-next-process', 'behavior', 'login in a new process', 'pending_reconcile_required, no browser call', { outcome: refuse.final.result }, refuse.final.result === 'pending_reconcile_required');
+    const rec = await runIt(['reconcile', '--task-id', c.task, '--resolution', 'not-submitted', '--evidence-ref', EVIDENCE, '--evidence-sha256', EVIDENCE_SHA]);
+    check('A20-5-not-submitted-refunds-only-this-intent', 'behavior', 'reconcile not-submitted for the round-2 intent', 'used 1→0 and total 2→1: the already-closed round 1 submission is NOT refunded', { outcome: rec.final.result, used: c.state().used, total: c.state().total, rounds: c.state().roundsCompleted }, rec.final.result === 'reconciled' && c.state().used === 0 && c.state().total === 1 && c.state().roundsCompleted === 1);
+    const none = await runIt(['reconcile', '--task-id', c.task, '--resolution', 'not-submitted', '--evidence-ref', EVIDENCE, '--evidence-sha256', EVIDENCE_SHA]);
+    check('A20-5-no-cross-round-refund', 'behavior', 'second not-submitted with nothing pending', 'usage_error nothing_pending; total stays 1 (cannot refund the success round)', { outcome: none.final.result, reason: none.final.reason, total: c.state().total }, none.final.result === 'usage_error' && none.final.reason === 'nothing_pending' && c.state().total === 1);
+    expire(c);
+    const r3 = await c.login();
+    const ids = intents(c.task);
+    check('A20-5-intent-ids-unique-after-refund-and-reset', 'behavior', 'next login after refund and an earlier closed round', 'login_verified; every submit_intent id is distinct and strictly increasing (refund and zeroing never reuse a number)', { outcome: r3.final.result, ids }, r3.final.result === 'login_verified' && new Set(ids).size === ids.length && ids.length === 3 && strictlyIncreasing(ids));
+  }
+  {
+    const c = await makeCase('a20-blocked', { submits: ['credential_error'] }, null, { historical: 0 });
+    await c.login();
+    const stop = c.state();
+    fs.writeFileSync(path.join(c.dir, 'page.json'), JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(c.dir, 'page.json'), 'utf8')), loggedIn: true, url: BUSINESS }));
+    const ver = await runIt(['verify', '--task-id', c.task, ...c.bind, ...c.ego], { env: c.env });
+    check('A20-5-blocked-survives-success-verify', 'behavior', 'credential_error blocked the task; then a full verify success appears', 'blocked kept, used stays 1, no zero, login still refused', { outcome: ver.final.result, closed: ver.final.roundClosed, blocked: c.state().blocked?.reason, used: c.state().used, was: stop.blocked?.reason }, ver.final.result === 'login_verified' && ver.final.roundClosed === false && c.state().blocked?.reason === 'credential_error' && c.state().used === 1);
+    const ref = await c.login();
+    check('A20-5-blocked-still-refuses-login', 'behavior', 'login in a new process', 'blocked_reconcile_required', ref.final.result, ref.final.result === 'blocked_reconcile_required');
+  }
+
+  // (6) schema 1 → 2 迁移
+  {
+    const c = await makeCase('a20-legacy-ok', { submits: ['ok'] }, null, { historical: 0 });
+    putLegacy(c, legacyState(c.task, BINDING_OBJ, ['intent', 'outcome', 'verifyOK', 'intent', 'outcome', 'verifyOK']));
+    const legacyBytes = fs.readFileSync(stateFile(c.task));
+    const legacySha = sha(legacyBytes);
+    const st = await c.status();
+    check('A20-6-status-on-schema1-read-only', 'behavior', 'status on a schema 1 state that has a trusted last success', 'legacy cumulative numbers reported (used 5), migrationRequired true, migrationWouldReset true; bytes unchanged', { used: st.final.used, total: st.final.total, req: st.final.migrationRequired, would: st.final.migrationWouldReset, same: fileSha(stateFile(c.task)) === legacySha }, st.final.used === 5 && st.final.migrationRequired === true && st.final.migrationWouldReset === true && fileSha(stateFile(c.task)) === legacySha);
+    const ref = await c.login();
+    check('A20-6-login-refuses-unmigrated', 'behavior', 'login/verify on schema 1', 'migration_required (exit 31), zero browser calls, state untouched', { outcome: ref.final.result, code: ref.code, calls: c.calls().length, same: fileSha(stateFile(c.task)) === legacySha }, ref.final.result === 'migration_required' && ref.code === 31 && c.calls().length === 0 && fileSha(stateFile(c.task)) === legacySha);
+    const m = await runIt(migrateArgs(c));
+    const s = c.state();
+    const backup = path.join(STATE_ROOT, c.task, m.final.backup ?? 'missing');
+    check('A20-6-migrate-trusted-success-zeroes', 'behavior', 'migrate a legacy used=5 state whose last events are a full verify success', 'migrated: used 0 remaining 5 total 5 roundsCompleted 2; pending/blocked null; history events + migration event kept; backup is the exact original bytes', { outcome: m.final.result, used: s.used, total: s.total, rounds: s.roundsCompleted, reset: m.final.reset, backupSame: fs.existsSync(backup) && fileSha(backup) === legacySha, migration: s.migration?.reason, events: s.events.map((e) => e.kind) }, m.final.result === 'migrated' && s.schema === 2 && s.used === 0 && s.total === 5 && s.roundsCompleted === 2 && m.final.reset === true && !s.pending && !s.blocked && fs.existsSync(backup) && fileSha(backup) === legacySha && s.migration.previousFileSha256 === legacySha && s.events.length === 8 && s.events.at(-1).kind === 'migrated_schema' && s.events.slice(0, 7).map((e) => e.kind).join(',') === 'init,submit_intent,submit_outcome,verify,submit_intent,submit_outcome,verify');
+    const afterBytes = fileSha(stateFile(c.task));
+    const m2 = await runIt(migrateArgs(c));
+    check('A20-6-migrate-idempotent', 'behavior', 'migrate a second time', 'already_migrated; state bytes unchanged; still exactly one migrated_schema event', { outcome: m2.final.result, same: fileSha(stateFile(c.task)) === afterBytes, count: c.state().events.filter((e) => e.kind === 'migrated_schema').length }, m2.final.result === 'already_migrated' && fileSha(stateFile(c.task)) === afterBytes && c.state().events.filter((e) => e.kind === 'migrated_schema').length === 1);
+    const lg = await c.login();
+    check('A20-6-login-works-after-migrate', 'behavior', 'normal login on the migrated task (login page, correct captcha)', 'login_verified; total 6; used 0; intent id continues after 5', { outcome: lg.final.result, total: c.state().total, used: c.state().used, ids: intents(c.task) }, lg.final.result === 'login_verified' && c.state().total === 6 && c.state().used === 0 && intents(c.task).at(-1).endsWith('#6'));
+  }
+  const conservative = [
+    ['no-success', ['intent', 'outcome'], {}, 'no_trusted_success', 4],
+    ['failure-after-success', ['intent', 'outcome', 'verifyOK', 'intent', 'outcome'], {}, 'unfinished_after_success', 5],
+    ['unknown-after-success', ['intent', 'outcome', 'verifyOK', 'intent', 'unknownOutcome'], { pending: true }, 'pending_kept', 5],
+    ['blocked-state', ['intent', 'outcome', 'verifyOK', 'blockedEvent'], { blocked: true }, 'blocked_kept', 4],
+    ['bare-success-string-only', ['intent', 'outcome', 'verifyBare'], {}, 'no_trusted_success', 4],
+    ['failed-verify-last', ['intent', 'outcome', 'verifyOK', 'verifyFail'], {}, 'unfinished_after_success', 4],
+  ];
+  for (const [name, steps, opts, reason, usedExpected] of conservative) {
+    const c = await makeCase(`a20-legacy-${name}`, { submits: ['ok'] }, null, { historical: 0 });
+    const st = legacyState(c.task, BINDING_OBJ, steps, opts);
+    putLegacy(c, st);
+    const m = await runIt(migrateArgs(c));
+    const s = c.state();
+    check(`A20-6-conservative-${name}`, 'behavior', `migrate a legacy state without a clean trusted success (${name})`, `no credit: reset false (${reason}); used stays ${usedExpected}, total ${usedExpected}; pending/blocked preserved exactly`, { outcome: m.final.result, reason: m.final.reason, reset: m.final.reset, used: s.used, total: s.total, pending: !!s.pending, blocked: !!s.blocked }, m.final.result === 'migrated' && m.final.reset === false && m.final.reason === reason && s.used === usedExpected && s.total === usedExpected && !!s.pending === !!opts.pending && !!s.blocked === !!opts.blocked);
+    if (opts.pending || opts.blocked) {
+      const lg = await c.login();
+      check(`A20-6-protected-after-migrate-${name}`, 'behavior', 'login after migrating a pending/blocked legacy state', opts.pending ? 'pending_reconcile_required' : 'blocked_reconcile_required', lg.final.result, lg.final.result === (opts.pending ? 'pending_reconcile_required' : 'blocked_reconcile_required') && c.calls().length === 0);
+    }
+  }
+  {
+    const c = await makeCase('a20-legacy-tampered', { submits: ['ok'] }, null, { historical: 0 });
+    const st = legacyState(c.task, BINDING_OBJ, ['intent', 'outcome', 'verifyOK']);
+    st.used = 0; // 改了计数但不重算 integrity
+    putLegacy(c, st);
+    const before = fileSha(stateFile(c.task));
+    const m = await runIt(migrateArgs(c));
+    const unchangedA = fileSha(stateFile(c.task)) === before && fs.readdirSync(path.join(STATE_ROOT, c.task)).every((f) => !f.startsWith('state.schema1-'));
+    const forged = legacyState(c.task, BINDING_OBJ, ['intent', 'outcome', 'verifyOK']);
+    forged.used = 5; // 重算了 integrity、字段仍合法，但与事件回放（应为 4）不一致
+    stamp(forged);
+    putLegacy(c, forged);
+    const m2 = await runIt(migrateArgs(c));
+    check('A20-6-corrupt-and-inconsistent', 'behavior', 'migrate (a) a state whose integrity hash does not match, (b) a re-hashed state whose used disagrees with its own event log', '(a) state_corrupt, file unchanged, no backup; (b) migrated without credit (used_mismatch), used stays 5', { corrupt: m.final.result, unchangedAndNoBackup: unchangedA, inconsistent: { outcome: m2.final.result, reason: m2.final.reason, reset: m2.final.reset, used: c.state().used } }, m.final.result === 'state_corrupt' && unchangedA && m2.final.result === 'migrated' && m2.final.reason === 'used_mismatch' && m2.final.reset === false && c.state().used === 5 && fs.readdirSync(path.join(STATE_ROOT, c.task)).filter((f) => f.startsWith('state.schema1-')).length === 1);
+  }
+  {
+    const c = await makeCase('a20-legacy-binding', { submits: ['ok'] }, null, { historical: 0 });
+    putLegacy(c, legacyState(c.task, BINDING_OBJ, ['intent', 'outcome', 'verifyOK']));
+    const before = fileSha(stateFile(c.task));
+    const wrong = [...c.bind]; wrong[wrong.indexOf('--expected-account') + 1] = '别人';
+    const m = await runIt(['migrate', '--task-id', c.task, ...wrong]);
+    check('A20-6-binding-mismatch-no-write', 'behavior', 'migrate with a different expected account', 'binding_mismatch; state bytes unchanged; no backup file', { outcome: m.final.result, same: fileSha(stateFile(c.task)) === before, files: fs.readdirSync(path.join(STATE_ROOT, c.task)).sort() }, m.final.result === 'binding_mismatch' && fileSha(stateFile(c.task)) === before && fs.readdirSync(path.join(STATE_ROOT, c.task)).every((f) => !f.startsWith('state.schema1-')));
+  }
+  {
+    const c = await makeCase('a20-legacy-concurrent', { submits: ['ok'] }, null, { historical: 0 });
+    putLegacy(c, legacyState(c.task, BINDING_OBJ, ['intent', 'outcome', 'verifyOK']));
+    const runs = await Promise.all(Array.from({ length: 6 }, () => runIt(migrateArgs(c))));
+    const outs = runs.map((r) => r.final?.result).sort();
+    const s = c.state();
+    check('A20-6-concurrent-migrate-single-effect', 'behavior', 'six migrate processes at once on one schema 1 state', 'exactly one `migrated`; others `already_migrated` or `locked`; one migrated_schema event; used 0 total 4', { outcomes: outs, events: s.events.filter((e) => e.kind === 'migrated_schema').length, used: s.used, total: s.total }, outs.filter((o) => o === 'migrated').length === 1 && outs.every((o) => ['migrated', 'already_migrated', 'locked'].includes(o)) && s.events.filter((e) => e.kind === 'migrated_schema').length === 1 && s.used === 0 && s.total === 4);
+    const again = await Promise.all([runIt(migrateArgs(c)), runIt(migrateArgs(c))]);
+    check('A20-6-migrate-on-schema2-concurrent', 'behavior', 'two more migrates on the already-current state', 'already_migrated/locked only, state unchanged', again.map((r) => r.final.result), again.every((r) => ['already_migrated', 'locked'].includes(r.final.result)) && c.state().events.filter((e) => e.kind === 'migrated_schema').length === 1);
+  }
+  {
+    // 冻结的正式账副本（只读输入，复制到隔离根；不复制回、不写原文件）
+    const FROZEN = '/mnt/d/ws/05-temp/20261106_飞书与案卷续办/验证码Skill/预算澄清-正式账只读基线-20261107.json';
+    if (!fs.existsSync(FROZEN)) notCovered('A20-6-frozen-formal-ledger-copy', 'behavior', 'migrate the frozen schema 1 copy (used 5/5, seq 7) inside the isolated root', 'used 0 / total 5 with history kept', 'frozen copy not reachable on this host');
+    else {
+      const srcBytes = fs.readFileSync(FROZEN);
+      const srcSha = sha(srcBytes);
+      const frozen = JSON.parse(srcBytes.toString('utf8'));
+      const dir = path.join(STATE_ROOT, frozen.taskId);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'state.json'), srcBytes);
+      const b = frozen.binding;
+      const args = ['--task-id', frozen.taskId, '--target-url', b.targetUrl, '--expected-account', b.expectedAccount, '--business-marker', b.businessMarker, '--account-selector', b.accountSelector, '--business-selector', b.businessSelector, '--secret-name', b.secretName, '--max-submissions', String(b.maxSubmissions)];
+      const st = await runIt(['status', '--task-id', frozen.taskId]);
+      const m = await runIt(['migrate', ...args]);
+      const s = readState(frozen.taskId);
+      const m2 = await runIt(['migrate', ...args]);
+      const after = readState(frozen.taskId);
+      check('A20-6-frozen-formal-ledger-copy', 'behavior', 'status then migrate the frozen schema 1 copy of the formal ledger (used 5/5, seq 7, last event a full verify success) in the isolated test root', 'status shows used 5 remaining 0 and would-reset; migrate → used 0 remaining 5 total 5 roundsCompleted 2, history kept, backup == frozen bytes, second migrate idempotent; the frozen file is untouched', { srcSha, statusUsed: st.final.used, would: st.final.migrationWouldReset, migrated: m.final.result, used: s.used, total: s.total, rounds: s.roundsCompleted, seq: s.seq, backupSha: fileSha(path.join(dir, m.final.backup)), second: m2.final.result, srcAfter: fileSha(FROZEN), integrityPrev: s.migration?.previousIntegrity === frozen.integrity }, srcSha === 'c31fb0fffa51c8b1204396973181f89ab4d1ca58636f87da6f5c00983c1eca95' && st.final.used === 5 && st.final.remaining === 0 && st.final.migrationWouldReset === true && m.final.result === 'migrated' && s.used === 0 && s.total === 5 && s.roundsCompleted === 2 && s.seq === 8 && fileSha(path.join(dir, m.final.backup)) === srcSha && m2.final.result === 'already_migrated' && after.events.length === 8 && fileSha(FROZEN) === srcSha && s.migration.previousIntegrity === frozen.integrity);
+    }
+  }
+
+  // (7) 旧参数兼容、原子写与读取接口
+  {
+    const c = await makeCase('a20-compat', { submits: ['ok'] }, null, { historical: 2 });
+    const st = await c.status();
+    const keys = ['used', 'max', 'remaining', 'historicalUsed', 'total', 'roundsCompleted', 'schema', 'pending', 'blocked', 'lock', 'bindingSha256', 'stateRootKind'].filter((k) => !(k in st.final));
+    check('A20-7-status-fields-compatible', 'behavior', 'status on a fresh schema 2 task initialised with the old init arguments (--historical-used 2)', 'old fields used/max/remaining/historicalUsed still present and meaning "this round" (2/5/3); new total/roundsCompleted/schema added', { missing: keys, used: st.final.used, max: st.final.max, remaining: st.final.remaining, total: st.final.total, schema: st.final.schema }, keys.length === 0 && st.final.used === 2 && st.final.remaining === 3 && st.final.total === 2 && st.final.schema === 2);
+    const s0 = c.state();
+    check('A20-7-schema2-atomic-private-file', 'behavior', 'state file written with the existing atomic/fsync path', 'integrity stamped, no tmp leftovers, no lock leftover', { files: fs.readdirSync(path.join(STATE_ROOT, c.task)).sort(), integrity: typeof s0.integrity }, JSON.stringify(fs.readdirSync(path.join(STATE_ROOT, c.task))) === JSON.stringify(['state.json']) && typeof s0.integrity === 'string');
+    const crash = await makeCase('a20-crash-in-new-round', { submits: ['hang'] }, null, { historical: 0 });
+    const killed = await crash.login(['--step-timeout-ms', '60000'], { killAfterMs: 2500 });
+    const cs = crash.state();
+    check('A20-7-intent-persisted-before-click-new-schema', 'behavior', 'runner SIGKILLed while the submit step hangs (schema 2)', 'used 1 / total 1 / pending intent already on disk, lock left behind; next process refuses with pending/locked, no replay', { signal: killed.signal, used: cs.used, total: cs.total, pending: cs.pending?.stage }, cs.used === 1 && cs.total === 1 && !!cs.pending);
+  }
+
+  // --- a21：旧账结构校验必须发生在任何持久写入之前（独验 B6 返工） ---
+  {
+    const baseSteps = ['intent', 'outcome', 'verifyOK'];
+    const dirOf = (task) => path.join(STATE_ROOT, task);
+    const cases = [
+      ['events-length-not-seq', (s) => { s.seq += 1; }],
+      ['max-not-binding', (s) => { s.max = 4; }],
+      ['events-null', (s) => { s.events = null; }],
+      ['event-seq-gap', (s) => { s.events[2].seq = 9; }],
+      ['events-not-array', (s) => { s.events = { length: s.seq }; }],
+      ['event-null-entry', (s) => { s.events[1] = null; }],
+      ['event-missing-kind', (s) => { delete s.events[1].kind; }],
+      ['seq-negative', (s) => { s.seq = -1; }],
+      ['seq-fraction', (s) => { s.seq = 1.5; }],
+      ['seq-string', (s) => { s.seq = String(s.seq); }],
+      ['seq-null', (s) => { s.seq = null; }],
+      ['seq-huge', (s) => { s.seq = 1e21; }],
+      ['pending-not-object', (s) => { s.pending = 'x'; }],
+      ['blocked-array', (s) => { s.blocked = []; }],
+    ];
+    for (const [name, mutate] of cases) {
+      const c = await makeCase(`a21-bad-${name}`, { submits: ['ok'] }, null, { historical: 0 });
+      const st = legacyState(c.task, BINDING_OBJ, baseSteps);
+      mutate(st);
+      stamp(st); // 完整性摘要重新算对：这是“结构损坏但摘要有效”的合成旧账
+      putLegacy(c, st);
+      const before = fileSha(stateFile(c.task));
+      const m = await runIt(migrateArgs(c));
+      const afterMigrate = { same: fileSha(stateFile(c.task)) === before, files: fs.readdirSync(dirOf(c.task)).sort() };
+      const s1 = await c.status();
+      const l1 = await c.login();
+      const rc = await runIt(['reconcile', '--task-id', c.task, '--resolution', 'not-submitted', '--evidence-ref', EVIDENCE, '--evidence-sha256', EVIDENCE_SHA]);
+      const noInternal = ![m, s1, l1, rc].some((r) => /internal_error|TypeError|at .*\.mjs/.test(r.stdout + r.stderr));
+      check(`A21-structure-${name}`, 'behavior', `schema 1 state with valid integrity but broken structure (${name}) → migrate, status, login, reconcile`, 'every command: state_corrupt (exit 31), never internal_error; state bytes unchanged; directory holds only state.json (no backup, no tmp, no lock); zero browser calls', { migrate: [m.final?.result, m.final?.reason, m.code], status: s1.final?.result, login: [l1.final?.result, l1.code], reconcile: rc.final?.result, ...afterMigrate, sameAtEnd: fileSha(stateFile(c.task)) === before, calls: c.calls().length, noInternal }, [m, s1, l1, rc].every((r) => r.final?.result === 'state_corrupt' && r.code === 31) && noInternal && afterMigrate.same && JSON.stringify(afterMigrate.files) === JSON.stringify(['state.json']) && fileSha(stateFile(c.task)) === before && c.calls().length === 0);
+    }
+    // 当前 schema 同样要在使用前拒绝结构损坏
+    for (const [name, mutate] of [['events-null', (s) => { s.events = null; }], ['length-not-seq', (s) => { s.seq += 1; }], ['max-not-binding', (s) => { s.max = 4; }], ['event-seq-gap', (s) => { s.events[0].seq = 5; }]]) {
+      const c = await makeCase(`a21-cur-${name}`, { submits: ['ok'] }, null, { historical: 1 });
+      const st = readState(c.task);
+      mutate(st);
+      stamp(st);
+      fs.writeFileSync(stateFile(c.task), JSON.stringify(st, null, 2));
+      const before = fileSha(stateFile(c.task));
+      const s1 = await c.status();
+      const l1 = await c.login();
+      const m = await runIt(migrateArgs(c));
+      check(`A21-current-schema-structure-${name}`, 'behavior', `schema 2 state with valid integrity but broken structure (${name})`, 'status/login/migrate: state_corrupt, no internal_error, bytes unchanged, zero browser calls', { status: s1.final?.result, login: l1.final?.result, migrate: m.final?.result, same: fileSha(stateFile(c.task)) === before, calls: c.calls().length }, [s1, l1, m].every((r) => r.final?.result === 'state_corrupt' && !/internal_error/.test(r.stdout + r.stderr)) && fileSha(stateFile(c.task)) === before && c.calls().length === 0 && JSON.stringify(fs.readdirSync(dirOf(c.task)).sort()) === JSON.stringify(['state.json']));
+    }
+    // 结构合法、仅事件回放计数与 used 不一致：保守迁移（不补额度），不等同结构损坏；迁移后同 runner 可读
+    for (const [name, delta] of [['used-above-replay', +1], ['used-below-replay', -1]]) {
+      const c = await makeCase(`a21-replay-${name}`, { submits: ['ok'] }, null, { historical: 0 });
+      const st = legacyState(c.task, BINDING_OBJ, baseSteps);
+      const replayUsed = st.used;
+      st.used = replayUsed + delta; // 事件日志结构完整，但计数与回放不一致（used 仍 ≥ historical 且 ≤ max）
+      stamp(st);
+      putLegacy(c, st);
+      const m = await runIt(migrateArgs(c));
+      const afterStatus = await c.status();
+      const s = c.state();
+      check(`A21-replay-mismatch-conservative-${name}`, 'behavior', `structurally valid legacy state whose used (${st.used}) disagrees with its event replay (${replayUsed})`, 'migrated without credit (used_mismatch, reset false); used and total stay at the stored value; same runner then reads it (status ok); not treated as corruption', { migrate: [m.final?.result, m.final?.reason, m.final?.reset], used: s.used, total: s.total, status: afterStatus.final?.result, files: fs.readdirSync(dirOf(c.task)).sort() }, m.final?.result === 'migrated' && m.final.reason === 'used_mismatch' && m.final.reset === false && s.used === st.used && s.total === st.used && afterStatus.final?.result === 'status' && afterStatus.code === 0);
+    }
+    // 每条成功迁移路径之后，同一 runner 的 status 必须正常可读（迁移结果满足完整字段约束）
+    for (const [name, steps, opts] of [['trusted-reset', ['intent', 'outcome', 'verifyOK'], {}], ['no-success', ['intent', 'outcome'], {}], ['pending', ['intent', 'outcome', 'verifyOK', 'intent', 'unknownOutcome'], { pending: true }], ['blocked', ['intent', 'outcome', 'verifyOK', 'blockedEvent'], { blocked: true }]]) {
+      const c = await makeCase(`a21-readable-${name}`, { submits: ['ok'] }, null, { historical: 0 });
+      putLegacy(c, legacyState(c.task, BINDING_OBJ, steps, opts));
+      const m = await runIt(migrateArgs(c));
+      const stat = await c.status();
+      check(`A21-migrated-state-readable-${name}`, 'behavior', `migrate (${name}) then status with the same runner`, 'migrated, then status exit 0 with result status (no state_corrupt)', { migrate: m.final?.result, status: stat.final?.result, code: stat.code }, m.final?.result === 'migrated' && stat.final?.result === 'status' && stat.code === 0);
+    }
+  }
+
   // --- L1：OCR 门槛与有界刷新 ---
   {
     const c = await makeCase('lowscore', { submits: ['ok'] }, [{ code: CODE, score: 0.5 }]);
@@ -503,7 +825,7 @@ async function main() {
   {
     const c = await makeCase('boundary', { submits: ['ok'] }, [{ code: CODE, score: 0.79 }, { code: CODE, score: 0.8 }]);
     const r = await c.login();
-    check('L1-score-boundary', 'behavior', 'score 0.79 rejected, next round 0.80 accepted', 'one rejection then one submission', { outcome: r.final.result, rejected: r.final.ocrRejected, used: r.final.used }, r.final.result === 'login_verified' && r.final.ocrRejected === 1 && r.final.used === 3);
+    check('L1-score-boundary', 'behavior', 'score 0.79 rejected, next round 0.80 accepted', 'one rejection then one submission (total 3, round closed)', { outcome: r.final.result, rejected: r.final.ocrRejected, used: r.final.used, total: r.final.total }, r.final.result === 'login_verified' && r.final.ocrRejected === 1 && r.final.total === 3 && r.final.used === 0);
   }
   {
     const c = await makeCase('ocr-dep', { submits: ['ok'] }, [{ kind: 'dep' }]);
@@ -575,7 +897,7 @@ async function main() {
     const c = await makeCase('concurrent', { submits: ['ok'], submitDelayMs: 1200 });
     const [a, b] = await Promise.all([c.login(), c.login()]);
     const outcomes = [a.final.result, b.final.result].sort();
-    check('L2-concurrent-exclusive', 'behavior', 'two logins on the same task at once', 'exactly one proceeds (login_verified), the other is locked; one submission, count 2->3', { outcomes, used: c.state().used, submits: c.page().submits }, outcomes.join(',') === 'locked,login_verified' && c.state().used === 3 && c.page().submits === 1);
+    check('L2-concurrent-exclusive', 'behavior', 'two logins on the same task at once', 'exactly one proceeds (login_verified), the other is locked; one submission, total 2->3 and the round closed', { outcomes, used: c.state().used, total: c.state().total, submits: c.page().submits }, outcomes.join(',') === 'locked,login_verified' && c.state().total === 3 && c.state().used === 0 && c.page().submits === 1);
   }
 
   // --- L2/L3：绑定、篡改、根目录、凭据参数 ---
@@ -658,7 +980,7 @@ async function main() {
     check('L3-skill-metadata', 'behavior', 'SKILL.md frontmatter markers', 'x-custom-skill true and x-source-repo dmdmwshr/custom-skills', skill.slice(0, 400), /x-custom-skill: true/.test(skill.slice(0, 600)) && /x-source-repo: dmdmwshr\/custom-skills/.test(skill.slice(0, 600)));
     const stale = ['自建skills', '验证码、\nMFA', '优先使用独立的临时 Edge/Playwright'].filter((s) => skill.includes(s));
     check('L3-skill-no-legacy-conflicts', 'behavior', 'SKILL.md has no legacy checkout path nor blanket manual-captcha/default-temp-Playwright text', 'none', stale, stale.length === 0);
-    const needed = ['Ego', '.codex\\skills\\localvault-credentials', 'init', 'historical-used', 'reconcile', 'blocked-reviewed', 'blocked_reconcile_required', 'userinfo', '--account-selector', '--business-selector', '不回退', 'stdin', '0.8', '最多 5', 'not-covered'].filter((s) => !docs.includes(s));
+    const needed = ['Ego', '.codex\\skills\\localvault-credentials', 'init', 'historical-used', 'reconcile', 'blocked-reviewed', 'blocked_reconcile_required', 'userinfo', '--account-selector', '--business-selector', '不回退', 'stdin', '0.8', '最多 5', 'not-covered', '每轮', '累计', 'total', 'roundsCompleted', 'migrate', 'migration_required', 'round_reset', 'state.schema1-', 'already_migrated'].filter((s) => !docs.includes(s));
     check('L4-contract-sections', 'behavior', 'references/captcha-login.md covers Ego target, managed entry, init/reconcile, stdin-only credentials, 0.8 gate, budget', 'nothing missing', needed, needed.length === 0);
     const passwordArg = /-(?:Password|passwd)\b|--password/i.test(docs + skill);
     check('L3-docs-never-pass-password-as-argument', 'behavior', 'grep docs for password arguments', 'none', passwordArg, !passwordArg);
