@@ -18,13 +18,13 @@ from pypdf import PdfReader, PdfWriter
 
 if __package__:
     from . import image_pdf, ledger_views, normalized_sources
-    from .ocr_runtime import OcrError, run_ocr
+    from .ocr_runtime import OcrError, adopt_existing_results, run_ocr
     from .workflow_reporting import ReportingError, record_timing, render_report, write_report
 else:
     import image_pdf
     import ledger_views
     import normalized_sources
-    from ocr_runtime import OcrError, run_ocr
+    from ocr_runtime import OcrError, adopt_existing_results, run_ocr
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
 VERSION = "2.1.0"
@@ -330,6 +330,137 @@ def image_source_bytes(work: Path, entries: dict[str, dict[str, Any]]) -> Any:
     return read
 
 
+SPLIT_INTENT = "split-incremental-intent.json"
+
+
+def load_incremental_baseline(work: Path) -> tuple[dict[str, Any], dict[Path, dict[str, Any]]]:
+    """增量拆分基线：旧索引必须存在且无未收尾的增量意图，旧条目保持原样。"""
+    if (work / SPLIT_INTENT).exists():
+        raise RegistryError(
+            f"存在未收尾的增量拆分记录 {SPLIT_INTENT}，必须先核对目标实际摘要，不得盲重跑"
+        )
+    path = work / "split-index.json"
+    if not path.is_file():
+        raise RegistryError("增量拆分需要已存在的 split-index.json；首次拆分不带 --incremental")
+    old = read_json(path)
+    items = old.get("items")
+    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        raise RegistryError("旧 split-index.items 必须是对象数组")
+    by_target: dict[Path, dict[str, Any]] = {}
+    for item in items:
+        relative = item.get("relativePath")
+        if not isinstance(relative, str):
+            raise RegistryError("旧 split-index 条目缺少 relativePath")
+        target = (work / safe_relative(relative)).resolve()
+        if target in by_target:
+            raise RegistryError(f"旧 split-index 含重复目标：{relative}")
+        by_target[target] = item
+    return old, by_target
+
+
+def check_incremental_reuse(
+    item: dict[str, Any], parts: list[dict[str, Any]], target: Path, old: dict[str, Any]
+) -> None:
+    """同一目标已在旧索引：来源分段与计划元数据必须一致，输出字节必须仍等于旧摘要。"""
+    if pdf_parts(old) != parts:
+        raise RegistryError(f"旧条目来源分段与本次计划冲突，拒绝改写：{old.get('relativePath')}")
+    for key, value in item.items():
+        if key in {"relativePath", "parts", "sourceRelativePath", "pageStart", "pageEnd"}:
+            continue
+        if old.get(key) != value:
+            raise RegistryError(
+                f"旧条目元数据与本次计划冲突（{key}），拒绝改写：{old.get('relativePath')}"
+            )
+    if not target.is_file():
+        raise RegistryError(f"旧条目输出已缺失，需人工对账：{old.get('relativePath')}")
+    sha, pages = pdf_info(target)
+    if sha != old.get("sha256") or pages != old.get("pageCount"):
+        raise RegistryError(f"旧条目输出字节已变化，拒绝复用：{old.get('relativePath')}")
+
+
+def commit_incremental_split(
+    args: argparse.Namespace,
+    work: Path,
+    plan: dict[str, Any],
+    by_rel: dict[str, dict[str, Any]],
+    planned: list[tuple[dict[str, Any], Path, list[dict[str, Any]]]],
+    old_index: dict[str, Any],
+    reused: list[str],
+) -> None:
+    """新输出先在批次临时目录完成并核验，再逐个独占写入并追加索引；失败保留意图记录。"""
+    if not planned:
+        return  # 全部复用：不改索引、不动水位
+    intent_path = work / SPLIT_INTENT
+    token = f"{int(time.time() * 1000)}"
+    stage = work / f".split-incremental-{token}"
+    old_sha = file_sha256(work / "split-index.json")
+    intent = {
+        "phase": "STAGING",
+        "startedAt": utc_now(),
+        "oldIndexSha256": old_sha,
+        "stageDir": stage.name,
+        "newTargets": [target.relative_to(work).as_posix() for _, target, _ in planned],
+        "reused": reused,
+    }
+    try:
+        with intent_path.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(json.dumps(intent, ensure_ascii=False, indent=2) + "\n")
+    except FileExistsError as error:
+        raise RegistryError(f"另一增量拆分仍在进行或未收尾：{SPLIT_INTENT}") from error
+    stage.mkdir()
+    staged = []
+    for index, (item, target, parts) in enumerate(planned):
+        writer = PdfWriter()
+        for part in parts:
+            reader = PdfReader(str(by_rel[part["sourceRelativePath"]]["absolutePath"]))
+            for page in reader.pages[part["pageStart"] - 1 : part["pageEnd"]]:
+                writer.add_page(page)
+        temporary = stage / f"{index:03d}.pdf"
+        with temporary.open("xb") as stream:
+            writer.write(stream)
+        sha, pages = pdf_info(temporary)
+        staged.append((item, target, parts, temporary, sha, pages))
+    new_items = [
+        {
+            **item,
+            "sourceKinds": sorted(
+                {by_rel[p["sourceRelativePath"]].get("sourceKind", "ZIP_MEMBER") for p in parts}
+            ),
+            "relativePath": target.relative_to(work).as_posix(),
+            "absolutePath": str(target),
+            "sha256": sha,
+            "mimeType": "application/pdf",
+            "pageCount": pages,
+        }
+        for item, target, parts, _, sha, pages in staged
+    ]
+    merged = {
+        **old_index,
+        "splitIndexVersion": max(
+            old_index.get("splitIndexVersion") or 0,
+            5 if any("parts" in item for item in plan["items"]) else 4,
+        ),
+        "lastIncrementalAt": utc_now(),
+        "items": [*old_index["items"], *new_items],
+    }
+    intent["phase"] = "COMMITTING"
+    intent["expectedNewSha256"] = {entry["relativePath"]: entry["sha256"] for entry in new_items}
+    write_json(intent_path, intent)
+    for _, target, _, temporary, sha, _ in staged:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("xb") as stream:  # 目标被并发占用时在此失败，意图记录保留
+            stream.write(temporary.read_bytes())
+        if pdf_info(target)[0] != sha:
+            raise RegistryError(f"新输出写入后摘要不符：{target}")
+    write_json(work / "split-index.json", merged)
+    written = read_json(work / "split-index.json")["items"][-len(new_items) :]
+    if [item["sha256"] for item in written] != [entry["sha256"] for entry in new_items]:
+        raise RegistryError("split-index 回读与预期不符，保留增量意图记录")
+    shutil.rmtree(stage)
+    intent_path.unlink()
+    update_local_case_waterline(args, work, state="ORGANIZING", local_status="ORGANIZING")
+
+
 def split_command(args: argparse.Namespace) -> None:
     work, plan = Path(args.work_dir).resolve(), read_json(Path(args.plan).resolve())
     enforce_local_workspace_preflight(args, work)
@@ -346,6 +477,12 @@ def split_command(args: argparse.Namespace) -> None:
     normalized = (work / "normalized").resolve()
     if not isinstance(plan.get("items"), list):
         raise RegistryError("split-plan.items 必须是数组")
+    incremental = bool(getattr(args, "incremental", False))
+    old_index: dict[str, Any] = {}
+    old_by_target: dict[Path, dict[str, Any]] = {}
+    reused: list[str] = []
+    if incremental:
+        old_index, old_by_target = load_incremental_baseline(work)
     for index, item in enumerate(plan["items"], 1):
         if not isinstance(item, dict):
             raise RegistryError("split-plan 每项必须是对象")
@@ -374,6 +511,11 @@ def split_command(args: argparse.Namespace) -> None:
             or not inside(target, normalized)
         ):
             raise RegistryError("拆分输出只能位于 normalized/ 且必须为 PDF")
+        if incremental and target in old_by_target and target not in seen:
+            check_incremental_reuse(item, parts, target, old_by_target[target])
+            reused.append(relative)
+            seen.add(target)
+            continue
         if (
             target in seen
             or target.exists()
@@ -383,6 +525,9 @@ def split_command(args: argparse.Namespace) -> None:
             raise RegistryError("拆分目标重复、已存在或与源重叠")
         seen.add(target)
         planned.append((item, target, parts))
+    if incremental:
+        commit_incremental_split(args, work, plan, by_rel, planned, old_index, reused)
+        return
     result = []
     for item, target, parts in planned:
         writer = PdfWriter()
@@ -500,13 +645,33 @@ def ocr_command(args: argparse.Namespace) -> None:
     enforce_local_workspace_preflight(args, work)
     allowed_roots = None
     path_transform = None
+    project_no = None
     if getattr(args, "workspace_required", False):
         resolved = resolve_local_case_workspace(args, work)
         assert resolved is not None
         _workspace, layout, project = resolved
+        project_no = project
         allowed_roots = [work / "source", layout.pending_case_dir(project)]
         path_transform = layout.project_recorded_paths
         inventory = path_transform(inventory)
+    if getattr(args, "adopt_existing", None):
+        # Explicit reuse of finished results: verifies recorded digests, never starts an
+        # engine and never sends a request.
+        try:
+            result = adopt_existing_results(
+                work=work,
+                inventory=inventory,
+                output=Path(args.output_dir),
+                receipts=read_json(Path(args.adopt_existing)),
+                allowed_roots=allowed_roots,
+                project=project_no,
+                path_transform=path_transform,
+            )
+        except OcrError as error:
+            raise RegistryError(str(error)) from error
+        update_local_case_waterline(args, work, state="ORGANIZING", local_status="ORGANIZING")
+        print(json.dumps(result, ensure_ascii=False))
+        return
     try:
         result = run_ocr(
             work=work,
@@ -522,12 +687,20 @@ def ocr_command(args: argparse.Namespace) -> None:
         )
     except OcrError as error:
         raise RegistryError(str(error)) from error
-    update_local_case_waterline(
-        args,
-        work,
-        state="ORGANIZING",
-        local_status="ORGANIZING",
-    )
+    if (
+        result.get("status") != "COMPLETED"
+        or result.get("engineInvocations")
+        or result.get("adoptedFiles")
+        or result.get("cachedFiles") != result.get("selectedFiles")
+    ):
+        # A run answered entirely from valid cached results changes nothing about the case, so it
+        # must not push an already verified or ready case back to ORGANIZING.
+        update_local_case_waterline(
+            args,
+            work,
+            state="ORGANIZING",
+            local_status="ORGANIZING",
+        )
     print(json.dumps(result, ensure_ascii=False))
 
 
@@ -680,6 +853,10 @@ def validate_manifest(
                     "maintenance",
                     "repairSiteId",
                     "marketAccessMode",
+                    "marketAccessRaw",
+                    "certificateNumberRaw",
+                    "qualityCheckRaw",
+                    "qualityCheckPerformed",
                     "problemDescription",
                     "reinspectionApplied",
                     "reinspectionResult",
@@ -698,6 +875,9 @@ def validate_manifest(
                 "nominalProducer": 300,
                 "location": 300,
                 "problemDescription": 2000,
+                "marketAccessRaw": 5000,
+                "certificateNumberRaw": 300,
+                "qualityCheckRaw": 5000,
             }
             for key, limit in field_limits.items():
                 if key not in product:
@@ -715,7 +895,9 @@ def validate_manifest(
                 errors.append("产品 result 不合法")
             if "result" in product and "method" not in product:
                 errors.append("产品 result 必须同时声明 method")
-            for key in ("onlineSale", "maintenance", "reinspectionApplied"):
+            if product.get("qualityCheckPerformed") == "NO" and ("result" in product or "method" in product):
+                errors.append("未开展质量检查时不得声明质量检查 method/result")
+            for key in ("onlineSale", "maintenance", "reinspectionApplied", "qualityCheckPerformed"):
                 if key in product and product[key] not in TRI:
                     errors.append(f"产品 {key} 不合法")
             if "marketAccessMode" in product and product["marketAccessMode"] not in ACCESS:
@@ -1271,7 +1453,9 @@ def workspace_doctor_command(args: argparse.Namespace) -> None:
 def ledger_export_command(args: argparse.Namespace) -> None:
     workspace = workspace_api()
     try:
-        _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        _config, layout = workspace.resolve_workspace(
+            **workspace_kwargs(args), create_layout=False, require_download_dir=False
+        )
         output = workspace.export_waterline_xlsx(layout)
     except workspace.WorkspaceStateError as error:
         raise RegistryError(str(error)) from error
@@ -1282,7 +1466,9 @@ def ledger_status_command(args: argparse.Namespace) -> None:
     workspace = workspace_api()
     source_year = ledger_source_year(args)
     try:
-        _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        _config, layout = workspace.resolve_workspace(
+            **workspace_kwargs(args), create_layout=False, require_download_dir=False
+        )
         result = (
             workspace.workspace_progress(layout, batch_id=args.batch_id)
             if getattr(args, "scope", "batch") == "batch"
@@ -1312,7 +1498,7 @@ def ledger_source_year(args: argparse.Namespace) -> int | None:
 
 def ledger_index_history_command(args: argparse.Namespace) -> None:
     _config, layout = workspace_api().resolve_workspace(
-        **workspace_kwargs(args), create_layout=False
+        **workspace_kwargs(args), create_layout=False, require_download_dir=False
     )
     print(json.dumps(ledger_views.index_history(layout, apply=args.apply), ensure_ascii=False))
 
@@ -1321,7 +1507,9 @@ def ledger_report_command(args: argparse.Namespace) -> None:
     workspace = workspace_api()
     source_year = ledger_source_year(args)
     try:
-        _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        _config, layout = workspace.resolve_workspace(
+            **workspace_kwargs(args), create_layout=False, require_download_dir=False
+        )
         if getattr(args, "scope", "batch") == "batch":
             progress = workspace.workspace_progress(layout, batch_id=args.batch_id)
             markdown = render_report(progress)
@@ -1361,6 +1549,8 @@ def source_scan_plan_command(args: argparse.Namespace) -> None:
             mode=args.mode,
             year=args.year,
             limit=args.limit,
+            package_months=args.package_window_months,
+            package_refresh_days=args.package_refresh_days,
         )
     except workspace.WorkspaceStateError as error:
         raise RegistryError(str(error)) from error
@@ -1468,7 +1658,28 @@ def source_add_detail_command(args: argparse.Namespace) -> None:
         detail=Path(args.detail_json),
         source_url=getattr(args, "source_url", None),
         screenshot=Path(args.screenshot) if getattr(args, "screenshot", None) else None,
+        supersede_carried=bool(getattr(args, "supersede_carried", False)),
     )
+
+
+def source_admit_observed_case_command(args: argparse.Namespace) -> None:
+    run_source_action(
+        args,
+        "admit_observed_material_case",
+        batch_id=args.batch_id,
+        observation=Path(args.detail_json),
+    )
+
+
+def source_attach_detail_segments_command(args: argparse.Namespace) -> None:
+    source = source_intake_api()
+    try:
+        result = source.attach_detail_segments(
+            resolve_source_layout(args), batch_id=args.batch_id, index_path=Path(args.index_json)
+        )
+    except (source.SourceIntakeError, workspace_api().WorkspaceStateError) as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
 
 
 def source_accept_manual_command(args: argparse.Namespace) -> None:
@@ -1681,11 +1892,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="同案所选文件共用一次 MinerU；总期限为单文件期限乘待处理文件数",
     )
+    ocr.add_argument(
+        "--adopt-existing",
+        metavar="RECEIPTS_JSON",
+        help="OcrAdoptionReceiptsV1：校验摘要后采纳本案既有识别结果；不启动引擎、不发请求",
+    )
     add_workspace_resolution_options(ocr)
     ocr.set_defaults(func=ocr_command, workspace_required=True)
     split = sub.add_parser("split")
     split.add_argument("--work-dir", required=True)
     split.add_argument("--plan", required=True)
+    split.add_argument(
+        "--incremental",
+        action="store_true",
+        help="在既有 split-index 之后追加新条目；相同条目复用，冲突或未收尾记录拒绝",
+    )
     add_workspace_resolution_options(split)
     split.set_defaults(func=split_command, workspace_required=True)
     normalize = sub.add_parser(
@@ -1725,6 +1946,23 @@ def build_parser() -> argparse.ArgumentParser:
     source = sub.add_parser("source", help="接收已登录浏览器生成的本地采集物")
     source_sub = source.add_subparsers(dest="source_command", required=True)
 
+    source_facts = source_sub.add_parser(
+        "facts-validate", help="只读核验分层来源原文与本地证据绑定；不裁定源事实、不写云端"
+    )
+    source_facts.add_argument("snapshot", help="SourceFactsSnapshotV1 JSON")
+    source_facts.add_argument("--evidence-root", help="可选：核验本地证据路径和摘要")
+    source_facts.set_defaults(func=source_facts_validate_command)
+
+    source_ingest = source_sub.add_parser(
+        "facts-ingest",
+        help="把已核验的来源观察追加写入本案 source-facts.json 源事实层；不改人工层、不写云端",
+    )
+    source_ingest.add_argument("snapshot", help="SourceFactsSnapshotV1 JSON")
+    source_ingest.add_argument("--work-dir", required=True)
+    source_ingest.add_argument("--evidence-root", required=True, help="本地证据根；路径和摘要必须可核验")
+    add_workspace_resolution_options(source_ingest)
+    source_ingest.set_defaults(func=source_facts_ingest_command, workspace_required=True)
+
     source_plan = source_sub.add_parser(
         "scan-plan", help="只读规划年度基线或近三个月增量及未完成断点"
     )
@@ -1736,6 +1974,14 @@ def build_parser() -> argparse.ArgumentParser:
     source_plan.add_argument("--year", type=int, help="来源年度；默认上海执行年")
     source_plan.add_argument(
         "--limit", type=int, default=10, help="最多展开多少项来源动作；默认 10"
+    )
+    source_plan.add_argument(
+        "--package-window-months", type=int, default=ledger_views.PACKAGE_WINDOW_MONTHS_DEFAULT,
+        help="只读列出近期不合格未结案包更新候选的滚动自然月窗口；默认 2",
+    )
+    source_plan.add_argument(
+        "--package-refresh-days", type=int, default=ledger_views.PACKAGE_REFRESH_DAYS_DEFAULT,
+        help="候选的最小更新间隔天数；默认 7（可配置，不建调度）",
     )
     source_plan.set_defaults(func=source_scan_plan_command)
     source_coverage = source_sub.add_parser(
@@ -1793,7 +2039,29 @@ def build_parser() -> argparse.ArgumentParser:
     source_detail.add_argument("--detail-json", required=True)
     source_detail.add_argument("--source-url", required=True)
     source_detail.add_argument("--screenshot", required=True)
+    source_detail.add_argument(
+        "--supersede-carried",
+        action="store_true",
+        help="仅在旧详情经来源批次证明为继承且现场新观察通过全部校验时，移为前代并解除对应冲突",
+    )
     source_detail.set_defaults(func=source_add_detail_command)
+
+    source_admit = source_sub.add_parser(
+        "admit-observed-case", help="已证单案材料准入：现场详情原文证明本案四身份与 [产] 产品根，不计年度清单"
+    )
+    add_workspace_resolution_options(source_admit)
+    source_admit.add_argument("--batch-id", required=True)
+    source_admit.add_argument("--detail-json", required=True)
+    source_admit.set_defaults(func=source_admit_observed_case_command)
+
+    source_segments = source_sub.add_parser(
+        "attach-detail-segments",
+        help="把一案已有的多段详情截图按覆盖索引绑定为永久 D 引用(首段须为已登记截图；只增叶，同索引重入 0 写)",
+    )
+    add_workspace_resolution_options(source_segments)
+    source_segments.add_argument("--batch-id", required=True)
+    source_segments.add_argument("--index-json", required=True)
+    source_segments.set_defaults(func=source_attach_detail_segments_command)
 
     manual_intake = source_sub.add_parser(
         "accept-manual", help="接收已逐图核清的手动原始 ZIP 和详情截图"
@@ -1978,6 +2246,40 @@ def build_parser() -> argparse.ArgumentParser:
     fields_validate.add_argument("--image-dir", help="核对 source_files 存在性的截图目录")
     fields_validate.set_defaults(func=fields_validate_command)
 
+    feishu_sync = sub.add_parser(
+        "feishu-source-sync",
+        help="按 fieldId/record_id 白名单把来源字段增量写入飞书（官方 lark-cli；缺省只计划，不写云）",
+    )
+    feishu_sync.add_argument("--spec", required=True, help="FeishuSourceSyncSpecV1 JSON")
+    feishu_sync.add_argument(
+        "--execute", action="store_true", help="真实云写；spec.mode 也必须为 execute，缺一不可"
+    )
+    feishu_sync.add_argument(
+        "--reconcile", action="store_true", help="只读云回读，对账早先未决写入；spec.mode 须为 reconcile"
+    )
+    feishu_sync.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    feishu_sync.add_argument(
+        "--ledger-dir", help="追加式账本目录；按精确目标建档，与 spec.logDir 无关；省略用模块默认"
+    )
+    feishu_sync.add_argument(
+        "--user-risk-acceptance",
+        help="UserRiskAcceptanceV1：用户亲自对精确意图接受迟到写风险的记录；spec 含 humanRelease 时必填，助手不得自署",
+    )
+    feishu_sync.set_defaults(func=feishu_source_sync_command)
+    feishu_build = sub.add_parser(
+        "feishu-source-build",
+        help="由权威已存详情(采集批次)+fresh云全页/八队/schema 生成带字段依据的基础字段 V3 创建说明与 V2 补空说明；只读云，不写",
+    )
+    for flag in ("--capture", "--capture-sha", "--waterline", "--contract-v3", "--contract-v3-sha", "--contract-v9", "--contract-v9-sha",
+                 "--routes", "--routes-sha", "--base-token", "--profile", "--out-dir", "--log-root"):
+        feishu_build.add_argument(flag, required=True)
+    feishu_build.add_argument("--identity", default="user", choices=["user", "bot"])
+    feishu_build.add_argument("--ledger-dir", required=True, help="唯一既有 P18 账本(必填)：未决 UNKNOWN 与未获用户接受的 human_release 的目标保留未决，不生成说明")
+    feishu_build.add_argument("--user-accepted-releases", help="UserRiskAcceptanceV1：用户亲自接受的精确意图清单")
+    feishu_build.add_argument("--batch-size", type=int, default=20)
+    feishu_build.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    feishu_build.set_defaults(func=feishu_source_build_command)
+
     local_verify = sub.add_parser(
         "local-verify",
         help="本地核验清单、文件与原包并归档；不访问服务器、飞牛或任何认证",
@@ -1993,6 +2295,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_workspace_resolution_options(local_verify)
     local_verify.set_defaults(func=local_verify_command)
+
+    confirm_docs = sub.add_parser(
+        "confirm-documents",
+        help="由 split-index 与确认依据形成已确认文书子集清单；不等于全案核验或归档",
+    )
+    confirm_docs.add_argument("--project", required=True)
+    confirm_docs.add_argument("--confirmation", required=True, help="确认清单 JSON（projectNo/items/held；依据为现有证据文件及摘要）")
+    confirm_docs.add_argument("--check-only", action="store_true", help="只核验并输出摘要，不写文件")
+    add_workspace_resolution_options(confirm_docs)
+    confirm_docs.set_defaults(func=confirm_documents_command)
+
+    archive_subset = sub.add_parser(
+        "archive-document-subset",
+        help="把已确认文书子集只复制到已处理案卷/<项目>/文书子集/<内容清单SHA>；不移动原包/工作区，不冒全案完成",
+    )
+    archive_subset.add_argument("--project", required=True)
+    archive_subset.add_argument("--check-only", action="store_true", help="只核验源与目标，不复制、不写总账")
+    add_workspace_resolution_options(archive_subset)
+    archive_subset.set_defaults(func=archive_document_subset_command)
 
     for name, replacement in RETIRED_COMMANDS.items():
         retired = sub.add_parser(name, help=f"已退役：{replacement}")
@@ -2023,6 +2344,116 @@ RETIRED_COMMANDS = {
 def retired_command(args: argparse.Namespace) -> None:
     """Fail before authentication, network access, timing records or any business write."""
     raise RegistryError(f"命令 {args.retired_name} 已退役。{RETIRED_REPLACEMENT}")
+
+
+
+def source_facts_validate_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(
+        f"{__package__}.source_facts" if __package__ else "source_facts"
+    )
+    try:
+        snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        raise RegistryError(f"无法读取来源快照：{error}") from error
+    report = module.validate_snapshot(
+        snapshot, Path(args.evidence_root) if args.evidence_root else None
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["status"] != "ok":
+        raise RegistryError("来源快照绑定有误，未改动输入或水位")
+
+
+def source_facts_ingest_command(args: argparse.Namespace) -> None:
+    """Store validated source observations for one project in the source layer only."""
+    module = importlib.import_module(
+        f"{__package__}.source_facts" if __package__ else "source_facts"
+    )
+    work = Path(args.work_dir).resolve()
+    enforce_local_workspace_preflight(args, work)
+    try:
+        snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        raise RegistryError(f"无法读取来源快照：{error}") from error
+    report = module.validate_snapshot(snapshot, Path(args.evidence_root))
+    if report["status"] != "ok":
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        raise RegistryError("来源快照绑定有误，未写入源事实层")
+    store_path = work / module.STORE_FILE
+    store = read_json(store_path) if store_path.is_file() else None
+    try:
+        merged, counts = module.merge_snapshot(store, snapshot, work.name, utc_now())
+    except module.SourceFactsConflict as error:
+        raise RegistryError(str(error)) from error
+    if counts["added"]:
+        write_json(store_path, merged)
+    print(
+        json.dumps(
+            {
+                "project": work.name,
+                **counts,
+                "stationActivity": module.station_activity(merged),
+                "storePath": str(store_path),
+                "manualVerificationTouched": False,
+                "cloudWritten": False,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def feishu_source_sync_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(
+        f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync"
+    )
+    try:
+        report = module.run(
+            Path(args.spec),
+            execute_flag=args.execute,
+            reconcile_flag=args.reconcile,
+            cli=args.cli or module.DEFAULT_CLI,
+            ledger_dir=Path(args.ledger_dir) if args.ledger_dir else None,
+            user_risk_acceptance=Path(args.user_risk_acceptance) if getattr(args, "user_risk_acceptance", None) else None,
+        )
+    except module.SyncError as error:
+        raise RegistryError(f"飞书来源同步已拒绝：{error}") from error
+    except module.RuntimeSyncError as error:
+        # 3 = 已发起外部调用后失败或结果未知；与 2(外部调用之前即拒绝)分开，便于调用方对账而不是重放
+        print(f"ERROR: 飞书来源同步失败或结果未知，已保留证据并封锁目标，未重试：{error}", file=sys.stderr)
+        raise SystemExit(3) from error
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if isinstance(report, dict) and report.get("status") == "PARTIAL":
+        print("WARNING: 同步结果为 PARTIAL，存在被挡实体(见 blockedEntities)，退出码 4，不代表整体完成", file=sys.stderr)
+        raise SystemExit(4)
+
+
+def feishu_source_build_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(
+        f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync"
+    )
+    target = {"baseToken": args.base_token, "profile": args.profile, "identity": args.identity}
+    try:
+        transport = module.LarkCliTransport(args.cli or module.DEFAULT_CLI, args.profile, args.identity)
+        report = module.build_basic_specs(
+            capture_path=Path(args.capture), capture_sha=args.capture_sha,
+            waterline_path=Path(args.waterline),
+            v3_path=Path(args.contract_v3), v3_sha=args.contract_v3_sha,
+            v9_path=Path(args.contract_v9), v9_sha=args.contract_v9_sha,
+            routes_path=Path(args.routes), routes_sha=args.routes_sha,
+            target=target, transport=transport, out_dir=Path(args.out_dir), log_root=Path(args.log_root),
+            batch_size=args.batch_size,
+            ledger_dir=Path(args.ledger_dir) if args.ledger_dir else None,
+            user_accepted_releases=Path(args.user_accepted_releases) if args.user_accepted_releases else None,
+        )
+    except module.SyncError as error:
+        raise RegistryError(f"基础字段说明生成已拒绝：{error}") from error
+    except module.RuntimeSyncError as error:
+        print(f"ERROR: fresh 云读取失败，未生成说明：{error}", file=sys.stderr)
+        raise SystemExit(3) from error
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["status"] != "OK":
+        print("WARNING: 有被挡实体或路由问题(PARTIAL)，其余说明已生成；退出码 4，不代表全部可同步", file=sys.stderr)
+        raise SystemExit(4)
 
 
 def fields_validate_command(args: argparse.Namespace) -> None:
@@ -2078,6 +2509,57 @@ def local_verify_command(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False))
     if result.get("status") == "NEEDS_REVIEW":
         raise RegistryError("本地完成需复核，已保留全部证据且未改动任何文件")
+
+
+def confirm_documents_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(
+        f"{__package__}.local_completion" if __package__ else "local_completion"
+    )
+    workspace = workspace_api()
+    try:
+        _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        project = args.project
+        if not PROJECT_NO.fullmatch(project):
+            raise RegistryError("项目编号格式不合法")
+        confirmation = read_json(Path(args.confirmation))
+        document = module.build_confirmed_documents(sys.modules[__name__], layout, project, confirmation)
+        result: dict[str, Any] = {
+            "status": "CHECK_ONLY" if args.check_only else "CONFIRMED",
+            "projectNo": project,
+            "items": len(document["items"]),
+            "held": len(document["held"]),
+            "contentListSha256": document["contentListSha256"],
+            "caseLevelVerified": False,
+            "wrote": False,
+        }
+        if not args.check_only:
+            path, status = module.write_confirmed_documents(sys.modules[__name__], layout, project, document)
+            result.update(file=str(path), write=status, wrote=status != "REUSED")
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def archive_document_subset_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(
+        f"{__package__}.local_completion" if __package__ else "local_completion"
+    )
+    workspace = workspace_api()
+    try:
+        _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        project = args.project
+        if not PROJECT_NO.fullmatch(project):
+            raise RegistryError("项目编号格式不合法")
+        confirmed_file = layout.work_case_dir(project) / module.CONFIRMED_NAME
+        if not confirmed_file.is_file():
+            raise RegistryError("没有 confirmed-documents.json，请先执行 confirm-documents")
+        confirmed = read_json(confirmed_file)
+        result = workspace.archive_document_subset(
+            layout, project, confirmed=confirmed, confirmed_file=confirmed_file, check_only=args.check_only
+        )
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
 
 
 def record_command_timing(

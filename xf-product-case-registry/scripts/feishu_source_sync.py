@@ -1,0 +1,1811 @@
+"""0104 source-field sync into the Feishu case Base, through the official ``lark-cli`` (v2).
+
+Only source fields explicitly allow-listed by field ID, on explicitly allow-listed record IDs,
+and classified ``source-sync-whitelist`` by a pinned protection contract can be written.
+Human, derived, structural, admin and legacy fields, unknown fields and field names are always
+refused. Every refusal happens before the first external call. There is no "all records" mode.
+
+Modes (``mode`` in the spec; cloud access also needs the matching command-line flag)
+- ``plan``       validate locally and print the exact wire requests and ledger state; never calls
+                 Feishu and never writes the ledger.
+- ``execute``    ``--execute``: ledger check and per-target locks, full readback with strict record
+                 identity, stable-key check, intent recorded before the first write, one upsert per
+                 record, full readback and protection assertions.
+- ``reconcile``  ``--reconcile``: read-only cloud readback of an unresolved earlier write, compared
+                 with the intent recorded in the ledger. It never writes to Feishu. Only a matching
+                 stable key plus every intended value present clears the block (APPLIED). An old value
+                 observed later is only an observation: it cannot prove the request never ran or will
+                 not arrive late, so the target stays blocked until a recorded human release with
+                 evidence.
+
+Unknown results are never replayed. A write whose effect is unknown, failed, or not yet verified
+blocks every later write to the same exact target (base, table, record) until reconciliation or a
+recorded human release; the ledger is append-only and independent of ``logDir``.
+
+V3 (``FeishuSourceSyncSpecV3``) adds a separate, create-only branch for entities that a fresh full-page
+key scan proves absent (see "V3 create" below). It never updates, re-parents or renumbers an existing
+row and uses the same append-only ledger directory (intent keys are derived from the stable key because
+no recordId exists before the create).
+
+Standard library only; the transport is injectable so tests never reach the network.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import getpass
+import hashlib
+import json
+import math
+import os
+import re
+import socket
+import subprocess
+import sys
+import uuid
+from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Protocol
+
+SPEC_SCHEMA = "FeishuSourceSyncSpecV2"
+REPORT_SCHEMA = "FeishuSourceSyncReportV2"
+WHITELIST = "source-sync-whitelist"
+SCALAR_TYPES = {"text", "number", "select", "datetime"}
+DERIVED_CLASSES = {"derived-readonly"}
+DERIVED_TYPES = {"formula", "updated_at", "created_at", "lookup"}
+FIELD_ID = re.compile(r"^fld[0-9A-Za-z]{6,}$")
+RECORD_ID = re.compile(r"^rec[0-9A-Za-z]{6,}$")
+TABLE_ID = re.compile(r"^tbl[0-9A-Za-z]{6,}$")
+DATETIME_INPUT = re.compile(r"^(\d{4}-\d{2}-\d{2})(?: (\d{2}:\d{2})(?::00)?)?$")
+HARD_CAP_RECORDS = 20
+DEFAULT_CLI = "/opt/devtools/nvm/versions/node/v24.21.0/bin/lark-cli"
+DEFAULT_LEDGER = Path.home() / ".local" / "state" / "xf-product-case-registry" / "feishu-source-sync"
+VALUE_STATES = {"observed", "not-provided", "unknown"}
+SOURCE_TZ = timezone(timedelta(hours=8))  # responses carry timezone Asia/Shanghai
+# Manual and relation fields from the v8 contract. They stay denied even if a later contract
+# edit mislabels them as source fields. Unknown or new fields are refused by default as well.
+ALWAYS_DENIED = {
+    "fld4mVYy5Y": "案卷.是否网售(人工)",
+    "fldvHLpSKI": "案卷.是否加油加气站(人工)",
+    "fld5E2njAU": "案卷.是否微型消防站(人工)",
+    "fldrKL9rDE": "案卷.是否核实(人工)",
+    "fldW2kJC0V": "案卷.核实说明(人工)",
+    "fldoFEnhmd": "案卷.涉及网售产品(人工关系)",
+    "fld4atEDRT": "检查.是否核实(人工)",
+    "fldYkXBvEt": "检查.核实说明(人工)",
+    "fldwsnqeJ4": "产品.是否核实(人工)",
+    "fld1Plox8P": "产品.核实说明(人工)",
+    "fldVZE4Yc9": "产品.网售标记案卷(人工关系反向)",
+}
+# Stable business key per table; it must match before any write.
+STABLE_KEYS = {"案卷主表": "fld1lHXHpk", "检查明细": "fld5ujrPv4", "产品明细": "fldqlwHjUW"}
+NEGATIVE_LITERALS = {"否", "0", 0, False}
+CLEAR_FINALS = {"OK", "UNCHANGED", "NOT_ATTEMPTED"}
+CLEAR_RECONCILED = {"APPLIED"}  # only positive evidence that the request took effect; an old value proves nothing
+RELEASE_EVIDENCE_KINDS = {"request-terminal-proof", "service-side-record", "cli-process-log", "human-decision-record"}
+
+
+class SyncError(Exception):
+    """Refused before any external call (exit code 2)."""
+
+
+class RuntimeSyncError(Exception):
+    """A failure while talking to Feishu or while verifying (exit code 3)."""
+
+
+class Ambiguous(Exception):
+    """A cell has a shape this version does not interpret; comparisons fail closed."""
+
+
+class Transport(Protocol):
+    def get_records(self, base: str, table: str, record_ids: list[str]) -> dict[str, dict[str, Any]]: ...
+    def upsert(self, base: str, table: str, record_id: str, fields: dict[str, Any]) -> dict[str, Any]: ...
+    # V3 create branch (optional for V2-only transports)
+    def find_records(self, base: str, table: str, key_field_id: str, value: str) -> list[str]: ...
+    def create_record(self, base: str, table: str, fields: dict[str, Any]) -> dict[str, Any]: ...
+
+
+def now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def file_sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def digest(value: Any) -> str:
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def canon(value: Any) -> Any:
+    """Order-insensitive, display-name-insensitive raw comparison form for a cell."""
+    if isinstance(value, list):
+        items = [canon(item) for item in value]
+        return sorted(items, key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False))
+    if isinstance(value, dict):
+        if "id" in value:
+            return {"id": value["id"]}
+        return {key: canon(item) for key, item in sorted(value.items())}
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+# ---------------------------------------------------------------------------------------------
+# Typed cells: one definition of the wire value and of the comparison, per contract field type.
+# ---------------------------------------------------------------------------------------------
+
+
+def wire_value(field_type: str, new: Any) -> Any:
+    """Official lark-cli CellValue for a source value; ambiguous input is refused."""
+    if field_type == "text":
+        if not isinstance(new, str) or not new:
+            raise SyncError("text 字段的新值必须是非空字符串")
+        return new
+    if field_type == "select":
+        if not isinstance(new, str) or not new:
+            raise SyncError("select 字段的新值必须是单个非空选项字符串(程序序列化为单元素数组)")
+        return [new]
+    if field_type == "number":
+        if isinstance(new, bool) or not isinstance(new, (int, float)) or not math.isfinite(new):
+            raise SyncError("number 字段的新值必须是有限数字(不接受布尔/字符串)")
+        return new
+    if field_type == "datetime":
+        match = DATETIME_INPUT.match(new) if isinstance(new, str) else None
+        if match is None:
+            raise SyncError("datetime 字段的新值必须是 YYYY-MM-DD 或 YYYY-MM-DD HH:MM(按 Asia/Shanghai)")
+        text = f"{match.group(1)} {match.group(2) or '00:00'}"
+        try:
+            datetime.strptime(text, "%Y-%m-%d %H:%M")
+        except ValueError as error:
+            raise SyncError("datetime 字段的新值不是有效日期时间") from error
+        return text
+    raise SyncError(f"本版不支持写入 {field_type} 类型")
+
+
+def norm_cell(field_type: str, cell: Any) -> Any:
+    """Comparable form of a stored or intended cell; raises Ambiguous for unknown shapes."""
+    if cell is None:
+        return None
+    if field_type == "text":
+        if isinstance(cell, str):
+            return cell
+        raise Ambiguous
+    if field_type == "select":
+        if isinstance(cell, str):
+            return cell
+        if isinstance(cell, list) and all(isinstance(item, str) for item in cell):
+            if not cell:
+                return None
+            return cell[0] if len(cell) == 1 else tuple(sorted(cell))
+        raise Ambiguous
+    if field_type == "number":
+        if isinstance(cell, bool) or not isinstance(cell, (int, float)):
+            raise Ambiguous
+        return float(cell)
+    if field_type == "datetime":
+        if not isinstance(cell, str):
+            raise Ambiguous
+        try:
+            parsed = datetime.fromisoformat(cell)
+        except ValueError as error:
+            raise Ambiguous from error
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(SOURCE_TZ).replace(tzinfo=None)
+        return parsed
+    raise Ambiguous
+
+
+def cell_is_empty(cell: Any) -> bool:
+    """A stored cell that carries no value (missing, empty text or empty list)."""
+    return cell is None or cell == "" or cell == []
+
+
+def cell_equals(field_type: str, stored: Any, intended_wire: Any) -> bool:
+    try:
+        return norm_cell(field_type, stored) == norm_cell(field_type, intended_wire if field_type != "datetime" else intended_wire.replace(" ", "T"))
+    except Ambiguous:
+        return False
+
+
+# ---------------------------------------------------------------------------------------------
+# Contract and spec validation (everything here runs before the first external call)
+# ---------------------------------------------------------------------------------------------
+
+
+def load_contract(path: Path, expected_sha: str) -> dict[str, Any]:
+    if not path.is_file():
+        raise SyncError("保护合同文件不存在")
+    if file_sha(path) != expected_sha:
+        raise SyncError("保护合同摘要与 spec 固定值不一致；合同变化须另版冻结")
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(contract.get("tables"), dict) or not contract.get("baseId"):
+        raise SyncError("保护合同缺少 baseId 或 tables")
+    return contract
+
+
+def field_index(contract: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]]:
+    """tableId -> fieldId -> {name, type, class, table}."""
+    index: dict[str, dict[str, dict[str, Any]]] = {}
+    for table_name, table in contract["tables"].items():
+        table_id = table.get("tableId")
+        if not isinstance(table_id, str):
+            raise SyncError("合同表缺少 tableId")
+        index[table_id] = {
+            field["fieldId"]: {
+                "name": field["name"],
+                "type": field["type"],
+                "class": field["class"],
+                "table": table_name,
+            }
+            for field in table.get("fields", [])
+        }
+    return index
+
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise SyncError(message)
+
+
+def _table_name(index: dict[str, dict[str, dict[str, Any]]], table_id: str) -> str:
+    return next(iter(index[table_id].values()))["table"]
+
+
+def validate_spec(spec: Any, contract: dict[str, Any]) -> dict[str, Any]:
+    """Every rule that must hold before the first external call. Returns the resolved plan."""
+    _require(isinstance(spec, dict) and spec.get("schemaVersion") == SPEC_SCHEMA, "spec 格式无效(需要 FeishuSourceSyncSpecV2)")
+    _require(spec.get("mode") in {"plan", "execute", "reconcile"}, "mode 必须是 plan / execute / reconcile")
+    target = spec.get("target")
+    _require(isinstance(target, dict), "缺少 target")
+    base = target.get("baseToken")
+    _require(isinstance(base, str) and base == contract["baseId"], "目标 Base 与保护合同不一致")
+    _require(
+        isinstance(target.get("profile"), str) and target["profile"] and target.get("identity") in {"user", "bot"},
+        "必须显式给出 profile 与 identity",
+    )
+    index = field_index(contract)
+    allow = spec.get("allowlist")
+    _require(isinstance(allow, dict) and allow, "allowlist 为空；不回落到任何全量数据")
+    allowed: dict[str, dict[str, set[str]]] = {}
+    for table_id, entry in allow.items():
+        _require(TABLE_ID.match(table_id) is not None and table_id in index, f"allowlist 表不在保护合同中：{table_id}")
+        _require(isinstance(entry, dict), "allowlist 表项无效")
+        records, fields = entry.get("records"), entry.get("fields")
+        _require(isinstance(records, list) and records, f"{table_id} 的 record 白名单为空")
+        _require(isinstance(fields, list) and fields, f"{table_id} 的 fieldId 白名单为空")
+        _require(all(isinstance(r, str) and RECORD_ID.match(r) for r in records), "record_id 格式无效或仍是占位")
+        _require(len(set(records)) == len(records), "record 白名单含重复")
+        for field_id in fields:
+            _require(isinstance(field_id, str) and FIELD_ID.match(field_id) is not None, f"白名单必须是 fieldId，不接受名称：{field_id}")
+            _require(field_id not in ALWAYS_DENIED, f"人工/关系字段永久禁写：{ALWAYS_DENIED.get(field_id, field_id)}")
+            meta = index[table_id].get(field_id)
+            _require(meta is not None, f"字段不在保护合同中（新增字段默认拒写）：{field_id}")
+            _require(meta["class"] == WHITELIST, f"字段不是 {WHITELIST}：{meta['name']}({meta['class']})")
+            _require(meta["type"] in SCALAR_TYPES, f"本版只写标量源字段，拒绝 {meta['type']}：{meta['name']}")
+        stable = STABLE_KEYS.get(_table_name(index, table_id))
+        _require(stable in index[table_id] and index[table_id][stable]["class"] == WHITELIST, "稳定键字段未在合同中确认")
+        allowed[table_id] = {"records": set(records), "fields": set(fields)}
+    updates = spec.get("updates")
+    _require(isinstance(updates, list) and updates, "updates 为空")
+    limits = spec.get("limits") or {}
+    cap = limits.get("maxRecords")
+    _require(isinstance(cap, int) and not isinstance(cap, bool) and 1 <= cap <= HARD_CAP_RECORDS, f"limits.maxRecords 必须是 1..{HARD_CAP_RECORDS}")
+    _require(len(updates) <= cap, "更新记录数超过 maxRecords")
+    seen: set[tuple[str, str]] = set()
+    pattern = spec.get("syntheticKeyPattern")
+    synthetic = spec.get("syntheticOnly") is True
+    _require(not synthetic or (isinstance(pattern, str) and pattern), "syntheticOnly 需要 syntheticKeyPattern")
+    plan: list[dict[str, Any]] = []
+    for update in updates:
+        _require(isinstance(update, dict), "update 无效")
+        table_id, record_id = update.get("tableId"), update.get("recordId")
+        _require(table_id in allowed and record_id in allowed[table_id]["records"], f"目标记录不在白名单：{table_id}/{record_id}")
+        _require((table_id, record_id) not in seen, "同一记录重复更新")
+        seen.add((table_id, record_id))
+        stable = STABLE_KEYS[_table_name(index, table_id)]
+        key = update.get("stableKey")
+        _require(
+            isinstance(key, dict) and key.get("fieldId") == stable and isinstance(key.get("value"), str) and key["value"],
+            f"必须给出稳定键 {stable} 及其值",
+        )
+        _require(not synthetic or re.search(pattern, key["value"]) is not None, "syntheticOnly：稳定键不符合合成测试模式")
+        fields = update.get("fields")
+        _require(isinstance(fields, dict) and fields, "update.fields 为空")
+        writes: dict[str, dict[str, Any]] = {}
+        skipped: dict[str, dict[str, Any]] = {}
+        for field_id, item in fields.items():
+            _require(FIELD_ID.match(field_id) is not None, f"update 必须用 fieldId：{field_id}")
+            _require(field_id not in ALWAYS_DENIED, f"人工/关系字段永久禁写：{ALWAYS_DENIED.get(field_id, field_id)}")
+            _require(field_id in allowed[table_id]["fields"], f"字段不在白名单：{field_id}")
+            _require(field_id != stable, "稳定键字段不得作为更新目标")
+            _require(isinstance(item, dict), "每个字段需 {new, basis}")
+            basis = item.get("basis")
+            _require(
+                isinstance(basis, dict)
+                and basis.get("kind") == "source-observed"
+                and basis.get("valueState") in VALUE_STATES
+                and isinstance(basis.get("sourceRef"), str)
+                and basis["sourceRef"]
+                and isinstance(basis.get("observedAt"), str)
+                and basis["observedAt"],
+                "每个字段需 basis{kind:source-observed, valueState:observed|not-provided|unknown, sourceRef, observedAt}",
+            )
+            meta = index[table_id][field_id]
+            if basis["valueState"] != "observed":
+                _require("new" not in item, "valueState 为 not-provided/unknown 时不得携带 new；缺失只跳过，不覆盖已有值")
+                skipped[field_id] = {"name": meta["name"], "valueState": basis["valueState"], "basis": basis}
+                continue
+            _require("new" in item, "valueState=observed 需要 new")
+            value = item["new"]
+            if isinstance(value, (str, int, float, bool)) and value in NEGATIVE_LITERALS:
+                _require(basis.get("explicitNegative") is True, "“否/0”只能来自来源明确否定(basis.explicitNegative)")
+            writes[field_id] = {
+                "name": meta["name"], "type": meta["type"], "new": value, "wire": wire_value(meta["type"], value),
+                "basis": basis, "expectedOld": item.get("expectedOld", "__absent__"),
+            }
+        plan.append({"tableId": table_id, "recordId": record_id, "stableKey": key, "writes": writes, "skipped": skipped})
+    if spec["mode"] != "plan":
+        _require(isinstance(spec.get("logDir"), str) and spec["logDir"], f"{spec['mode']} 需要显式 logDir")
+    if spec["mode"] == "reconcile" and spec.get("humanRelease") is not None:
+        release = spec["humanRelease"]
+        _require(isinstance(release, dict), "humanRelease 格式无效")
+        _require(all(isinstance(release.get(k), str) and release[k].strip() for k in ("reason", "operator", "intentId")), "humanRelease 需要 reason、operator 与精确 intentId(只放行该意图)")
+        _require(release.get("acknowledgesLateWriteRisk") is True, "humanRelease 需要 acknowledgesLateWriteRisk: true(确认知悉迟到写入风险)")
+        evidence = release.get("evidence")
+        _require(isinstance(evidence, list) and evidence, "humanRelease 需要至少一条依据 evidence；旧值相等不是依据")
+        for item in evidence:
+            _require(isinstance(item, dict) and item.get("kind") in RELEASE_EVIDENCE_KINDS, f"evidence.kind 必须是 {sorted(RELEASE_EVIDENCE_KINDS)} 之一")
+            _require(isinstance(item.get("ref"), str) and item["ref"].strip(), "evidence.ref 不能为空")
+    return {"index": index, "allowed": allowed, "plan": plan}
+
+
+def build_requests(checked: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "tableId": item["tableId"],
+            "recordId": item["recordId"],
+            "stableKey": item["stableKey"],
+            "wire": {fid: write["wire"] for fid, write in item["writes"].items()},
+            "skippedFields": {fid: skip["valueState"] for fid, skip in item["skipped"].items()},
+        }
+        for item in checked["plan"]
+    ]
+
+
+# ---------------------------------------------------------------------------------------------
+# Strict response parsing and the transport
+# ---------------------------------------------------------------------------------------------
+
+
+def parse_get_response(body: Any, requested: list[str]) -> dict[str, dict[str, Any]]:
+    """record_id -> {fieldId: cell}. Identity comes only from the service receipt, never from order."""
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict):
+        raise RuntimeSyncError("回读结构异常：缺少 data")
+    ids, field_ids, rows = data.get("record_id_list"), data.get("field_id_list"), data.get("data")
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise RuntimeSyncError("回读缺少 record_id_list，不能按请求顺序猜配记录")
+    if not isinstance(field_ids, list) or not all(isinstance(f, str) for f in field_ids) or len(set(field_ids)) != len(field_ids):
+        raise RuntimeSyncError("回读缺少或重复 field_id_list")
+    if not isinstance(rows, list) or not all(isinstance(r, list) for r in rows):
+        raise RuntimeSyncError("回读 data 不是行矩阵")
+    if len(set(ids)) != len(ids):
+        raise RuntimeSyncError("回读 record_id_list 含重复 ID")
+    if len(ids) != len(rows):
+        raise RuntimeSyncError("回读 record_id_list 与 data 行数不一致")
+    unknown = sorted(set(ids) - set(requested))
+    if unknown:
+        raise RuntimeSyncError(f"回读含未请求的 record_id：{unknown}")
+    missing = sorted(set(requested) - set(ids))
+    if missing:
+        raise RuntimeSyncError(f"目标记录读不到：{missing}")
+    if any(len(row) != len(field_ids) for row in rows):
+        raise RuntimeSyncError("回读行宽与 field_id_list 不一致")
+    return {rid: dict(zip(field_ids, row, strict=True)) for rid, row in zip(ids, rows, strict=True)}
+
+
+def _receipt_record_id(body: Any) -> str | None:
+    """Exactly one record id from the service receipt; several/none => None (never guessed from order)."""
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict):
+        return None
+    found: list[str] = []
+    record = data.get("record")
+    if isinstance(record, dict) and isinstance(record.get("record_id"), str):
+        found.append(record["record_id"])
+    if isinstance(record, dict) and isinstance(record.get("record_id_list"), list):  # 真实 CLI 回执形态：data.record.record_id_list
+        found.extend(x for x in record["record_id_list"] if isinstance(x, str))
+    if isinstance(data.get("record_id"), str):
+        found.append(data["record_id"])
+    for key in ("record_id_list", "record_ids"):
+        if isinstance(data.get(key), list):
+            found.extend(x for x in data[key] if isinstance(x, str))
+    records = data.get("records")
+    if isinstance(records, list):
+        found.extend(r["record_id"] for r in records if isinstance(r, dict) and isinstance(r.get("record_id"), str))
+    unique = list(dict.fromkeys(found))
+    return unique[0] if len(unique) == 1 and RECORD_ID.match(unique[0]) else None
+
+
+def parse_list_response(body: Any, key_field_id: str) -> tuple[list[str], list[Any]]:
+    """record ids and the key column cells of one ``+record-list`` page; identity only from the service receipt."""
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict):
+        raise RuntimeSyncError("列表结构异常：缺少 data")
+    ids, field_ids, rows = data.get("record_id_list"), data.get("field_id_list"), data.get("data")
+    if not isinstance(ids, list) or not isinstance(field_ids, list) or not isinstance(rows, list):
+        raise RuntimeSyncError("列表缺少 record_id_list/field_id_list/data")
+    if len(ids) != len(rows) or len(set(ids)) != len(ids):
+        raise RuntimeSyncError("列表 record_id_list 与 data 不一致或重复")
+    if key_field_id not in field_ids:
+        raise RuntimeSyncError("列表缺少稳定键列，不能确认唯一性")
+    position = field_ids.index(key_field_id)
+    if any(not isinstance(row, list) or len(row) != len(field_ids) for row in rows):
+        raise RuntimeSyncError("列表行宽与 field_id_list 不一致")
+    return ids, [row[position] for row in rows]
+
+
+class LarkCliTransport:
+    """Official lark-cli, existing authenticated profile. No credential is read here."""
+
+    def __init__(self, cli: str, profile: str, identity: str, runner: Any = None, timeout: int = 120):
+        self.cli, self.profile, self.identity = cli, profile, identity
+        self.runner = runner or subprocess.run
+        self.timeout = timeout
+
+    def _run(self, args: list[str]) -> dict[str, Any]:
+        argv = [self.cli, "base", *args, "--profile", self.profile, "--as", self.identity]
+        try:
+            result = self.runner(argv, capture_output=True, text=True, timeout=self.timeout)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeSyncError("UNKNOWN: 官方 CLI 超时；效果未知，需按 record_id 回读对账") from error
+        except OSError as error:
+            raise RuntimeSyncError(f"官方 CLI 无法启动：{error.__class__.__name__}") from error
+        try:
+            body = json.loads(result.stdout)
+        except ValueError as error:
+            raise RuntimeSyncError("UNKNOWN: 官方 CLI 输出不是 JSON") from error
+        self.last_body = body  # 供创建回执解析失败时留证（只保存在日志，不用于判断身份）
+        if result.returncode != 0 or not isinstance(body, dict) or not body.get("ok"):
+            raise RuntimeSyncError("官方 CLI 返回失败")
+        return body
+
+    def get_records(self, base: str, table: str, record_ids: list[str]) -> dict[str, dict[str, Any]]:
+        args = ["+record-get", "--base-token", base, "--table-id", table, "--format", "json"]
+        for record_id in record_ids:
+            args += ["--record-id", record_id]
+        return parse_get_response(self._run(args), record_ids)
+
+    def upsert(self, base: str, table: str, record_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+        body = self._run(
+            ["+record-upsert", "--base-token", base, "--table-id", table, "--record-id", record_id,
+             "--json", json.dumps(fields, ensure_ascii=False)]
+        )
+        data = body.get("data")
+        rid = data.get("record", {}).get("record_id") if isinstance(data, dict) and isinstance(data.get("record"), dict) else None
+        if rid is not None and rid != record_id:
+            raise RuntimeSyncError("UNKNOWN: 写入回执的 record_id 与请求不一致")
+        return body
+
+    def find_records(self, base: str, table: str, key_field_id: str, value: str) -> list[str]:
+        """Full-page scan of one key column; exact string match on the client (no server filter trusted)."""
+        matches: list[str] = []
+        offset, limit = 0, 200
+        while True:
+            body = self._run(["+record-list", "--base-token", base, "--table-id", table, "--field-id", key_field_id,
+                              "--limit", str(limit), "--offset", str(offset), "--format", "json"])
+            ids, rows = parse_list_response(body, key_field_id)
+            for record_id, cell in zip(ids, rows, strict=True):
+                if cell == value:
+                    matches.append(record_id)
+            if len(ids) < limit:
+                return matches
+            offset += limit
+
+    def list_rows(self, base: str, table: str, field_ids: list[str] | None = None) -> dict[str, dict[str, Any]]:
+        """Full-page read of selected columns: record_id -> {fieldId: cell}. Identity only from the service receipt."""
+        result: dict[str, dict[str, Any]] = {}
+        offset, limit = 0, 200
+        while True:
+            args = ["+record-list", "--base-token", base, "--table-id", table]
+            for field_id in field_ids or []:
+                args += ["--field-id", field_id]
+            body = self._run([*args, "--limit", str(limit), "--offset", str(offset), "--format", "json"])
+            data = body.get("data") if isinstance(body, dict) else None
+            ids, fids, rows = (data or {}).get("record_id_list"), (data or {}).get("field_id_list"), (data or {}).get("data")
+            if not isinstance(ids, list) or not isinstance(fids, list) or not isinstance(rows, list) or len(ids) != len(rows):
+                raise RuntimeSyncError("列表结构异常：record_id_list/field_id_list/data 不一致")
+            if len(set(ids)) != len(ids) or any(i in result for i in ids) or any(not isinstance(r, list) or len(r) != len(fids) for r in rows):
+                raise RuntimeSyncError("列表含重复 record_id 或行宽与 field_id_list 不一致")
+            for record_id, row in zip(ids, rows, strict=True):
+                result[record_id] = dict(zip(fids, row, strict=True))
+            if len(ids) < limit:
+                return result
+            offset += limit
+
+    def create_record(self, base: str, table: str, fields: dict[str, Any]) -> dict[str, Any]:
+        """``+record-upsert`` without --record-id creates a record (official help); no business-key upsert."""
+        body = self._run(["+record-upsert", "--base-token", base, "--table-id", table, "--json", json.dumps(fields, ensure_ascii=False)])
+        rid = _receipt_record_id(body)
+        if rid is None:
+            raise RuntimeSyncError("UNKNOWN: 创建回执缺少 record_id；效果未知，不按顺序猜配，需按稳定键回读对账")
+        return {**body, "data": {**(body.get("data") if isinstance(body.get("data"), dict) else {}), "record": {"record_id": rid}}}
+
+
+# ---------------------------------------------------------------------------------------------
+# Append-only ledger: exact-target intents, results and reconciliation, independent of logDir
+# ---------------------------------------------------------------------------------------------
+
+
+# 唯一正式 P18 账根：正常入口(CLI/函数默认)只认这一个身份。结构合法但另建的“空账”不是它，不能绕过它的历史封锁。
+# 变更此常量是源码变更(须经 diff 评审)，不是运行时可传入的参数。
+P18_LEDGER_ROOT = "/mnt/d/ws/05-temp/20261104_飞书大队权限/P18运行账本/实施"
+ISOLATED_LEDGER_MARKER = ".isolated-test-ledger"
+
+
+def canonical_ledger_path(value: Any) -> str:
+    """Windows 盘符路径与 WSL /mnt 路径指向同一 D 根时规范成同一字符串，便于比较身份(不访问文件系统)。"""
+    text = str(value).replace("\\", "/")
+    match = re.match(r"^([A-Za-z]):/(.*)$", text)
+    if match:
+        text = f"/mnt/{match.group(1).lower()}/{match.group(2)}"
+    return os.path.normpath(text).rstrip("/")
+
+
+class Ledger:
+    def __init__(self, root: Path, *, isolated_test: bool = False):
+        self.root = Path(root)
+        self.isolated_test = isolated_test   # 仅代码内部(测试)可设；CLI/正常入口从不设置
+
+    def validate_root(self) -> None:
+        """正常入口只认唯一正式 P18 账根的身份，而不只是“目录结构合法”。
+
+        - 正式根：规范化路径必须等于 P18_LEDGER_ROOT，目录须存在且已有历史(targets/ 下至少一个事件文件)；只读核验，不写。
+        - 隔离测试账：仅当代码内部以 isolated_test=True 构造、根里有 initialize() 写下的标记、且不是正式根时才可用；
+          CLI 与默认入口不暴露这条路径，另建的空账(哪怕有 targets/)一律拒绝。
+        """
+        production = canonical_ledger_path(P18_LEDGER_ROOT)
+        is_production = canonical_ledger_path(self.root) == production
+        if not self.root.is_dir() or not (self.root / "targets").is_dir():
+            raise SyncError(f"账根不存在或不是既有账(缺 targets/)：{self.root}；正常入口不会新建账根")
+        if self.isolated_test:
+            if is_production or not (self.root / ISOLATED_LEDGER_MARKER).is_file():
+                raise SyncError("隔离测试账必须是显式 initialize() 过、带标记且不是正式根的目录")
+            return
+        if not is_production:
+            raise SyncError(f"不是唯一正式 P18 账根(应为 {P18_LEDGER_ROOT})：{self.root}；另建的空账会绕过正式账的历史封锁，拒绝")
+        if not any((self.root / "targets").glob("*.jsonl")):
+            raise SyncError("正式账根下没有任何历史事件，疑似被替换为空账，拒绝")
+
+    def initialize(self) -> None:
+        """仅隔离测试：显式创建账根结构并写下隔离标记；正常同步入口从不调用，也不会对正式根调用。"""
+        if canonical_ledger_path(self.root) == canonical_ledger_path(P18_LEDGER_ROOT):
+            raise SyncError("拒绝对正式 P18 账根执行 initialize")
+        (self.root / "targets").mkdir(parents=True, exist_ok=True)
+        (self.root / "locks").mkdir(parents=True, exist_ok=True)
+        (self.root / ISOLATED_LEDGER_MARKER).write_text("isolated test ledger; not the formal P18 ledger\n", encoding="utf-8")
+
+    @staticmethod
+    def target_key(base: str, table: str, record: str) -> str:
+        return digest({"base": base, "table": table, "record": record})[:32]
+
+    def _events_path(self, key: str) -> Path:
+        return self.root / "targets" / f"{key}.jsonl"
+
+    def events(self, key: str) -> list[dict[str, Any]]:
+        path = self._events_path(key)
+        if not path.is_file():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def state(self, key: str) -> dict[str, Any]:
+        """CLEAR, or BLOCKED with the unresolved intent and why."""
+        events = self.events(key)
+        last_intent = None
+        status: dict[str, Any] = {"state": "CLEAR"}
+        for event in events:
+            kind = event["event"]
+            if kind == "intent":
+                last_intent = event
+                status = {"state": "BLOCKED", "reason": "PENDING", "intentId": event["intentId"], "detail": "意图已落账但无终态(进程中断或结果未记录)"}
+            elif last_intent is not None and event.get("intentId") == last_intent["intentId"]:
+                if kind == "final":
+                    status = {"state": "CLEAR"} if event["status"] in CLEAR_FINALS else {
+                        "state": "BLOCKED", "reason": event["status"], "intentId": event["intentId"], "detail": event.get("detail", "")}
+                elif kind == "reconciled":
+                    status = {"state": "CLEAR"} if event["outcome"] in CLEAR_RECONCILED else {
+                        "state": "BLOCKED", "reason": event["outcome"], "intentId": event["intentId"], "detail": event.get("detail", "")}
+                elif kind == "human_release":
+                    status = {"state": "CLEAR", "releasedByHuman": True}
+        status["lastIntent"] = last_intent
+        return status
+
+    def append(self, key: str, event: dict[str, Any]) -> None:
+        path = self._events_path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"at": now(), **event}, ensure_ascii=False, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    @contextlib.contextmanager
+    def locks(self, keys: list[str], run_id: str):
+        """Exclusive per-target locks held for the whole run; a leftover lock is never auto-broken."""
+        directory = self.root / "locks"
+        directory.mkdir(parents=True, exist_ok=True)
+        held: list[Path] = []
+        try:
+            for key in sorted(set(keys)):
+                path = directory / f"{key}.lock"
+                try:
+                    handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                except FileExistsError as error:
+                    raise SyncError(f"目标正被另一运行占用或遗留锁未清理(人工核实后才能删除)：{path.name}") from error
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"runId": run_id, "pid": os.getpid(), "host": socket.gethostname(), "at": now()}))
+                held.append(path)
+            yield
+        finally:
+            for path in held:
+                with contextlib.suppress(OSError):
+                    path.unlink()
+
+
+def operator() -> dict[str, Any]:
+    try:
+        user = getpass.getuser()
+    except Exception:  # noqa: BLE001 - identity is diagnostic only
+        user = "unknown"
+    return {"user": user, "host": socket.gethostname(), "pid": os.getpid()}
+
+
+def _write(log_dir: Path, name: str, value: Any) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / name).write_text(json.dumps(value, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+
+
+def _append(log_dir: Path, name: str, value: Any) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    with (log_dir / name).open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(value, ensure_ascii=False) + "\n")
+
+
+def _fresh_log_dir(spec: dict[str, Any]) -> Path:
+    path = Path(spec["logDir"])
+    if path.exists() and (not path.is_dir() or any(path.iterdir())):
+        raise SyncError("logDir 已存在且非空；旧结果不得被覆盖，请使用新目录")
+    return path
+
+
+def _target_keys(spec: dict[str, Any], checked: dict[str, Any]) -> dict[tuple[str, str], str]:
+    base = spec["target"]["baseToken"]
+    return {(i["tableId"], i["recordId"]): Ledger.target_key(base, i["tableId"], i["recordId"]) for i in checked["plan"]}
+
+
+def _ledger_blocks(ledger: Ledger, keys: dict[tuple[str, str], str]) -> list[dict[str, Any]]:
+    blocks = []
+    for (table, record), key in keys.items():
+        status = ledger.state(key)
+        if status["state"] == "BLOCKED":
+            blocks.append({"tableId": table, "recordId": record, "reason": status["reason"], "intentId": status["intentId"], "detail": status["detail"]})
+    return blocks
+
+
+def _creation_blocks(ledger: Ledger, spec: dict[str, Any], checked: dict[str, Any]) -> list[dict[str, Any]]:
+    """同案稳定键的创建意图若仍未决，晚到的行不能转成“补空”来绕过它(创建键与记录键不同)。"""
+    base, blocks = spec["target"]["baseToken"], []
+    for item in checked["plan"]:
+        status = ledger.state(Ledger.target_key(base, item["tableId"], "create:" + item["stableKey"]["value"]))
+        if status["state"] == "BLOCKED":
+            blocks.append({"tableId": item["tableId"], "recordId": item["recordId"], "stableKey": item["stableKey"]["value"], "kind": "CREATE_UNKNOWN",
+                           "reason": status["reason"], "intentId": status["intentId"], "detail": status["detail"]})
+    return blocks
+
+
+def _all_blocks(ledger: Ledger, spec: dict[str, Any], checked: dict[str, Any]) -> list[dict[str, Any]]:
+    return [*_ledger_blocks(ledger, _target_keys(spec, checked)), *_creation_blocks(ledger, spec, checked)]
+
+
+# ---------------------------------------------------------------------------------------------
+# execute / reconcile
+# ---------------------------------------------------------------------------------------------
+
+
+def execute(spec: dict[str, Any], checked: dict[str, Any], transport: Transport, ledger: Ledger) -> dict[str, Any]:
+    index, base = checked["index"], spec["target"]["baseToken"]
+    keys = _target_keys(spec, checked)
+    blocks = _all_blocks(ledger, spec, checked)
+    if blocks:
+        raise SyncError("目标存在未对账的早先写入或同案稳定键的未决创建，已拒绝(未发起任何外部调用)；先 reconcile 或经用户接受后人工放行：" + json.dumps(blocks, ensure_ascii=False))
+    log_dir = _fresh_log_dir(spec)
+    run_id = uuid.uuid4().hex
+    with ledger.locks(list(keys.values()), run_id):
+        blocks = _all_blocks(ledger, spec, checked)  # re-check inside the lock: a concurrent run may have just finished
+        if blocks:
+            raise SyncError("目标在加锁后出现未对账记录，已拒绝：" + json.dumps(blocks, ensure_ascii=False))
+        return _execute_locked(spec, checked, transport, ledger, keys, log_dir, run_id, index, base)
+
+
+def _execute_locked(spec, checked, transport, ledger, keys, log_dir, run_id, index, base) -> dict[str, Any]:
+    plan = checked["plan"]
+    report: dict[str, Any] = {
+        "schema": REPORT_SCHEMA, "mode": "execute", "runId": run_id, "operator": operator(), "startedAt": now(),
+        "baseToken": base, "profile": spec["target"]["profile"], "ledgerDir": str(ledger.root),
+        "contractSha256": spec["contract"]["sha256"], "records": [], "status": "RUNNING",
+    }
+
+    def refuse(reason: str) -> None:
+        report["status"] = "REFUSED_BEFORE_WRITE"
+        report["reason"] = reason
+        _write(log_dir, "report.json", report)
+        raise RuntimeSyncError(reason)
+
+    tables: dict[str, list[str]] = {}
+    for item in plan:
+        tables.setdefault(item["tableId"], []).append(item["recordId"])
+    before: dict[str, dict[str, dict[str, Any]]] = {}
+    for table_id, ids in tables.items():
+        try:
+            before[table_id] = transport.get_records(base, table_id, ids)
+        except RuntimeSyncError as error:
+            refuse(f"写前回读失败，未写入：{error}")
+    _write(log_dir, "before.json", before)
+    for item in plan:  # stable key and expectedOld checks, still before any write
+        row = before[item["tableId"]][item["recordId"]]
+        key_field = item["stableKey"]["fieldId"]
+        absent = [fid for fid in [key_field, *item["writes"]] if fid not in row]
+        if absent:
+            refuse(f"写前回读缺少稳定键或目标字段，旧值不可比，未写入：{item['recordId']}/{absent}")
+        if not cell_equals(index[item["tableId"]][key_field]["type"], row.get(key_field), item["stableKey"]["value"]):
+            refuse(f"稳定键与云端记录不符：{item['recordId']}")
+        for fid, write in item["writes"].items():
+            expected = write["expectedOld"]
+            if expected is None:  # 显式 null：云端此刻必须为空(只补空值，不覆盖任何既有值)
+                if not cell_is_empty(row.get(fid)):
+                    refuse(f"旧值应为空但云端已有值（同期变化，保留双方）：{item['recordId']}/{fid}")
+            elif expected != "__absent__" and not cell_equals(write["type"], row.get(fid), wire_value(write["type"], expected)):
+                refuse(f"旧值与 expectedOld 不符（同期变化，保留双方）：{item['recordId']}/{fid}")
+        item["changes"] = {fid: w["wire"] for fid, w in item["writes"].items() if not cell_equals(w["type"], row.get(fid), w["wire"])}
+    for item in plan:
+        row = before[item["tableId"]][item["recordId"]]
+        report["records"].append({
+            "tableId": item["tableId"], "recordId": item["recordId"], "stableKey": item["stableKey"],
+            "fieldDetail": {fid: {"name": w["name"], "type": w["type"], "old": row.get(fid), "new": w["new"], "wire": w["wire"], "basis": w["basis"]} for fid, w in item["writes"].items()},
+            "skippedFields": {fid: {"name": s["name"], "valueState": s["valueState"], "basis": s["basis"]} for fid, s in item["skipped"].items()},
+            "plannedFields": sorted(item["changes"]), "writtenFields": [],
+            "status": "NOT_ATTEMPTED" if item["changes"] else "UNCHANGED",
+        })
+    intents: dict[tuple[str, str], str] = {}
+    for item in plan:  # the intent is on the ledger before the first external write
+        if not item["changes"]:
+            continue
+        intent_id = digest({"base": base, "table": item["tableId"], "record": item["recordId"], "stableKey": item["stableKey"], "wire": item["changes"]})
+        intents[(item["tableId"], item["recordId"])] = intent_id
+        ledger.append(keys[(item["tableId"], item["recordId"])], {
+            "event": "intent", "intentId": intent_id, "runId": run_id, "operator": operator(), "logDir": str(log_dir),
+            "target": {"base": base, "table": item["tableId"], "record": item["recordId"]}, "stableKey": item["stableKey"],
+            "fields": {fid: {"name": item["writes"][fid]["name"], "type": item["writes"][fid]["type"], "old": before[item["tableId"]][item["recordId"]].get(fid), "wire": wire}
+                       for fid, wire in item["changes"].items()},
+        })
+    failed = False
+    for item, entry in zip(plan, report["records"], strict=True):
+        if not item["changes"]:
+            continue
+        _append(log_dir, "requests.jsonl", {"at": now(), "op": "upsert", "tableId": item["tableId"], "recordId": item["recordId"], "fields": item["changes"]})
+        try:
+            response = transport.upsert(base, item["tableId"], item["recordId"], item["changes"])
+            data = response.get("data")
+            _append(log_dir, "responses.jsonl", {"at": now(), "recordId": item["recordId"], "ok": bool(response.get("ok", True)), "ignored_fields": data.get("ignored_fields") if isinstance(data, dict) else None})
+            entry["status"] = "WRITTEN"
+            entry["writtenFields"] = sorted(item["changes"])
+        except RuntimeSyncError as error:
+            entry["status"] = "UNKNOWN" if str(error).startswith("UNKNOWN") else "FAILED"
+            entry["error"] = str(error)
+            failed = True
+            break  # never continue or retry after a failed/unknown request
+    after: dict[str, dict[str, dict[str, Any]]] = {}
+    readback_error = None
+    try:
+        for table_id, ids in tables.items():
+            after[table_id] = transport.get_records(base, table_id, ids)
+    except RuntimeSyncError as error:
+        readback_error = str(error)
+    violations: list[str] = []
+    if readback_error is None:
+        _write(log_dir, "after.json", after)
+        violations = _verify(index, plan, report["records"], before, after)
+    report["protectionViolations"] = violations
+    report["finishedAt"] = now()
+    if readback_error is not None:
+        report["status"] = "UNKNOWN"
+        report["reason"] = f"写后回读失败，效果未核实：{readback_error}"
+    else:
+        report["status"] = "FAILED" if failed or violations else "OK"
+    _write(log_dir, "report.json", report)
+    for item, entry in zip(plan, report["records"], strict=True):
+        intent_id = intents.get((item["tableId"], item["recordId"]))
+        if intent_id is None:
+            continue
+        if entry["status"] == "NOT_ATTEMPTED":
+            final = "NOT_ATTEMPTED"
+        elif readback_error is not None and entry["status"] == "WRITTEN":
+            final = "READBACK_FAILED"
+        elif entry["status"] in {"FAILED", "UNKNOWN"}:
+            final = entry["status"]
+        elif any(v.startswith(item["recordId"]) for v in violations):
+            final = "VIOLATION"
+        else:
+            final = "OK"
+        ledger.append(keys[(item["tableId"], item["recordId"])], {"event": "final", "intentId": intent_id, "runId": run_id, "status": final, "detail": entry.get("error", "")})
+    if report["status"] != "OK":
+        raise RuntimeSyncError(report.get("reason") or "; ".join(violations) or "写入失败/结果未知，已保留回读证据，未重试，目标已在账本中封锁")
+    return report
+
+
+def _verify(index, plan, records, before, after) -> list[str]:
+    violations: list[str] = []
+    for item, entry in zip(plan, records, strict=True):
+        old_row, new_row = before[item["tableId"]][item["recordId"]], after[item["tableId"]][item["recordId"]]
+        meta_by_id = index[item["tableId"]]
+        if entry["status"] in {"WRITTEN", "UNCHANGED"}:
+            for fid, write in item["writes"].items():  # every requested field needs an explicit, comparable readback
+                if fid not in new_row:
+                    violations.append(f"{item['recordId']}/{write['name']}：回读缺少该目标字段，无法核对")
+                elif not cell_equals(write["type"], new_row[fid], write["wire"]):
+                    violations.append(f"{item['recordId']}/{write['name']}：回读值不等于目标值")
+        for fid in sorted(set(old_row) | set(new_row)):
+            if fid in item["writes"]:
+                continue
+            meta = meta_by_id.get(fid)
+            derived = meta is not None and (meta["class"] in DERIVED_CLASSES or meta["type"] in DERIVED_TYPES)
+            if not derived and canon(old_row.get(fid)) != canon(new_row.get(fid)):
+                violations.append(f"{item['recordId']}/{meta['name'] if meta else fid}：非目标字段发生变化（保护域/未知字段）")
+    return violations
+
+
+def reconcile(spec: dict[str, Any], checked: dict[str, Any], transport: Transport, ledger: Ledger) -> dict[str, Any]:
+    """Read-only against Feishu; appends reconciliation results to the local ledger only.
+
+    Identity first: the stable key stored in the intent must equal both the key in this spec and the
+    key read back now, otherwise the record is a different business object and the block stays.
+    """
+    base, index = spec["target"]["baseToken"], checked["index"]
+    keys = _target_keys(spec, checked)
+    log_dir = _fresh_log_dir(spec)
+    run_id = uuid.uuid4().hex
+    release = spec.get("humanRelease")
+    for item in checked["plan"]:  # spec/intent identity conflicts are refused before any ledger write
+        intent = ledger.state(keys[(item["tableId"], item["recordId"])]).get("lastIntent")
+        if intent is not None and intent["stableKey"] != item["stableKey"]:
+            raise SyncError(f"对账 spec 的稳定键与账本意图不一致，已拒绝：{item['recordId']}")
+    report: dict[str, Any] = {"schema": REPORT_SCHEMA, "mode": "reconcile", "runId": run_id, "operator": operator(), "startedAt": now(),
+                              "ledgerDir": str(ledger.root), "externalWrites": 0, "targets": []}
+    with ledger.locks(list(keys.values()), run_id):
+        for item in checked["plan"]:
+            key = keys[(item["tableId"], item["recordId"])]
+            status = ledger.state(key)
+            entry: dict[str, Any] = {"tableId": item["tableId"], "recordId": item["recordId"], "ledgerState": status["state"]}
+            report["targets"].append(entry)
+            if status["state"] == "CLEAR":
+                entry["outcome"] = "NOTHING_TO_RECONCILE"
+                continue
+            intent = status["lastIntent"]
+            entry["intentId"] = intent["intentId"]
+            if release is not None and release["intentId"] != intent["intentId"]:
+                entry["outcome"] = "RELEASE_NOT_FOR_THIS_INTENT"   # 放行只对其精确 intentId 有效；其余目标保持封锁，不批量释放
+                continue
+            if release is not None:
+                ledger.append(key, {"event": "human_release", "intentId": intent["intentId"], "runId": run_id, "reason": release["reason"],
+                                    "operator": release["operator"], "evidence": release["evidence"], "acknowledgesLateWriteRisk": True,
+                                    "priorState": status["reason"], "originalIntent": intent})
+                entry["outcome"] = "HUMAN_RELEASED"
+                continue
+            outcome, observed = _classify(index, item, intent, transport, base)
+            ledger.append(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome,
+                                "originalIntent": intent, "observed": observed,
+                                "detail": "旧值仅是观察，不能证明请求未执行或不会迟到" if outcome == "OLD_VALUE_OBSERVED" else ""})
+            entry["outcome"] = outcome
+            entry["observed"] = observed
+    report["finishedAt"] = now()
+    _write(log_dir, "reconcile-report.json", report)
+    return report
+
+
+def _classify(index, item, intent, transport, base) -> tuple[str, dict[str, Any]]:
+    key_field, key_value = intent["stableKey"]["fieldId"], intent["stableKey"]["value"]
+    try:
+        row = transport.get_records(base, item["tableId"], [item["recordId"]])[item["recordId"]]
+    except RuntimeSyncError as error:
+        return "UNREADABLE", {"error": str(error)}
+    observed: dict[str, Any] = {"stableKey": row.get(key_field, "__absent__"), "fields": {fid: row.get(fid, "__absent__") for fid in intent["fields"]}}
+    if key_field not in row:
+        return "IDENTITY_UNREADABLE", observed
+    if not cell_equals(index[item["tableId"]][key_field]["type"], row[key_field], key_value):
+        return "IDENTITY_MISMATCH", observed
+    fields = intent["fields"]
+    if any(fid not in row for fid in fields):
+        return "UNREADABLE", observed
+    if all(cell_equals(f["type"], row[fid], f["wire"]) for fid, f in fields.items()):
+        return "APPLIED", observed
+    if all(cell_equals(f["type"], row[fid], f["old"]) if f["old"] is not None else norm_or_none(f["type"], row[fid]) is None for fid, f in fields.items()):
+        return "OLD_VALUE_OBSERVED", observed
+    return "DIVERGED", observed
+
+
+def norm_or_none(field_type: str, cell: Any) -> Any:
+    try:
+        return norm_cell(field_type, cell)
+    except Ambiguous:
+        return "__ambiguous__"
+
+
+# ---------------------------------------------------------------------------------------------
+# V3 create: create-only branch, same ledger directory, fail-closed identity/route/parent checks
+# ---------------------------------------------------------------------------------------------
+
+SPEC_SCHEMA_V3 = "FeishuSourceSyncSpecV3"
+REPORT_SCHEMA_V3 = "FeishuSourceSyncReportV3"
+CREATE_CLASSES = {"create-once-identity", "create-once-source-scalar", "create-once-routing", "create-once-parent-link"}
+TABLE_RANK = {"案卷主表": 0, "检查明细": 1, "产品明细": 2}
+PROJECT_NO = re.compile(r"^\d{8}[A-Z]\d{9}$")
+TEAM_TABLE_NAME = "大队底册"
+
+
+def load_contract_v3(path: Path, expected_sha: str) -> dict[str, Any]:
+    """The pinned V3 composite: the complete v9 contract (``baseContract``) plus the create-once extension."""
+    if not path.is_file():
+        raise SyncError("V3 合同文件不存在")
+    if file_sha(path) != expected_sha:
+        raise SyncError("V3 合同摘要与 spec 固定值不一致；合同变化须另版冻结")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    base, extension = value.get("baseContract"), value.get("extension")
+    if not isinstance(base, dict) or not isinstance(base.get("tables"), dict) or not base.get("baseId"):
+        raise SyncError("V3 合同缺少完整 v9 baseContract")
+    if not isinstance(extension, dict) or not isinstance(extension.get("createFieldsCandidate"), list):
+        raise SyncError("V3 合同缺少 create-once 扩展")
+    return {"base": base, "extension": extension}
+
+
+def _link_wire(value: Any) -> list[dict[str, str]]:
+    _require(isinstance(value, str) and RECORD_ID.match(value) is not None, "link 字段的新值必须是 recordId 字符串")
+    return [{"id": value}]
+
+
+def validate_create_spec(spec: Any, v3: dict[str, Any]) -> dict[str, Any]:
+    """Structural violations refuse the whole spec; entity-level gaps only block that entity."""
+    _require(isinstance(spec, dict) and spec.get("schemaVersion") == SPEC_SCHEMA_V3, "spec 格式无效(需要 FeishuSourceSyncSpecV3)")
+    _require(spec.get("mode") in {"plan", "execute", "reconcile"}, "mode 必须是 plan / execute / reconcile")
+    contract, extension = v3["base"], v3["extension"]
+    target = spec.get("target")
+    _require(isinstance(target, dict) and target.get("baseToken") == contract["baseId"], "目标 Base 与保护合同不一致")
+    _require(isinstance(target.get("profile"), str) and target["profile"] and target.get("identity") in {"user", "bot"}, "必须显式给出 profile 与 identity")
+    index = field_index(contract)
+    candidates: dict[str, dict[str, Any]] = {f["fieldId"]: f for f in extension["createFieldsCandidate"]}
+    # 冻结合同把两个 admin-only 路由字段同时列入 createPayload DENY 与 create-once-routing 候选；
+    # 父定稿明确放行“所属大队+归属大队”的精确队路由首写，故仅 create-once-routing 候选可覆盖通用 DENY 清单；
+    # 人工/永久禁写字段（ALWAYS_DENIED）永不被覆盖。冲突字段记入 plan/report 的 contractConflicts。
+    routing_ids = {fid for fid, f in candidates.items() if f.get("proposedCreateClass") == "create-once-routing"}
+    explicit_deny = {f["fieldId"] for f in extension.get("explicitCreatePayloadDeny", [])}
+    contract_conflicts = sorted(explicit_deny & routing_ids)
+    denied = ((explicit_deny - routing_ids) | set(ALWAYS_DENIED))
+    release = spec.get("humanRelease")
+    if release is not None:
+        _require(spec["mode"] == "reconcile" and isinstance(release, dict), "humanRelease 仅限 reconcile 且为对象")
+        _require(all(isinstance(release.get(k), str) and release[k].strip() for k in ("reason", "operator", "intentId")), "humanRelease 需要 reason、operator 与精确 intentId(只放行该意图)")
+        _require(release.get("acknowledgesLateWriteRisk") is True and isinstance(release.get("evidence"), list) and release["evidence"], "humanRelease 需要风险确认与 evidence")
+    creates = spec.get("creates")
+    _require(isinstance(creates, list) and creates, "creates 为空；不回落到任何全量数据")
+    limits = spec.get("limits") or {}
+    cap = limits.get("maxRecords")
+    _require(isinstance(cap, int) and not isinstance(cap, bool) and 1 <= cap <= HARD_CAP_RECORDS, f"limits.maxRecords 必须是 1..{HARD_CAP_RECORDS}")
+    _require(len(creates) <= cap, "创建条数超过 maxRecords")
+    routes = spec.get("routes") or []
+    _require(isinstance(routes, list), "routes 格式无效")
+    route_by_source: dict[str, dict[str, Any]] = {}
+    for route in routes:
+        _require(isinstance(route, dict) and all(isinstance(route.get(k), str) and route[k] for k in ("sourceJurisdictionExact", "teamOptionExact", "teamTableId", "teamRecordId")), "route 需要精确原文管辖/队选项/底册表/底册记录")
+        _require(TABLE_ID.match(route["teamTableId"]) is not None and RECORD_ID.match(route["teamRecordId"]) is not None, "route 的底册表/记录无效")
+        _require(len({r["teamTableId"] for r in routes}) == 1, "所有 route 必须指向同一大队底册表")
+        _require(route["sourceJurisdictionExact"] not in route_by_source, "route 的管辖原文重复")
+        route_by_source[route["sourceJurisdictionExact"]] = route
+    synthetic = spec.get("syntheticOnly") is True
+    pattern = spec.get("syntheticKeyPattern")
+    _require(not synthetic or (isinstance(pattern, str) and pattern), "syntheticOnly 需要 syntheticKeyPattern")
+    if spec["mode"] != "plan":
+        _require(isinstance(spec.get("logDir"), str) and spec["logDir"], f"{spec['mode']} 需要显式 logDir")
+    plan: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for create in creates:
+        _require(isinstance(create, dict), "create 项无效")
+        table_id = create.get("tableId")
+        _require(isinstance(table_id, str) and table_id in index, f"create 表不在保护合同中：{table_id}")
+        table_name = _table_name(index, table_id)
+        _require(table_name in TABLE_RANK, f"本版只创建案卷/检查/产品源行：{table_name}")
+        stable_field = STABLE_KEYS[table_name]
+        key = create.get("stableKey")
+        _require(isinstance(key, dict) and key.get("fieldId") == stable_field and isinstance(key.get("value"), str) and key["value"], f"必须给出稳定键 {stable_field} 及其值")
+        _require((table_id, key["value"]) not in seen, "同一稳定键重复创建")
+        seen.add((table_id, key["value"]))
+        if table_name == "案卷主表":
+            _require(PROJECT_NO.fullmatch(key["value"]) is not None or (synthetic and re.search(pattern, key["value"]) is not None), "案卷稳定键必须是项目编号")
+        _require(not synthetic or re.search(pattern, key["value"]) is not None, "syntheticOnly：稳定键不符合合成测试模式")
+        fields = create.get("fields")
+        _require(isinstance(fields, dict) and fields, "create.fields 为空")
+        blocked: list[str] = []
+        writes: dict[str, dict[str, Any]] = {}
+        skipped: dict[str, dict[str, Any]] = {}
+        for field_id, item in fields.items():
+            _require(FIELD_ID.match(field_id) is not None, f"create 必须用 fieldId：{field_id}")
+            _require(field_id not in denied, f"人工/派生/关系/禁写字段不得出现在创建载荷：{field_id}")
+            meta, cand = index[table_id].get(field_id), candidates.get(field_id)
+            _require(meta is not None and cand is not None and cand.get("tableId") == table_id, f"字段不在 V3 创建候选中(默认拒绝)：{field_id}")
+            _require(cand.get("proposedCreateClass") in CREATE_CLASSES, f"字段不是 create-once 类别：{field_id}")
+            _require(not str(cand.get("candidateState", "")).startswith("blocked"), f"合同未放行该字段创建(候选仍 blocked)：{meta['name']}")
+            _require(isinstance(item, dict), "每个字段需 {new, basis}")
+            basis = item.get("basis")
+            _require(
+                isinstance(basis, dict) and basis.get("kind") == "source-observed" and basis.get("valueState") in VALUE_STATES
+                and isinstance(basis.get("sourceRef"), str) and basis["sourceRef"] and isinstance(basis.get("observedAt"), str) and basis["observedAt"],
+                "每个字段需 basis{kind:source-observed, valueState, sourceRef, observedAt}",
+            )
+            if basis["valueState"] != "observed":
+                _require("new" not in item, "valueState 为 not-provided/unknown 时不得携带 new")
+                skipped[field_id] = {"name": meta["name"], "valueState": basis["valueState"], "basis": basis}
+                continue
+            _require("new" in item, "valueState=observed 需要 new")
+            value = item["new"]
+            if isinstance(value, (str, int, float, bool)) and value in NEGATIVE_LITERALS:
+                _require(basis.get("explicitNegative") is True, "“否/0”只能来自来源明确否定")
+            wire = _link_wire(value) if meta["type"] == "link" else wire_value(meta["type"], value)
+            writes[field_id] = {"name": meta["name"], "type": meta["type"], "new": value, "wire": wire, "basis": basis, "class": cand["proposedCreateClass"]}
+        _require(stable_field in writes and writes[stable_field]["new"] == key["value"], "稳定键字段必须作为 create-once-identity 写入且等于 stableKey.value")
+        for field_id, cand in candidates.items():  # required fields missing => only this entity is blocked
+            if cand.get("tableId") == table_id and str(cand.get("emptySemantics", "")).startswith("required") and field_id not in writes:
+                blocked.append(f"缺必需字段 {cand['name']}")
+        route_info = None
+        if table_name == "案卷主表":
+            source = create.get("routingSource")
+            route = route_by_source.get(source) if isinstance(source, str) else None
+            if route is None:
+                blocked.append("路由未匹配：消防管辖原文无冻结映射(不按单位名/项目号前缀猜)")
+            else:
+                select_id, link_id = "fld2Kdm4i2", "fldlw1KAaR"
+                _require(select_id in writes and link_id in writes, "案卷创建必须同时给出所属大队与归属大队")
+                _require(writes[select_id]["new"] == route["teamOptionExact"] and writes[link_id]["new"] == route["teamRecordId"], "所属大队/归属大队与冻结路由不一致(必须同队)")
+                route_info = route
+        parent = create.get("parent")
+        if table_name != "案卷主表":
+            _require(isinstance(parent, dict), "检查/产品创建必须给出 parent")
+            _require(isinstance(parent.get("recordId"), str) or isinstance(parent.get("createRef"), str), "parent 需要 recordId 或 createRef")
+        plan.append({"tableId": table_id, "tableName": table_name, "stableKey": key, "writes": writes, "skipped": skipped,
+                     "blocked": blocked, "route": route_info, "parent": parent, "rank": TABLE_RANK[table_name]})
+    plan.sort(key=lambda item: item["rank"])  # case -> check -> product, stable within a rank
+    return {"index": index, "plan": plan, "routes": route_by_source, "contractConflicts": contract_conflicts}
+
+
+def _create_key(spec: dict[str, Any], item: dict[str, Any]) -> str:
+    return Ledger.target_key(spec["target"]["baseToken"], item["tableId"], "create:" + item["stableKey"]["value"])
+
+
+def _create_blocks(spec: dict[str, Any], checked: dict[str, Any], ledger: Ledger) -> list[dict[str, Any]]:
+    blocks = []
+    for item in checked["plan"]:
+        status = ledger.state(_create_key(spec, item))
+        if status["state"] == "BLOCKED":
+            blocks.append({"tableId": item["tableId"], "stableKey": item["stableKey"]["value"], "reason": status["reason"], "intentId": status["intentId"], "detail": status["detail"]})
+    return blocks
+
+
+def plan_creates(spec: dict[str, Any], checked: dict[str, Any], ledger: Ledger) -> dict[str, Any]:
+    blocks = _create_blocks(spec, checked, ledger)
+    return {
+        "schema": REPORT_SCHEMA_V3, "mode": "plan", "externalCalls": 0,
+        "creates": [{"tableId": i["tableId"], "stableKey": i["stableKey"], "wire": {f: w["wire"] for f, w in i["writes"].items()},
+                     "skippedFields": {f: s["valueState"] for f, s in i["skipped"].items()}, "blocked": i["blocked"],
+                     "parent": i["parent"], "action": "blocked" if i["blocked"] else "create-if-fresh-scan-proves-absent"} for i in checked["plan"]],
+        "ledgerBlocks": blocks, "executable": not blocks and all(not i["blocked"] for i in checked["plan"]),
+        "contractConflicts": checked.get("contractConflicts", []),
+        "note": "plan 不读云；创建前仍须 fresh 全页键扫描证明 0 匹配",
+    }
+
+
+def _create_wire(item: dict[str, Any], parent_record: str | None) -> dict[str, Any]:
+    wire = {fid: w["wire"] for fid, w in item["writes"].items()}
+    if parent_record is not None:
+        for fid, w in item["writes"].items():
+            if w["class"] == "create-once-parent-link":
+                wire[fid] = [{"id": parent_record}]
+    return wire
+
+
+def execute_creates(spec: dict[str, Any], checked: dict[str, Any], transport: Transport, ledger: Ledger) -> dict[str, Any]:
+    base, index = spec["target"]["baseToken"], checked["index"]
+    blocks = _create_blocks(spec, checked, ledger)
+    if blocks:
+        raise SyncError("目标存在未对账的早先创建，已拒绝(未发起任何外部调用)；先 reconcile 或人工放行：" + json.dumps(blocks, ensure_ascii=False))
+    log_dir = _fresh_log_dir(spec)
+    run_id = uuid.uuid4().hex
+    keys = [_create_key(spec, i) for i in checked["plan"] if not i["blocked"]]
+    report: dict[str, Any] = {"schema": REPORT_SCHEMA_V3, "mode": "execute", "runId": run_id, "operator": operator(), "startedAt": now(),
+                              "baseToken": base, "profile": spec["target"]["profile"], "ledgerDir": str(ledger.root),
+                              "contractSha256": spec["contract"]["sha256"], "records": [], "status": "RUNNING",
+                              "contractConflicts": checked.get("contractConflicts", [])}
+    created: dict[str, str] = {}
+    stop = False
+    with ledger.locks(keys, run_id):
+        blocks = _create_blocks(spec, checked, ledger)
+        if blocks:
+            raise SyncError("目标在加锁后出现未对账记录，已拒绝：" + json.dumps(blocks, ensure_ascii=False))
+        for item in checked["plan"]:
+            key_field, key_value = item["stableKey"]["fieldId"], item["stableKey"]["value"]
+            entry: dict[str, Any] = {"tableId": item["tableId"], "stableKey": item["stableKey"], "status": "NOT_ATTEMPTED"}
+            report["records"].append(entry)
+            if item["blocked"]:
+                entry.update(status="BLOCKED_ENTITY", reasons=item["blocked"])
+                continue
+            if stop:
+                entry["status"] = "NOT_ATTEMPTED_AFTER_STOP"
+                continue
+            parent_record = None
+            if item["parent"] is not None:
+                parent = item["parent"]
+                parent_record = parent.get("recordId") or created.get(parent.get("createRef", ""))
+                if parent_record is None:
+                    entry.update(status="BLOCKED_ENTITY", reasons=["父记录未确认(createRef 未成功)"])
+                    continue
+                try:  # parent must exist and carry the stated stable key right now
+                    parent_row = transport.get_records(base, _parent_table(index, item), [parent_record])[parent_record]
+                except RuntimeSyncError as error:
+                    entry.update(status="BLOCKED_ENTITY", reasons=[f"父记录读不到：{error}"])
+                    continue
+                pkey = parent.get("stableKey")
+                if isinstance(pkey, dict) and not cell_equals("text", parent_row.get(pkey.get("fieldId")), pkey.get("value", "")):
+                    entry.update(status="BLOCKED_ENTITY", reasons=["父记录稳定键与云端不符"])
+                    continue
+            if item["route"] is not None:  # the team base row must exist and be the frozen one
+                route = item["route"]
+                try:
+                    transport.get_records(base, route["teamTableId"], [route["teamRecordId"]])
+                except RuntimeSyncError as error:
+                    entry.update(status="BLOCKED_ENTITY", reasons=[f"八队底册行读不到：{error}"])
+                    continue
+            try:
+                matches = transport.find_records(base, item["tableId"], key_field, key_value)
+            except RuntimeSyncError as error:
+                entry.update(status="UNKNOWN_SCAN", error=str(error))
+                stop = True
+                continue
+            if len(matches) > 1:
+                entry.update(status="DUPLICATE_KEYS_BLOCK", recordIds=matches)
+                stop = True
+                continue
+            if len(matches) == 1:
+                verdict = _classify_existing(index, item, matches[0], parent_record, transport, base)
+                entry.update(recordId=matches[0], **verdict["entry"])
+                if verdict["usable"]:  # 稳定实体/路由/父链已核实：只作"已存在的同一实体"，不声称本次载荷已创建
+                    created[key_value] = matches[0]
+                continue
+            wire = _create_wire(item, parent_record)
+            intent_id = digest({"base": base, "table": item["tableId"], "stableKey": item["stableKey"], "wire": wire})
+            ledger_key = _create_key(spec, item)
+            ledger.append(ledger_key, {"event": "intent", "kind": "create", "intentId": intent_id, "runId": run_id, "operator": operator(),
+                                       "logDir": str(log_dir), "target": {"base": base, "table": item["tableId"]}, "stableKey": item["stableKey"],
+                                       "parent": parent_record, "route": item["route"],
+                                       "fields": {fid: {"name": item["writes"][fid]["name"], "type": item["writes"][fid]["type"], "old": None, "wire": w} for fid, w in wire.items()}})
+            _append(log_dir, "requests.jsonl", {"at": now(), "op": "create", "tableId": item["tableId"], "stableKey": item["stableKey"], "fields": wire})
+            try:
+                response = transport.create_record(base, item["tableId"], wire)
+            except RuntimeSyncError as error:
+                status = "UNKNOWN" if str(error).startswith("UNKNOWN") else "FAILED"
+                entry.update(status=status, error=str(error))
+                _append(log_dir, "responses.jsonl", {"at": now(), "stableKey": key_value, "error": str(error), "rawReceipt": getattr(transport, "last_body", None)})
+                ledger.append(ledger_key, {"event": "final", "intentId": intent_id, "runId": run_id, "status": status, "detail": str(error)})
+                stop = True
+                continue
+            record_id = _receipt_record_id(response)
+            _append(log_dir, "responses.jsonl", {"at": now(), "stableKey": key_value, "recordId": record_id, "rawReceipt": response})
+            if record_id is None:  # 回执没有唯一合法 id：效果未知，不回读 None、不向子层交出未核实 id
+                entry.update(status="UNKNOWN", error="UNKNOWN: 创建回执缺少唯一合法 record_id")
+                ledger.append(ledger_key, {"event": "final", "intentId": intent_id, "runId": run_id, "status": "UNKNOWN", "detail": entry["error"]})
+                stop = True
+                continue
+            entry.update(status="CREATED", recordId=record_id)
+            problems = _verify_created(index, item, record_id, parent_record, transport, base)
+            if problems:
+                entry.update(status="VIOLATION", violations=problems)
+                ledger.append(ledger_key, {"event": "final", "intentId": intent_id, "runId": run_id, "status": "VIOLATION", "detail": "; ".join(problems)})
+                stop = True
+                continue
+            created[key_value] = record_id
+            ledger.append(ledger_key, {"event": "bound", "intentId": intent_id, "runId": run_id, "recordId": record_id})
+            ledger.append(ledger_key, {"event": "final", "intentId": intent_id, "runId": run_id, "status": "OK", "detail": ""})
+            entry["status"] = "CREATED_VERIFIED"
+    report["finishedAt"] = now()
+    bad = [e for e in report["records"] if e["status"] in {"UNKNOWN", "FAILED", "VIOLATION", "UNKNOWN_SCAN", "DUPLICATE_KEYS_BLOCK"}]
+    held = [e for e in report["records"] if e["status"] in {"EXISTING_DIVERGED", "BLOCKED_ENTITY"}]  # 精确目标及其依赖被挡；独立对象照常继续，不是失败、不写账本封锁
+    report["blockedEntities"] = [{k: e.get(k) for k in ("tableId", "stableKey", "status", "violations", "reasons")} for e in held]
+    report["status"] = "FAILED" if bad else ("PARTIAL" if held else "OK")
+    _write(log_dir, "report.json", report)
+    if bad:
+        raise RuntimeSyncError("创建失败/结果未知/违规，已停止且未重试，目标已在账本中封锁：" + json.dumps([{k: e.get(k) for k in ("stableKey", "status", "error", "violations")} for e in bad], ensure_ascii=False))
+    return report
+
+
+def _classify_existing(index, item, record_id, parent_record, transport, base) -> dict[str, Any]:
+    """A unique key match is only a candidate. Identity (key, routing, parent link) must equal the current intent;
+    source-scalar differences are legitimate updates for the V2 contract, never silently claimed as this create."""
+    try:
+        row = transport.get_records(base, item["tableId"], [record_id])[record_id]
+    except RuntimeSyncError as error:
+        return {"usable": False, "entry": {"status": "EXISTING_DIVERGED", "violations": [f"已存在记录读不到：{error}"]}}
+    wire = _create_wire(item, parent_record)
+    identity_bad: list[str] = []
+    update_fields: list[str] = []
+    for fid, intended in wire.items():
+        w = item["writes"][fid]
+        meta = index[item["tableId"]][fid]
+        if fid not in row:
+            same = False
+        elif meta["type"] == "link":
+            same = canon(row[fid]) == canon(intended)
+        else:
+            same = cell_equals(meta["type"], row[fid], intended)
+        if same:
+            continue
+        (update_fields if w["class"] == "create-once-source-scalar" else identity_bad).append(meta["name"])
+    if identity_bad:
+        return {"usable": False, "entry": {"status": "EXISTING_DIVERGED", "violations": [f"同键已存在记录的身份/路由/父链字段与当前意图不符：{identity_bad}"], "sourceScalarDiffs": update_fields}}
+    if update_fields:  # 实体已核实为同一实体；字段差异只能走 V2 更新契约(五个白名单字段)，不重放创建
+        return {"usable": True, "entry": {"status": "EXISTING_NEEDS_V2_UPDATE", "sourceScalarDiffs": update_fields}}
+    return {"usable": True, "entry": {"status": "ALREADY_PRESENT_VERIFIED", "verifiedFields": sorted(wire), "note": "既有记录与当前意图一致；未声称由本次载荷创建"}}
+
+
+def _parent_table(index: dict[str, dict[str, dict[str, Any]]], item: dict[str, Any]) -> str:
+    link = next(fid for fid, w in item["writes"].items() if w["class"] == "create-once-parent-link")
+    for table_id, fields in index.items():  # the link points at the table of the previous rank
+        if _table_name(index, table_id) == ("案卷主表" if item["tableName"] == "检查明细" else "检查明细"):
+            return table_id
+    raise SyncError(f"无法确定父表：{link}")
+
+
+def _verify_created(index, item, record_id, parent_record, transport, base) -> list[str]:
+    """Read back by the returned recordId (never by response order): key, every written field, parent, duplicates."""
+    problems: list[str] = []
+    key_field, key_value = item["stableKey"]["fieldId"], item["stableKey"]["value"]
+    try:
+        row = transport.get_records(base, item["tableId"], [record_id])[record_id]
+    except RuntimeSyncError as error:
+        return [f"创建后回读失败：{error}"]
+    wire = _create_wire(item, parent_record)
+    for fid, intended in wire.items():
+        meta = index[item["tableId"]][fid]
+        if fid not in row:
+            problems.append(f"回读缺少字段 {meta['name']}")
+        elif meta["type"] == "link":
+            if canon(row[fid]) != canon(intended):
+                problems.append(f"回读关联不等于目标：{meta['name']}")
+        elif not cell_equals(meta["type"], row[fid], intended):
+            problems.append(f"回读值不等于目标值：{meta['name']}")
+    try:
+        matches = transport.find_records(base, item["tableId"], key_field, key_value)
+    except RuntimeSyncError as error:
+        problems.append(f"创建后键扫描失败：{error}")
+    else:
+        if matches != [record_id]:
+            problems.append(f"创建后稳定键匹配不唯一：{matches}")
+    return problems
+
+
+def reconcile_creates(spec: dict[str, Any], checked: dict[str, Any], transport: Transport, ledger: Ledger) -> dict[str, Any]:
+    """Read-only against Feishu. Zero matches never authorize a retry; one match needs request-terminal proof to clear."""
+    base, index = spec["target"]["baseToken"], checked["index"]
+    log_dir = _fresh_log_dir(spec)
+    run_id = uuid.uuid4().hex
+    release = spec.get("humanRelease")
+    proof = spec.get("requestTerminalProof")
+    report: dict[str, Any] = {"schema": REPORT_SCHEMA_V3, "mode": "reconcile", "runId": run_id, "operator": operator(), "startedAt": now(),
+                              "ledgerDir": str(ledger.root), "externalWrites": 0, "targets": []}
+    keys = [_create_key(spec, i) for i in checked["plan"]]
+    with ledger.locks(keys, run_id):
+        for item in checked["plan"]:
+            key = _create_key(spec, item)
+            status = ledger.state(key)
+            entry: dict[str, Any] = {"tableId": item["tableId"], "stableKey": item["stableKey"], "ledgerState": status["state"]}
+            report["targets"].append(entry)
+            if status["state"] == "CLEAR":
+                entry["outcome"] = "NOTHING_TO_RECONCILE"
+                continue
+            intent = status["lastIntent"]
+            if intent.get("stableKey") != item["stableKey"]:
+                raise SyncError("对账 spec 的稳定键与账本意图不一致，已拒绝")
+            entry["intentId"] = intent["intentId"]
+            if release is not None and release.get("intentId") == intent["intentId"]:  # 人工放行只作用于其精确 intent，不推广到其他目标
+                ledger.append(key, {"event": "human_release", "intentId": intent["intentId"], "runId": run_id, "reason": release["reason"], "operator": release["operator"],
+                                    "evidence": release["evidence"], "acknowledgesLateWriteRisk": True, "priorState": status["reason"], "originalIntent": intent})
+                entry["outcome"] = "HUMAN_RELEASED"
+                continue
+            outcome, observed = _classify_create(index, item, intent, transport, base, proof)
+            ledger.append(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome, "originalIntent": intent,
+                                "observed": observed, "terminalProof": observed.get("verifiedProof", []) if outcome == "APPLIED" else [],
+                                "detail": "0 匹配不能证明迟到请求不会执行，保持封锁" if outcome == "ZERO_MATCH" else ""})
+            entry["outcome"], entry["observed"] = outcome, observed
+    report["finishedAt"] = now()
+    _write(log_dir, "reconcile-report.json", report)
+    return report
+
+
+def _classify_create(index, item, intent, transport, base, proof) -> tuple[str, dict[str, Any]]:
+    key_field, key_value = intent["stableKey"]["fieldId"], intent["stableKey"]["value"]
+    try:
+        matches = transport.find_records(base, item["tableId"], key_field, key_value)
+    except RuntimeSyncError as error:
+        return "UNREADABLE", {"error": str(error)}
+    observed: dict[str, Any] = {"matches": matches}
+    if not matches:
+        return "ZERO_MATCH", observed
+    if len(matches) > 1:
+        return "MULTIPLE_MATCH", observed
+    try:
+        row = transport.get_records(base, item["tableId"], matches)[matches[0]]
+    except RuntimeSyncError as error:
+        return "UNREADABLE", {**observed, "error": str(error)}
+    for fid, field in intent["fields"].items():
+        if fid not in row:
+            return "UNREADABLE", observed
+        same = canon(row[fid]) == canon(field["wire"]) if field["type"] == "link" else cell_equals(field["type"], row[fid], field["wire"])
+        if not same:
+            return "DIVERGED", observed
+    verified, reasons = _verify_terminal_proof(proof, item, intent, base, matches[0])
+    if not verified:
+        return "ONE_MATCH_NEEDS_TERMINAL_PROOF", {**observed, "proofRejected": reasons}
+    return "APPLIED", {**observed, "verifiedProof": verified}
+
+
+def _jsonl(path: Path) -> list[Any]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _verify_terminal_proof(proof: Any, item, intent, base: str, record_id: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Causal proof that the ORIGINAL request reached a service terminal state and produced this very row.
+
+    Accepted only from the original run's own logs: logDir == intent.logDir, report.runId == intent.runId, the logged
+    request equals the intent (table, stable key, every field wire), and exactly one logged service receipt (ok, one
+    valid id) names the matched record. Hashes of both logs are pinned. A non-empty/bool/free-text reference is no proof.
+    """
+    if not isinstance(proof, list) or not proof:
+        return [], ["未提供 requestTerminalProof"]
+    reasons: list[str] = []
+    for n, ref in enumerate(proof):
+        tag = f"proof[{n}]"
+        if not isinstance(ref, dict) or ref.get("kind") != "service-receipt-log":
+            reasons.append(f"{tag}：kind 必须是 service-receipt-log")
+            continue
+        try:
+            log_dir = Path(str(ref.get("logDir", "")))
+            if str(log_dir) != str(intent.get("logDir")) or not log_dir.is_absolute():
+                reasons.append(f"{tag}：logDir 不是原意图的 logDir")
+                continue
+            files = {name: log_dir / name for name in ("requests.jsonl", "responses.jsonl", "report.json")}
+            if not all(f.is_file() for f in files.values()):
+                reasons.append(f"{tag}：原日志文件缺失")
+                continue
+            if ref.get("requestsSha256") != file_sha(files["requests.jsonl"]) or ref.get("responsesSha256") != file_sha(files["responses.jsonl"]):
+                reasons.append(f"{tag}：日志摘要与登记不符")
+                continue
+            report = json.loads(files["report.json"].read_text(encoding="utf-8"))
+            if report.get("runId") != intent.get("runId") or ref.get("runId") != intent.get("runId") or ref.get("intentId") != intent.get("intentId"):
+                reasons.append(f"{tag}：run/intent 与原意图不一致")
+                continue
+            if report.get("baseToken") not in (None, base):
+                reasons.append(f"{tag}：原运行的 base 不同")
+                continue
+            wanted = {fid: f["wire"] for fid, f in intent["fields"].items()}
+            requests = [r for r in _jsonl(files["requests.jsonl"]) if isinstance(r, dict) and r.get("op") == "create" and r.get("stableKey") == intent["stableKey"]]
+            if len(requests) != 1 or requests[0].get("tableId") != item["tableId"] or canon(requests[0].get("fields")) != canon(wanted):
+                reasons.append(f"{tag}：原请求(表/稳定键/字段载荷)与意图不一致或不唯一")
+                continue
+            key_value = intent["stableKey"]["value"]
+            responses = [r for r in _jsonl(files["responses.jsonl"]) if isinstance(r, dict) and r.get("stableKey") == key_value]
+            receipts = [r for r in responses if isinstance(r.get("rawReceipt"), dict) and r["rawReceipt"].get("ok") is True]
+            ids = {_receipt_record_id(r["rawReceipt"]) for r in receipts}
+            if len(responses) != 1 or len(receipts) != 1 or len(ids) != 1 or None in ids or ids != {record_id}:  # 恰好一条成功回执；两条同 id 也不算唯一证明
+                reasons.append(f"{tag}：服务回执须恰好一条且成功，其 record_id 等于当前唯一匹配")
+                continue
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            reasons.append(f"{tag}：证明无法核验：{error}")
+            continue
+        return [{"kind": "service-receipt-log", "logDir": str(log_dir), "runId": intent["runId"], "intentId": intent["intentId"],
+                 "requestsSha256": ref["requestsSha256"], "responsesSha256": ref["responsesSha256"], "recordId": record_id}], []
+    return [], reasons
+
+
+# ---------------------------------------------------------------------------------------------
+# 权威已存详情 -> 带字段依据的基础字段说明(V3 创建说明 + V2 补空说明)的正常生成入口
+# ---------------------------------------------------------------------------------------------
+
+BASIC_FIELDS = {"key": "fld1lHXHpk", "unit": "fld2Lo4dpD", "addr": "fld71ckPl9", "date": "fld5azNPuE", "team": "fld2Kdm4i2", "link": "fldlw1KAaR"}
+BUILD_SCHEMA = "FeishuBasicFieldBuildReportV1"
+RWID_IN_URL = re.compile(r"[?&#]RWID=(\d+)")
+ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+PRODUCT_ROOT = re.compile(r"\[产\]\S*?-(\d{8}C\d{9})-")
+
+
+def _tree_titles(tree: Any) -> list[str]:
+    titles: list[str] = []
+    for node in tree if isinstance(tree, list) else []:
+        if isinstance(node, dict):
+            if isinstance(node.get("title"), str):
+                titles.append(node["title"])
+            titles.extend(_tree_titles(node.get("children")))
+    return titles
+
+
+def load_user_release_acceptances(path: Path) -> list[dict[str, Any]]:
+    """UserRiskAcceptanceV1 的材料结构校验：只检查必填字段与 intentId 匹配，**不能证明真实的人类授权**。
+
+    真实例外仍须可核的用户原话(userQuote 的出处 sourceRef)；助手签名、通用实施授权、ack=true 都不是依据。
+    本函数不是权限系统，任何自动编排都不得自造或传入这类记录。"""
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise SyncError(f"无法读取用户风险接受记录：{error.__class__.__name__}") from error
+    items = document.get("acceptances") if isinstance(document, dict) and document.get("schemaVersion") == "UserRiskAcceptanceV1" else None
+    if not isinstance(items, list) or not items:
+        raise SyncError("用户风险接受记录需要 schemaVersion=UserRiskAcceptanceV1 与 acceptances 列表")
+    for item in items:
+        if not (isinstance(item, dict) and item.get("acceptedBy") == "user" and all(isinstance(item.get(k), str) and item[k].strip() for k in ("intentId", "userQuote", "sourceRef", "acceptedAt"))):
+            raise SyncError("每条风险接受需要 acceptedBy=user、intentId、用户原话 userQuote、sourceRef 与 acceptedAt")
+    return items
+
+
+def require_user_acceptance_for_release(spec: Any, acceptance_path: Path | None) -> None:
+    """正常入口不接受助手自署的 humanRelease：spec 带 humanRelease 时必须同时给出用户对该精确意图的风险接受记录(仅结构校验，见 load_user_release_acceptances)。"""
+    release = spec.get("humanRelease") if isinstance(spec, dict) else None
+    if release is None:
+        return
+    if acceptance_path is None:
+        raise SyncError("humanRelease 只能由用户接受迟到写风险后使用：必须附 --user-risk-acceptance(UserRiskAcceptanceV1，含用户原话)；助手不得自署")
+    intents = {a["intentId"] for a in load_user_release_acceptances(acceptance_path)}
+    if release.get("intentId") not in intents:
+        raise SyncError("用户风险接受记录没有覆盖该精确 intentId，拒绝")
+
+
+def _text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _record_basis(ref: str, observed_at: str) -> dict[str, Any]:
+    return {"kind": "source-observed", "valueState": "observed", "sourceRef": ref, "observedAt": observed_at}
+
+
+def _entity_evidence(rwid: str, record: Any, capture_name: str, capture_sha: str) -> tuple[dict[str, Any] | None, list[str]]:
+    """Read one stored detail; every value is tied to the same case (project no / RWID / URL / unit / jurisdiction)."""
+    problems: list[str] = []
+    if not isinstance(record, dict) or not isinstance(record.get("collectionDetail"), dict):
+        return None, ["缺少已存详情(collectionDetail)"]
+    detail, listed = record["collectionDetail"], record.get("fields") if isinstance(record.get("fields"), dict) else {}
+    fields = detail.get("fields") if isinstance(detail.get("fields"), dict) else {}
+    project = _text(record.get("projectNo"))
+    url = _text(detail.get("sourceUrl"))
+    captured = _text(detail.get("capturedAt"))
+    if PROJECT_NO.fullmatch(project) is None:
+        problems.append("项目编号格式无效")
+    if _text(fields.get("项目编号")) != project or _text(detail.get("projectNo")) != project:
+        problems.append("详情项目编号与登记项目编号不一致")
+    found = RWID_IN_URL.findall(url)
+    if str(record.get("rwid")) != rwid or found != [rwid]:
+        problems.append("详情 URL 的 RWID 与记录 RWID 不一致")
+    if _text(listed.get("rwid")) not in {"", rwid}:
+        problems.append("列表 RWID 与记录 RWID 不一致")
+    unit, jurisdiction, address = _text(fields.get("单位名称")), _text(fields.get("消防管辖")), _text(fields.get("单位地址"))
+    if not unit:
+        problems.append("详情缺少单位名称")
+    elif _text(listed.get("unitName")) not in {"", unit}:
+        problems.append("详情单位与列表单位不一致")
+    if not jurisdiction:
+        problems.append("详情缺少消防管辖")
+    elif _text(listed.get("sourceOrganization")) not in {"", jurisdiction}:
+        problems.append("详情消防管辖与列表大队不一致")
+    if not captured:
+        problems.append("缺少取得时点")
+    roots = {m for title in _tree_titles(fields.get("文书目录")) for m in PRODUCT_ROOT.findall(title)}
+    if roots != {project}:  # 类别只由同案四身份 + 本案唯一 [产] 根证明；C 号、单位名、结果合否或入口名都不是依据
+        problems.append(f"文书目录没有唯一的本案 [产] 产品根(实际={sorted(roots)})，不放行")
+    if problems:
+        return None, problems
+
+    def ref(field: str) -> str:
+        return f"{capture_name}#records.{rwid}.collectionDetail.fields.{field} | batchSha256={capture_sha} | url={url} | projectNo={project}"
+
+    return {"projectNo": project, "rwid": rwid, "unit": unit, "address": address, "jurisdiction": jurisdiction,
+            "capturedAt": captured, "ref": ref, "url": url}, []
+
+
+def _initial_date(waterline_case: Any, root: Path, project: str, rwid: str) -> tuple[tuple[str, str, str] | None, str | None]:
+    """The actual initial-inspection day, proven from the stored original; otherwise (None, reason).
+
+    Registry claim -> original file must exist inside the business root with the recorded SHA, belong to the same case
+    (project no / RWID / URL), and its product rows marked as not-a-recheck (SFCPFC=0) must show exactly that one day
+    (JCRQ). A recheck row, the acceptance date, a different day or a missing original never passes.
+    """
+    source = waterline_case.get("source") if isinstance(waterline_case, dict) else None
+    cls = (source or {}).get("classification") if isinstance(source, dict) else None
+    if not isinstance(cls, dict) or cls.get("initialInspectionDate") is None:
+        return None, None  # 没有登记初查日：不是错误，只是省略
+    claimed = cls["initialInspectionDate"]
+    if not isinstance(claimed, str) or ISO_DAY.match(claimed) is None:
+        return None, "登记的初查日格式无效"
+    path_text, recorded_sha, observed = _text(cls.get("evidencePath")), _text(cls.get("evidenceSha256")), _text(cls.get("observedAt"))
+    if not path_text or not recorded_sha or not observed:
+        return None, "缺少原件路径/摘要/取得时点"
+    relative = Path(path_text.replace("\\", "/"))
+    try:
+        original = (root / relative).resolve()
+        original.relative_to(root.resolve())
+    except (ValueError, OSError):
+        return None, "原件路径越出业务根"
+    if relative.is_absolute() or not original.is_file():
+        return None, "原件不存在"
+    actual_sha = "sha256:" + file_sha(original)
+    if actual_sha != recorded_sha:
+        return None, "原件实际摘要与登记不符"
+    try:
+        document = json.loads(original.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, "原件无法读取为 JSON"
+    detail: Any = None
+    if isinstance(document, dict) and document.get("schemaVersion") == "SourceIdentityV1":
+        detail = document
+    elif isinstance(document, dict) and isinstance(document.get("records"), dict):
+        detail = document["records"].get(rwid)
+    if not isinstance(detail, dict) or not isinstance(detail.get("fields"), dict):
+        return None, "原件里没有本案详情"
+    fields = detail["fields"]
+    url = _text(detail.get("sourceUrl"))
+    same_case = _text(detail.get("projectNo")) == project and _text(fields.get("项目编号")) == project
+    if "rwid" in detail:
+        same_case = same_case and str(detail["rwid"]) == rwid
+    if not same_case or RWID_IN_URL.findall(url) != [rwid]:
+        return None, "原件不是同一案(项目编号/RWID/URL)"
+    rows = fields.get("检查产品信息")
+    initial_days: set[str] = set()
+    positions: list[int] = []
+    for position, row in enumerate(rows if isinstance(rows, list) else []):
+        record = row.get("页面记录") if isinstance(row, dict) else None
+        if isinstance(record, dict) and record.get("SFCPFC") == "0":  # 0 = 非复查(初查)；复查行永不作初查日依据
+            day = _text(record.get("JCRQ"))[:10]
+            if ISO_DAY.match(day):
+                initial_days.add(day)
+                positions.append(position)
+    if not initial_days:
+        return None, "原件没有可读的初查(SFCPFC=0)检查日"
+    if initial_days != {claimed}:
+        return None, f"原件初查日{sorted(initial_days)}与登记{claimed}不一致"
+    where = f"检查产品信息[{','.join(map(str, positions))}].页面记录.JCRQ(SFCPFC=0)={claimed}"
+    return (claimed, f"{path_text} | {actual_sha} | {where} | projectNo={project} | RWID={rwid} | url={url}", observed), None
+
+
+def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: Path, v3_path: Path, v3_sha: str,
+                      v9_path: Path, v9_sha: str, routes_path: Path, routes_sha: str, target: dict[str, str],
+                      transport: Any, out_dir: Path, log_root: Path, batch_size: int = HARD_CAP_RECORDS,
+                      ledger_dir: Path | None = None, user_accepted_releases: Path | None = None,
+                      isolated_test_ledger: bool = False) -> dict[str, Any]:
+    """Fresh cloud first (keys, schema fields, team base), then specs only for what the stored details prove.
+
+    Creates: 2026 cases absent from the fresh key scan. Fills: existing rows whose address / initial date is empty while the stored
+    source value is present (explicit ``expectedOld: null``). Anything non-empty and different is reported, never overwritten.
+    """
+    _require(1 <= batch_size <= HARD_CAP_RECORDS, f"batch_size 必须是 1..{HARD_CAP_RECORDS}")
+    _require(ledger_dir is not None, "生成说明必须沿唯一 P18 账(--ledger-dir)：缺账会跳过历史封锁与放行核查，拒绝")
+    ledger = Ledger(ledger_dir, isolated_test=isolated_test_ledger)
+    ledger.validate_root()
+    _require(file_sha(capture_path) == capture_sha, "采集批次摘要与固定值不一致")
+    _require(file_sha(routes_path) == routes_sha, "八队路由文件摘要与固定值不一致")
+    v3 = load_contract_v3(v3_path, v3_sha)
+    contract = load_contract(v9_path, v9_sha)
+    case_table = v3["base"]["tables"]["案卷主表"]["tableId"]
+    _require(target.get("baseToken") == v3["base"]["baseId"] == contract["baseId"], "目标 Base 与合同不一致")
+    index = field_index(v3["base"])
+    for field_id in BASIC_FIELDS.values():
+        _require(field_id in index[case_table], f"合同缺少案卷字段 {field_id}")
+    capture = json.loads(capture_path.read_text(encoding="utf-8"))
+    waterline = json.loads(waterline_path.read_text(encoding="utf-8")).get("cases", {})
+    routes_doc = json.loads(routes_path.read_text(encoding="utf-8"))
+    _require(routes_doc.get("baseId") == target["baseToken"], "路由文件 Base 与目标不一致")
+    # 1) fresh cloud: team base + case rows
+    team_table = {r["teamTableId"] if "teamTableId" in r else None for r in routes_doc.get("routes", [])}
+    _require(len(team_table) == 1 and None not in team_table, "路由必须指向同一大队底册")
+    (team_table_id,) = team_table
+    teams = transport.list_rows(target["baseToken"], team_table_id, None)
+    live_routes: dict[str, dict[str, Any]] = {}
+    route_problems: list[dict[str, Any]] = []
+    for route in routes_doc["routes"]:
+        record_id = route.get("savedTeamRecordId")
+        row = teams.get(record_id)
+        names = {v for v in (row or {}).values() if isinstance(v, str)} | {x for v in (row or {}).values() if isinstance(v, list) for x in v if isinstance(x, str)}
+        if row is None or route["teamOptionExact"] not in names:
+            route_problems.append({"source": route["sourceJurisdictionExact"], "reason": "fresh 大队底册读不到该行或名称不符"})
+            continue
+        live_routes[route["sourceJurisdictionExact"]] = {"sourceJurisdictionExact": route["sourceJurisdictionExact"], "teamOptionExact": route["teamOptionExact"],
+                                                         "teamTableId": team_table_id, "teamRecordId": record_id}
+    cloud = transport.list_rows(target["baseToken"], case_table, list(BASIC_FIELDS.values()))
+    by_key: dict[str, list[str]] = {}
+    for record_id, row in cloud.items():
+        by_key.setdefault(_text(row.get(BASIC_FIELDS["key"])), []).append(record_id)
+    duplicate = {k: v for k, v in by_key.items() if k and len(v) > 1}
+    _require(not duplicate, "fresh 云端稳定键重复，停止：" + json.dumps(duplicate, ensure_ascii=False))
+    # 1b) 账本里出现过 human_release 的目标：除非用户亲自接受该精确意图的迟到写风险，否则保留未决、不生成任何创建/补空说明
+    accepted_intents: set[str] = set()
+    if user_accepted_releases is not None:
+        accepted_intents = {a["intentId"] for a in load_user_release_acceptances(user_accepted_releases)}
+    # 2) per-entity evidence
+    creates: list[dict[str, Any]] = []
+    fills: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    differing: list[dict[str, Any]] = []
+    dates_omitted: list[dict[str, Any]] = []
+    already_equal = 0
+    for rwid, record in sorted((capture.get("records") or {}).items(), key=lambda kv: str((kv[1] or {}).get("projectNo"))):
+        project = _text((record or {}).get("projectNo"))
+        year_match = re.match(r"^\d{8}C(\d{4})\d{5}$", project)
+        if year_match is None or int(year_match.group(1)) < 2026:
+            continue  # 默认只从 2026 年起(含之后年份)、只消防产品监督案(C)；2025 及更早不新采不重算
+        evidence, problems = _entity_evidence(rwid, record, capture_path.name, capture_sha)
+        if evidence is None:
+            blocked.append({"projectNo": project, "rwid": rwid, "reasons": problems})
+            continue
+        key = Ledger.target_key(target["baseToken"], case_table, "create:" + project)
+        pending = [e for e in ledger.events(key) if e.get("event") == "human_release" and e.get("intentId") not in accepted_intents]
+        if pending:
+            blocked.append({"projectNo": project, "rwid": rwid, "reasons": ["历史上出现过未获用户风险接受的人工放行(human_release)；保留原 UNKNOWN 的迟到写风险，不再生成创建/补空说明",
+                                                                       {"intentIds": sorted({e.get("intentId") for e in pending})}]})
+            continue
+        ids = by_key.get(project, [])
+        # 普通未决(UNKNOWN/PENDING 等)按目标局部阻断：先看同案稳定键的创建意图，再看该记录的更新意图；晚到的行不能改走补空来绕过
+        unresolved = [("create", ledger.state(key))]
+        if ids:
+            unresolved.append(("update", ledger.state(Ledger.target_key(target["baseToken"], case_table, ids[0]))))
+        held = [(kind, st) for kind, st in unresolved if st["state"] == "BLOCKED"]
+        if held:
+            blocked.append({"projectNo": project, "rwid": rwid, "reasons": [f"{kind} 意图未决({st['reason']})：{st.get('detail', '')}；按目标局部阻断，独立项目继续" for kind, st in held],
+                            "intentIds": [st["intentId"] for _, st in held]})
+            continue
+        date, date_reason = _initial_date(waterline.get(project), waterline_path.parent, project, rwid)
+        if date_reason:
+            dates_omitted.append({"projectNo": project, "rwid": rwid, "reason": date_reason})
+        if not ids:
+            route = live_routes.get(evidence["jurisdiction"])
+            if route is None:
+                blocked.append({"projectNo": project, "rwid": rwid, "reasons": [f"路由未匹配(保留本地，不猜队)：{evidence['jurisdiction']}"]})
+                continue
+            observed = evidence["capturedAt"]
+            fields: dict[str, Any] = {
+                BASIC_FIELDS["key"]: {"new": project, "basis": _record_basis(evidence["ref"]("项目编号"), observed)},
+                BASIC_FIELDS["unit"]: {"new": evidence["unit"], "basis": _record_basis(evidence["ref"]("单位名称"), observed)},
+                BASIC_FIELDS["team"]: {"new": route["teamOptionExact"], "basis": _record_basis(evidence["ref"]("消防管辖") + f" | route={routes_path.name} sha256={routes_sha}", observed)},
+                BASIC_FIELDS["link"]: {"new": route["teamRecordId"], "basis": _record_basis(evidence["ref"]("消防管辖") + f" | route={routes_path.name} sha256={routes_sha}", observed)},
+            }
+            if evidence["address"]:
+                fields[BASIC_FIELDS["addr"]] = {"new": evidence["address"], "basis": _record_basis(evidence["ref"]("单位地址"), observed)}
+            if date:
+                fields[BASIC_FIELDS["date"]] = {"new": date[0], "basis": _record_basis(date[1], date[2])}
+            creates.append({"tableId": case_table, "stableKey": {"fieldId": BASIC_FIELDS["key"], "value": project}, "routingSource": evidence["jurisdiction"], "fields": fields})
+            continue
+        row = cloud[ids[0]]
+        update_fields: dict[str, Any] = {}
+        for name, fid, new in (("单位名称", BASIC_FIELDS["unit"], evidence["unit"]), ("单位地址", BASIC_FIELDS["addr"], evidence["address"]), ("初查日期", BASIC_FIELDS["date"], date[0] if date else "")):
+            stored = row.get(fid)
+            ftype = index[case_table][fid]["type"]
+            if not new:
+                continue
+            if not cell_is_empty(stored) and cell_equals(ftype, stored, new):
+                already_equal += 1
+            elif cell_is_empty(stored):
+                basis = _record_basis(date[1], date[2]) if fid == BASIC_FIELDS["date"] else _record_basis(evidence["ref"](name), evidence["capturedAt"])
+                update_fields[fid] = {"new": new, "expectedOld": None, "basis": basis}
+            else:
+                differing.append({"projectNo": project, "field": name, "cloud": stored, "source": new, "handling": "云端非空且不同：不覆盖，报告交人工/来源裁决"})
+        if update_fields:
+            fills.append({"tableId": case_table, "recordId": ids[0], "stableKey": {"fieldId": BASIC_FIELDS["key"], "value": project}, "fields": update_fields})
+    # 3) specs (≤ batch_size per run, fresh logDir per spec)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    specs: list[dict[str, Any]] = []
+
+    def emit(kind: str, items: list[dict[str, Any]]) -> None:
+        for number, start in enumerate(range(0, len(items), batch_size), start=1):
+            chunk = items[start:start + batch_size]
+            name = f"{kind}-{number:02d}"
+            spec: dict[str, Any] = {"mode": "execute", "target": dict(target), "limits": {"maxRecords": batch_size}, "logDir": str(log_root / name)}
+            if kind == "create":
+                spec |= {"schemaVersion": SPEC_SCHEMA_V3, "contract": {"path": str(v3_path), "sha256": v3_sha},
+                         "routes": [live_routes[x] for x in sorted({c["routingSource"] for c in chunk})],
+                         "creates": chunk}
+            else:
+                spec |= {"schemaVersion": SPEC_SCHEMA, "contract": {"path": str(v9_path), "sha256": v9_sha},
+                         "allowlist": {case_table: {"records": [c["recordId"] for c in chunk], "fields": sorted({f for c in chunk for f in c["fields"]})}},
+                         "updates": chunk}
+            path = out_dir / f"{name}.json"
+            path.write_text(json.dumps(spec, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+            specs.append({"name": name, "path": str(path), "sha256": file_sha(path), "records": len(chunk), "kind": kind})
+
+    emit("create", creates)
+    emit("fill", fills)
+    report = {"schema": BUILD_SCHEMA, "builtAt": now(), "externalCalls": "read-only fresh scan", "target": dict(target),
+              "inputs": {"capture": {"path": str(capture_path), "sha256": capture_sha}, "routes": {"path": str(routes_path), "sha256": routes_sha},
+                         "contractV3": {"path": str(v3_path), "sha256": v3_sha}, "contractV9": {"path": str(v9_path), "sha256": v9_sha},
+                         "waterline": {"path": str(waterline_path), "sha256": file_sha(waterline_path)}},
+              "fresh": {"cloudCaseRows": len(cloud), "cloudDistinctKeys": len([k for k in by_key if k]), "teamRows": len(teams), "routeProblems": route_problems},
+              "counts": {"toCreate": len(creates), "toFill": len(fills), "alreadyEqualFields": already_equal, "differingNotOverwritten": len(differing), "blockedEntities": len(blocked)},
+              "createdWithInitialDate": sum(1 for c in creates if BASIC_FIELDS["date"] in c["fields"]),
+              "createdWithoutAddress": sum(1 for c in creates if BASIC_FIELDS["addr"] not in c["fields"]),
+              "specs": specs, "blockedEntities": blocked, "differing": differing, "initialDatesOmitted": dates_omitted,
+              "status": "PARTIAL" if blocked or route_problems else "OK"}
+    (out_dir / "build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return report
+
+
+def run(spec_path: Path, *, execute_flag: bool = False, reconcile_flag: bool = False, cli: str = DEFAULT_CLI,
+        transport: Transport | None = None, ledger_dir: Path | None = None, user_risk_acceptance: Path | None = None,
+        isolated_test_ledger: bool = False) -> dict[str, Any]:
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    _require(isinstance(spec, dict) and isinstance(spec.get("contract"), dict), "spec 缺少 contract")
+    require_user_acceptance_for_release(spec, user_risk_acceptance)
+    if spec.get("schemaVersion") == SPEC_SCHEMA_V3:
+        v3 = load_contract_v3(Path(spec["contract"].get("path", "")), str(spec["contract"].get("sha256", "")))
+        checked = validate_create_spec(spec, v3)
+        _require(spec["mode"] == "plan" or ledger_dir is not None, f"{spec['mode']} 必须显式给出 --ledger-dir")
+        ledger = Ledger(ledger_dir or DEFAULT_LEDGER, isolated_test=isolated_test_ledger)
+        if spec["mode"] == "plan":
+            return plan_creates(spec, checked, ledger)
+        flag, name = (execute_flag, "--execute") if spec["mode"] == "execute" else (reconcile_flag, "--reconcile")
+        _require(flag, f"{spec['mode']} 模式必须同时带 {name}")
+        ledger.validate_root()
+        use = transport or LarkCliTransport(cli, spec["target"]["profile"], spec["target"]["identity"])
+        return execute_creates(spec, checked, use, ledger) if spec["mode"] == "execute" else reconcile_creates(spec, checked, use, ledger)
+    contract = load_contract(Path(spec["contract"].get("path", "")), str(spec["contract"].get("sha256", "")))
+    checked = validate_spec(spec, contract)
+    _require(spec["mode"] == "plan" or ledger_dir is not None, f"{spec['mode']} 必须显式给出 --ledger-dir(无默认账本，避免写到别处绕过封锁)")
+    ledger = Ledger(ledger_dir or DEFAULT_LEDGER, isolated_test=isolated_test_ledger)
+    if spec["mode"] == "plan":
+        blocks = _all_blocks(ledger, spec, checked)
+        return {"schema": REPORT_SCHEMA, "mode": "plan", "externalCalls": 0, "requests": build_requests(checked),
+                "denylist": sorted(ALWAYS_DENIED), "contractSha256": spec["contract"]["sha256"],
+                "ledgerDir": str(ledger.root), "ledgerBlocks": blocks, "executable": not blocks}
+    flag, name = (execute_flag, "--execute") if spec["mode"] == "execute" else (reconcile_flag, "--reconcile")
+    _require(flag, f"{spec['mode']} 模式必须同时带 {name}")
+    ledger.validate_root()
+    use = transport or LarkCliTransport(cli, spec["target"]["profile"], spec["target"]["identity"])
+    if spec["mode"] == "execute":
+        return execute(spec, checked, use, ledger)
+    return reconcile(spec, checked, use, ledger)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="0104 来源字段白名单增量同步（官方 lark-cli）")
+    parser.add_argument("--spec", required=True)
+    parser.add_argument("--execute", action="store_true", help="真实云写；缺省只计划")
+    parser.add_argument("--reconcile", action="store_true", help="只读云回读，对账早先未决写入")
+    parser.add_argument("--cli", default=DEFAULT_CLI)
+    parser.add_argument("--ledger-dir", help="追加式账本目录；execute/reconcile 必填；按精确目标建档，与 logDir 无关")
+    parser.add_argument("--user-risk-acceptance", help="UserRiskAcceptanceV1：用户对精确意图接受迟到写风险的记录；spec 带 humanRelease 时必填，助手不得自署")
+    args = parser.parse_args(argv)
+    try:
+        result = run(Path(args.spec), execute_flag=args.execute, reconcile_flag=args.reconcile, cli=args.cli, ledger_dir=Path(args.ledger_dir) if args.ledger_dir else None,
+                     user_risk_acceptance=Path(args.user_risk_acceptance) if args.user_risk_acceptance else None)
+    except SyncError as error:
+        print(json.dumps({"status": "REFUSED", "externalCalls": 0, "reason": str(error)}, ensure_ascii=False))
+        return 2
+    except RuntimeSyncError as error:
+        print(json.dumps({"status": "FAILED_OR_UNKNOWN", "reason": str(error)}, ensure_ascii=False))
+        return 3
+    print(json.dumps(result, ensure_ascii=False))
+    return 4 if result.get("status") == "PARTIAL" else 0  # PARTIAL 有被挡实体：不得以 exit 0 当作整体完成
+
+
+if __name__ == "__main__":
+    sys.exit(main())

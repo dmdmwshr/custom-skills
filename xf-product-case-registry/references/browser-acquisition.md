@@ -2,6 +2,10 @@
 
 本文件规定消防产品监督来源网页的浏览器流程。浏览器采集、Skill 程序、真实工作目录和 V2 登记系统保持分离；浏览器只把结构化来源证据和下载包交给工作目录，不直接写登记系统。
 
+## 可见 DOM 读取（2026-11-06）
+
+浏览器默认使用 Ego；Playwright 等仅用户明确指定时作备用。读取只用页面可见文字、控件角色、Element UI 标准结构（树表行 `el-table__row--level-N`、展开图标 `el-table__expand-icon[--expanded]`）和复选框 value/checked；不读取 `__vue__`、数据模型、store 或网络缓存。列表不显示 RWID，`LIST_READER` 的 `rwid` 恒为 `null`：先 `open_visible_case(单位名称)`（只发一次点击，匹配 0 个或多个即失败），再由详情 URL 取得 RWID，并与台账期望的项目号、RWID、单位、消防管辖四项逐项核对。正常年度入口（`collect_list` → `collect_identities` / `locate_known_case` → `open_case` / `open_identity`）默认走可见候选：`collect_list` 逐页保存可见行到批次下 `visible-candidates.json`（RWID 记 pending）；`collect_identities` 对同页唯一的单位名称候选一次打开、读两次详情身份收敛，同名歧义或缺大队即写入 blocked 并停止，不猜行；只有该 RWID 已在原批次采集状态内才写入 `source.add_detail`。活动模块不含、也没有任何开关可恢复读取页面框架内部数据模型的旧读取器或旧动作链；历史做法只作为只读失败证据留在旧补丁与基线中，不是备用方法。完整叶证明不得由可见行数自证：只接受页面可见的声明总数，或已展开且无未知图标、无虚拟化/滚动遗漏的完整层级覆盖证据。详情目录若存在未展开节点，`文书目录完整性.complete=false`，不得当作完整文书集合。上述选择器与分页、日期框含义均未经真实页面实测，实测前不写成已验证。
+
 ## 会话与隐私门禁
 
 1. 使用用户当前可见、已登录的受控浏览器标签页。先检查页面是否显示业务导航或案卷列表；登录过期时，只有用户已明确授权账号和自动登录才按 [Playwright 单案入口](playwright-single-case.md) 调用 LocalVault，否则请用户恢复。无权限或空白跳转须先判断页面事实，不能当成密码错误反复登录。
@@ -225,3 +229,13 @@
 ZIP 接收完整不等于来源全部文书正文齐全。对照当前项目的可下载叶子和包内文件；关联项目的文书不得混为当前案。只显示检验结果表单、没有报告 PDF 的记录应保留明确材料缺口，不能拿其他产品型式检验报告替代。
 
 ZIP 漏掉但当前叶子“查看”能打开 PDF 的，可从该已确认浏览器预览取回实际 PDF，保存项目编号、RWID、叶子身份、原详情证据、PDF 哈希和页数；不要保存含临时签名的预览地址。保留原 ZIP 不变，将原包材料和补采文件汇成目录，使用已有 inventory 目录模式重新清点；记录原 ZIP、补采回执与目录摘要之间的关系，不能把目录摘要冒称原 ZIP 摘要。无法取得正文时保留 source.materialGaps，已登记部分可核验，材料缺口未清零不归档。
+
+
+## 多段详情截图的永久引用
+
+长页分段截图后，用 `source attach-detail-segments --batch-id <批次> --index-json <覆盖索引>` 把已有分段按正常入口绑为永久 D 引用，不重新打开来源页。索引含 projectNo、rwid、sourceUrl 和分段列表（序号、coverFrom/coverTo、scrollHeight、png、width/height、sha256）。
+
+- 全部成立才写：同案（RWID/项目编号与批次记录一致、URL 的 RWID 一致）、序号从 0 连续、每段文件存在且为 PNG、摘要与尺寸与索引相符、首段 coverFrom=0、相邻段无空隙且不倒退、末段到达 scrollHeight。任何一项缺失都拒绝且不留半成品。
+- 首段必须已是该案登记的详情截图（保留旧引用和原图）；其余段复制为 `案卷详情_<sha12>.png`，索引按字节副本存为 `案卷详情覆盖索引_<sha12>.json`；批次记录的 `screenshotSegmentSets` 追加一组，旧的 `screenshot`/`screenshotObservations` 不变。
+- 同一索引重入返回 REUSED，批次与目录 0 写。索引里的绝对路径来自别的主机/盘符时，只按索引同目录同文件名找，摘要仍须相符。
+- 只升级被绑定的案；其他案的单张引用仍只是“文件存在、大小/摘要一致”，视觉完整性未知，不因此升级。

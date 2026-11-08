@@ -62,7 +62,7 @@ def test_duplicate_stable_key_and_three_rows_are_errors() -> None:
     assert any("最多只能有" in e for e in report["errors"])
 
 
-def test_rounds_extend_the_stable_key_and_the_latest_round_decides() -> None:
+def test_rounds_extend_the_stable_key_without_deciding_case_type() -> None:
     first = row(
         "复查", inspection_date="2026-10-20", inspection_date_source="1.png", qualified="不合格"
     )
@@ -79,14 +79,19 @@ def test_rounds_extend_the_stable_key_and_the_latest_round_decides() -> None:
     assert any("重复" in e for e in duplicate["errors"])
     bad = fv.validate_cases([row(), row("复查", inspection_round=0)])
     assert any("inspection_round" in e for e in bad["errors"])
-    # A later passing round means the administrative-case rule no longer holds.
-    flagged = dict(first, case_type="行案")
-    assert any("只有复查不合格" in e for e in fv.validate_cases([row(), flagged, second])["errors"])
+    # A later passing round does not erase an independently evidenced case type.
+    flagged = dict(first, case_type="行案", case_type_source="1.png")
+    assert fv.validate_cases([row(), flagged, second])["status"] == "ok"
 
 
-def test_recheck_requires_failed_initial_and_own_date_source() -> None:
+def test_recheck_requires_source_phase_when_initial_is_pending_and_own_date_source() -> None:
     passed = fv.validate_cases([row(qualified="合格"), row("复查")])
-    assert any("只有初查不合格" in e for e in passed["errors"])
+    assert any("inspection_phase_source" in e for e in passed["errors"])
+    evidenced = [row(qualified=""), row("复查", inspection_date="2026-10-20",
+        inspection_date_source="1.png", inspection_phase_source="1.png")]
+    original = copy.deepcopy(evidenced)
+    assert fv.validate_cases(evidenced)["status"] == "ok"
+    assert evidenced == original
     copied = fv.validate_cases([row(), row("复查", inspection_date="2026-10-01")])
     assert any("疑似复制初查日期" in e for e in copied["errors"])
     unsourced = fv.validate_cases([row(), row("复查", inspection_date="2026-10-20")])
@@ -102,9 +107,12 @@ def test_recheck_requires_failed_initial_and_own_date_source() -> None:
     ]
 
 
-def test_administrative_case_only_after_failed_recheck_unless_manual() -> None:
+def test_administrative_case_has_independent_source_and_preserves_legacy_manual_values() -> None:
     bad = fv.validate_cases([row(case_type="行案")])
-    assert any("只有复查不合格" in e for e in bad["errors"])
+    assert bad["status"] == "ok"
+    assert any("缺少独立来源" in w for w in bad["warnings"])
+    assert fv.validate_cases([row(case_type="行案", case_type_source="1.png")])["status"] == "ok"
+    assert fv.validate_cases([row(case_type="行案", case_type_source="missing.pdf")])["status"] == "errors_found"
     good = fv.validate_cases(
         [
             row(case_type="行案"),

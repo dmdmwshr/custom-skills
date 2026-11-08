@@ -1,0 +1,1920 @@
+"""Offline mechanical tests for feishu_source_sync v2.
+
+The real ``LarkCliTransport`` runs against a fake *service* behind its subprocess runner. The fake
+validates the wire shape of every CellValue like the official CLI help describes and never
+corrects a wrong shape, so a formatting defect cannot be hidden. Results here are NOT a P18
+real-cloud result.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import os
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import scripts.feishu_source_sync as sync
+
+CONTRACT_CANDIDATES = [
+    os.environ.get("P18_CONTRACT", ""),
+    "D:/ws/05-temp/20261105_案卷汇总_不合格名录与下载核查/review/p18-actual-field-contract-observation-20261106/人工字段与同步保护合同-结构已回读.json",
+    "/mnt/d/ws/05-temp/20261105_案卷汇总_不合格名录与下载核查/review/p18-actual-field-contract-observation-20261106/人工字段与同步保护合同-结构已回读.json",
+]
+CONTRACT = next((Path(c) for c in CONTRACT_CANDIDATES if c and Path(c).is_file()), None)
+pytestmark = pytest.mark.skipif(CONTRACT is None, reason="P18 保护合同副本不可达")
+
+_REAL_RELEASE_GATE = sync.require_user_acceptance_for_release
+
+
+@pytest.fixture(autouse=True)
+def _engine_tests_exercise_the_release_mechanics_not_the_user_gate(monkeypatch, request):
+    """旧引擎用例验证放行机制本身(精确意图、证据形态)；用户风险接受门禁另由 gate 用例用真实函数验证。"""
+    if not any(tag in request.node.name for tag in ("users_own_risk_acceptance", "assistant_signed")):
+        monkeypatch.setattr(sync, "require_user_acceptance_for_release", lambda spec, path: None)
+    if "ledger_root" not in request.node.name:
+        # 引擎用例在“自己的隔离测试账”上运行：这里显式 initialize() 并只通过内部 isolated_test_ledger 开关通行，
+        # 真实的 validate_root() 照常执行(不被 mock)；正式根身份规则由 ledger_root 用例直接验证。
+        real_run, real_build = sync.run, sync.build_basic_specs
+
+        def run_isolated(spec_path, **kw):
+            if kw.get("ledger_dir") is not None and json.loads(Path(spec_path).read_text(encoding="utf-8")).get("mode") != "plan":
+                sync.Ledger(kw["ledger_dir"]).initialize()
+            return real_run(spec_path, **kw, isolated_test_ledger=True)
+
+        def build_isolated(**kw):
+            if kw.get("ledger_dir") is not None:
+                sync.Ledger(kw["ledger_dir"]).initialize()
+            return real_build(**kw, isolated_test_ledger=True)
+
+        monkeypatch.setattr(sync, "run", run_isolated)
+        monkeypatch.setattr(sync, "build_basic_specs", build_isolated)
+
+
+CASE, CHECK, PRODUCT = "tbl30eWyoeTZqxmU", "tbl6cARXeBhjWunC", "tbl6jr76MIVK1xXi"
+KEY, UNIT, HANDLER, RESULT, DATE = "fld1lHXHpk", "fld2Lo4dpD", "fldHTq0ECh", "fld77TOx5G", "fld5azNPuE"
+HUMAN_NET, HUMAN_NOTE, HUMAN_CHECKBOX, DERIVED = "fld4mVYy5Y", "fldW2kJC0V", "fldrKL9rDE", "fld3Vvqol2"
+CHECK_KEY, CHECK_NUMBER = "fld5ujrPv4", "fld1jdSi33"
+BASE = "XOZ1bfapIasXW1ssaeEcovPinLc"
+REC, REC2, CREC = "recTEST000001", "recTEST000002", "recTEST000003"
+STABLE = "SYNTH-0001"
+
+
+def sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.fixture()
+def contract() -> dict:
+    return json.loads(CONTRACT.read_text(encoding="utf-8"))
+
+
+@pytest.fixture()
+def meta(contract) -> dict:
+    return {t["tableId"]: {f["fieldId"]: f for f in t["fields"]} for t in contract["tables"].values()}
+
+
+class FakeService:
+    """Stands behind the lark-cli runner. Strict about wire shapes, honest about identity."""
+
+    def __init__(self, meta, rows, **behaviour):
+        self.meta, self.rows = meta, copy.deepcopy(rows)
+        self.b = behaviour
+        self.calls: list[list[str]] = []
+        self.upserts: list[tuple[str, str, dict]] = []
+        self.hooks_at_upsert = None
+
+    def __call__(self, argv, capture_output=True, text=True, timeout=None):
+        self.calls.append(argv)
+        verb = argv[2]
+        opt = lambda name: [argv[i + 1] for i, a in enumerate(argv) if a == name]  # noqa: E731
+        table = opt("--table-id")[0]
+        if verb == "+record-get":
+            return self._get(table, opt("--record-id"))
+        if verb == "+record-upsert":
+            return self._upsert(table, opt("--record-id")[0], json.loads(opt("--json")[0]))
+        return SimpleNamespace(returncode=1, stdout=json.dumps({"ok": False}), stderr="")
+
+    def _ok(self, data):
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "data": data}, ensure_ascii=False), stderr="")
+
+    def _get(self, table, ids):
+        if self.b.get("fail_get_after_write") and self.upserts:
+            return SimpleNamespace(returncode=1, stdout=json.dumps({"ok": False}), stderr="")
+        shown = [i for i in ids if not (self.b.get("drop_row") == i)]
+        if self.b.get("permute"):
+            shown = list(reversed(shown))
+        if self.b.get("extra_unknown"):
+            self.rows[(table, "recUNKNOWN9999")] = {}
+            shown = [*shown, "recUNKNOWN9999"]
+        if self.b.get("dup_ids") and shown:
+            shown = [*shown, shown[0]]
+        fields = sorted(set(self.meta[table]) | {fid for i in shown for fid in self.rows.get((table, i), {})})
+        fields = [f for f in fields if f not in self.b.get("omit_fields", ())
+                  and not (self.upserts and f in self.b.get("omit_fields_after_write", ()))]
+        if self.b.get("dup_fields") and fields:
+            fields = [*fields, fields[0]]
+        data = {"fields": [self.meta[table].get(f, {}).get("name", f) for f in fields], "field_id_list": fields,
+                "field_type_list": [self.meta[table].get(f, {}).get("type", "text") for f in fields],
+                "data": [[self.rows[(table, i)].get(f) for f in fields] for i in shown],
+                "record_id_list": shown, "has_more": False, "timezone": "Asia/Shanghai"}
+        if self.b.get("no_ids"):
+            del data["record_id_list"]
+        if self.b.get("no_field_ids"):
+            del data["field_id_list"]
+        if self.b.get("ragged") and data["data"]:
+            data["data"][0] = data["data"][0][:-1]
+        if self.b.get("count_mismatch") and data["record_id_list"]:
+            data["record_id_list"] = data["record_id_list"][:-1]
+        return self._ok(data)
+
+    def _upsert(self, table, record, fields):
+        self.upserts.append((table, record, copy.deepcopy(fields)))
+        if self.hooks_at_upsert:
+            self.hooks_at_upsert(table, record)
+        if self.b.get("timeout_for") == record:
+            raise subprocess.TimeoutExpired("lark-cli", 1)
+        if self.b.get("fail_for") == record:
+            return SimpleNamespace(returncode=1, stdout=json.dumps({"ok": False}), stderr="")
+        if self.b.get("crash_for") == record:
+            raise KeyboardInterrupt
+        for fid, wire in fields.items():
+            kind = self.meta[table][fid]["type"]
+            if kind == "select":
+                assert isinstance(wire, list) and wire and all(isinstance(x, str) for x in wire), f"select 需要数组：{wire!r}"
+            elif kind == "text":
+                assert isinstance(wire, str), "text 需要字符串"
+            elif kind == "number":
+                assert isinstance(wire, (int, float)) and not isinstance(wire, bool), "number 需要数字"
+            elif kind == "datetime":
+                assert isinstance(wire, str) and len(wire) == 16 and wire[10] == " ", f"datetime 需要 'YYYY-MM-DD HH:MM'：{wire!r}"
+                wire = wire.replace(" ", "T") + ":00.000+08:00"
+            else:
+                raise AssertionError(f"不应写入 {kind}")
+            if self.b.get("ignore_writes_for") != record:
+                self.rows[(table, record)][fid] = wire
+        if self.b.get("mutate"):
+            self.b["mutate"](self.rows[(table, record)])
+        if self.b.get("apply_then_timeout_for") == record:
+            raise subprocess.TimeoutExpired("lark-cli", 1)
+        return self._ok({"record": {"record_id": record}})
+
+
+def base_rows():
+    case = {KEY: STABLE, UNIT: "旧单位", HANDLER: "旧承办人", RESULT: ["合格"], DATE: "2026-01-05T00:00:00.000+08:00",
+            HUMAN_NET: ["是"], HUMAN_NOTE: "人工说明", HUMAN_CHECKBOX: True, DERIVED: "0"}
+    return {(CASE, REC): dict(case), (CASE, REC2): {**case, KEY: "SYNTH-0002"},
+            (CHECK, CREC): {CHECK_KEY: "SYNTH-CHK-1", CHECK_NUMBER: 3, "fld1RPp2yY": ["合格"], "fld4atEDRT": ["是"]}}
+
+
+def basis(ref="源详情#1", state="observed", **extra):
+    return {"kind": "source-observed", "valueState": state, "sourceRef": ref, "observedAt": "2026-11-06T08:00:00Z", **extra}
+
+
+def make_spec(tmp_path, mode="execute", **override):
+    spec = {
+        "schemaVersion": sync.SPEC_SCHEMA, "mode": mode,
+        "contract": {"path": str(CONTRACT), "sha256": sha(CONTRACT)},
+        "target": {"baseToken": BASE, "profile": "p18-test", "identity": "user"},
+        "syntheticOnly": True, "syntheticKeyPattern": r"^SYNTH-",
+        "limits": {"maxRecords": 5},
+        "logDir": str(tmp_path / "log"),
+        "allowlist": {CASE: {"records": [REC, REC2], "fields": [UNIT, HANDLER, RESULT, DATE]}},
+        "updates": [{
+            "tableId": CASE, "recordId": REC, "stableKey": {"fieldId": KEY, "value": STABLE},
+            "fields": {UNIT: {"new": "新单位", "basis": basis()}, RESULT: {"new": "不合格", "basis": basis()}},
+        }],
+    }
+    spec.update(override)
+    return spec
+
+
+def write_spec(tmp_path, spec, name="spec.json"):
+    path = tmp_path / name
+    path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def service(meta, **behaviour):
+    return FakeService(meta, base_rows(), **behaviour)
+
+
+def run(tmp_path, spec, svc, *, flag="execute", name="spec.json"):
+    transport = sync.LarkCliTransport("/x/lark-cli", "p18-test", "user", runner=svc)
+    kwargs = {"execute_flag": flag == "execute", "reconcile_flag": flag == "reconcile"}
+    return sync.run(write_spec(tmp_path, spec, name), cli="unused", transport=transport, ledger_dir=tmp_path / "ledger", **kwargs)
+
+
+def refused(tmp_path, spec, meta, match=None, flag="execute"):
+    svc = service(meta)
+    with pytest.raises(sync.SyncError, match=match):
+        run(tmp_path, spec, svc, flag=flag)
+    assert svc.calls == [], "拒绝必须发生在任何外部调用之前"
+
+
+def read_report(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def ledger_events(tmp_path, record=REC):
+    key = sync.Ledger.target_key(BASE, CASE, record)
+    return sync.Ledger(tmp_path / "ledger").events(key)
+
+
+# ------------------------------------------------------------------ plan / basic execute
+
+
+def test_plan_makes_no_external_call_and_writes_no_ledger(tmp_path, meta):
+    svc = service(meta)
+    result = run(tmp_path, make_spec(tmp_path, "plan"), svc)
+    assert result["externalCalls"] == 0 and svc.calls == [] and result["executable"] is True
+    assert result["requests"][0]["wire"][RESULT] == ["不合格"]
+    assert set(sync.ALWAYS_DENIED) <= set(result["denylist"])
+    assert not (tmp_path / "ledger").exists() and not (tmp_path / "log").exists()
+
+
+def test_execute_requires_explicit_flag(tmp_path, meta):
+    svc = service(meta)
+    with pytest.raises(sync.SyncError, match="--execute"):
+        run(tmp_path, make_spec(tmp_path), svc, flag="none")
+    assert svc.calls == []
+
+
+def test_execute_updates_only_target_fields_with_official_wire_shapes(tmp_path, meta):
+    svc = service(meta)
+    report = run(tmp_path, make_spec(tmp_path), svc)
+    row = svc.rows[(CASE, REC)]
+    assert report["status"] == "OK"
+    assert row[UNIT] == "新单位" and row[RESULT] == ["不合格"]
+    assert row[HANDLER] == "旧承办人" and row[HUMAN_NET] == ["是"] and row[HUMAN_NOTE] == "人工说明" and row[HUMAN_CHECKBOX] is True
+    assert svc.rows[(CASE, REC2)] == base_rows()[(CASE, REC2)]
+    assert svc.upserts == [(CASE, REC, {UNIT: "新单位", RESULT: ["不合格"]})]      # select 以数组上线
+    detail = report["records"][0]["fieldDetail"][RESULT]
+    assert detail["old"] == ["合格"] and detail["new"] == "不合格" and detail["wire"] == ["不合格"] and detail["type"] == "select"
+    log = Path(tmp_path / "log")
+    for name in ("before.json", "after.json", "requests.jsonl", "report.json"):
+        assert (log / name).is_file()
+    assert [e["event"] for e in ledger_events(tmp_path)] == ["intent", "final"]
+
+
+def test_fake_service_does_not_correct_a_wrong_select_shape(meta):
+    svc = service(meta)
+    transport = sync.LarkCliTransport("/x/lark-cli", "p", "user", runner=svc)
+    with pytest.raises(AssertionError, match="select 需要数组"):
+        transport.upsert(BASE, CASE, REC, {RESULT: "不合格"})
+
+
+def test_unchanged_value_is_not_written_and_select_form_is_compared_as_value(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["updates"][0]["fields"] = {UNIT: {"new": "旧单位", "basis": basis()}, RESULT: {"new": "合格", "basis": basis()}}
+    svc = service(meta)
+    report = run(tmp_path, spec, svc)
+    assert svc.upserts == [] and report["records"][0]["status"] == "UNCHANGED"
+    assert ledger_events(tmp_path) == []
+
+
+def test_datetime_number_and_text_use_their_own_wire_and_comparison(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["allowlist"] = {CASE: {"records": [REC], "fields": [DATE, UNIT]}, CHECK: {"records": [CREC], "fields": [CHECK_NUMBER, "fld1RPp2yY"]}}
+    spec["updates"] = [
+        {"tableId": CASE, "recordId": REC, "stableKey": {"fieldId": KEY, "value": STABLE},
+         "fields": {DATE: {"new": "2026-01-05", "basis": basis()}}},                      # 与云端 00:00 相同 -> 不写
+        {"tableId": CHECK, "recordId": CREC, "stableKey": {"fieldId": CHECK_KEY, "value": "SYNTH-CHK-1"},
+         "fields": {CHECK_NUMBER: {"new": 4, "basis": basis()}, "fld1RPp2yY": {"new": "不合格", "basis": basis()}}}]
+    svc = service(meta)
+    run(tmp_path, spec, svc)
+    assert svc.upserts == [(CHECK, CREC, {CHECK_NUMBER: 4, "fld1RPp2yY": ["不合格"]})]
+    spec2 = copy.deepcopy(spec)
+    spec2["logDir"] = str(tmp_path / "log2")
+    spec2["updates"] = [spec["updates"][0]]
+    spec2["updates"][0]["fields"] = {DATE: {"new": "2026-02-01 08:30", "basis": basis()}}
+    svc2 = service(meta)
+    run(tmp_path, spec2, svc2, name="spec2.json")
+    assert svc2.upserts == [(CASE, REC, {DATE: "2026-02-01 08:30"})]
+    assert svc2.rows[(CASE, REC)][DATE] == "2026-02-01T08:30:00.000+08:00"
+
+
+@pytest.mark.parametrize("field,new,match", [
+    (RESULT, ["不合格"], "单个非空选项"),
+    (RESULT, "", "单个非空选项"),
+    (UNIT, 5, "非空字符串"),
+    (UNIT, ["x"], "非空字符串"),
+    (DATE, "2026/01/05", "datetime"),
+    (DATE, "2026-13-40", "datetime"),
+    (DATE, 20260105, "datetime"),
+    (CHECK_NUMBER, True, "有限数字"),
+    (CHECK_NUMBER, "4", "有限数字"),
+    (CHECK_NUMBER, float("nan"), "有限数字"),
+])
+def test_ambiguous_or_wrong_typed_values_are_refused(tmp_path, meta, field, new, match):
+    table, record, key, stable = (CHECK, CREC, CHECK_KEY, "SYNTH-CHK-1") if field == CHECK_NUMBER else (CASE, REC, KEY, STABLE)
+    spec = make_spec(tmp_path)
+    spec["allowlist"] = {table: {"records": [record], "fields": [field]}}
+    spec["updates"] = [{"tableId": table, "recordId": record, "stableKey": {"fieldId": key, "value": stable},
+                        "fields": {field: {"new": new, "basis": basis()}}}]
+    refused(tmp_path, spec, meta, match)
+
+
+# ------------------------------------------------------------------ allow / deny rules
+
+
+@pytest.mark.parametrize("field_id", sorted(sync.ALWAYS_DENIED))
+def test_every_human_and_relation_field_is_denied(tmp_path, meta, field_id):
+    table = next(t for t, fields in meta.items() if field_id in fields)
+    stable = {CASE: KEY, CHECK: CHECK_KEY, PRODUCT: "fldqlwHjUW"}[table]
+    spec = make_spec(tmp_path)
+    spec["allowlist"] = {table: {"records": [REC], "fields": [field_id]}}
+    spec["updates"] = [{"tableId": table, "recordId": REC, "stableKey": {"fieldId": stable, "value": STABLE},
+                        "fields": {field_id: {"new": "是", "basis": basis()}}}]
+    refused(tmp_path, spec, meta, "永久禁写")
+
+
+def test_human_field_mixed_into_updates_only(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["updates"][0]["fields"][HUMAN_NET] = {"new": "是", "basis": basis()}
+    refused(tmp_path, spec, meta, "永久禁写")
+
+
+def test_field_name_instead_of_id_rejected(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["allowlist"][CASE]["fields"] = ["单位名称"]
+    refused(tmp_path, spec, meta, "fieldId")
+
+
+def test_unknown_field_rejected(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["allowlist"][CASE]["fields"] = ["fldNEWUNKNOWN1"]
+    refused(tmp_path, spec, meta, "默认拒写")
+
+
+def test_derived_admin_legacy_and_structural_fields_rejected(tmp_path, contract, meta):
+    for cls in ("derived-readonly", "admin-only", "legacy-hidden-protected", "structural-relation"):
+        field = next(f for f in contract["tables"]["案卷主表"]["fields"] if f["class"] == cls and f["fieldId"] not in sync.ALWAYS_DENIED)
+        spec = make_spec(tmp_path)
+        spec["allowlist"][CASE]["fields"] = [field["fieldId"]]
+        spec["updates"][0]["fields"] = {field["fieldId"]: {"new": "x", "basis": basis()}}
+        refused(tmp_path, spec, meta, "source-sync-whitelist")
+
+
+def test_link_whitelist_field_not_written_by_this_version(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["allowlist"] = {CHECK: {"records": [REC], "fields": ["fld1kH9BIS"]}}
+    spec["updates"] = [{"tableId": CHECK, "recordId": REC, "stableKey": {"fieldId": CHECK_KEY, "value": STABLE},
+                        "fields": {"fld1kH9BIS": {"new": "x", "basis": basis()}}}]
+    refused(tmp_path, spec, meta, "标量")
+
+
+@pytest.mark.parametrize("patch,match", [
+    (lambda s: s.pop("allowlist"), "allowlist"),
+    (lambda s: s.update(allowlist={}), "allowlist"),
+    (lambda s: s["allowlist"][CASE].update(fields=[]), "fieldId 白名单为空"),
+    (lambda s: s["allowlist"][CASE].update(records=[]), "record 白名单为空"),
+    (lambda s: s["allowlist"][CASE].update(records=["<待填合成record_id>", REC]), "record_id 格式"),
+    (lambda s: s["allowlist"][CASE].update(records=[REC, REC]), "重复"),
+    (lambda s: s["target"].update(baseToken="OTHERBASETOKEN"), "Base"),
+    (lambda s: s["target"].pop("profile"), "profile"),
+    (lambda s: s.update(updates=[]), "updates"),
+    (lambda s: s.update(updates=s["updates"] * 2), "重复"),
+    (lambda s: s["updates"][0].update(recordId="recNOTLISTED001"), "不在白名单"),
+    (lambda s: s["updates"][0].pop("stableKey"), "稳定键"),
+    (lambda s: s["updates"][0]["stableKey"].update(fieldId=UNIT), "稳定键"),
+    (lambda s: s["updates"][0]["stableKey"].update(value="REAL-0001"), "合成"),
+    (lambda s: s["updates"][0]["fields"].update({HANDLER: {"new": "x"}}), "basis"),
+    (lambda s: s["updates"][0]["fields"].update({HANDLER: {"new": "x", "basis": {"kind": "source-observed", "sourceRef": "a", "observedAt": "b"}}}), "valueState"),
+    (lambda s: s["updates"][0]["fields"].update({HANDLER: {"new": "x", "basis": {**basis(), "kind": "local-processing"}}}), "basis"),
+    (lambda s: s["updates"][0]["fields"].update({HANDLER: {"new": "x", "basis": basis(state="guess")}}), "valueState"),
+    (lambda s: s["updates"][0]["fields"].update({HANDLER: {"new": "", "basis": basis()}}), "非空"),
+    (lambda s: s["updates"][0]["fields"].update({HANDLER: {"new": None, "basis": basis()}}), "非空"),
+    (lambda s: s["updates"][0]["fields"].update({HANDLER: {"basis": basis()}}), "需要 new"),
+    (lambda s: s["updates"][0]["fields"].update({HANDLER: {"new": "否", "basis": basis()}}), "明确否定"),
+    (lambda s: s["updates"][0]["fields"].update({HANDLER: {"new": "0", "basis": basis()}}), "明确否定"),
+    (lambda s: s["updates"][0]["fields"].update({"fld9ZZZZZZ": {"new": "x", "basis": basis()}}), "不在白名单"),
+    (lambda s: s["limits"].update(maxRecords=21), "maxRecords"),
+    (lambda s: s.pop("logDir"), "logDir"),
+    (lambda s: s.update(mode="bulk"), "mode"),
+    (lambda s: s.update(schemaVersion="FeishuSourceSyncSpecV1"), "格式无效"),
+    (lambda s: s.update(syntheticKeyPattern=""), "syntheticKeyPattern"),
+])
+def test_invalid_specs_are_refused_before_any_external_call(tmp_path, meta, patch, match):
+    spec = make_spec(tmp_path)
+    patch(spec)
+    refused(tmp_path, spec, meta, match)
+
+
+def test_contract_digest_mismatch_refused(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["contract"]["sha256"] = "0" * 64
+    refused(tmp_path, spec, meta, "摘要")
+
+
+# ------------------------------------------------------------------ source value states
+
+
+def test_explicit_negative_is_allowed_only_with_source_basis(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["updates"][0]["fields"] = {HANDLER: {"new": "否", "basis": basis(explicitNegative=True)}}
+    svc = service(meta)
+    assert run(tmp_path, spec, svc)["status"] == "OK"
+    assert svc.rows[(CASE, REC)][HANDLER] == "否"
+
+
+def test_literal_pending_verification_text_is_a_legitimate_observed_source_value(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["updates"][0]["fields"] = {RESULT: {"new": "待核实", "basis": basis("来源页面原文“待核实”")}}
+    svc = service(meta)
+    run(tmp_path, spec, svc)
+    assert svc.rows[(CASE, REC)][RESULT] == ["待核实"]
+
+
+@pytest.mark.parametrize("state", ["not-provided", "unknown"])
+def test_missing_source_value_is_skipped_and_never_overwrites(tmp_path, meta, state):
+    spec = make_spec(tmp_path)
+    spec["updates"][0]["fields"] = {HANDLER: {"basis": basis(state=state)}, UNIT: {"new": "新单位", "basis": basis()}}
+    svc = service(meta)
+    report = run(tmp_path, spec, svc)
+    assert svc.upserts == [(CASE, REC, {UNIT: "新单位"})]
+    assert svc.rows[(CASE, REC)][HANDLER] == "旧承办人"
+    assert report["records"][0]["skippedFields"][HANDLER]["valueState"] == state
+
+
+def test_missing_value_state_with_a_value_is_ambiguous_and_refused(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["updates"][0]["fields"] = {HANDLER: {"new": "x", "basis": basis(state="not-provided")}}
+    refused(tmp_path, spec, meta, "不得携带 new")
+
+
+def test_all_fields_missing_means_no_write_at_all(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["updates"][0]["fields"] = {HANDLER: {"basis": basis(state="not-provided")}}
+    svc = service(meta)
+    report = run(tmp_path, spec, svc)
+    assert svc.upserts == [] and report["records"][0]["status"] == "UNCHANGED"
+
+
+# ------------------------------------------------------------------ strict record identity
+
+
+@pytest.mark.parametrize("behaviour,match", [
+    ({"no_ids": True}, "record_id_list"),
+    ({"drop_row": REC}, "读不到"),
+    ({"dup_ids": True}, "重复"),
+    ({"extra_unknown": True}, "未请求"),
+    ({"count_mismatch": True}, "行数不一致"),
+    ({"ragged": True}, "行宽"),
+    ({"no_field_ids": True}, "field_id_list"),
+    ({"dup_fields": True}, "field_id_list"),
+])
+def test_identity_or_structure_anomalies_fail_closed_before_any_write(tmp_path, meta, behaviour, match):
+    svc = service(meta, **behaviour)
+    with pytest.raises(sync.RuntimeSyncError, match=match):
+        run(tmp_path, make_spec(tmp_path), svc)
+    assert svc.upserts == []
+    assert read_report(tmp_path / "log" / "report.json")["status"] == "REFUSED_BEFORE_WRITE"
+    assert ledger_events(tmp_path) == []
+
+
+def test_response_order_never_decides_identity(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["updates"].append({"tableId": CASE, "recordId": REC2, "stableKey": {"fieldId": KEY, "value": "SYNTH-0002"},
+                            "fields": {UNIT: {"new": "新2", "basis": basis()}}})
+    svc = service(meta, permute=True)
+    report = run(tmp_path, spec, svc)
+    assert report["status"] == "OK"
+    assert svc.rows[(CASE, REC)][UNIT] == "新单位" and svc.rows[(CASE, REC2)][UNIT] == "新2"
+
+
+def test_get_records_never_invents_ids_from_request_order():
+    body = {"ok": True, "data": {"fields": ["项目编号"], "data": [["SYNTH-REVIEW"]]}}
+    with pytest.raises(sync.RuntimeSyncError, match="record_id_list"):
+        sync.parse_get_response(body, ["recSYNTH00001"])
+
+
+# ------------------------------------------------------------------ stable key, expectedOld, failures
+
+
+def test_stable_key_mismatch_refused_before_write(tmp_path, meta):
+    svc = service(meta)
+    spec = make_spec(tmp_path)
+    spec["updates"][0]["stableKey"]["value"] = "SYNTH-9999"
+    with pytest.raises(sync.RuntimeSyncError, match="稳定键"):
+        run(tmp_path, spec, svc)
+    assert svc.upserts == [] and len(svc.calls) == 1 and ledger_events(tmp_path) == []
+
+
+def test_expected_old_conflict_preserves_both_sides(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["updates"][0]["fields"][UNIT]["expectedOld"] = "别人刚改过的值"
+    svc = service(meta)
+    with pytest.raises(sync.RuntimeSyncError, match="expectedOld"):
+        run(tmp_path, spec, svc)
+    assert svc.upserts == [] and svc.rows[(CASE, REC)][UNIT] == "旧单位"
+
+
+def test_expected_old_uses_typed_comparison(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["updates"][0]["fields"][RESULT]["expectedOld"] = "合格"      # 云端为 ["合格"]
+    assert run(tmp_path, spec, service(meta))["status"] == "OK"
+
+
+def two_record_spec(tmp_path):
+    spec = make_spec(tmp_path)
+    spec["updates"].append({"tableId": CASE, "recordId": REC2, "stableKey": {"fieldId": KEY, "value": "SYNTH-0002"},
+                            "fields": {UNIT: {"new": "新2", "basis": basis()}}})
+    return spec
+
+
+def test_failed_write_stops_without_retry_and_blocks_the_target(tmp_path, meta):
+    svc = service(meta, fail_for=REC)
+    with pytest.raises(sync.RuntimeSyncError):
+        run(tmp_path, two_record_spec(tmp_path), svc)
+    assert [u[1] for u in svc.upserts] == [REC]
+    report = read_report(tmp_path / "log" / "report.json")
+    assert report["status"] == "FAILED" and [r["status"] for r in report["records"]] == ["FAILED", "NOT_ATTEMPTED"]
+    assert [e["event"] for e in ledger_events(tmp_path)] == ["intent", "final"] and ledger_events(tmp_path)[-1]["status"] == "FAILED"
+    assert ledger_events(tmp_path, REC2)[-1]["status"] == "NOT_ATTEMPTED"
+
+
+def test_protection_violation_detected_on_readback_and_blocks(tmp_path, meta):
+    def clobber(row):
+        row[HUMAN_NOTE] = "被同步冲掉"
+
+    svc = service(meta, mutate=clobber)
+    with pytest.raises(sync.RuntimeSyncError, match="人工说明|fldW2kJC0V|核实说明"):
+        run(tmp_path, make_spec(tmp_path), svc)
+    report = read_report(tmp_path / "log" / "report.json")
+    assert report["status"] == "FAILED" and report["protectionViolations"]
+    assert ledger_events(tmp_path)[-1]["status"] == "VIOLATION"
+
+
+def test_ignored_write_is_caught_by_readback(tmp_path, meta):
+    svc = service(meta, ignore_writes_for=REC)
+    with pytest.raises(sync.RuntimeSyncError, match="回读值不等于目标值"):
+        run(tmp_path, make_spec(tmp_path), svc)
+
+
+# ------------------------------------------------------------------ UNKNOWN protection / ledger
+
+
+def unknown_state(tmp_path, meta, **behaviour):
+    svc = service(meta, **({"timeout_for": REC} | behaviour))
+    with pytest.raises(sync.RuntimeSyncError):
+        run(tmp_path, make_spec(tmp_path), svc)
+    return svc
+
+
+def test_unknown_result_is_recorded_and_not_replayed_by_the_same_spec(tmp_path, meta):
+    svc = unknown_state(tmp_path, meta)
+    first = (tmp_path / "log" / "report.json").read_bytes()
+    assert read_report(tmp_path / "log" / "report.json")["records"][0]["status"] == "UNKNOWN"
+    svc2 = service(meta)
+    with pytest.raises(sync.SyncError, match="logDir 已存在|未对账"):
+        run(tmp_path, make_spec(tmp_path), svc2)                       # 同 spec 同 logDir
+    assert svc2.calls == []
+    assert (tmp_path / "log" / "report.json").read_bytes() == first   # 旧 UNKNOWN 报告不被覆盖
+    spec = make_spec(tmp_path, logDir=str(tmp_path / "log-other"))
+    with pytest.raises(sync.SyncError, match="未对账"):
+        run(tmp_path, spec, svc2, name="other.json")                   # 换 logDir 不能绕过
+    assert svc2.calls == [] and len(svc.upserts) == 1
+
+
+def test_different_values_on_the_same_unreconciled_target_are_also_blocked(tmp_path, meta):
+    unknown_state(tmp_path, meta)
+    spec = make_spec(tmp_path, logDir=str(tmp_path / "log-b"))
+    spec["updates"][0]["fields"] = {UNIT: {"new": "另一个值", "basis": basis()}}
+    svc = service(meta)
+    with pytest.raises(sync.SyncError, match="未对账"):
+        run(tmp_path, spec, svc, name="b.json")
+    assert svc.calls == []
+
+
+def test_plan_reports_the_block_without_touching_anything(tmp_path, meta):
+    unknown_state(tmp_path, meta)
+    before = sorted(p.name for p in (tmp_path / "ledger" / "targets").iterdir())
+    result = run(tmp_path, make_spec(tmp_path, "plan"), service(meta))
+    assert result["executable"] is False and result["ledgerBlocks"][0]["reason"] == "UNKNOWN"
+    assert sorted(p.name for p in (tmp_path / "ledger" / "targets").iterdir()) == before
+
+
+def test_intent_is_on_the_ledger_before_the_write_is_sent(tmp_path, meta):
+    seen = {}
+    svc = service(meta)
+    svc.hooks_at_upsert = lambda table, record: seen.update(events=[e["event"] for e in ledger_events(tmp_path, record)])
+    run(tmp_path, make_spec(tmp_path), svc)
+    assert seen["events"] == ["intent"]
+
+
+def test_interrupted_run_leaves_a_pending_intent_that_blocks(tmp_path, meta):
+    svc = service(meta, crash_for=REC)
+    with pytest.raises(KeyboardInterrupt):
+        run(tmp_path, make_spec(tmp_path), svc)
+    assert [e["event"] for e in ledger_events(tmp_path)] == ["intent"]
+    assert not list((tmp_path / "ledger" / "locks").iterdir())          # 锁已释放，意图仍封锁
+    svc2 = service(meta)
+    with pytest.raises(sync.SyncError, match="PENDING"):
+        run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-2")), svc2, name="s2.json")
+    assert svc2.calls == []
+
+
+def test_readback_failure_after_write_is_unknown_and_blocks(tmp_path, meta):
+    svc = service(meta, fail_get_after_write=True)
+    with pytest.raises(sync.RuntimeSyncError, match="效果未核实"):
+        run(tmp_path, make_spec(tmp_path), svc)
+    assert read_report(tmp_path / "log" / "report.json")["status"] == "UNKNOWN"
+    assert ledger_events(tmp_path)[-1]["status"] == "READBACK_FAILED"
+
+
+def test_concurrent_run_is_refused_by_the_target_lock(tmp_path, meta):
+    lock_dir = tmp_path / "ledger" / "locks"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / f"{sync.Ledger.target_key(BASE, CASE, REC)}.lock").write_text("{}", encoding="utf-8")
+    svc = service(meta)
+    with pytest.raises(sync.SyncError, match="占用|遗留锁"):
+        run(tmp_path, make_spec(tmp_path), svc)
+    assert svc.calls == [] and (lock_dir / f"{sync.Ledger.target_key(BASE, CASE, REC)}.lock").exists()
+
+
+def test_a_lock_held_inside_the_run_is_seen_by_a_second_run(tmp_path, meta):
+    outcome = {}
+
+    def second_run(table, record):
+        svc2 = service(meta)
+        try:
+            run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-concurrent")), svc2, name="c.json")
+        except sync.SyncError as error:
+            outcome["error"] = str(error)
+        outcome["calls"] = len(svc2.calls)
+
+    svc = service(meta)
+    svc.hooks_at_upsert = second_run
+    run(tmp_path, make_spec(tmp_path), svc)
+    assert ("未对账" in outcome["error"] or "占用" in outcome["error"]) and outcome["calls"] == 0
+
+
+def reconcile_spec(tmp_path, name="reconcile", **extra):
+    return make_spec(tmp_path, "reconcile", logDir=str(tmp_path / name), **extra)
+
+
+def test_reconcile_applied_clears_the_block_without_any_write(tmp_path, meta):
+    svc = unknown_state(tmp_path, meta, apply_then_timeout_for=REC, timeout_for=None)
+    recon = service(meta)
+    recon.rows = copy.deepcopy(svc.rows)                                # 云端已生效
+    report = run(tmp_path, reconcile_spec(tmp_path), recon, flag="reconcile", name="r.json")
+    assert report["targets"][0]["outcome"] == "APPLIED" and recon.upserts == [] and report["externalWrites"] == 0
+    assert all(call[2] == "+record-get" for call in recon.calls)
+    again = service(meta)
+    again.rows = copy.deepcopy(svc.rows)
+    result = run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-after")), again, name="again.json")
+    assert result["records"][0]["status"] == "UNCHANGED" and again.upserts == []
+
+
+def test_old_value_observed_after_unknown_never_releases_the_block(tmp_path, meta):
+    unknown_state(tmp_path, meta)
+    recon = service(meta)                                               # 云端仍是旧值
+    report = run(tmp_path, reconcile_spec(tmp_path), recon, flag="reconcile", name="r.json")
+    assert report["targets"][0]["outcome"] == "OLD_VALUE_OBSERVED" and recon.upserts == []
+    again = service(meta)
+    with pytest.raises(sync.SyncError, match="OLD_VALUE_OBSERVED"):
+        run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-retry")), again, name="retry.json")
+    assert again.calls == []
+    last = ledger_events(tmp_path)[-1]
+    assert last["event"] == "reconciled" and last["originalIntent"]["fields"][UNIT]["wire"] == "新单位" and last["observed"]["fields"][UNIT] == "旧单位"
+
+
+def test_a_late_write_after_an_old_value_observation_is_not_replayed_or_missed(tmp_path, meta):
+    svc = unknown_state(tmp_path, meta)
+    first = service(meta)
+    assert run(tmp_path, reconcile_spec(tmp_path, "r1"), first, flag="reconcile", name="r1.json")["targets"][0]["outcome"] == "OLD_VALUE_OBSERVED"
+    late = service(meta)                                                # 迟到的原请求现在才生效
+    late.rows[(CASE, REC)][UNIT], late.rows[(CASE, REC)][RESULT] = "新单位", ["不合格"]
+    blocked = service(meta)
+    with pytest.raises(sync.SyncError, match="OLD_VALUE_OBSERVED"):
+        run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-b")), blocked, name="b.json")
+    assert blocked.calls == []                                          # 未被重放，不会双写
+    report = run(tmp_path, reconcile_spec(tmp_path, "r2"), late, flag="reconcile", name="r2.json")
+    assert report["targets"][0]["outcome"] == "APPLIED" and late.upserts == [] and len(svc.upserts) == 1
+    again = service(meta)
+    again.rows = copy.deepcopy(late.rows)
+    assert run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-c")), again, name="c.json")["records"][0]["status"] == "UNCHANGED"
+
+
+def test_a_late_write_mixed_with_a_foreign_change_is_diverged_not_applied(tmp_path, meta):
+    unknown_state(tmp_path, meta)
+    recon = service(meta)
+    recon.rows[(CASE, REC)][UNIT] = "新单位"                            # 只到了一半
+    assert run(tmp_path, reconcile_spec(tmp_path), recon, flag="reconcile", name="r.json")["targets"][0]["outcome"] == "DIVERGED"
+
+
+def test_reconcile_requires_the_same_stable_key_business_identity(tmp_path, meta):
+    unknown_state(tmp_path, meta)
+    recon = service(meta)
+    recon.rows[(CASE, REC)][KEY] = "SYNTH-OTHER"                       # 同 record_id 现在是另一个业务对象
+    recon.rows[(CASE, REC)][UNIT], recon.rows[(CASE, REC)][RESULT] = "新单位", ["不合格"]   # 目标值恰好都相等
+    report = run(tmp_path, reconcile_spec(tmp_path), recon, flag="reconcile", name="r.json")
+    assert report["targets"][0]["outcome"] == "IDENTITY_MISMATCH" and report["targets"][0]["observed"]["stableKey"] == "SYNTH-OTHER"
+    with pytest.raises(sync.SyncError, match="IDENTITY_MISMATCH"):
+        run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-x")), service(meta), name="x.json")
+    last = ledger_events(tmp_path)[-1]
+    assert last["outcome"] == "IDENTITY_MISMATCH" and last["originalIntent"]["stableKey"]["value"] == STABLE
+
+
+def test_reconcile_with_a_different_stable_key_in_the_spec_is_refused_before_any_event(tmp_path, meta):
+    unknown_state(tmp_path, meta)
+    events = len(ledger_events(tmp_path))
+    spec = reconcile_spec(tmp_path)
+    spec["updates"][0]["stableKey"]["value"] = "SYNTH-0009"
+    recon = service(meta)
+    with pytest.raises(sync.SyncError, match="稳定键与账本意图不一致"):
+        run(tmp_path, spec, recon, flag="reconcile", name="r.json")
+    assert recon.calls == [] and len(ledger_events(tmp_path)) == events
+
+
+def test_reconcile_with_an_unreadable_stable_key_stays_blocked(tmp_path, meta):
+    unknown_state(tmp_path, meta)
+    recon = service(meta, omit_fields=(KEY,))
+    assert run(tmp_path, reconcile_spec(tmp_path), recon, flag="reconcile", name="r.json")["targets"][0]["outcome"] == "IDENTITY_UNREADABLE"
+
+
+def test_reconcile_diverged_stays_blocked(tmp_path, meta):
+    unknown_state(tmp_path, meta)
+    recon = service(meta)
+    recon.rows[(CASE, REC)][UNIT] = "别人改成的值"
+    report = run(tmp_path, reconcile_spec(tmp_path), recon, flag="reconcile", name="r.json")
+    assert report["targets"][0]["outcome"] == "DIVERGED"
+    svc = service(meta)
+    with pytest.raises(sync.SyncError, match="DIVERGED"):
+        run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-x")), svc, name="x.json")
+
+
+def test_reconcile_unreadable_stays_blocked_and_needs_a_flag(tmp_path, meta):
+    unknown_state(tmp_path, meta)
+    recon = service(meta, no_ids=True)
+    report = run(tmp_path, reconcile_spec(tmp_path), recon, flag="reconcile", name="r.json")
+    assert report["targets"][0]["outcome"] == "UNREADABLE"
+    with pytest.raises(sync.SyncError, match="--reconcile"):
+        run(tmp_path, reconcile_spec(tmp_path, "r2"), service(meta), flag="none", name="r2.json")
+
+
+RELEASE = {"reason": "已核对服务端请求记录：原请求已终止且未生效", "operator": "测试人", "intentId": "placeholder-intent", "acknowledgesLateWriteRisk": True,
+           "evidence": [{"kind": "service-side-record", "ref": "审计记录#42", "sha256": "ab" * 32}]}
+
+
+def test_human_release_is_recorded_with_evidence_and_the_original_intent(tmp_path, meta):
+    unknown_state(tmp_path, meta)
+    recon = service(meta)
+    release = {**RELEASE, "intentId": ledger_events(tmp_path)[0]["intentId"]}
+    report = run(tmp_path, reconcile_spec(tmp_path, humanRelease=release), recon, flag="reconcile", name="r.json")
+    assert report["targets"][0]["outcome"] == "HUMAN_RELEASED" and recon.calls == []
+    event = ledger_events(tmp_path)[-1]
+    assert event["event"] == "human_release" and event["evidence"] == RELEASE["evidence"] and event["operator"] == "测试人"
+    assert event["originalIntent"]["fields"][UNIT]["wire"] == "新单位" and event["priorState"] == "UNKNOWN"
+    assert run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-after")), service(meta), name="a.json")["status"] == "OK"
+
+
+def test_update_reconcile_releases_only_the_exact_intent_and_never_a_whole_target_in_bulk(tmp_path, meta):
+    unknown_state(tmp_path, meta)
+    recon = service(meta)
+    wrong = {**RELEASE, "intentId": "0" * 64}
+    report = run(tmp_path, reconcile_spec(tmp_path, humanRelease=wrong), recon, flag="reconcile", name="r.json")
+    assert report["targets"][0]["outcome"] == "RELEASE_NOT_FOR_THIS_INTENT"
+    assert not [e for e in ledger_events(tmp_path) if e["event"] == "human_release"]
+    with pytest.raises(sync.SyncError, match="未对账"):
+        run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-after")), service(meta), name="a.json")
+
+
+@pytest.mark.parametrize("patch,match", [
+    (lambda r: r.pop("evidence"), "evidence"),
+    (lambda r: r.update(evidence=[]), "evidence"),
+    (lambda r: r.update(evidence=[{"kind": "old-value-readback", "ref": "云端旧值相等"}]), "evidence.kind"),
+    (lambda r: r.update(evidence=[{"kind": "service-side-record", "ref": " "}]), "evidence.ref"),
+    (lambda r: r.pop("acknowledgesLateWriteRisk"), "acknowledgesLateWriteRisk"),
+    (lambda r: r.update(reason=" "), "reason"),
+    (lambda r: r.update(operator=""), "operator"),
+    (lambda r: r.pop("intentId"), "精确 intentId"),
+])
+def test_human_release_without_real_grounds_is_refused(tmp_path, meta, patch, match):
+    release = copy.deepcopy(RELEASE)
+    patch(release)
+    spec = reconcile_spec(tmp_path, humanRelease=release)
+    refused(tmp_path, spec, meta, match, flag="reconcile")
+
+
+def test_reconcile_with_nothing_unresolved_does_nothing(tmp_path, meta):
+    recon = service(meta)
+    report = run(tmp_path, reconcile_spec(tmp_path), recon, flag="reconcile", name="r.json")
+    assert report["targets"][0]["outcome"] == "NOTHING_TO_RECONCILE" and recon.calls == []
+
+
+def test_existing_log_dir_is_never_reused(tmp_path, meta):
+    (tmp_path / "log").mkdir()
+    (tmp_path / "log" / "report.json").write_text("旧结果", encoding="utf-8")
+    svc = service(meta)
+    with pytest.raises(sync.SyncError, match="已存在且非空"):
+        run(tmp_path, make_spec(tmp_path), svc)
+    assert svc.calls == [] and (tmp_path / "log" / "report.json").read_text(encoding="utf-8") == "旧结果"
+
+
+# ------------------------------------------------------------------ entry points
+
+
+def test_main_refuses_with_exit_2_and_zero_calls(tmp_path, capsys):
+    spec = make_spec(tmp_path)
+    spec["allowlist"] = {}
+    path = write_spec(tmp_path, spec)
+    assert sync.main(["--spec", str(path), "--execute", "--ledger-dir", str(tmp_path / "l")]) == 2
+    assert json.loads(capsys.readouterr().out)["externalCalls"] == 0
+
+
+def test_main_without_spec_is_usage_error():
+    with pytest.raises(SystemExit):
+        sync.main([])
+
+
+def test_registry_cli_subcommand_refuses_without_external_call(tmp_path, capsys):
+    import scripts.registry_cli as registry_cli
+
+    spec = make_spec(tmp_path)
+    spec["allowlist"] = {}
+    path = write_spec(tmp_path, spec)
+    assert registry_cli.main(["feishu-source-sync", "--spec", str(path), "--execute", "--ledger-dir", str(tmp_path / "l")]) == 2
+    assert "已拒绝" in capsys.readouterr().err
+
+
+def test_lark_transport_builds_official_cli_argv(meta):
+    svc = service(meta)
+    transport = sync.LarkCliTransport("/x/lark-cli", "prof", "user", runner=svc)
+    assert transport.get_records(BASE, CASE, [REC])[REC][UNIT] == "旧单位"
+    transport.upsert(BASE, CASE, REC, {UNIT: "新"})
+    assert svc.calls[0][:3] == ["/x/lark-cli", "base", "+record-get"] and "--record-id" in svc.calls[0]
+    assert svc.calls[1][2] == "+record-upsert" and svc.calls[1][-4:] == ["--profile", "prof", "--as", "user"]
+    assert not any(arg in svc.calls[1] for arg in ("+record-batch-update", "+record-delete", "+record-list"))
+
+
+def test_upsert_receipt_with_another_record_id_is_unknown(meta):
+    def runner(argv, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "data": {"record": {"record_id": "recOTHER00001"}}}), stderr="")
+
+    transport = sync.LarkCliTransport("/x/lark-cli", "p", "user", runner=runner)
+    with pytest.raises(sync.RuntimeSyncError, match="UNKNOWN"):
+        transport.upsert(BASE, CASE, REC, {UNIT: "x"})
+
+
+def test_missing_cli_binary_is_a_clean_failure_before_any_write(tmp_path):
+    def runner(argv, **kwargs):
+        raise FileNotFoundError(argv[0])
+
+    transport = sync.LarkCliTransport("/nonexistent/lark-cli", "prof", "user", runner=runner)
+    with pytest.raises(sync.RuntimeSyncError, match="无法启动"):
+        transport.get_records("B", CASE, [REC])
+
+
+def test_target_field_missing_from_the_pre_write_readback_is_refused_before_any_write(tmp_path, meta):
+    svc = service(meta, omit_fields=(UNIT,))                            # 服务端两次回读都不返回该字段
+    with pytest.raises(sync.RuntimeSyncError, match="缺少稳定键或目标字段"):
+        run(tmp_path, make_spec(tmp_path), svc)
+    assert svc.upserts == [] and ledger_events(tmp_path) == []
+
+
+def test_target_field_missing_from_the_post_write_readback_cannot_pass(tmp_path, meta):
+    svc = service(meta, omit_fields_after_write=(UNIT,))
+    with pytest.raises(sync.RuntimeSyncError, match="回读缺少该目标字段"):
+        run(tmp_path, make_spec(tmp_path), svc)
+    report = read_report(tmp_path / "log" / "report.json")
+    assert report["status"] == "FAILED" and ledger_events(tmp_path)[-1]["status"] == "VIOLATION"
+
+
+def test_a_service_that_ignores_the_write_for_a_missing_field_does_not_report_ok(tmp_path, meta):
+    svc = service(meta, ignore_writes_for=REC, omit_fields_after_write=(UNIT, RESULT))
+    with pytest.raises(sync.RuntimeSyncError):
+        run(tmp_path, make_spec(tmp_path), svc)
+    assert read_report(tmp_path / "log" / "report.json")["status"] != "OK"
+
+
+@pytest.mark.parametrize("mode", ["execute", "reconcile"])
+def test_execute_and_reconcile_need_an_explicit_ledger_dir(tmp_path, meta, mode):
+    spec = make_spec(tmp_path, mode)
+    transport = sync.LarkCliTransport("/x/lark-cli", "p", "user", runner=service(meta))
+    path = write_spec(tmp_path, spec)
+    with pytest.raises(sync.SyncError, match="--ledger-dir"):
+        sync.run(path, execute_flag=True, reconcile_flag=True, transport=transport)
+    assert not (tmp_path / "log").exists()
+
+
+def test_plan_may_omit_the_ledger_dir_and_reads_only(tmp_path, meta):
+    path = write_spec(tmp_path, make_spec(tmp_path, "plan"))
+    result = sync.run(path, transport=sync.LarkCliTransport("/x/lark-cli", "p", "user", runner=service(meta)))
+    assert result["externalCalls"] == 0
+
+
+def test_a_newly_added_manual_field_in_the_contract_is_refused_without_any_code_change(tmp_path, contract, meta):
+    new_field = {"fieldId": "fldNEWMANUAL1", "name": "新人工标记", "type": "select", "class": "human", "syncWrite": "denied"}
+    contract["tables"]["案卷主表"]["fields"].append(new_field)
+    path = tmp_path / "contract-with-new-human-field.json"
+    path.write_text(json.dumps(contract, ensure_ascii=False), encoding="utf-8")
+    spec = make_spec(tmp_path)
+    spec["contract"] = {"path": str(path), "sha256": sha(path)}
+    spec["allowlist"][CASE]["fields"] = ["fldNEWMANUAL1"]
+    spec["updates"][0]["fields"] = {"fldNEWMANUAL1": {"new": "是", "basis": basis()}}
+    refused(tmp_path, spec, meta, "source-sync-whitelist")
+
+
+def test_an_unclassified_new_field_is_refused_by_default(tmp_path, meta):
+    spec = make_spec(tmp_path)
+    spec["allowlist"][CASE]["fields"] = ["fldBRANDNEW01"]
+    spec["updates"][0]["fields"] = {"fldBRANDNEW01": {"new": "是", "basis": basis()}}
+    refused(tmp_path, spec, meta, "默认拒写")
+
+
+def test_registry_cli_exit_code_3_when_an_external_call_failed(tmp_path, capsys):
+    import scripts.registry_cli as registry_cli
+
+    path = write_spec(tmp_path, make_spec(tmp_path))
+    with pytest.raises(SystemExit) as stop:
+        registry_cli.main(["feishu-source-sync", "--spec", str(path), "--execute", "--cli", str(tmp_path / "no-such-lark-cli"),
+                           "--ledger-dir", str(tmp_path / "ledger")])
+    assert stop.value.code == 3 and "未重试" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------------------------
+# V3 create (offline, in-memory transport; not a P18/real-cloud result)
+# ---------------------------------------------------------------------------------------------
+
+TEAM_TABLE, TEAM_NAME = "tbl3pj0AvF9G7GJh", "fldTEAMname1"
+SELECT_TEAM, LINK_TEAM = "fld2Kdm4i2", "fldlw1KAaR"
+CHECK_PARENT = "fld1kH9BIS"
+TEAM_REC, OTHER_TEAM_REC = "recTEAMliangxi1", "recTEAMbinhu001"
+SRC = "无锡市梁溪区消防救援局"
+
+
+def _f(fid, name, kind, klass, sync="NEVER"):
+    return {"fieldId": fid, "name": name, "type": kind, "class": klass, "memberRead": False, "memberEdit": False, "syncWrite": sync}
+
+
+def _cand(table, fid, name, kind, klass, state, empty="omit unknown/missing/unread/unconfirmed"):
+    return {"tableId": table, "fieldId": fid, "name": name, "type": kind, "proposedCreateClass": klass, "candidateState": state, "emptySemantics": empty}
+
+
+def make_v3_contract(tmp_path: Path, *, child_ready: bool = False) -> Path:
+    base = {
+        "baseId": BASE, "version": "synthetic-v9",
+        "tables": {
+            "案卷主表": {"tableId": CASE, "fields": [
+                _f(KEY, "项目编号", "text", "source-sync-whitelist", "NEVER (stable key)"), _f(UNIT, "单位名称", "text", "source-sync-whitelist", "allowed"),
+                _f(SELECT_TEAM, "所属大队", "select", "admin-only"), _f(LINK_TEAM, "归属大队", "link", "admin-only"),
+                _f(HUMAN_NET, "是否网售", "select", "human"), _f(DERIVED, "初查不合格数", "formula", "derived-readonly")]},
+            "检查明细": {"tableId": CHECK, "fields": [
+                _f(CHECK_KEY, "检查键", "text", "source-sync-whitelist", "NEVER (stable key)"), _f(CHECK_PARENT, "项目编号", "link", "structural-relation")]},
+            "产品明细": {"tableId": PRODUCT, "fields": [_f("fldqlwHjUW", "产品键", "text", "source-sync-whitelist", "NEVER (stable key)")]},
+            "大队底册": {"tableId": TEAM_TABLE, "fields": [_f(TEAM_NAME, "名称", "text", "admin-only")]},
+        },
+    }
+    child = "candidate-test-ready" if child_ready else "blocked-pending-native-child-ref-parent-and-compatible-key"
+    ext = {
+        "versionCandidate": "synthetic-v3",
+        "createFieldsCandidate": [
+            _cand(CASE, KEY, "项目编号", "text", "create-once-identity", "candidate-ready", "required; block"),
+            _cand(CASE, UNIT, "单位名称", "text", "create-once-source-scalar", "candidate-observed", "required; block"),
+            _cand(CASE, SELECT_TEAM, "所属大队", "select", "create-once-routing", "candidate-ready", "required; block"),
+            _cand(CASE, LINK_TEAM, "归属大队", "link", "create-once-routing", "candidate-ready", "required; block"),
+            _cand(CHECK, CHECK_KEY, "检查键", "text", "create-once-identity", child, "required; block"),
+            _cand(CHECK, CHECK_PARENT, "项目编号", "link", "create-once-parent-link", child, "required; block"),
+        ],
+        "explicitCreatePayloadDeny": [{"fieldId": DERIVED}, {"fieldId": HUMAN_NET}, {"fieldId": SELECT_TEAM}, {"fieldId": LINK_TEAM}],  # 与冻结合同一致：路由字段同时在DENY清单
+    }
+    path = tmp_path / "v3-contract.json"
+    path.write_text(json.dumps({"baseContract": base, "extension": ext}, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+class MemoryTransport:
+    """In-memory service for the V3 branch. Behaviours simulate timeouts, ignored fields and late writes."""
+
+    def __init__(self, **behaviour):
+        self.b = behaviour
+        self.rows: dict[tuple[str, str], dict] = {(TEAM_TABLE, TEAM_REC): {TEAM_NAME: "梁溪大队"}}
+        self.creates: list[tuple[str, dict]] = []
+        self.finds = 0
+        self.counter = 0
+        self.order: list[str] = []
+
+    def get_records(self, base, table, ids):
+        for rid in ids:
+            if (table, rid) not in self.rows:
+                raise sync.RuntimeSyncError(f"目标记录读不到：{[rid]}")
+        return {rid: dict(self.rows[(table, rid)]) for rid in ids}
+
+    def find_records(self, base, table, key_field, value):
+        self.finds += 1
+        if self.b.get("scan_fails"):
+            raise sync.RuntimeSyncError("扫描失败")
+        return [rid for (t, rid), row in self.rows.items() if t == table and row.get(key_field) == value]
+
+    def _store(self, table, fields):
+        self.counter += 1
+        rid = f"recNEW{self.counter:07d}"
+        row = dict(fields)
+        for fid in self.b.get("ignore_fields", ()):
+            row.pop(fid, None)
+        self.rows[(table, rid)] = row
+        return rid
+
+    def create_record(self, base, table, fields):
+        self.creates.append((table, copy.deepcopy(fields)))
+        if self.b.get("timeout_late"):
+            self._store(table, fields)  # the request did take effect, but the caller sees a timeout
+            raise sync.RuntimeSyncError("UNKNOWN: 官方 CLI 超时；效果未知，需按 record_id 回读对账")
+        if self.b.get("timeout_lost"):
+            raise sync.RuntimeSyncError("UNKNOWN: 官方 CLI 超时；效果未知，需按 record_id 回读对账")
+        rid = self._store(table, fields)
+        if self.b.get("no_receipt_id"):
+            self.last_body = {"ok": True, "data": {"created": True, "record": {"record_id_list": [rid]}}}   # 真实回执形态，旧解析器读不到
+            raise sync.RuntimeSyncError("UNKNOWN: 创建回执缺少 record_id；效果未知，不按顺序猜配，需按稳定键回读对账")
+        return {"ok": True, "data": {"record": {"record_id": rid}}}
+
+    def upsert(self, base, table, record_id, fields):  # V2 path must never be used by V3
+        raise AssertionError("V3 不得走更新路径")
+
+
+def _wire_case(key="32002299C202600001", unit="合成单位", source=SRC, team_option="梁溪大队", team_rec=TEAM_REC, **extra):
+    basis = {"kind": "source-observed", "valueState": "observed", "sourceRef": "fixture", "observedAt": "2026-11-07T00:00:00Z"}
+    fields = {KEY: {"new": key, "basis": basis}, UNIT: {"new": unit, "basis": basis},
+              SELECT_TEAM: {"new": team_option, "basis": basis}, LINK_TEAM: {"new": team_rec, "basis": basis}}
+    fields.update(extra)
+    return {"tableId": CASE, "stableKey": {"fieldId": KEY, "value": key}, "routingSource": source, "fields": fields}
+
+
+def v3_spec(tmp_path: Path, contract: Path, creates: list, *, mode="execute", log="log1", **over) -> Path:
+    spec = {
+        "schemaVersion": sync.SPEC_SCHEMA_V3, "mode": mode,
+        "contract": {"path": str(contract), "sha256": sha(contract)},
+        "target": {"baseToken": BASE, "profile": "offline-fake", "identity": "user"},
+        "limits": {"maxRecords": 5}, "logDir": str(tmp_path / log),
+        "routes": [{"sourceJurisdictionExact": SRC, "teamOptionExact": "梁溪大队", "teamTableId": TEAM_TABLE, "teamRecordId": TEAM_REC}],
+        "creates": creates,
+    }
+    spec.update(over)
+    path = tmp_path / f"spec-{mode}-{log}.json"
+    path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _run_v3(spec_path, transport, ledger, *, execute=False, reconcile=False):
+    return sync.run(spec_path, execute_flag=execute, reconcile_flag=reconcile, transport=transport, ledger_dir=ledger)
+
+
+def test_v3_plan_makes_no_call_and_shows_official_wire_shapes(tmp_path):
+    contract = make_v3_contract(tmp_path)
+    transport = MemoryTransport()
+    spec = v3_spec(tmp_path, contract, [_wire_case(), _wire_case(key="32002299C202600002", source="未知管辖")], mode="plan")
+    report = _run_v3(spec, transport, tmp_path / "ledger")
+    assert report["externalCalls"] == 0 and transport.finds == 0 and not transport.creates
+    ok, unmatched = report["creates"]
+    assert ok["wire"][SELECT_TEAM] == ["梁溪大队"] and ok["wire"][LINK_TEAM] == [{"id": TEAM_REC}]
+    assert unmatched["action"] == "blocked" and "路由未匹配" in unmatched["blocked"][0]
+    assert not (tmp_path / "ledger").exists()
+
+
+def test_v3_creates_a_verified_case_with_the_intent_on_the_ledger_first_and_a_second_run_adds_nothing(tmp_path):
+    contract, ledger = make_v3_contract(tmp_path), tmp_path / "ledger"
+    transport = MemoryTransport()
+    seen = {}
+    original = transport.create_record
+
+    def spy(base, table, fields):
+        events = [json.loads(line) for p in (ledger / "targets").glob("*.jsonl") for line in p.read_text(encoding="utf-8").splitlines()]
+        seen["intent_before_create"] = any(e["event"] == "intent" and e["kind"] == "create" for e in events)
+        return original(base, table, fields)
+
+    transport.create_record = spy
+    report = _run_v3(v3_spec(tmp_path, contract, [_wire_case()]), transport, ledger, execute=True)
+    assert report["status"] == "OK" and report["records"][0]["status"] == "CREATED_VERIFIED" and seen["intent_before_create"]
+    assert len(transport.creates) == 1
+    key = sync.Ledger.target_key(BASE, CASE, "create:32002299C202600001")
+    assert sync.Ledger(ledger).state(key)["state"] == "CLEAR"
+    again = _run_v3(v3_spec(tmp_path, contract, [_wire_case()], log="log2"), transport, ledger, execute=True)
+    assert again["records"][0]["status"] == "ALREADY_PRESENT_VERIFIED" and len(transport.creates) == 1     # 幂等：零新增
+
+
+@pytest.mark.parametrize("field,message", [
+    (HUMAN_NET, "不得出现在创建载荷"), (DERIVED, "不得出现在创建载荷"), ("fldUNKNOWN01", "不在 V3 创建候选"),
+])
+def test_v3_denied_and_unknown_fields_are_refused_before_any_call(tmp_path, field, message):
+    contract = make_v3_contract(tmp_path)
+    transport = MemoryTransport()
+    basis = {"kind": "source-observed", "valueState": "observed", "sourceRef": "fixture", "observedAt": "2026-11-07T00:00:00Z"}
+    spec = v3_spec(tmp_path, contract, [_wire_case(**{field: {"new": "x", "basis": basis}})])
+    with pytest.raises(sync.SyncError, match=message):
+        _run_v3(spec, transport, tmp_path / "ledger", execute=True)
+    assert transport.finds == 0 and not transport.creates
+
+
+def test_v3_child_creation_is_refused_while_the_contract_keeps_it_blocked_and_works_when_released(tmp_path):
+    basis = {"kind": "source-observed", "valueState": "observed", "sourceRef": "fixture", "observedAt": "2026-11-07T00:00:00Z"}
+    child = {"tableId": CHECK, "stableKey": {"fieldId": CHECK_KEY, "value": "32002299C202600001|初查"},
+             "parent": {"createRef": "32002299C202600001", "stableKey": {"fieldId": KEY, "value": "32002299C202600001"}},
+             "fields": {CHECK_KEY: {"new": "32002299C202600001|初查", "basis": basis}, CHECK_PARENT: {"new": "recPLACEHOLDER1", "basis": basis}}}
+    blocked_contract = make_v3_contract(tmp_path)
+    with pytest.raises(sync.SyncError, match="候选仍 blocked"):
+        _run_v3(v3_spec(tmp_path, blocked_contract, [_wire_case(), child]), MemoryTransport(), tmp_path / "l0", execute=True)
+    ready = make_v3_contract(tmp_path / "ready" if (tmp_path / "ready").mkdir() is None else tmp_path, child_ready=True)
+    transport = MemoryTransport()
+    report = _run_v3(v3_spec(tmp_path, ready, [child, _wire_case()]), transport, tmp_path / "l1", execute=True)
+    assert [e["status"] for e in report["records"]] == ["CREATED_VERIFIED", "CREATED_VERIFIED"]      # 案卷先于检查
+    assert [t for t, _ in transport.creates] == [CASE, CHECK]
+    case_rid = report["records"][0]["recordId"]
+    assert transport.creates[1][1][CHECK_PARENT] == [{"id": case_rid}]                               # 只设子端父链
+
+
+def test_v3_route_must_match_the_frozen_pair_and_unmatched_jurisdiction_only_blocks_that_entity(tmp_path):
+    contract = make_v3_contract(tmp_path)
+    transport = MemoryTransport()
+    with pytest.raises(sync.SyncError, match="必须同队"):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case(team_rec=OTHER_TEAM_REC)]), transport, tmp_path / "l0", execute=True)
+    report = _run_v3(v3_spec(tmp_path, contract, [_wire_case(), _wire_case(key="32002299C202600002", source="无锡市新吴区消防救援局")], log="b"),
+                     transport, tmp_path / "l1", execute=True)
+    assert [e["status"] for e in report["records"]] == ["CREATED_VERIFIED", "BLOCKED_ENTITY"] and len(transport.creates) == 1
+
+
+def test_v3_duplicate_existing_keys_stop_without_creating(tmp_path):
+    contract = make_v3_contract(tmp_path)
+    transport = MemoryTransport()
+    transport.rows[(CASE, "recDUP0000001")] = {KEY: "32002299C202600001"}
+    transport.rows[(CASE, "recDUP0000002")] = {KEY: "32002299C202600001"}
+    with pytest.raises(sync.RuntimeSyncError):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case()]), transport, tmp_path / "ledger", execute=True)
+    assert not transport.creates
+
+
+def test_v3_unknown_create_blocks_the_target_and_zero_match_never_authorizes_a_retry(tmp_path):
+    contract, ledger = make_v3_contract(tmp_path), tmp_path / "ledger"
+    transport = MemoryTransport(timeout_lost=True)
+    with pytest.raises(sync.RuntimeSyncError, match="创建失败/结果未知"):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case()]), transport, ledger, execute=True)
+    with pytest.raises(sync.SyncError, match="未对账的早先创建"):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case()], log="again"), transport, ledger, execute=True)
+    assert len(transport.creates) == 1
+    report = _run_v3(v3_spec(tmp_path, contract, [_wire_case()], mode="reconcile", log="rec"), transport, ledger, reconcile=True)
+    assert report["targets"][0]["outcome"] == "ZERO_MATCH"
+    with pytest.raises(sync.SyncError, match="未对账的早先创建"):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case()], log="after-zero"), transport, ledger, execute=True)
+    assert len(transport.creates) == 1                                                            # 仍封锁，没有换ID/重放
+
+
+def _proof_for(log_dir: Path, ledger: Path, key_value="32002299C202600001", **override):
+    key = sync.Ledger.target_key(BASE, CASE, "create:" + key_value)
+    intent = sync.Ledger(ledger).state(key)["lastIntent"]
+    ref = {"kind": "service-receipt-log", "logDir": str(log_dir), "runId": intent["runId"], "intentId": intent["intentId"],
+           "requestsSha256": sha(log_dir / "requests.jsonl"), "responsesSha256": sha(log_dir / "responses.jsonl")}
+    ref.update(override)
+    return [ref]
+
+
+def _late_create(tmp_path, **behaviour):
+    contract, ledger = make_v3_contract(tmp_path), tmp_path / "ledger"
+    transport = MemoryTransport(**behaviour)
+    with pytest.raises(sync.RuntimeSyncError):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case()]), transport, ledger, execute=True)
+    return contract, ledger, transport, sync.Ledger.target_key(BASE, CASE, "create:32002299C202600001")
+
+
+def _reconcile(tmp_path, contract, ledger, transport, log, **extra):
+    return _run_v3(v3_spec(tmp_path, contract, [_wire_case()], mode="reconcile", log=log, **extra), transport, ledger, reconcile=True)["targets"][0]
+
+
+def test_v3_weak_or_free_text_proof_never_clears_a_late_effect(tmp_path):
+    contract, ledger, transport, key = _late_create(tmp_path, timeout_late=True)     # 超时：没有任何服务回执
+    for n, weak in enumerate([True, "cli-process-log", [{"kind": "request-terminal-proof", "ref": "cli-process-log-fixture"}], [{}], ["x"], [{"kind": "service-receipt-log"}]]):
+        target = _reconcile(tmp_path, contract, ledger, transport, f"w{n}", requestTerminalProof=weak)
+        assert target["outcome"] == "ONE_MATCH_NEEDS_TERMINAL_PROOF" and sync.Ledger(ledger).state(key)["state"] == "BLOCKED"
+    # 真实日志但原请求没有拿到服务回执：同样不能证明已终态
+    log_dir = Path(sync.Ledger(ledger).state(key)["lastIntent"]["logDir"])
+    target = _reconcile(tmp_path, contract, ledger, transport, "no-receipt", requestTerminalProof=_proof_for(log_dir, ledger))
+    assert target["outcome"] == "ONE_MATCH_NEEDS_TERMINAL_PROOF" and "回执" in " ".join(target["observed"]["proofRejected"])
+    assert len(transport.creates) == 1
+
+
+def test_v3_service_receipt_log_clears_only_the_exact_original_request(tmp_path):
+    contract, ledger, transport, key = _late_create(tmp_path, no_receipt_id=True)    # 真实形态 record_id_list：旧代码读不到 id
+    intent = sync.Ledger(ledger).state(key)["lastIntent"]
+    log_dir = Path(intent["logDir"])
+    bad = {
+        "digest": _proof_for(log_dir, ledger, requestsSha256="0" * 64),
+        "intent": _proof_for(log_dir, ledger, intentId="f" * 64),
+        "run": _proof_for(log_dir, ledger, runId="other-run"),
+        "dir": _proof_for(log_dir, ledger, logDir=str(tmp_path / "forged")),
+        "unrelated": _proof_for(log_dir, ledger, logDir=str(tmp_path)),
+    }
+    for name, proof in bad.items():
+        target = _reconcile(tmp_path, contract, ledger, transport, "bad-" + name, requestTerminalProof=proof)
+        assert target["outcome"] == "ONE_MATCH_NEEDS_TERMINAL_PROOF", name
+        assert sync.Ledger(ledger).state(key)["state"] == "BLOCKED"
+    rows = [rid for (t, rid) in transport.rows if t == CASE]
+    transport.rows[(CASE, "recOTHER00001")] = dict(transport.rows[(CASE, rows[0])])     # 第二条同键行：多匹配
+    assert _reconcile(tmp_path, contract, ledger, transport, "multi", requestTerminalProof=_proof_for(log_dir, ledger))["outcome"] == "MULTIPLE_MATCH"
+    del transport.rows[(CASE, "recOTHER00001")]
+    transport.rows[(CASE, rows[0])][UNIT] = "被他人改过"                                  # 字段差异：DIVERGED
+    assert _reconcile(tmp_path, contract, ledger, transport, "diff", requestTerminalProof=_proof_for(log_dir, ledger))["outcome"] == "DIVERGED"
+    transport.rows[(CASE, rows[0])][UNIT] = "合成单位"
+    good = _reconcile(tmp_path, contract, ledger, transport, "good", requestTerminalProof=_proof_for(log_dir, ledger))
+    assert good["outcome"] == "APPLIED" and sync.Ledger(ledger).state(key)["state"] == "CLEAR"
+    assert len(transport.creates) == 1
+    kinds = [e["event"] for e in sync.Ledger(ledger).events(key)]
+    assert kinds.count("intent") == 1 and kinds.count("reconciled") >= 7                      # 历史只追加，不删改
+
+
+def test_v3_proof_whose_receipt_names_another_record_is_rejected(tmp_path):
+    contract, ledger, transport, key = _late_create(tmp_path, no_receipt_id=True)
+    log_dir = Path(sync.Ledger(ledger).state(key)["lastIntent"]["logDir"])
+    lines = [json.loads(x) for x in (log_dir / "responses.jsonl").read_text(encoding="utf-8").splitlines()]
+    lines[0]["rawReceipt"]["data"]["record"]["record_id_list"] = ["recSOMEONEELSE1"]
+    (log_dir / "responses.jsonl").write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in lines) + "\n", encoding="utf-8")
+    target = _reconcile(tmp_path, contract, ledger, transport, "other-id", requestTerminalProof=_proof_for(log_dir, ledger))
+    assert target["outcome"] == "ONE_MATCH_NEEDS_TERMINAL_PROOF" and sync.Ledger(ledger).state(key)["state"] == "BLOCKED"
+
+
+def test_v3_two_identical_receipts_are_not_a_unique_terminal_proof(tmp_path):
+    contract, ledger, transport, key = _late_create(tmp_path, no_receipt_id=True)
+    log_dir = Path(sync.Ledger(ledger).state(key)["lastIntent"]["logDir"])
+    line = (log_dir / "responses.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    (log_dir / "responses.jsonl").write_text(line + "\n" + line + "\n", encoding="utf-8")         # 同 run/request/intent/payload 的两条同 id 成功回执
+    target = _reconcile(tmp_path, contract, ledger, transport, "dup", requestTerminalProof=_proof_for(log_dir, ledger))
+    assert target["outcome"] == "ONE_MATCH_NEEDS_TERMINAL_PROOF" and "恰好一条" in " ".join(target["observed"]["proofRejected"])
+    assert sync.Ledger(ledger).state(key)["state"] == "BLOCKED" and len(transport.creates) == 1
+
+
+def test_v3_human_release_applies_only_to_its_exact_intent(tmp_path):
+    contract, ledger, transport, key = _late_create(tmp_path, timeout_lost=True)
+    intent = sync.Ledger(ledger).state(key)["lastIntent"]
+    release = {"reason": "人工核实", "operator": "tester", "acknowledgesLateWriteRisk": True, "evidence": [{"kind": "x", "ref": "y"}]}
+    with pytest.raises(sync.SyncError, match="intentId"):
+        _reconcile(tmp_path, contract, ledger, transport, "no-id", humanRelease=release)
+    wrong = _reconcile(tmp_path, contract, ledger, transport, "wrong", humanRelease={**release, "intentId": "0" * 64})
+    assert wrong["outcome"] == "ZERO_MATCH" and sync.Ledger(ledger).state(key)["state"] == "BLOCKED"
+    ok = _reconcile(tmp_path, contract, ledger, transport, "ok", humanRelease={**release, "intentId": intent["intentId"]})
+    assert ok["outcome"] == "HUMAN_RELEASED"
+
+
+def test_v3_unknown_blocks_every_payload_variant_of_the_same_target_before_any_call(tmp_path):
+    contract, ledger = make_v3_contract(tmp_path), tmp_path / "ledger"
+    transport = MemoryTransport(timeout_lost=True)
+    with pytest.raises(sync.RuntimeSyncError):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case()]), transport, ledger, execute=True)
+    finds, creates = transport.finds, len(transport.creates)
+    with pytest.raises(sync.SyncError, match="未对账的早先创建"):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case(unit="换了单位名的另一载荷")], log="variant"), transport, ledger, execute=True)
+    assert transport.finds == finds and len(transport.creates) == creates                       # 未发起任何外部调用
+    other = _run_v3(v3_spec(tmp_path, contract, [_wire_case(key="32002299C202600009")], log="other"), MemoryTransport(), ledger, execute=True)
+    assert other["status"] == "OK"                                                               # 其他目标不受牵连
+
+
+def test_v3_existing_row_is_verified_not_assumed_to_be_this_create(tmp_path):
+    contract = make_v3_contract(tmp_path)
+    good = MemoryTransport()
+    good.rows[(CASE, "recEXIST000001")] = {KEY: "32002299C202600001", UNIT: "合成单位", SELECT_TEAM: ["梁溪大队"], LINK_TEAM: [{"id": TEAM_REC}]}
+    r = _run_v3(v3_spec(tmp_path, contract, [_wire_case()]), good, tmp_path / "l1", execute=True)
+    assert r["records"][0]["status"] == "ALREADY_PRESENT_VERIFIED" and not good.creates
+    scalar = MemoryTransport()                                                                    # 仅来源标量字段不同：走 V2 更新，不重放创建
+    scalar.rows[(CASE, "recEXIST000001")] = {KEY: "32002299C202600001", UNIT: "旧单位名", SELECT_TEAM: ["梁溪大队"], LINK_TEAM: [{"id": TEAM_REC}]}
+    r = _run_v3(v3_spec(tmp_path, contract, [_wire_case()], log="s"), scalar, tmp_path / "l2", execute=True)
+    assert r["records"][0]["status"] == "EXISTING_NEEDS_V2_UPDATE" and r["records"][0]["sourceScalarDiffs"] == ["单位名称"] and not scalar.creates
+    wrong_route = MemoryTransport()                                                               # 路由不同：不是同一实体，只挡该目标，不创建、不写账本封锁
+    wrong_route.rows[(CASE, "recEXIST000001")] = {KEY: "32002299C202600001", UNIT: "合成单位", SELECT_TEAM: ["别的大队"], LINK_TEAM: [{"id": OTHER_TEAM_REC}]}
+    r = _run_v3(v3_spec(tmp_path, contract, [_wire_case(), _wire_case(key="32002299C202600002")], log="w"), wrong_route, tmp_path / "l3", execute=True)
+    assert [e["status"] for e in r["records"]] == ["EXISTING_DIVERGED", "CREATED_VERIFIED"] and r["status"] == "PARTIAL"   # 独立对象照常继续
+    assert [f[KEY] for _, f in wrong_route.creates] == ["32002299C202600002"]
+    assert sync.Ledger(tmp_path / "l3").state(sync.Ledger.target_key(BASE, CASE, "create:32002299C202600001"))["state"] == "CLEAR"
+
+
+def test_v3_unverified_existing_row_id_is_not_handed_to_child_layers(tmp_path):
+    basis = {"kind": "source-observed", "valueState": "observed", "sourceRef": "fixture", "observedAt": "2026-11-07T00:00:00Z"}
+    child = {"tableId": CHECK, "stableKey": {"fieldId": CHECK_KEY, "value": "32002299C202600001|初查"},
+             "parent": {"createRef": "32002299C202600001", "stableKey": {"fieldId": KEY, "value": "32002299C202600001"}},
+             "fields": {CHECK_KEY: {"new": "32002299C202600001|初查", "basis": basis}, CHECK_PARENT: {"new": "recPLACEHOLDER1", "basis": basis}}}
+    contract = make_v3_contract(tmp_path, child_ready=True)
+    transport = MemoryTransport()
+    transport.rows[(CASE, "recEXIST000001")] = {KEY: "32002299C202600001", UNIT: "合成单位", SELECT_TEAM: ["别的大队"], LINK_TEAM: [{"id": OTHER_TEAM_REC}]}
+    report = _run_v3(v3_spec(tmp_path, contract, [_wire_case(), child]), transport, tmp_path / "l", execute=True)
+    assert [e["status"] for e in report["records"]] == ["EXISTING_DIVERGED", "BLOCKED_ENTITY"] and not transport.creates       # 子层不得拿到未核实id
+    assert "父记录未确认" in report["records"][1]["reasons"][0]
+
+
+def test_v3_readback_violation_and_missing_receipt_id_stay_blocked(tmp_path):
+    contract = make_v3_contract(tmp_path)
+    ignoring = MemoryTransport(ignore_fields=(UNIT,))
+    with pytest.raises(sync.RuntimeSyncError):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case()]), ignoring, tmp_path / "l1", execute=True)
+    key = sync.Ledger.target_key(BASE, CASE, "create:32002299C202600001")
+    assert sync.Ledger(tmp_path / "l1").state(key)["state"] == "BLOCKED"
+    no_id = MemoryTransport(no_receipt_id=True)
+    with pytest.raises(sync.RuntimeSyncError):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case(key="32002299C202600003")], log="x"), no_id, tmp_path / "l2", execute=True)
+    assert sync.Ledger(tmp_path / "l2").state(sync.Ledger.target_key(BASE, CASE, "create:32002299C202600003"))["state"] == "BLOCKED"
+
+
+def test_v3_scan_failure_stops_before_create(tmp_path):
+    contract = make_v3_contract(tmp_path)
+    transport = MemoryTransport(scan_fails=True)
+    with pytest.raises(sync.RuntimeSyncError):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case()]), transport, tmp_path / "ledger", execute=True)
+    assert not transport.creates
+
+
+def test_v3_lark_transport_scans_all_pages_and_creates_without_a_record_id():
+    pages = {0: ([f"rec{i:08d}" for i in range(200)], [["K%d" % i] for i in range(200)]), 200: (["recLAST00001"], [["WANTED"]])}
+    calls = []
+
+    def runner(argv, capture_output=True, text=True, timeout=None):
+        calls.append(argv)
+        opt = lambda name: argv[argv.index(name) + 1] if name in argv else None  # noqa: E731
+        if argv[2] == "+record-list":
+            ids, rows = pages[int(opt("--offset"))]
+            data = {"record_id_list": ids, "field_id_list": [KEY], "data": rows}
+        else:
+            data = {"record": {"record_id": "recCREATED0001"}}
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "data": data}), stderr="")
+
+    transport = sync.LarkCliTransport("lark-cli", "p", "user", runner=runner)
+    assert transport.find_records(BASE, CASE, KEY, "WANTED") == ["recLAST00001"]
+    assert [c[c.index("--offset") + 1] for c in calls] == ["0", "200"]
+    transport.create_record(BASE, CASE, {KEY: "x"})
+    assert "--record-id" not in calls[-1] and calls[-1][2] == "+record-upsert"
+
+
+def test_v3_routing_candidates_override_the_generic_deny_list_but_human_fields_never_do(tmp_path):
+    contract = make_v3_contract(tmp_path)
+    spec = v3_spec(tmp_path, contract, [_wire_case()], mode="plan")
+    report = _run_v3(spec, MemoryTransport(), tmp_path / "ledger")
+    assert report["contractConflicts"] == sorted([SELECT_TEAM, LINK_TEAM]) and report["executable"]
+    basis = {"kind": "source-observed", "valueState": "observed", "sourceRef": "fixture", "observedAt": "2026-11-07T00:00:00Z"}
+    with pytest.raises(sync.SyncError, match="不得出现在创建载荷"):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case(**{HUMAN_NET: {"new": "是", "basis": basis}})], mode="plan", log="h"), MemoryTransport(), tmp_path / "ledger")
+
+
+def test_v3_create_receipt_shapes_yield_exactly_one_record_id():
+    assert sync._receipt_record_id({"data": {"created": True, "record": {"record_id_list": ["recABC1234567"]}}}) == "recABC1234567"
+    assert sync._receipt_record_id({"data": {"record": {"record_id": "recABC1234567"}}}) == "recABC1234567"
+    assert sync._receipt_record_id({"data": {"record": {"record_id_list": ["recABC1234567", "recDEF1234567"]}}}) is None   # 多个：不猜
+    assert sync._receipt_record_id({"data": {"record": {}}}) is None and sync._receipt_record_id({}) is None
+    assert sync._receipt_record_id({"data": {"record": {"record_id_list": []}}}) is None                                 # 0 个
+    assert sync._receipt_record_id({"data": {"record": {"record_id": "recABC1234567", "record_id_list": ["recDEF1234567"]}}}) is None   # 冲突
+    assert sync._receipt_record_id({"data": {"record": {"record_id_list": [123]}}}) is None and sync._receipt_record_id({"data": {"record": {"record_id_list": "recABC1234567"}}}) is None
+    assert sync._receipt_record_id({"data": {"record": {"record_id_list": ["bad id"]}}}) is None                          # 非法形态
+    assert sync._receipt_record_id({"data": {"record": {"record_id_list": ["recABC1234567", "recABC1234567"]}}}) == "recABC1234567"   # 同一 id 重复
+
+
+# ---------------------------------------------------------------------------------------------
+# 基础字段说明的正常生成入口(权威已存详情 -> 带字段依据的 V3/V2 说明)；离线内存传输，不是真实云结果
+# ---------------------------------------------------------------------------------------------
+
+ADDR, DATE_FIELD = "fld71ckPl9", "fld5azNPuE"
+PN_NEW, PN_FILL, PN_OTHER = "32002299C202600001", "32002299C202600002", "32002299C202600003"
+
+
+def make_basic_contracts(tmp_path: Path) -> tuple[Path, Path]:
+    v3 = json.loads(make_v3_contract(tmp_path).read_text(encoding="utf-8"))
+    table = v3["baseContract"]["tables"]["案卷主表"]["fields"]
+    table[1]["class"] = "source-sync-whitelist"
+    table += [_f(ADDR, "单位地址", "text", "source-sync-whitelist", "allowed"), _f(DATE_FIELD, "初查日期", "datetime", "source-sync-whitelist", "allowed")]
+    v3["extension"]["createFieldsCandidate"] += [
+        _cand(CASE, ADDR, "单位地址", "text", "create-once-source-scalar", "optional-only-if-actual-source-value-observed"),
+        _cand(CASE, DATE_FIELD, "初查日期", "datetime", "create-once-source-scalar", "optional-only-if-actual-source-value-observed"),
+    ]
+    v3_path, v9_path = tmp_path / "v3-basic.json", tmp_path / "v9-basic.json"
+    v3_path.write_text(json.dumps(v3, ensure_ascii=False), encoding="utf-8")
+    v9_path.write_text(json.dumps(v3["baseContract"], ensure_ascii=False), encoding="utf-8")
+    return v3_path, v9_path
+
+
+def _detail(project, rwid, *, unit="合成单位", address="合成地址1号", jurisdiction=SRC, url_rwid=None, listed_unit=None):
+    return {"projectNo": project, "rwid": rwid, "fields": {"rwid": rwid, "unitName": listed_unit or unit, "sourceOrganization": jurisdiction},
+            "collectionDetail": {"projectNo": project, "capturedAt": "2026-11-05T10:00:00+08:00",
+                                 "sourceUrl": f"http://source.invalid/#/xfjd/projectDetail?runId=1&RWID={url_rwid or rwid}",
+                                 "fields": {"项目编号": project, "单位名称": unit, "单位地址": address, "消防管辖": jurisdiction,
+                                        "文书目录": [{"title": "[安]非承诺制-32002299A202600001-合成单位", "children": []},
+                                                 {"title": f"[产]开业检查-{project}-{unit}", "children": [{"title": "受理登记", "children": []}]}]}}}
+
+
+def make_basic_inputs(tmp_path: Path, records: dict, waterline: dict | None = None):
+    capture, water, routes = tmp_path / "capture.json", tmp_path / "waterline.json", tmp_path / "routes.json"
+    capture.write_text(json.dumps({"records": records}, ensure_ascii=False), encoding="utf-8")
+    water.write_text(json.dumps({"cases": waterline or {}}, ensure_ascii=False), encoding="utf-8")
+    routes.write_text(json.dumps({"baseId": BASE, "routes": [{"sourceJurisdictionExact": SRC, "teamOptionExact": "梁溪大队", "teamTableId": TEAM_TABLE,
+                                                              "savedTeamRecordId": TEAM_REC}]}, ensure_ascii=False), encoding="utf-8")
+    return capture, water, routes
+
+
+class BuildTransport(MemoryTransport):
+    list_calls = 0
+
+    def list_rows(self, base, table, field_ids=None):
+        type(self).list_calls += 1
+        rows = {rid: dict(row) for (t, rid), row in self.rows.items() if t == table}
+        return {rid: ({f: v for f, v in row.items() if f in field_ids} if field_ids else row) for rid, row in rows.items()}
+
+    def upsert(self, base, table, record_id, fields):
+        row = self.rows[(table, record_id)]
+        row.update({f: (w if not isinstance(w, str) or len(w) != 16 else w.replace(" ", "T") + ":00.000+08:00") for f, w in fields.items()})
+        return {"ok": True, "data": {"record": {"record_id": record_id}}}
+
+
+def run_build(tmp_path, records, *, waterline=None, transport=None, capture_sha=None, batch=20, ledger_dir=None):
+    v3, v9 = make_basic_contracts(tmp_path)
+    capture, water, routes = make_basic_inputs(tmp_path, records, waterline)
+    transport = transport or BuildTransport()
+    report = sync.build_basic_specs(
+        capture_path=capture, capture_sha=capture_sha or sha(capture), waterline_path=water, v3_path=v3, v3_sha=sha(v3), v9_path=v9, v9_sha=sha(v9),
+        routes_path=routes, routes_sha=sha(routes), target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"},
+        transport=transport, out_dir=tmp_path / "specs", log_root=tmp_path / "logs", batch_size=batch, ledger_dir=ledger_dir or tmp_path / "build-ledger")
+    return report, transport, (v3, v9)
+
+
+def test_build_makes_a_v3_create_with_per_field_evidence_and_omits_unknown_initial_date(tmp_path):
+    transport = BuildTransport()
+    report, transport, _ = run_build(tmp_path, {"1001": _detail(PN_NEW, "1001")}, transport=transport)
+    assert report["status"] == "OK" and report["counts"]["toCreate"] == 1 and report["createdWithInitialDate"] == 0
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    fields = spec["creates"][0]["fields"]
+    assert set(fields) == {KEY, UNIT, ADDR, SELECT_TEAM, LINK_TEAM}                      # 没有初查日期：未知不以受理日代替
+    assert fields[SELECT_TEAM]["new"] == "梁溪大队" and fields[LINK_TEAM]["new"] == TEAM_REC
+    ref = fields[UNIT]["basis"]["sourceRef"]
+    assert "records.1001.collectionDetail.fields.单位名称" in ref and sha(tmp_path / "capture.json") in ref and "RWID=1001" in ref and PN_NEW in ref
+    assert not transport.creates                                                           # 生成入口只读云，不创建
+
+
+def _original(tmp_path, project, rwid, rows, *, name="orig.json", url_rwid=None, proj=None):
+    """A stored SourceIdentityV1 original beside the waterline (the business root)."""
+    folder = tmp_path / "evidence"
+    folder.mkdir(exist_ok=True)
+    doc = {"schemaVersion": "SourceIdentityV1", "projectNo": proj or project, "rwid": rwid,
+           "sourceUrl": f"http://source.invalid/#/xfjd/projectDetail?RWID={url_rwid or rwid}",
+           "fields": {"项目编号": proj or project, "检查产品信息": rows}}
+    path = folder / name
+    path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _row(day, recheck="0"):
+    return {"产品名称（规格型号）": "合成产品", "页面记录": {"JCRQ": f"{day} 19:00:00", "SFCPFC": recheck, "SFHG": "0"}}
+
+
+def _classification(path, day, *, sha=None, rel=None):
+    return {"initialInspectionDate": day, "evidencePath": rel or f"evidence\\{path.name}", "evidenceSha256": sha or "sha256:" + sha_of(path),
+            "observedAt": "2026-11-05T10:00:00+08:00"}
+
+
+def sha_of(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _date_build(tmp_path, project, classification, *, rwid="1001"):
+    water = {project: {"source": {"classification": classification}}}
+    report, _, _ = run_build(tmp_path, {rwid: _detail(project, rwid)}, waterline=water)
+    creates = {c["stableKey"]["value"]: c for c in json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))["creates"]} if report["specs"] else {}
+    return report, creates
+
+
+def test_build_keeps_an_initial_date_only_when_the_stored_original_proves_exactly_that_initial_day(tmp_path):
+    original = _original(tmp_path, PN_NEW, "1001", [_row("2026-09-21"), _row("2026-10-30", recheck="1")])
+    report, creates = _date_build(tmp_path, PN_NEW, _classification(original, "2026-09-21"))
+    field = creates[PN_NEW]["fields"][DATE_FIELD]
+    assert field["new"] == "2026-09-21" and report["initialDatesOmitted"] == []
+    ref = field["basis"]["sourceRef"]
+    assert "JCRQ(SFCPFC=0)=2026-09-21" in ref and "sha256:" + sha_of(original) in ref and "RWID=1001" in ref and PN_NEW in ref
+
+
+@pytest.mark.parametrize("scenario,reason", [
+    ("missing", "原件不存在"),
+    ("bad-sha", "摘要"),
+    ("other-project", "不是同一案"),
+    ("other-rwid-url", "不是同一案"),
+    ("wrong-day", "不一致"),
+    ("recheck-only", "没有可读的初查"),
+    ("recheck-day-claimed", "不一致"),
+    ("two-initial-days", "不一致"),
+    ("outside-root", "越出业务根"),
+])
+def test_build_omits_the_date_but_keeps_the_main_row_when_the_basis_is_not_proven(tmp_path, scenario, reason):
+    rows = [_row("2026-09-21")]
+    kwargs = {}
+    if scenario == "other-project":
+        kwargs["proj"] = "32002299C209999999"
+    if scenario == "other-rwid-url":
+        kwargs["url_rwid"] = "9999"
+    if scenario == "recheck-only":
+        rows = [_row("2026-09-21", recheck="1")]
+    if scenario == "recheck-day-claimed":
+        rows = [_row("2026-08-01"), _row("2026-09-21", recheck="1")]
+    if scenario == "two-initial-days":
+        rows = [_row("2026-09-21"), _row("2026-09-22")]
+    original = _original(tmp_path, PN_NEW, "1001", rows, **kwargs)
+    classification = _classification(original, "2026-09-21")
+    if scenario == "missing":
+        classification = _classification(original, "2026-09-21", rel="evidence\\nope.json")
+    if scenario == "bad-sha":
+        classification = _classification(original, "2026-09-21", sha="sha256:" + "0" * 64)
+    if scenario == "wrong-day":
+        classification = _classification(original, "2026-09-22")
+    if scenario == "outside-root":
+        classification = _classification(original, "2026-09-21", rel="..\\..\\evidence\\orig.json")
+    report, creates = _date_build(tmp_path, PN_NEW, classification)
+    assert DATE_FIELD not in creates[PN_NEW]["fields"] and creates[PN_NEW]["fields"][UNIT]["new"] == "合成单位"   # 主行不受影响
+    assert report["counts"]["blockedEntities"] == 0 and len(report["initialDatesOmitted"]) == 1
+    assert reason in report["initialDatesOmitted"][0]["reason"]
+
+
+def test_build_without_a_registered_initial_date_omits_it_silently_and_never_uses_the_acceptance_date(tmp_path):
+    report, creates = _date_build(tmp_path, PN_NEW, {"initialResult": "QUALIFIED"})
+    assert DATE_FIELD not in creates[PN_NEW]["fields"] and report["initialDatesOmitted"] == []
+
+
+@pytest.mark.parametrize("tree,reason", [
+    ([{"title": "[处]行政处罚-32002299X202600001-合成单位", "children": []}], "产品根"),
+    ([], "产品根"),
+    ([{"title": "[产]开业检查-32002299C209999999-合成单位", "children": []}], "产品根"),
+    ([{"title": f"[产]开业检查-{PN_NEW}-合成单位", "children": []}, {"title": "[产]开业检查-32002299C209999999-合成单位", "children": []}], "产品根"),
+])
+def test_build_blocks_a_c_numbered_case_without_its_own_unique_product_root(tmp_path, tree, reason):
+    record = _detail(PN_NEW, "1001")
+    record["collectionDetail"]["fields"]["文书目录"] = tree
+    report, _, _ = run_build(tmp_path, {"1001": record, "1002": _detail(PN_FILL, "1002")})
+    assert report["status"] == "PARTIAL" and report["counts"]["blockedEntities"] == 1 and report["counts"]["toCreate"] == 1
+    assert reason in json.dumps(report["blockedEntities"], ensure_ascii=False)
+
+
+def test_build_does_not_gate_on_product_quantity_zero_or_missing(tmp_path):
+    record = _detail(PN_NEW, "1001")
+    record["collectionDetail"]["fields"]["检查产品信息"] = []
+    report, _, _ = run_build(tmp_path, {"1001": record})
+    assert report["status"] == "OK" and report["counts"]["toCreate"] == 1
+
+
+@pytest.mark.parametrize("record,reason", [
+    (_detail(PN_NEW, "1001", url_rwid="9999"), "RWID"),
+    (_detail(PN_NEW, "1001", listed_unit="另一个单位"), "单位"),
+    (_detail(PN_NEW, "1001", jurisdiction="无锡市未知区消防救援局"), "路由未匹配"),
+])
+def test_build_blocks_only_the_wrong_case_and_never_guesses_a_route(tmp_path, record, reason):
+    if reason == "单位":
+        record["collectionDetail"]["fields"]["单位名称"] = "合成单位"
+    records = {"1001": record, "1002": _detail(PN_FILL, "1002")}
+    report, _, _ = run_build(tmp_path, records)
+    assert report["status"] == "PARTIAL" and report["counts"]["blockedEntities"] == 1 and report["counts"]["toCreate"] == 1
+    assert reason in json.dumps(report["blockedEntities"], ensure_ascii=False)
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    assert [c["stableKey"]["value"] for c in spec["creates"]] == [PN_FILL]
+
+
+def test_build_refuses_a_capture_whose_digest_is_not_the_pinned_one(tmp_path):
+    with pytest.raises(sync.SyncError, match="摘要"):
+        run_build(tmp_path, {"1001": _detail(PN_NEW, "1001")}, capture_sha="0" * 64)
+
+
+def test_build_skips_independent_non_2026_and_non_c_cases(tmp_path):
+    records = {"1": _detail("32002299C202500001", "1"), "2": _detail("32002299J202600001", "2"), "3": _detail(PN_NEW, "3")}
+    report, _, _ = run_build(tmp_path, records)
+    assert report["counts"]["toCreate"] == 1 and report["counts"]["blockedEntities"] == 0
+
+
+def test_build_scopes_by_fresh_cloud_keys_and_fills_only_empty_cells_without_overwriting_values(tmp_path):
+    transport = BuildTransport()
+    transport.rows[(CASE, "recEXIST000001")] = {KEY: PN_FILL, UNIT: "合成单位", ADDR: "", SELECT_TEAM: ["梁溪大队"]}
+    transport.rows[(CASE, "recEXIST000002")] = {KEY: PN_OTHER, UNIT: "合成单位", ADDR: "云端人工改过的地址"}
+    transport.rows[(TEAM_TABLE, TEAM_REC)] = {TEAM_NAME: "梁溪大队"}
+    records = {"1002": _detail(PN_FILL, "1002", address="来源地址A"), "1003": _detail(PN_OTHER, "1003", address="来源地址B")}
+    report, transport, _ = run_build(tmp_path, records, transport=transport)
+    assert report["counts"]["toCreate"] == 0 and report["counts"]["toFill"] == 1 and report["counts"]["differingNotOverwritten"] == 1
+    fill = next(s for s in report["specs"] if s["kind"] == "fill")
+    spec = json.loads(Path(fill["path"]).read_text(encoding="utf-8"))
+    update = spec["updates"][0]
+    assert update["recordId"] == "recEXIST000001" and update["fields"][ADDR]["new"] == "来源地址A" and update["fields"][ADDR]["expectedOld"] is None
+    assert report["differing"][0]["projectNo"] == PN_OTHER
+
+
+def test_built_create_spec_runs_through_the_normal_path_and_a_rerun_writes_nothing(tmp_path):
+    transport = BuildTransport()
+    report, transport, _ = run_build(tmp_path, {"1001": _detail(PN_NEW, "1001")}, transport=transport)
+    spec_path = Path(report["specs"][0]["path"])
+    done = sync.run(spec_path, execute_flag=True, transport=transport, ledger_dir=tmp_path / "ledger")
+    assert done["status"] == "OK" and len(transport.creates) == 1
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["logDir"] = str(tmp_path / "logs" / "rerun")
+    spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    again = sync.run(spec_path, execute_flag=True, transport=transport, ledger_dir=tmp_path / "ledger")
+    assert again["records"][0]["status"] == "ALREADY_PRESENT_VERIFIED" and len(transport.creates) == 1      # 同输入重跑：业务写调用数不增
+
+
+def test_built_fill_spec_refuses_when_the_cell_was_filled_meanwhile_and_fills_when_still_empty(tmp_path):
+    transport = BuildTransport()
+    transport.rows[(CASE, "recEXIST000001")] = {KEY: PN_FILL, UNIT: "合成单位", ADDR: ""}
+    report, transport, _ = run_build(tmp_path, {"1002": _detail(PN_FILL, "1002", address="来源地址A")}, transport=transport)
+    fill_path = Path(next(s for s in report["specs"] if s["kind"] == "fill")["path"])
+    transport.rows[(CASE, "recEXIST000001")][ADDR] = "同期有人填了"
+    with pytest.raises(sync.RuntimeSyncError, match="旧值应为空"):
+        sync.run(fill_path, execute_flag=True, transport=transport, ledger_dir=tmp_path / "ledger")
+    assert transport.rows[(CASE, "recEXIST000001")][ADDR] == "同期有人填了"
+    transport.rows[(CASE, "recEXIST000001")][ADDR] = ""
+    spec = json.loads(fill_path.read_text(encoding="utf-8"))
+    spec["logDir"] = str(tmp_path / "logs" / "fill-ok")
+    fill_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    done = sync.run(fill_path, execute_flag=True, transport=transport, ledger_dir=tmp_path / "ledger2")
+    assert done["status"] == "OK" and transport.rows[(CASE, "recEXIST000001")][ADDR] == "来源地址A"
+
+
+def test_partial_never_exits_zero_on_either_entry(tmp_path, monkeypatch, capsys):
+    transport = BuildTransport()
+    report, transport, _ = run_build(tmp_path, {"1002": _detail(PN_FILL, "1002")}, transport=transport)
+    spec_path = Path(report["specs"][0]["path"])
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["creates"].append(_wire_case(key=PN_NEW, source="未知管辖"))         # 路由合同外：只阻该实体
+    monkeypatch.setattr(sync, "LarkCliTransport", lambda *a, **k: transport)
+    import scripts.registry_cli as registry_cli
+
+    spec["logDir"] = str(tmp_path / "logs" / "p1")
+    spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    assert sync.main(["--spec", str(spec_path), "--execute", "--ledger-dir", str(tmp_path / "led1")]) == 4
+    spec["logDir"] = str(tmp_path / "logs" / "p2")
+    spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(SystemExit) as stop:
+        registry_cli.main(["feishu-source-sync", "--spec", str(spec_path), "--execute", "--ledger-dir", str(tmp_path / "led2")])
+    assert stop.value.code == 4 and "PARTIAL" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("juris,code", [(SRC, None), ("无锡市未知区消防救援局", 4)])
+def test_registry_cli_build_command_reports_partial_with_exit_4_and_writes_no_cloud(tmp_path, monkeypatch, capsys, juris, code):
+    import scripts.registry_cli as registry_cli
+
+    transport = BuildTransport()
+    v3, v9 = make_basic_contracts(tmp_path)
+    capture, water, routes = make_basic_inputs(tmp_path, {"1001": _detail(PN_NEW, "1001", jurisdiction=juris), "1002": _detail(PN_FILL, "1002")})
+    monkeypatch.setattr(sync, "LarkCliTransport", lambda *a, **k: transport)
+    argv = ["feishu-source-build", "--capture", str(capture), "--capture-sha", sha(capture), "--waterline", str(water), "--contract-v3", str(v3),
+            "--contract-v3-sha", sha(v3), "--contract-v9", str(v9), "--contract-v9-sha", sha(v9), "--routes", str(routes), "--routes-sha", sha(routes),
+            "--base-token", BASE, "--profile", "offline-fake", "--out-dir", str(tmp_path / "o"), "--log-root", str(tmp_path / "l"), "--ledger-dir", str(tmp_path / "bl")]
+    if code is None:
+        registry_cli.main(argv)
+    else:
+        with pytest.raises(SystemExit) as stop:
+            registry_cli.main(argv)
+        assert stop.value.code == code and "PARTIAL" in capsys.readouterr().err
+    assert not transport.creates and (tmp_path / "o" / "build-report.json").is_file()
+
+
+def test_registry_cli_build_command_applies_the_date_and_category_gates_through_real_files(tmp_path, monkeypatch):
+    import scripts.registry_cli as registry_cli
+
+    good = _original(tmp_path, PN_NEW, "1001", [_row("2026-09-21")], name="good.json")
+    bad = _original(tmp_path, PN_FILL, "1002", [_row("2026-09-22")], name="bad.json")        # 登记日与原件不一致
+    non_product = _detail(PN_OTHER, "1003")
+    non_product["collectionDetail"]["fields"]["文书目录"] = [{"title": "[监]日常监督抽查-32002299J202600001-合成单位", "children": []}]
+    records = {"1001": _detail(PN_NEW, "1001"), "1002": _detail(PN_FILL, "1002"), "1003": non_product}
+    water = {PN_NEW: {"source": {"classification": _classification(good, "2026-09-21")}},
+             PN_FILL: {"source": {"classification": _classification(bad, "2026-09-21")}}}
+    v3, v9 = make_basic_contracts(tmp_path)
+    capture, waterline, routes = make_basic_inputs(tmp_path, records, water)
+    transport = BuildTransport()
+    monkeypatch.setattr(sync, "LarkCliTransport", lambda *a, **k: transport)
+    argv = ["feishu-source-build", "--capture", str(capture), "--capture-sha", sha(capture), "--waterline", str(waterline), "--contract-v3", str(v3),
+            "--contract-v3-sha", sha(v3), "--contract-v9", str(v9), "--contract-v9-sha", sha(v9), "--routes", str(routes), "--routes-sha", sha(routes),
+            "--base-token", BASE, "--profile", "offline-fake", "--out-dir", str(tmp_path / "o"), "--log-root", str(tmp_path / "l"), "--ledger-dir", str(tmp_path / "bl")]
+    with pytest.raises(SystemExit) as stop:
+        registry_cli.main(argv)
+    assert stop.value.code == 4                                      # 非产品 C 案被挡 => PARTIAL，不是 0
+    report = json.loads((tmp_path / "o" / "build-report.json").read_text(encoding="utf-8"))
+    creates = {c["stableKey"]["value"]: c for c in json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))["creates"]}
+    assert set(creates) == {PN_NEW, PN_FILL} and creates[PN_NEW]["fields"][DATE_FIELD]["new"] == "2026-09-21"
+    assert DATE_FIELD not in creates[PN_FILL]["fields"] and report["initialDatesOmitted"][0]["projectNo"] == PN_FILL
+    assert report["blockedEntities"][0]["projectNo"] == PN_OTHER and not transport.creates
+
+
+def _acceptance(tmp_path, intent, **over):
+    item = {"acceptedBy": "user", "intentId": intent, "userQuote": "我接受该精确请求迟到写入的风险", "sourceRef": "dialog#1", "acceptedAt": "2026-11-08T07:00:00Z", **over}
+    path = tmp_path / "accept.json"
+    path.write_text(json.dumps({"schemaVersion": "UserRiskAcceptanceV1", "acceptances": [item]}, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def test_a_human_release_without_the_users_own_risk_acceptance_is_refused_before_any_call(tmp_path):
+    spec = {"humanRelease": {"reason": "r", "operator": "Claude 实施者", "intentId": "i1", "acknowledgesLateWriteRisk": True, "evidence": [{"kind": "x", "ref": "y"}]}}
+    with pytest.raises(sync.SyncError, match="助手不得自署"):
+        sync.require_user_acceptance_for_release(spec, None)
+    for bad in ({"acceptedBy": "assistant"}, {"userQuote": ""}, {"sourceRef": " "}):
+        with pytest.raises(sync.SyncError, match="acceptedBy=user"):
+            sync.require_user_acceptance_for_release(spec, _acceptance(tmp_path, "i1", **bad))
+    with pytest.raises(sync.SyncError, match="精确 intentId"):
+        sync.require_user_acceptance_for_release(spec, _acceptance(tmp_path, "another-intent"))
+    sync.require_user_acceptance_for_release(spec, _acceptance(tmp_path, "i1"))        # 用户亲自接受该精确意图才放行
+    sync.require_user_acceptance_for_release({"mode": "plan"}, None)                    # 没有 humanRelease 的 spec 不受影响
+
+
+def test_the_normal_entries_refuse_an_assistant_signed_release_with_zero_cloud_calls(tmp_path, monkeypatch, capsys):
+    import scripts.registry_cli as registry_cli
+
+    contract, ledger, transport, key = _late_create(tmp_path, timeout_lost=True)
+    intent = sync.Ledger(ledger).state(key)["lastIntent"]
+    spec = json.loads(v3_spec(tmp_path, contract, [_wire_case()], mode="reconcile", log="rel").read_text(encoding="utf-8"))
+    spec["humanRelease"] = {"reason": "助手自署", "operator": "Claude", "intentId": intent, "acknowledgesLateWriteRisk": True, "evidence": [{"kind": "cli-process-log", "ref": "x"}]}
+    path = tmp_path / "release.json"
+    path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(sync, "LarkCliTransport", lambda *a, **k: calls.append(a) or transport)
+    assert sync.main(["--spec", str(path), "--reconcile", "--ledger-dir", str(ledger)]) == 2
+    assert registry_cli.main(["feishu-source-sync", "--spec", str(path), "--reconcile", "--ledger-dir", str(ledger)]) != 0
+    assert "助手不得自署" in capsys.readouterr().err
+    assert not calls and sync.Ledger(ledger).state(key)["state"] == "BLOCKED"          # 账本仍封锁，没有放行事件
+    assert not [e for e in sync.Ledger(ledger).events(key) if e["event"] == "human_release"]
+
+
+def test_repeated_zero_match_and_other_variants_keep_the_unknown_blocked(tmp_path):
+    contract, ledger, transport, key = _late_create(tmp_path, timeout_lost=True)
+    for number in range(3):
+        report = _run_v3(v3_spec(tmp_path, contract, [_wire_case()], mode="reconcile", log=f"z{number}"), transport, ledger, reconcile=True)
+        assert report["targets"][0]["outcome"] == "ZERO_MATCH"
+        assert sync.Ledger(ledger).state(key)["state"] == "BLOCKED"
+    changed = _wire_case(unit="换了单位名称的同键变体")
+    before = len(transport.creates)
+    with pytest.raises(sync.SyncError, match="未对账"):
+        _run_v3(v3_spec(tmp_path, contract, [changed], log="variant"), transport, ledger, execute=True)
+    assert len(transport.creates) == before                                                # 稳定键变体：云写调用 0
+
+
+def test_build_keeps_a_target_with_an_unaccepted_human_release_undecided_and_never_plans_it(tmp_path):
+    transport = BuildTransport()
+    ledger = tmp_path / "ledger"
+    key = sync.Ledger.target_key(BASE, CASE, "create:" + PN_NEW)
+    sync.Ledger(ledger).append(key, {"event": "human_release", "intentId": "iX", "operator": "assistant"})
+    v3, v9 = make_basic_contracts(tmp_path)
+    capture, water, routes = make_basic_inputs(tmp_path, {"1001": _detail(PN_NEW, "1001"), "1002": _detail(PN_FILL, "1002")})
+    args = dict(capture_path=capture, capture_sha=sha(capture), waterline_path=water, v3_path=v3, v3_sha=sha(v3), v9_path=v9, v9_sha=sha(v9),
+                routes_path=routes, routes_sha=sha(routes), target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"},
+                transport=transport, log_root=tmp_path / "logs", ledger_dir=ledger)
+    report = sync.build_basic_specs(out_dir=tmp_path / "o1", **args)
+    assert report["status"] == "PARTIAL" and [b["projectNo"] for b in report["blockedEntities"]] == [PN_NEW] and report["counts"]["toCreate"] == 1
+    accepted = _acceptance(tmp_path, "iX")
+    report = sync.build_basic_specs(out_dir=tmp_path / "o2", user_accepted_releases=accepted, **args)
+    assert report["status"] == "OK" and report["counts"]["toCreate"] == 2
+
+
+def test_build_year_gate_is_2026_or_later_not_only_2026(tmp_path):
+    records = {"1": _detail("32002299C202500001", "1"), "2": _detail("32002299C202600009", "2"), "3": _detail("32002299C202700001", "3")}
+    report, _, _ = run_build(tmp_path, records)
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    assert sorted(c["stableKey"]["value"] for c in spec["creates"]) == ["32002299C202600009", "32002299C202700001"]
+
+
+# ---------------------------------------------------------------------------------------------
+# r27 七项最小修正：账根、必须带账、普通 UNKNOWN 局部阻断、创建未决不转补空、更新对账精确 intent
+# ---------------------------------------------------------------------------------------------
+
+def _unknown_create_in(ledger_dir, project, intent="iUNK"):
+    ledger = sync.Ledger(ledger_dir)
+    ledger.initialize()
+    key = sync.Ledger.target_key(BASE, CASE, "create:" + project)
+    ledger.append(key, {"event": "intent", "kind": "create", "intentId": intent, "stableKey": {"fieldId": KEY, "value": project}, "fields": {}})
+    ledger.append(key, {"event": "final", "intentId": intent, "status": "UNKNOWN", "detail": "UNKNOWN: 官方 CLI 输出不是 JSON"})
+    return key
+
+
+def _listing(root):
+    return sorted((p.relative_to(root).as_posix(), p.stat().st_size, p.read_bytes() if p.is_file() else None) for p in root.rglob("*"))
+
+
+def test_ledger_root_that_is_missing_or_wrong_is_refused_and_never_created(tmp_path):
+    contract = make_v3_contract(tmp_path)
+    for name in ("never-created", "wrong-place"):
+        missing = tmp_path / name
+        with pytest.raises(sync.SyncError, match="账根"):
+            _run_v3(v3_spec(tmp_path, contract, [_wire_case()], log=f"lr-{name}"), MemoryTransport(), missing, execute=True)
+        assert not missing.exists()                                                   # 读空之后也不会被悄悄建成另一本账
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    with pytest.raises(sync.SyncError, match="账根"):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case()], log="lr-empty"), MemoryTransport(), empty_dir, execute=True)
+    assert not (empty_dir / "targets").exists() and not (empty_dir / "locks").exists()
+
+
+def test_ledger_root_that_is_another_initialized_empty_ledger_is_not_the_formal_one(tmp_path):
+    """结构合法、已 initialize 的另一本空账，在正常入口(execute/reconcile/build)一律在任何外调与持久写之前被拒绝。"""
+    contract = make_v3_contract(tmp_path)
+    other = tmp_path / "another-ledger"
+    sync.Ledger(other).initialize()
+    before = _listing(other)
+    transport = MemoryTransport()
+    BuildTransport.list_calls = 0
+    for mode, kw in (("execute", {"execute": True}), ("reconcile", {"reconcile": True})):
+        spec = v3_spec(tmp_path, contract, [_wire_case()], mode=mode, log=f"other-{mode}")
+        with pytest.raises(sync.SyncError, match="唯一正式 P18 账根"):
+            sync.run(spec, execute_flag=kw.get("execute", False), reconcile_flag=kw.get("reconcile", False), transport=transport, ledger_dir=other)
+    assert transport.creates == [] and transport.finds == 0                          # 外调 0、云写 0
+    assert _listing(other) == before                                                 # 账内无任何新增/改动(含 locks/)
+    assert not (tmp_path / "other-execute").exists() and not (tmp_path / "other-reconcile").exists()   # logDir 也未建
+    v3, v9 = make_basic_contracts(tmp_path)
+    capture, water, routes = make_basic_inputs(tmp_path, {"1001": _detail(PN_NEW, "1001")})
+    with pytest.raises(sync.SyncError, match="唯一正式 P18 账根"):
+        sync.build_basic_specs(capture_path=capture, capture_sha=sha(capture), waterline_path=water, v3_path=v3, v3_sha=sha(v3), v9_path=v9, v9_sha=sha(v9),
+                               routes_path=routes, routes_sha=sha(routes), target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"},
+                               transport=BuildTransport(), out_dir=tmp_path / "o", log_root=tmp_path / "l", ledger_dir=other)
+    assert not (tmp_path / "o").exists() and _listing(other) == before
+    assert BuildTransport.list_calls == 0                                            # build 在任何云读取之前就拒绝
+
+
+def test_ledger_root_identity_is_the_formal_path_in_either_notation_and_is_checked_read_only():
+    assert sync.canonical_ledger_path("D:\\ws\\05-temp\\20261104_飞书大队权限\\P18运行账本\\实施") == sync.canonical_ledger_path(sync.P18_LEDGER_ROOT)
+    assert sync.canonical_ledger_path("d:/ws/05-temp/20261104_飞书大队权限/P18运行账本/实施/") == sync.canonical_ledger_path(sync.P18_LEDGER_ROOT)
+    assert sync.canonical_ledger_path("/mnt/d/ws/05-temp/20261104_飞书大队权限/P18运行账本/实施x") != sync.canonical_ledger_path(sync.P18_LEDGER_ROOT)
+    root = Path(sync.P18_LEDGER_ROOT)
+    if not root.is_dir():
+        pytest.skip("正式 P18 账根不可达")
+    before = sorted((p.relative_to(root).as_posix(), p.stat().st_size) for p in root.rglob("*") if p.is_file())
+    sync.Ledger(root).validate_root()                                                # 真实 validator，只读
+    after = sorted((p.relative_to(root).as_posix(), p.stat().st_size) for p in root.rglob("*") if p.is_file())
+    assert before == after
+    with pytest.raises(sync.SyncError, match="正式 P18 账根"):
+        sync.Ledger(root).initialize()                                               # 对正式根永不 initialize
+
+
+def test_ledger_root_isolated_test_ledger_needs_marker_the_internal_switch_and_cannot_be_the_formal_root(tmp_path):
+    isolated = tmp_path / "isolated"
+    sync.Ledger(isolated).initialize()
+    sync.Ledger(isolated, isolated_test=True).validate_root()                        # 标记 + 内部开关：可用
+    with pytest.raises(sync.SyncError, match="唯一正式 P18 账根"):
+        sync.Ledger(isolated).validate_root()                                        # 没有内部开关：同一目录在正常入口不可用
+    unmarked = tmp_path / "unmarked"
+    (unmarked / "targets").mkdir(parents=True)
+    with pytest.raises(sync.SyncError, match="隔离测试账"):
+        sync.Ledger(unmarked, isolated_test=True).validate_root()
+    root = Path(sync.P18_LEDGER_ROOT)
+    if root.is_dir():
+        with pytest.raises(sync.SyncError, match="隔离测试账"):
+            sync.Ledger(root, isolated_test=True).validate_root()                    # 正式根不能被当作隔离账
+
+
+def test_ledger_root_normal_cli_entries_never_expose_the_isolated_switch(tmp_path, monkeypatch, capsys):
+    import scripts.registry_cli as registry_cli
+
+    other = tmp_path / "another"
+    sync.Ledger(other).initialize()
+    contract = make_v3_contract(tmp_path)
+    spec = v3_spec(tmp_path, contract, [_wire_case()], log="cli-other")
+    calls = []
+    monkeypatch.setattr(sync, "LarkCliTransport", lambda *a, **k: calls.append(a) or MemoryTransport())
+    assert sync.main(["--spec", str(spec), "--execute", "--ledger-dir", str(other)]) == 2
+    assert registry_cli.main(["feishu-source-sync", "--spec", str(spec), "--execute", "--ledger-dir", str(other)]) != 0
+    assert "唯一正式 P18 账根" in capsys.readouterr().err and not calls and not (tmp_path / "cli-other").exists()
+    assert "isolated" not in " ".join(a.option_strings[0] for a in registry_cli.build_parser()._subparsers._group_actions[0].choices["feishu-source-sync"]._actions if a.option_strings)
+
+
+def test_build_blocks_only_the_target_with_an_unresolved_create_and_lets_independent_cases_continue(tmp_path):
+    ledger = tmp_path / "ledger"
+    _unknown_create_in(ledger, PN_NEW)
+    report, _, _ = run_build(tmp_path, {"1001": _detail(PN_NEW, "1001"), "1002": _detail(PN_FILL, "1002")}, ledger_dir=ledger)
+    assert report["status"] == "PARTIAL" and report["counts"]["toCreate"] == 1
+    assert [b["projectNo"] for b in report["blockedEntities"]] == [PN_NEW] and "create 意图未决" in json.dumps(report["blockedEntities"], ensure_ascii=False)
+
+
+def test_a_late_arriving_row_cannot_turn_an_unresolved_create_into_a_fill(tmp_path):
+    ledger = tmp_path / "ledger"
+    _unknown_create_in(ledger, PN_NEW)
+    transport = BuildTransport()
+    transport.rows[(CASE, "recLATE0000001")] = {KEY: PN_NEW, UNIT: "合成单位", ADDR: ""}                 # 迟到的创建结果：行出现了，地址为空
+    for variation in (_detail(PN_NEW, "1001"), _detail(PN_NEW, "1001", address="另一份来源地址", unit="合成单位")):
+        report, _, _ = run_build(tmp_path, {"1001": variation}, transport=transport, ledger_dir=ledger)
+        assert report["counts"]["toFill"] == 0 and report["counts"]["toCreate"] == 0 and report["blockedEntities"][0]["projectNo"] == PN_NEW
+        assert report["specs"] == []                                                                      # 字段/证据变化也不绕过旧创建未决
+
+
+def test_an_unresolved_update_blocks_only_its_own_record_in_the_build(tmp_path):
+    ledger = sync.Ledger(tmp_path / "ledger")
+    ledger.initialize()
+    key = sync.Ledger.target_key(BASE, CASE, "recEXIST000001")
+    ledger.append(key, {"event": "intent", "intentId": "iU2", "stableKey": {"fieldId": KEY, "value": PN_FILL}, "fields": {}})   # 无终态：进程中断
+    transport = BuildTransport()
+    transport.rows[(CASE, "recEXIST000001")] = {KEY: PN_FILL, UNIT: "合成单位", ADDR: ""}
+    transport.rows[(CASE, "recEXIST000002")] = {KEY: PN_OTHER, UNIT: "合成单位", ADDR: ""}
+    records = {"1002": _detail(PN_FILL, "1002", address="地址A"), "1003": _detail(PN_OTHER, "1003", address="地址B")}
+    report, _, _ = run_build(tmp_path, records, transport=transport, ledger_dir=tmp_path / "ledger")
+    assert [b["projectNo"] for b in report["blockedEntities"]] == [PN_FILL] and report["counts"]["toFill"] == 1 and report["status"] == "PARTIAL"
+
+
+def test_v2_execute_refuses_a_fill_for_a_stable_key_whose_create_is_still_unresolved(tmp_path):
+    ledger_dir = tmp_path / "ledger"
+    _unknown_create_in(ledger_dir, PN_FILL)
+    transport = BuildTransport()
+    transport.rows[(CASE, "recEXIST000001")] = {KEY: PN_FILL, UNIT: "合成单位", ADDR: ""}
+    report, transport, _ = run_build(tmp_path, {"1002": _detail(PN_FILL, "1002", address="地址A")}, transport=transport, ledger_dir=tmp_path / "other-ledger")
+    fill = Path(next(s for s in report["specs"] if s["kind"] == "fill")["path"])               # 手工拿到 fill 说明(另一本账里没有封锁)
+    with pytest.raises(sync.SyncError, match="未决创建"):
+        sync.run(fill, execute_flag=True, transport=transport, ledger_dir=ledger_dir)
+    assert transport.rows[(CASE, "recEXIST000001")][ADDR] == ""
+
+
+def test_the_normal_generation_and_execution_flow_never_writes_or_emits_a_human_release(tmp_path):
+    transport = BuildTransport()
+    report, transport, _ = run_build(tmp_path, {"1001": _detail(PN_NEW, "1001")}, transport=transport)
+    spec_path = Path(report["specs"][0]["path"])
+    assert "humanRelease" not in json.loads(spec_path.read_text(encoding="utf-8"))
+    sync.run(spec_path, execute_flag=True, transport=transport, ledger_dir=tmp_path / "build-ledger")
+    events = [json.loads(line) for p in (tmp_path / "build-ledger" / "targets").glob("*.jsonl") for line in p.read_text(encoding="utf-8").splitlines()]
+    assert events and not [e for e in events if e["event"] in {"human_release", "reconciled"}]

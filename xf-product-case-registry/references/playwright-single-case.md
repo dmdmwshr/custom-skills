@@ -1,5 +1,7 @@
 # Playwright CLI 登录与单案下载验收
 
+> 备用入口：浏览器默认 Ego；本文仅在用户明确指定 Playwright 时使用，读取规则同 [浏览器采集](browser-acquisition.md) 的可见 DOM 约束。
+
 此入口用于用户指定的 Windows Chrome/Edge 单案下载测试，不自动迁移年度批次或已有业务固定驱动。浏览器仍使用官方 CLI 与扩展，凭据由 LocalVault 管理。连接的工作目录建议直接放在业务工作根内，使浏览器产物也留在工作根。
 
 ## 登录

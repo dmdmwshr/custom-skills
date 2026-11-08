@@ -14,45 +14,92 @@
     "documentSlots"
   ],
   "properties": {
-    "schemaVersion": { "const": "CaseImportManifestV2" },
-    "packageSha256": { "$ref": "#/$defs/sha256" },
-    "createdAt": { "type": "string", "format": "date-time" },
+    "schemaVersion": {
+      "const": "CaseImportManifestV2"
+    },
+    "packageSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
     "extractor": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "version"],
+      "required": [
+        "name",
+        "version"
+      ],
       "properties": {
-        "name": { "type": "string", "minLength": 1 },
-        "version": { "type": "string", "minLength": 1 }
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
-    "case": { "$ref": "#/$defs/case" },
-    "initialInspection": { "$ref": "#/$defs/initialInspection" },
-    "recheckInspection": { "$ref": "#/$defs/recheckInspection" },
-    "files": { "type": "array", "items": { "$ref": "#/$defs/file" } },
+    "case": {
+      "$ref": "#/$defs/case"
+    },
+    "initialInspection": {
+      "$ref": "#/$defs/initialInspection"
+    },
+    "recheckInspection": {
+      "$ref": "#/$defs/recheckInspection"
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/file"
+      }
+    },
     "documentSlots": {
       "type": "array",
-      "items": { "$ref": "#/$defs/documentSlot" }
+      "items": {
+        "$ref": "#/$defs/documentSlot"
+      }
     },
     "otherAttachments": {
       "type": "array",
-      "items": { "$ref": "#/$defs/otherAttachment" }
+      "items": {
+        "$ref": "#/$defs/otherAttachment"
+      }
     }
   },
   "$defs": {
-    "clientRef": { "type": "string", "pattern": "^[a-z][a-z0-9:_-]{0,159}$" },
+    "clientRef": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9:_-]{0,159}$"
+    },
     "uuid": {
       "type": "string",
       "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
     },
-    "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
-    "date": { "type": "string", "format": "date" },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
     "case": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["projectNo", "brigadeCode", "unitName"],
+      "required": [
+        "projectNo",
+        "brigadeCode",
+        "unitName"
+      ],
       "properties": {
-        "projectNo": { "type": "string", "pattern": "^[0-9]{8}[A-Z][0-9]{9}$" },
+        "projectNo": {
+          "type": "string",
+          "pattern": "^[0-9]{8}[A-Z][0-9]{9}$"
+        },
         "brigadeCode": {
           "enum": [
             "JIANGYIN",
@@ -66,98 +113,269 @@
             "SHUISHANG"
           ]
         },
-        "brigadeName": { "enum": ["水上大队"] },
-        "unitName": { "type": "string", "minLength": 1 },
-        "unitAddress": { "type": "string" },
-        "inspectionForm": {
-          "enum": ["ROUTINE", "SPECIAL", "COMPLAINT", "OTHER", "UNKNOWN"]
+        "brigadeName": {
+          "enum": [
+            "水上大队"
+          ]
         },
-        "handler": { "type": "string" },
-        "inspector": { "type": "string" },
-        "legalRepresentative": { "type": "string" },
-        "documentRecipient": { "type": "string" },
-        "criminalCaseOverride": { "type": "boolean" },
+        "unitName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unitAddress": {
+          "type": "string"
+        },
+        "inspectionForm": {
+          "enum": [
+            "ROUTINE",
+            "SPECIAL",
+            "COMPLAINT",
+            "OTHER",
+            "UNKNOWN"
+          ]
+        },
+        "handler": {
+          "type": "string"
+        },
+        "inspector": {
+          "type": "string"
+        },
+        "legalRepresentative": {
+          "type": "string"
+        },
+        "documentRecipient": {
+          "type": "string"
+        },
+        "criminalCaseOverride": {
+          "type": "boolean"
+        },
         "notificationTarget": {
-          "enum": ["PRODUCTION", "SALES", "BOTH", "UNKNOWN"]
+          "enum": [
+            "PRODUCTION",
+            "SALES",
+            "BOTH",
+            "UNKNOWN"
+          ]
         }
       }
     },
     "inspectionProduct": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["clientRef", "name"],
+      "required": [
+        "clientRef",
+        "name"
+      ],
       "properties": {
-        "clientRef": { "$ref": "#/$defs/clientRef" },
-        "name": { "type": "string", "minLength": 1 },
-        "modelSpec": { "type": "string" },
-        "nominalProducer": { "type": "string" },
-        "location": { "type": "string" },
-        "method": { "enum": ["ONSITE", "SAMPLING"] },
-        "result": {
-          "enum": ["UNKNOWN", "PENDING", "QUALIFIED", "UNQUALIFIED"]
+        "clientRef": {
+          "$ref": "#/$defs/clientRef"
         },
-        "onlineSale": { "enum": ["YES", "NO", "UNKNOWN"] },
-        "maintenance": { "enum": ["YES", "NO", "UNKNOWN"] },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "modelSpec": {
+          "type": "string"
+        },
+        "nominalProducer": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "ONSITE",
+            "SAMPLING"
+          ]
+        },
+        "result": {
+          "enum": [
+            "UNKNOWN",
+            "PENDING",
+            "QUALIFIED",
+            "UNQUALIFIED"
+          ]
+        },
+        "onlineSale": {
+          "enum": [
+            "YES",
+            "NO",
+            "UNKNOWN"
+          ]
+        },
+        "maintenance": {
+          "enum": [
+            "YES",
+            "NO",
+            "UNKNOWN"
+          ]
+        },
         "repairSiteId": {
-          "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "marketAccessMode": {
-          "enum": ["CCC", "TECHNICAL_APPRAISAL", "NOT_APPLICABLE", "UNKNOWN"]
+          "enum": [
+            "CCC",
+            "TECHNICAL_APPRAISAL",
+            "NOT_APPLICABLE",
+            "UNKNOWN"
+          ]
         },
-        "problemDescription": { "type": "string" },
-        "reinspectionApplied": { "enum": ["YES", "NO", "UNKNOWN"] },
+        "problemDescription": {
+          "type": "string"
+        },
+        "reinspectionApplied": {
+          "enum": [
+            "YES",
+            "NO",
+            "UNKNOWN"
+          ]
+        },
         "reinspectionResult": {
-          "enum": ["UNKNOWN", "PENDING", "QUALIFIED", "UNQUALIFIED"]
+          "enum": [
+            "UNKNOWN",
+            "PENDING",
+            "QUALIFIED",
+            "UNQUALIFIED"
+          ]
+        },
+        "marketAccessRaw": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 5000
+        },
+        "certificateNumberRaw": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "qualityCheckRaw": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 5000
+        },
+        "qualityCheckPerformed": {
+          "enum": [
+            "YES",
+            "NO",
+            "UNKNOWN"
+          ]
         }
       },
       "allOf": [
         {
           "if": {
-            "properties": { "repairSiteId": { "type": "string" } },
-            "required": ["repairSiteId"]
-          },
-          "then": {
-            "required": ["maintenance"],
-            "properties": { "maintenance": { "const": "YES" } }
-          }
-        },
-        {
-          "if": {
-            "properties": { "result": { "const": "UNQUALIFIED" } },
-            "required": ["result"]
-          },
-          "then": {
-            "required": ["method", "problemDescription"],
             "properties": {
-              "problemDescription": { "type": "string", "minLength": 1 }
+              "repairSiteId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "repairSiteId"
+            ]
+          },
+          "then": {
+            "required": [
+              "maintenance"
+            ],
+            "properties": {
+              "maintenance": {
+                "const": "YES"
+              }
             }
           }
         },
         {
-          "if": { "required": ["result"] },
-          "then": { "required": ["method"] }
+          "if": {
+            "properties": {
+              "result": {
+                "const": "UNQUALIFIED"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "required": [
+              "method",
+              "problemDescription"
+            ],
+            "properties": {
+              "problemDescription": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
         },
         {
           "if": {
-            "properties": { "method": { "const": "ONSITE" } },
-            "required": ["method"]
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "required": [
+              "method"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "ONSITE"
+              }
+            },
+            "required": [
+              "method"
+            ]
           },
           "then": {
             "properties": {
-              "result": { "enum": ["UNKNOWN", "QUALIFIED", "UNQUALIFIED"] }
+              "result": {
+                "enum": [
+                  "UNKNOWN",
+                  "QUALIFIED",
+                  "UNQUALIFIED"
+                ]
+              }
             }
           }
         },
         {
           "if": {
             "anyOf": [
-              { "required": ["reinspectionApplied"] },
-              { "required": ["reinspectionResult"] }
+              {
+                "required": [
+                  "reinspectionApplied"
+                ]
+              },
+              {
+                "required": [
+                  "reinspectionResult"
+                ]
+              }
             ]
           },
           "then": {
-            "required": ["method"],
-            "properties": { "method": { "const": "SAMPLING" } }
+            "required": [
+              "method"
+            ],
+            "properties": {
+              "method": {
+                "const": "SAMPLING"
+              }
+            }
           }
         }
       ]
@@ -165,81 +383,158 @@
     "initialInspection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["clientRef", "stage", "products"],
+      "required": [
+        "clientRef",
+        "stage",
+        "products"
+      ],
       "properties": {
-        "clientRef": { "$ref": "#/$defs/clientRef" },
-        "stage": { "const": "INITIAL_CHECK" },
-        "inspectionDate": { "$ref": "#/$defs/date" },
+        "clientRef": {
+          "$ref": "#/$defs/clientRef"
+        },
+        "stage": {
+          "const": "INITIAL_CHECK"
+        },
+        "inspectionDate": {
+          "$ref": "#/$defs/date"
+        },
         "products": {
           "type": "array",
-          "items": { "$ref": "#/$defs/inspectionProduct" }
+          "items": {
+            "$ref": "#/$defs/inspectionProduct"
+          }
         }
       }
     },
     "recheckInspection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["clientRef", "stage", "products"],
+      "required": [
+        "clientRef",
+        "stage",
+        "products"
+      ],
       "properties": {
-        "clientRef": { "$ref": "#/$defs/clientRef" },
-        "stage": { "const": "RECHECK" },
-        "inspectionDate": { "$ref": "#/$defs/date" },
+        "clientRef": {
+          "$ref": "#/$defs/clientRef"
+        },
+        "stage": {
+          "const": "RECHECK"
+        },
+        "inspectionDate": {
+          "$ref": "#/$defs/date"
+        },
         "products": {
           "type": "array",
-          "items": { "$ref": "#/$defs/inspectionProduct" }
+          "items": {
+            "$ref": "#/$defs/inspectionProduct"
+          }
         }
       }
     },
     "file": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["clientRef", "relativePath", "sha256", "mimeType"],
+      "required": [
+        "clientRef",
+        "relativePath",
+        "sha256",
+        "mimeType"
+      ],
       "properties": {
-        "clientRef": { "$ref": "#/$defs/clientRef" },
+        "clientRef": {
+          "$ref": "#/$defs/clientRef"
+        },
         "relativePath": {
           "type": "string",
           "minLength": 1,
           "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.(?:/|$))(?!.*(?:^|/)\\.\\.(?:/|$)).+\\.[Pp][Dd][Ff]$"
         },
-        "sha256": { "$ref": "#/$defs/sha256" },
-        "mimeType": { "const": "application/pdf" },
-        "pageCount": { "type": "integer", "minimum": 1 }
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mimeType": {
+          "const": "application/pdf"
+        },
+        "pageCount": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "fileVersion": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "fileRef"],
+      "required": [
+        "kind",
+        "fileRef"
+      ],
       "properties": {
-        "kind": { "enum": ["ELECTRONIC", "SCANNED"] },
-        "fileRef": { "$ref": "#/$defs/clientRef" }
+        "kind": {
+          "enum": [
+            "ELECTRONIC",
+            "SCANNED"
+          ]
+        },
+        "fileRef": {
+          "$ref": "#/$defs/clientRef"
+        }
       }
     },
     "documentSlot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["clientRef", "slotCode", "versions"],
+      "required": [
+        "clientRef",
+        "slotCode",
+        "versions"
+      ],
       "properties": {
-        "clientRef": { "$ref": "#/$defs/clientRef" },
-        "slotCode": { "$ref": "#/$defs/slotCode" },
-        "inspectionRef": { "$ref": "#/$defs/clientRef" },
-        "productRef": { "$ref": "#/$defs/clientRef" },
-        "notificationTarget": { "enum": ["PRODUCTION", "SALES"] },
-        "documentNo": { "type": "string" },
-        "documentDate": { "$ref": "#/$defs/date" },
+        "clientRef": {
+          "$ref": "#/$defs/clientRef"
+        },
+        "slotCode": {
+          "$ref": "#/$defs/slotCode"
+        },
+        "inspectionRef": {
+          "$ref": "#/$defs/clientRef"
+        },
+        "productRef": {
+          "$ref": "#/$defs/clientRef"
+        },
+        "notificationTarget": {
+          "enum": [
+            "PRODUCTION",
+            "SALES"
+          ]
+        },
+        "documentNo": {
+          "type": "string"
+        },
+        "documentDate": {
+          "$ref": "#/$defs/date"
+        },
         "versions": {
           "type": "array",
           "minItems": 1,
           "maxItems": 2,
-          "items": { "$ref": "#/$defs/fileVersion" },
+          "items": {
+            "$ref": "#/$defs/fileVersion"
+          },
           "uniqueItems": true
         }
       },
       "allOf": [
         {
           "not": {
-            "properties": { "slotCode": { "const": "OTHER_ATTACHMENT" } },
-            "required": ["slotCode"]
+            "properties": {
+              "slotCode": {
+                "const": "OTHER_ATTACHMENT"
+              }
+            },
+            "required": [
+              "slotCode"
+            ]
           }
         },
         {
@@ -249,8 +544,14 @@
                 "type": "array",
                 "contains": {
                   "type": "object",
-                  "properties": { "kind": { "const": "ELECTRONIC" } },
-                  "required": ["kind"]
+                  "properties": {
+                    "kind": {
+                      "const": "ELECTRONIC"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
                 },
                 "minContains": 2
               }
@@ -264,8 +565,14 @@
                 "type": "array",
                 "contains": {
                   "type": "object",
-                  "properties": { "kind": { "const": "SCANNED" } },
-                  "required": ["kind"]
+                  "properties": {
+                    "kind": {
+                      "const": "SCANNED"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
                 },
                 "minContains": 2
               }
@@ -276,10 +583,15 @@
           "if": {
             "properties": {
               "slotCode": {
-                "enum": ["INITIAL_ONSITE_PHOTO", "RECHECK_ONSITE_PHOTO"]
+                "enum": [
+                  "INITIAL_ONSITE_PHOTO",
+                  "RECHECK_ONSITE_PHOTO"
+                ]
               }
             },
-            "required": ["slotCode"]
+            "required": [
+              "slotCode"
+            ]
           },
           "then": {
             "properties": {
@@ -288,8 +600,14 @@
                 "maxItems": 1,
                 "items": {
                   "type": "object",
-                  "properties": { "kind": { "const": "SCANNED" } },
-                  "required": ["kind"]
+                  "properties": {
+                    "kind": {
+                      "const": "SCANNED"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
                 }
               }
             }
@@ -299,17 +617,34 @@
           "if": {
             "properties": {
               "slotCode": {
-                "enum": ["AUTHORIZATION_LETTER", "BUSINESS_LICENSE"]
+                "enum": [
+                  "AUTHORIZATION_LETTER",
+                  "BUSINESS_LICENSE"
+                ]
               }
             },
-            "required": ["slotCode"]
+            "required": [
+              "slotCode"
+            ]
           },
           "then": {
             "not": {
               "anyOf": [
-                { "required": ["inspectionRef"] },
-                { "required": ["productRef"] },
-                { "required": ["notificationTarget"] }
+                {
+                  "required": [
+                    "inspectionRef"
+                  ]
+                },
+                {
+                  "required": [
+                    "productRef"
+                  ]
+                },
+                {
+                  "required": [
+                    "notificationTarget"
+                  ]
+                }
               ]
             }
           }
@@ -347,14 +682,26 @@
                 ]
               }
             },
-            "required": ["slotCode"]
+            "required": [
+              "slotCode"
+            ]
           },
           "then": {
-            "required": ["inspectionRef"],
+            "required": [
+              "inspectionRef"
+            ],
             "not": {
               "anyOf": [
-                { "required": ["productRef"] },
-                { "required": ["notificationTarget"] }
+                {
+                  "required": [
+                    "productRef"
+                  ]
+                },
+                {
+                  "required": [
+                    "notificationTarget"
+                  ]
+                }
               ]
             }
           }
@@ -387,14 +734,26 @@
                 ]
               }
             },
-            "required": ["slotCode"]
+            "required": [
+              "slotCode"
+            ]
           },
           "then": {
-            "required": ["productRef"],
+            "required": [
+              "productRef"
+            ],
             "not": {
               "anyOf": [
-                { "required": ["inspectionRef"] },
-                { "required": ["notificationTarget"] }
+                {
+                  "required": [
+                    "inspectionRef"
+                  ]
+                },
+                {
+                  "required": [
+                    "notificationTarget"
+                  ]
+                }
               ]
             }
           }
@@ -410,14 +769,26 @@
                 ]
               }
             },
-            "required": ["slotCode"]
+            "required": [
+              "slotCode"
+            ]
           },
           "then": {
-            "required": ["notificationTarget"],
+            "required": [
+              "notificationTarget"
+            ],
             "not": {
               "anyOf": [
-                { "required": ["inspectionRef"] },
-                { "required": ["productRef"] }
+                {
+                  "required": [
+                    "inspectionRef"
+                  ]
+                },
+                {
+                  "required": [
+                    "productRef"
+                  ]
+                }
               ]
             }
           }
@@ -427,12 +798,24 @@
     "otherAttachment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["clientRef", "slotCode", "fileRef"],
+      "required": [
+        "clientRef",
+        "slotCode",
+        "fileRef"
+      ],
       "properties": {
-        "clientRef": { "$ref": "#/$defs/clientRef" },
-        "slotCode": { "const": "OTHER_ATTACHMENT" },
-        "title": { "type": "string" },
-        "fileRef": { "$ref": "#/$defs/clientRef" }
+        "clientRef": {
+          "$ref": "#/$defs/clientRef"
+        },
+        "slotCode": {
+          "const": "OTHER_ATTACHMENT"
+        },
+        "title": {
+          "type": "string"
+        },
+        "fileRef": {
+          "$ref": "#/$defs/clientRef"
+        }
       }
     },
     "slotCode": {

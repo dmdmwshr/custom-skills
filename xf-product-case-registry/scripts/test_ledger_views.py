@@ -867,3 +867,265 @@ def test_daily_report_only_expands_pending_or_anomalous_cases(layout):
     assert A not in daily and B in daily
     assert "本视图 2 案" in daily
     assert A in views.render_ledger_report(snapshot, include_all=True)
+
+
+def test_excel_views_give_every_header_column_a_width_and_a_tall_enough_header(layout):
+    """回归：业务视图曾 18 列只给 17 项宽度(现为 22 列)，最后一列“文书提示不合格候选”回落默认窄宽度，表头在 LibreOffice 导出中被挤压；
+    相邻长表头(如“历史系统已登记/历史正文已核验/本地已核验”)也因宽度不足连排。"""
+    import math
+    from contextlib import closing
+
+    from openpyxl import load_workbook
+
+    add_case(layout, A, archived=True, deep=True)
+    with closing(load_workbook(ws.export_waterline_xlsx(layout))) as book:
+        for name in ("所有案卷", "不合格案卷", "待确认案卷", "未完成案卷"):
+            sheet = book[name]
+            headers = [c.value for c in sheet[1]]
+            assert len(headers) == len(views.LEDGER_COLUMN_WIDTHS) == 22
+            height = sheet.row_dimensions[1].height
+            for index, header in enumerate(headers, 1):
+                letter = chr(64 + index)
+                width = sheet.column_dimensions[letter].width
+                assert width and width >= 10, (name, letter, header, width)
+                need = math.ceil(sum(2 if ord(ch) > 127 else 1 for ch in header) / (width - 1))
+                assert height >= 16 * need, (name, letter, header, width, height, need)
+            assert sheet.freeze_panes == "A2" and sheet.auto_filter.ref
+
+
+def add_source_classified_case(layout, project, *, manifest_products, cells, digest_ok=True):
+    """Local record (case-data manifest) plus a saved source classification bound to its evidence digest."""
+    if manifest_products is not None:
+        write(
+            layout.work_case_dir(project) / "manifest.json",
+            {
+                "case": {"projectNo": project},
+                "initialInspection": {"inspectionDate": "2098-12-10", "products": manifest_products},
+                "files": [],
+            },
+        )
+    evidence = layout.root / "证据" / f"{project}.json"
+    write(
+        evidence,
+        {
+            "projectNo": project,
+            "records": {
+                "rwid": {
+                    "projectNo": project,
+                    "fields": {
+                        "检查产品信息": [
+                            {"产品质量现场检查情况": quality, "市场准入检查情况": market, "检查结果": mark}
+                            for quality, market, mark in cells
+                        ]
+                    },
+                }
+            },
+        },
+    )
+    digest = "sha256:" + hashlib.sha256(evidence.read_bytes()).hexdigest()
+    ws.upsert_case(
+        layout,
+        project,
+        source={
+            "projectIdentitySource": "DETAIL",
+            "classification": {
+                "initialResult": "UNQUALIFIED",
+                "initialInspectionDate": "2098-12-10",
+                "statisticsYear": 2098,
+                "reinspectionPending": False,
+                "evidencePath": f"证据/{project}.json",
+                "evidenceSha256": digest if digest_ok else "sha256:" + "0" * 64,
+            },
+        },
+    )
+    return next(r for r in views.ledger_view(layout)["cases"] if r["projectNo"] == project)
+
+
+SAMPLING_PENDING = [{"method": "SAMPLING", "result": "PENDING"}]
+
+
+def test_pending_sampling_record_does_not_hide_a_valid_source_conclusion(layout):
+    row = add_source_classified_case(
+        layout, A, manifest_products=SAMPLING_PENDING, cells=[("不合格", "未发现不合格现象", "[检]"), ("未发现不合格现象", "未发现不合格现象", "[复查]")]
+    )
+    assert row["initialResult"] == "UNQUALIFIED" and row["statisticsYear"] == 2098
+    assert row["sourceProduct"]["unqualifiedBasis"] == "QUALITY"
+    assert row["recordInitialFact"] == "抽样送检·结果待定"
+    assert "CLASSIFICATION_EVIDENCE_UNTRUSTED" not in row["issues"]
+
+
+def test_market_access_finding_is_never_reported_as_a_quality_finding(layout):
+    row = add_source_classified_case(
+        layout, A, manifest_products=[{"method": None, "result": None}], cells=[("未检查", "1项不合格", "[检]")]
+    )
+    assert row["initialResult"] == "UNQUALIFIED"
+    summary = row["sourceProduct"]
+    assert summary["unqualifiedBasis"] == "MARKET_ACCESS"
+    assert summary["qualityOutcome"] == "NOT_CHECKED" and summary["marketAccessOutcome"] == "UNQUALIFIED"
+    assert summary["qualityCells"] == ["未检查"] and summary["marketAccessCells"] == ["1项不合格"]
+    assert row["recordInitialFact"] == ""  # 本地未登记初查事实时不打印占位
+
+
+def test_quality_and_market_access_findings_are_both_reported_when_both_present(layout):
+    row = add_source_classified_case(
+        layout, A, manifest_products=SAMPLING_PENDING, cells=[("不合格", "1项不合格(2021081810000043)", "[检]")]
+    )
+    assert row["sourceProduct"]["unqualifiedBasis"] == "QUALITY_AND_MARKET_ACCESS"
+
+
+def test_untrusted_source_evidence_does_not_classify_a_pending_record(layout):
+    row = add_source_classified_case(layout, A, manifest_products=SAMPLING_PENDING, cells=[("不合格", "", "[检]")], digest_ok=False)
+    assert row["initialResult"] == "UNKNOWN" and row["sourceProduct"] is None
+
+
+def test_pending_record_without_source_classification_stays_unknown(layout):
+    write(layout.work_case_dir(A) / "manifest.json", {"case": {"projectNo": A}, "initialInspection": {"inspectionDate": "2098-12-10", "products": SAMPLING_PENDING}, "files": []})
+    ws.upsert_case(layout, A, source={"projectIdentitySource": "DETAIL"})
+    row = views.ledger_view(layout)["cases"][0]
+    assert row["initialResult"] == "UNKNOWN" and row["recordInitialFact"] == "抽样送检·结果待定"
+
+
+def test_a_final_local_result_is_not_overridden_by_a_different_source_classification(layout):
+    row = add_source_classified_case(
+        layout, A, manifest_products=[{"method": "ONSITE", "result": "QUALIFIED"}], cells=[("不合格", "", "[检]")]
+    )
+    assert row["initialResult"] == "QUALIFIED"
+
+
+def test_excel_keeps_record_fact_quality_market_access_and_basis_in_separate_columns(layout):
+    from contextlib import closing
+
+    from openpyxl import load_workbook
+
+    add_source_classified_case(layout, A, manifest_products=[{"method": None, "result": None}], cells=[("未检查", "1项不合格", "[检]")])
+    add_source_classified_case(layout, B, manifest_products=SAMPLING_PENDING, cells=[("不合格", "未发现不合格现象", "[检]")])
+    with closing(load_workbook(ws.export_waterline_xlsx(layout))) as book:
+        sheet = book["不合格案卷"]
+        headers = [c.value for c in sheet[1]]
+        rows = {r[0]: dict(zip(headers, r, strict=True)) for r in sheet.iter_rows(min_row=2, values_only=True)}
+    assert rows[A]["不合格依据"] == "市场准入不合格" and rows[A]["来源产品质量现场检查原文"] == "未检查"
+    assert rows[A]["来源市场准入检查原文"] == "1项不合格"
+    assert rows[B]["不合格依据"] == "产品质量不合格" and rows[B]["本地检查记录初查事实"] == "抽样送检·结果待定"
+
+
+def test_ledger_row_reads_source_facts_layer_without_writing_or_inferring(layout):
+    from scripts import source_facts as sf
+
+    add_case(layout, A)
+    record = ws.load_waterline(layout)["cases"][A]
+    work = layout.work_case_dir(A)
+    row = views.describe(layout, A, record)["sourceFacts"]
+    assert row["stored"] is False and row["stationActivity"]["value"] == "UNKNOWN"
+    store, _ = sf.merge_snapshot(
+        None,
+        {
+            "observations": [
+                {
+                    "observationId": "o1", "projectNo": A, "rwid": "r", "level": "TASK",
+                    "taskKind": "daily", "taskId": "t",
+                    "stationAssertions": [{"scope": "COMBINED", "value": "YES", "evidenceRef": "e.json"}],
+                    "provenance": {"observedAt": "2099-01-01T00:00:00+08:00"},
+                }
+            ]
+        },
+        A,
+        "2099-01-01T00:00:00Z",
+    )
+    write(work / sf.STORE_FILE, store)
+    before = (work / sf.STORE_FILE).read_bytes()
+    row = views.describe(layout, A, record)["sourceFacts"]
+    assert row["stored"] is True and row["observationCount"] == 1
+    assert row["stationActivity"]["value"] == "YES"
+    assert (work / sf.STORE_FILE).read_bytes() == before
+    (work / sf.STORE_FILE).write_text("not json", encoding="utf-8")
+    broken = views.describe(layout, A, record)["sourceFacts"]
+    assert broken["stored"] is False and broken["stationActivity"]["value"] == "UNKNOWN"
+
+
+def test_ledger_stage_package_received_is_independent_of_materials_and_attach(layout):
+    add_case(layout, A)
+    record = ws.load_waterline(layout)["cases"][A]
+    base = views.describe(layout, A, record)["stages"]
+    assert "packageReceived" in base
+    # 仅收到包、未接件：已收到为真，材料已采集不因此为真
+    received = {"source": {"status": "PACKAGE_READY_TO_ATTACH", "downloadDelivery": {"status": "READY", "received": {"sha256": "x"}}}}
+    stages = views.describe(layout, A, {**record, "source": received["source"]})["stages"]
+    assert stages["packageReceived"] is True
+
+
+import datetime as _dt
+
+
+@pytest.mark.parametrize(
+    "today,start",
+    [
+        ("2026-11-07", "2026-09-07"),
+        ("2026-03-31", "2026-01-31"),
+        ("2026-04-30", "2026-02-28"),
+        ("2028-04-29", "2028-02-29"),
+        ("2027-04-30", "2027-02-28"),
+        ("2026-01-15", "2025-11-15"),
+        ("2026-02-28", "2025-12-28"),
+    ],
+)
+def test_rolling_two_month_window_clamps_month_end_and_crosses_year(today, start):
+    window = views.rolling_window(2, _dt.date.fromisoformat(today))
+    assert window == {"startDate": start, "endDate": today}
+
+
+def _facts(**over):
+    base = {"hasPackage": True, "packageValid": True, "attachedAt": "2026-10-01T10:00:00+08:00",
+            "sourceStatus": "OPEN", "initialResult": "UNQUALIFIED",
+            "checkDate": _dt.date(2026, 10, 20), "dateIssue": None, "localComplete": False}
+    return {**base, **over}
+
+
+TODAY = _dt.date(2026, 11, 7)
+
+
+def _code(**over):
+    return views.package_decision(_facts(**over), today=TODAY)["code"]
+
+
+def test_package_decision_default_reuses_and_never_downloads_for_missing_material():
+    assert _code(sourceStatus="CLOSED") == "PKG_REUSE_CLOSED"
+    assert _code(sourceStatus=None) == "PKG_REUSE_EXISTING"          # 状态未知不妨碍复用
+    assert _code(checkDate=None, dateIssue="DATE_UNKNOWN") == "PKG_REUSE_EXISTING"
+    assert _code(initialResult="QUALIFIED") == "PKG_REUSE_EXISTING"       # 合格案已有包也复用(不再仅索引)
+    assert _code(initialResult="UNKNOWN") == "PKG_REUSE_EXISTING"
+    assert _code(hasPackage=False, initialResult="UNKNOWN") == "PKG_ACQUIRE_FIRST"   # 结果未知无包：首次获取，不暂缓
+    assert _code(hasPackage=False, initialResult="QUALIFIED") == "PKG_ACQUIRE_FIRST"
+    assert _code(hasPackage=False, sourceStatus="CLOSED") == "PKG_ACQUIRE_FIRST"
+    assert _code(packageValid=False) == "PKG_BAD_LOCAL"
+    assert _code(packageValid=False, packageIssue="FILE_MISSING") == "PKG_BAD_LOCAL"
+    assert _code(packageValid=False, packageIssue="UNKNOWN") == "PKG_HOLD_PACKAGE_UNKNOWN"   # 无法确认不是坏包
+    assert _code(packageValid=False, packageIssue="AMBIGUOUS_CHAIN") == "PKG_HOLD_PACKAGE_UNKNOWN"
+
+
+def test_package_decision_recent_unqualified_open_is_candidate_even_when_complete():
+    assert _code() == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"
+    assert _code(localComplete=True) == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"  # complete 不盖过合法更新
+
+
+def test_package_decision_interval_window_edges_and_unknown_dates():
+    # 7 天间隔：第 6 天不到期，第 7 天到期
+    assert _code(attachedAt="2026-11-02T10:00:00+08:00") == "PKG_REUSE_EXISTING"
+    assert _code(attachedAt="2026-10-31T10:00:00+08:00") == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"
+    # 窗口两端均含：起点 2026-09-07 与今日
+    assert _code(checkDate=_dt.date(2026, 9, 7)) == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"
+    assert _code(checkDate=_dt.date(2026, 9, 6)) == "PKG_ACTIVE_OLDER_MANUAL"
+    assert _code(checkDate=TODAY) == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"
+    # 未来/冲突/无值不自动入候选
+    assert _code(checkDate=_dt.date(2026, 11, 8)) == "PKG_REUSE_EXISTING"
+    assert _code(checkDate=None, dateIssue="DATE_CONFLICT") == "PKG_REUSE_EXISTING"
+    # 可配置间隔
+    d = views.package_decision(_facts(attachedAt="2026-11-02T10:00:00+08:00"), today=TODAY, refresh_days=3)
+    assert d["code"] == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"
+
+
+def test_scan_plan_lists_package_candidates_read_only(layout):
+    add_case(layout, A)
+    before = ws.load_waterline(layout)
+    plan = views.scan_plan(layout, mode="annual-baseline", today=_dt.date(2099, 1, 1))
+    assert plan["packagePolicy"]["windowMonths"] == 2 and plan["packagePolicy"]["readOnly"] is True
+    assert "packageDecisionCounts" in plan and ws.load_waterline(layout) == before

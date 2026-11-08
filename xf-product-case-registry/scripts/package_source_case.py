@@ -37,32 +37,91 @@ def _read_request(layout, path: Path, context: dict) -> dict:
 
 
 def _await_request(layout, config, context: dict, request: dict, timeout: int) -> dict:
+    refresh = context.get("refresh") or {}
     result = source.await_download(
         layout, context["batchId"], context["rwid"],
         download_baseline=request["baselinePath"], download_dir=config.download_dir,
         allowed_download_dir=config.download_dir, attach=True, timeout_seconds=timeout,
+        refresh_of_sha=refresh.get("ofSha"), refresh_reason=refresh.get("reason"),
     )
     return {key: value for key, value in result.items() if key != "capture"}
 
-
-def _select_leaves(browser, context: dict) -> list[dict]:
-    rwid = context["rwid"]
-    browser.read_full_detail(rwid, context["projectNo"], context["unitName"])
-    module = Path(__file__).with_name("playwright_cli_download.cjs").read_text(encoding="utf-8")
-    reader = module.split("// PACKAGE_SELECTION_READER_START\n", 1)[1].split(
-        "// PACKAGE_SELECTION_READER_END", 1
+# 页面内选择读取器与点击前控制器共用同一份源码：SELECTION_BODY 位于 playwright_cli_download.cjs，护栏位于
+# browser_source_capture.mjs(VISIBLE_GUARDS)，两处逐字内联；只读可见 DOM，不读取框架内部数据。
+def selection_reader() -> str:
+    scripts = Path(__file__).parent
+    guards_module = (scripts / "browser_source_capture.mjs").read_text(encoding="utf-8")
+    guards = guards_module.split("// VISIBLE_GUARDS_START\n", 1)[1].split("// VISIBLE_GUARDS_END", 1)[0]
+    controller = (scripts / "playwright_cli_download.cjs").read_text(encoding="utf-8")
+    body = controller.split("// SELECTION_BODY_START\nconst SELECTION_BODY = String.raw`", 1)[1].split(
+        "`;\n// SELECTION_BODY_END", 1
     )[0]
-    browser.run(r'''async page => {
-      const start=page.locator('button:visible').filter({hasText:/^开始打包$/});
-      if(await start.count()===0)await page.locator('button:visible')
-        .filter({hasText:/^打\s*包$/}).press('Enter');
-      await start.waitFor({state:'visible',timeout:10000});
-      const clear=page.locator('button:visible').filter({hasText:/^取消所选数据$/});
-      if(await clear.count()!==1)throw new Error('PACKAGE_CLEAR_CONTROL_NOT_UNIQUE');
-      await clear.press('Enter');return {panelReady:true};}''')
+    return "function readPackageSelection(r){" + guards + body + "}"
+
+
+def _cross_check_leaf_count(detail: dict) -> int | None:
+    """详情目录的本案叶数，仅当该目录已被证明覆盖完整(coverageProven)时才可作为面板的交叉核对数；
+    目录行数本身不是页面声明总数，缺证返回 None(下游不据此放行)。"""
+    fields = detail.get("fields", {}) if isinstance(detail, dict) else {}
+    if (fields.get("文书目录完整性") or {}).get("coverageProven") is not True:
+        return None
+
+    def leaves(node):
+        kids = node.get("children") or []
+        return sum(leaves(k) for k in kids) if kids else 1
+
+    roots = [n for n in fields.get("文书目录", []) if n.get("currentProject") is True]
+    return sum(leaves(n) for n in roots) if roots else None
+
+
+# 每个脚本只做一个页面状态动作；动作后的效果由随后的独立只读观察核对。
+_OPEN_PANEL = r"""async page => {
+  const start=page.locator('button:visible').filter({hasText:/^开始打包$/});
+  if(await start.count()!==0)return {panelAlreadyOpen:true};
+  await page.locator('button:visible').filter({hasText:/^打\s*包$/}).press('Enter');
+  return {panelOpenSubmitted:true};}"""
+_OBSERVE_PANEL = r"""async page => {
+  await page.locator('button:visible').filter({hasText:/^开始打包$/}).waitFor({state:'visible',timeout:10000});
+  return {panelOpen:true};}"""
+_CLEAR_SELECTION = r"""async page => {
+  const clear=page.locator('button:visible').filter({hasText:/^取消所选数据$/});
+  if(await clear.count()!==1)throw new Error('PACKAGE_CLEAR_CONTROL_NOT_UNIQUE');
+  await clear.press('Enter');return {panelReady:true};}"""
+_SELECT_ALL = r"""async page => {
+  const all=page.getByText('全选',{exact:true});
+  if(await all.count()!==1)throw new Error('SELECT_ALL_CONTROL_NOT_UNIQUE');
+  await all.evaluate(e=>e.click());return {selectAllSubmitted:true};}"""
+
+
+def _click_leaf_script(leaf_id: str) -> str:
+    return (
+        "async page => {const id=" + json.dumps(leaf_id) + ";"
+        "const label=page.locator('label.el-checkbox:visible').filter({has:"
+        "page.locator('input[type=\"checkbox\"][value=\"'+id+'\"]')});"
+        "if(await label.count()!==1)throw new Error('CURRENT_LEAF_CHECKBOX_NOT_UNIQUE');"
+        "const box=label.locator('input[type=\"checkbox\"][value=\"'+id+'\"]');"
+        "if(await box.isChecked())return {alreadySelected:true};"
+        "await label.evaluate(e=>e.click());return {clickSubmitted:true};}"
+    )
+
+
+def _select_leaves(browser, context: dict, *, select_all: bool = True) -> list[dict]:
+    rwid = context["rwid"]
+    detail_args = [rwid, context["projectNo"], context["unitName"]]
+    if context.get("org"):
+        detail_args.append(context["org"])  # 大队预期值来自已保存详情，详情页实测必须相等
+    live = browser.read_full_detail(*detail_args)
+    # 预期(项目号/RWID/单位/大队)来自已保存的详情证据；实测来自当前页。叶集合完整性由面板自身的覆盖证明提供，
+    # 详情目录只在其自身覆盖已证明时才作交叉核对数。
+    cross_check = _cross_check_leaf_count(live)
+    reader = selection_reader()
 
     def observe(expected_ids=None):
-        request = {"rwid": rwid, "expectedLeafIds": expected_ids}
+        request = {
+            "rwid": rwid, "expectedLeafIds": expected_ids, "projectNo": context["projectNo"],
+            "unitName": context["unitName"], "org": context.get("org"),
+            "crossCheckLeafCount": cross_check, "declaredLeafCount": None, "declaredSourceVisible": False,
+        }
         selection = browser.run(
             "async page => {return await page.evaluate(" + reader + ","
             + json.dumps(request) + ");}"
@@ -75,24 +134,31 @@ def _select_leaves(browser, context: dict) -> list[dict]:
             raise error
         return selection
 
-    before = observe()
+    browser.run(_OPEN_PANEL)           # 动作1：打开面板(若未打开)
+    browser.run(_OBSERVE_PANEL)        # 观察：面板已出现
+    browser.run(_CLEAR_SELECTION)      # 动作2：取消所选数据
+    before = observe()                 # 观察：身份/根归属/完整叶证明后的初始选择
     if before["selectedLeafIds"]:
         raise source.SourceIntakeError("取消所选数据后仍有文书被选中，停止打包")
     ids = [leaf["id"] for leaf in before["leaves"]]
-    # DOM check events update the website normally. Do not call 全选 or write Vue state.
-    browser.run(
-        "async page => {const ids=" + json.dumps(ids) + ";for(const id of ids){"
-        "if(await page.evaluate(()=>document.visibilityState)==='hidden')"
-        "throw new Error('SOURCE_DOCUMENT_HIDDEN');"
-        "const label=page.locator('label.el-checkbox:visible').filter({has:"
-        "page.locator('input[type=\"checkbox\"][value=\"'+id+'\"]')});"
-        "if(await label.count()!==1)throw new Error('CURRENT_LEAF_CHECKBOX_NOT_UNIQUE');"
-        "const box=label.locator('input[type=\"checkbox\"][value=\"'+id+'\"]');"
-        "if(!(await box.isChecked()))await label.evaluate(e=>e.click());"
-        "if(!(await box.isChecked()))throw new Error('CURRENT_LEAF_NOT_SELECTED');"
-        "}return {selected:true};}"
-    )
-    after = observe(ids)
+    done = False
+    if select_all and before.get("canSelectAll") is True:
+        # 仅当面板内没有任何外案/未知叶且本案叶集合已证明完整时，才允许一次“全选”并回读精确集合。
+        try:
+            browser.run(_SELECT_ALL)   # 动作3：全选(控件不唯一则在点击前失败)
+            done = True
+        except source.SourceIntakeError as error:
+            if "SELECT_ALL_CONTROL_NOT_UNIQUE" not in str(error):
+                raise
+    if done:
+        after = observe(ids)
+    else:
+        for leaf_id in ids:            # 逐叶：一个脚本一次点击，之后新观察
+            browser.run(_click_leaf_script(leaf_id))
+            current = observe(ids)
+            if leaf_id not in current["selectedLeafIds"]:
+                raise source.SourceIntakeError("CURRENT_LEAF_NOT_SELECTED")
+        after = observe(ids)
     if not after["allCurrentSelected"] or set(after["selectedLeafIds"]) != set(ids):
         raise source.SourceIntakeError("打包面板完整选中集合与本案 RWID 叶子不一致，停止打包")
     return after["leaves"]
@@ -134,19 +200,56 @@ def _request_outcome(layout, config, context, directory, request, timeout, *, st
             "packageClickAttempts": int(started)}
 
 
+def _validated_refresh(layout, project: str, refresh_reason, today) -> dict:
+    """显式更新：必须有合法理由和当前代包；近期不合格周期更新还须计划判定为候选。"""
+    if refresh_reason not in source.REFRESH_REASONS:
+        raise source.SourceIntakeError("显式更新理由不在允许集合内，拒绝重新打包")
+    if refresh_reason == "BAD_LOCAL":
+        # 坏包诊断不静默变成下载：必须确认原包确实无法回读，且只记录过唯一一个包摘要。
+        try:
+            capture.verified_package(layout, project)
+        except capture.PackageUnreadable as error:
+            if error.state not in {"FILE_MISSING", "SHA_MISMATCH"}:
+                raise  # 路径安全/身份无法确认不是可靠坏包结论
+            recorded = capture.recorded_package_shas(layout, project)
+            if len(recorded) != 1:
+                raise source.SourceIntakeError("坏包更新要求项目只登记过唯一原包，请人工核对")
+            return {"ofSha": recorded[0], "reason": refresh_reason}
+        raise source.SourceIntakeError("原包可正常回读，BAD_LOCAL 不成立，拒绝重新打包")
+    head = capture.verified_package(layout, project)
+    if not head:
+        raise source.SourceIntakeError("该案没有已验证的原包，无需也不能按更新处理")
+    if refresh_reason == "RECENT_UNQUALIFIED":
+        if __package__:
+            from . import ledger_views as views
+        else:
+            import ledger_views as views
+        decision = views.package_decision_for_project(layout, project, today=today)
+        if decision["code"] != "PKG_REFRESH_DUE_RECENT_UNQUALIFIED":
+            raise source.SourceIntakeError(
+                "当前源证据不构成近期不合格更新候选：" + decision["code"] + "，拒绝重新打包"
+            )
+    return {"ofSha": head["package"]["sha256"], "reason": refresh_reason}
+
+
 def package_known_case(
     layout, config, browser, batch_id: str, rwid: str, project: str, *,
     session: str, browser_name: str = "edge", attempt: int = 1, timeout: int = 60,
-    start_request=_start_request,
+    start_request=_start_request, refresh_reason: str | None = None, today=None,
 ) -> dict:
     if attempt not in {1, 2} or type(timeout) is not int or not 1 <= timeout <= 60:
         raise source.SourceIntakeError("单案最多两次打包，单次接收观察最多 60 秒")
     context = capture.case_context(layout, batch_id, rwid, project)
-    if source._verified_completed_waterline(layout, project):
-        return {"status": "ALREADY_COMPLETED", "projectNo": project, "packageClickAttempts": 0}
-    existing = capture.verified_package(layout, project)
-    if existing:
-        return {**existing, "packageClickAttempts": 0}
+    refreshing = refresh_reason is not None
+    if refreshing:
+        # 显式、受审计的更新：complete 不盖过它，但必须有合法理由与当前代包。
+        context["refresh"] = _validated_refresh(layout, project, refresh_reason, today)
+    else:
+        if source._verified_completed_waterline(layout, project):
+            return {"status": "ALREADY_COMPLETED", "projectNo": project, "packageClickAttempts": 0}
+        existing = capture.verified_package(layout, project)
+        if existing:
+            return {**existing, "packageClickAttempts": 0}
     record, state = context["record"], context["state"]
     annual = state.get("filters", {}).get("selectionMode") == "ANNUAL_CASE_BASELINE"
     if annual:
@@ -158,7 +261,9 @@ def package_known_case(
     if not detail:
         raise source.SourceIntakeError("本案尚无完整详情证据，停止打包")
     context["unitName"] = source._find_first(detail["fields"], source._UNIT_NAME_KEYS)
-    pending = capture.pending_download_request(layout, project)
+    # 材料动作的身份期望必须来自打开页面之前已保存的详情证据；缺项由页面读取器的 identityGate 阻断。
+    context["org"] = (detail["fields"].get("消防管辖") or "").strip() or None
+    pending = capture.pending_download_request(layout, project, ignore_attached=refreshing)
     if pending and pending.get("batchId") != batch_id:
         return {**pending, "packageClickAttempts": 0}
     directory = capture.material_directory(layout, batch_id, project)
@@ -228,7 +333,9 @@ def package_known_case(
         "browserCwd": str(getattr(browser, "cwd", Path.cwd())),
         "origin": f"{origin.scheme}://{origin.netloc}",
         "batchId": batch_id, "rwid": rwid, "projectNo": project,
-        "unitName": context["unitName"], "expectedLeafCount": len(leaves),
+        "unitName": context["unitName"], "org": context.get("org"),
+        "crossCheckLeafCount": _cross_check_leaf_count(detail), "declaredSourceVisible": False,
+        "expectedLeafCount": len(leaves),
         "expectedLeafIds": [leaf["id"] for leaf in leaves],
         "baselinePath": str(layout.root / baseline["relativePath"]),
         "checkpointPath": str(directory / f"packaging-action{suffix}.json"),
@@ -250,13 +357,17 @@ def main() -> None:
     parser.add_argument("--workspace-root", type=Path)
     parser.add_argument("--attempt", type=int, choices=[1, 2], default=1)
     parser.add_argument("--timeout-seconds", type=int, default=60)
+    parser.add_argument(
+        "--refresh-reason", choices=sorted(source.REFRESH_REASONS),
+        help="显式更新理由；缺省为只复用已验证原包，不重新打包",
+    )
     args = parser.parse_args()
     config, layout = ws.resolve_workspace(work_root=args.workspace_root, create_layout=False)
     browser = browser_api.Session(args.browser_cwd, args.session, args.browser)
     result = package_known_case(
         layout, config, browser, args.batch_id, args.rwid, args.project,
         session=args.session, browser_name=args.browser, attempt=args.attempt,
-        timeout=args.timeout_seconds,
+        timeout=args.timeout_seconds, refresh_reason=args.refresh_reason,
     )
     print(json.dumps(result, ensure_ascii=False))
 

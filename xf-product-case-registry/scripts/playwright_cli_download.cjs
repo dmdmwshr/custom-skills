@@ -2,63 +2,76 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-// PACKAGE_SELECTION_READER_START
-function readPackageSelection(r) {
-  if(document.visibilityState==='hidden')return {ready:false,reason:'SOURCE_DOCUMENT_HIDDEN'};
-  const [route,query]=location.hash.split('?');
-  if(route!=='#/xfjd/projectDetail'||new URLSearchParams(query??'').get('RWID')!==r.rwid)
-    return {ready:false,reason:'IDENTITY_MISMATCH'};
-  const tables=[...document.querySelectorAll('.el-table')].filter(t=>t.offsetWidth&&t.offsetHeight&&
-    t.querySelector('.el-table__header-wrapper')?.innerText.includes('审批日期'));
-  const roots=tables.length===1?tables[0].__vue__?.store?.states?.data:null;
-  if(!Array.isArray(roots))return {ready:false,reason:'COMPLETE_SELECTION_STATE_UNAVAILABLE'};
-  const directory=new Map(),visited=new Set();
-  let invalid=false;
-  const walk=(n,depth)=>{
-    if(!n||typeof n!=='object'||visited.has(n)||depth>20){invalid=true;return;}
-    visited.add(n);
-    if(n.children!==undefined&&!Array.isArray(n.children)){invalid=true;return;}
-    if((n.children??[]).length){for(const child of n.children)walk(child,depth+1);return;}
-    if(!n.ID)return;
-    const id=String(n.ID),rwid=String(n.RWID??'');
-    if(!/^\d+$/.test(id)||!/^\d+$/.test(rwid)||directory.has(id)||directory.size>=500) {
-      invalid=true;return;
-    }
-    directory.set(id,{id,rwid,title:String(n.TITLE??'')});
-  };
-  roots.forEach(n=>walk(n,0));
-  const leaves=[...directory.values()].filter(n=>n.rwid===r.rwid);
-  const ids=leaves.map(n=>n.id);
-  if(invalid||!leaves.length)return {ready:false,reason:'COMPLETE_SELECTION_STATE_UNAVAILABLE'};
-  if(r.expectedLeafIds&&(ids.length!==r.expectedLeafIds.length||
-    !ids.every(id=>r.expectedLeafIds.includes(id))))return {ready:false,reason:'SELECTION_MISMATCH'};
-  // Every downloadable leaf, including collapsed related cases, must have an
-  // observable checkbox. Never infer an unrendered leaf's unchecked state.
-  const boxes=new Map();
-  let unknownSelected=0;
-  for(const e of document.querySelectorAll('input[type="checkbox"]')) {
-    if(!/^\d+$/.test(e.value))continue;
-    if(!directory.has(e.value)){if(e.checked)unknownSelected++;continue;}
-    if(!boxes.has(e.value))boxes.set(e.value,[]);
-    boxes.get(e.value).push(e);
-  }
-  const missing=[...directory.keys()].filter(id=>!boxes.has(id));
-  const disagreement=[...boxes.values()].some(es=>es.some(e=>e.checked!==es[0].checked));
-  if(missing.length||disagreement)return {ready:false,reason:'COMPLETE_SELECTION_STATE_UNAVAILABLE',
-    documentCount:directory.size,missingCheckboxCount:missing.length};
-  const selectedLeafIds=[...boxes].filter(([,es])=>es[0].checked).map(([id])=>id);
-  const foreignSelectedCount=selectedLeafIds.filter(id=>directory.get(id).rwid!==r.rwid).length;
-  if(foreignSelectedCount||unknownSelected)return {ready:false,reason:'SELECTION_MISMATCH',
-    documentCount:directory.size,foreignSelectedCount:foreignSelectedCount+unknownSelected};
-  if(ids.some(id=>boxes.get(id).some(e=>e.disabled)))
-    return {ready:false,reason:'COMPLETE_SELECTION_STATE_UNAVAILABLE',documentCount:directory.size};
-  return {ready:true,leaves,documentCount:directory.size,selectedLeafIds,
-    allCurrentSelected:ids.every(id=>selectedLeafIds.includes(id)),foreignSelectedCount:0};
+// 点击前选择读取器：只读可见 DOM(Element UI 树表行、复选框 value/checked、展开图标)，不读取框架内部数据。
+// 护栏函数(身份四项/根边界/完整叶证明/选择集合)与 browser_source_capture.mjs 的 VISIBLE_GUARDS 同源，逐字内联。
+// SELECTION_BODY_START
+const SELECTION_BODY = String.raw`
+if(document.visibilityState==='hidden')return {ready:false,reason:'SOURCE_DOCUMENT_HIDDEN'};
+const vis=e=>!!e&&!!e.offsetWidth&&!!e.offsetHeight;
+const txt=e=>(e?.innerText||'').replace(/\s+/g,' ').trim();
+const busy=[...document.querySelectorAll('[class*=loading],#nprogress,.el-loading-mask')].some(e=>vis(e)&&
+  getComputedStyle(e).visibility!=='hidden'&&Number(getComputedStyle(e).opacity)>0);
+if(busy)return {ready:false,reason:'SOURCE_LOADING'};
+const [route,query]=location.hash.split('?');
+const urlRwid=new URLSearchParams(query??'').get('RWID')||'';
+const pn=/项目编号[：:]\s*(\d{8}[A-Z]\d{9})/.exec(document.body.innerText)?.[1]||'';
+const field=l=>{const n=[...document.querySelectorAll('main.el-main span')].filter(e=>e.textContent.trim()===l);
+  return n.length===1?txt(n[0].parentElement.nextElementSibling):'';};
+const gate=identityGate({expectedProjectNo:r.projectNo,detailProjectNo:pn,expectedRwid:r.rwid,urlRwid,
+  expectedUnit:r.unitName,detailUnit:field('单位名称'),expectedOrg:r.org,detailOrg:field('消防管辖')});
+if(route!=='#/xfjd/projectDetail'||!gate.ok)return {ready:false,reason:'IDENTITY_BLOCKED',identityMiss:gate.miss};
+const tables=[...document.querySelectorAll('.el-table')].filter(t=>vis(t)&&
+  t.querySelector('.el-table__header-wrapper')?.innerText.includes('审批日期'));
+if(tables.length!==1)return {ready:false,reason:'COMPLETE_SELECTION_STATE_UNAVAILABLE',blockReasons:['SELECTION_TABLE_NOT_UNIQUE']};
+const trs=[...tables[0].querySelectorAll('.el-table__body-wrapper tr.el-table__row')].filter(vis);
+let collapsed=0,expandUnknown=0;const unknownIdx=[];
+const rows=trs.map((tr,ti)=>{
+  const cb=tr.querySelector('input[type="checkbox"]');
+  const lv=/el-table__row--level-(\d+)/.exec(tr.className);
+  const icon=tr.querySelector('.el-table__expand-icon'),ph=tr.querySelector('.el-table__placeholder');
+  if(!icon&&!ph)unknownIdx.push(ti);
+  if(icon&&!ph&&!icon.classList.contains('el-table__expand-icon--expanded'))collapsed++;
+  return {id:cb&&/^\d+$/.test(cb.value)?cb.value:null,hasCheckbox:!!cb,checked:cb?!!cb.checked:false,
+    disabled:cb?!!cb.disabled:false,level:lv?Number(lv[1]):0,
+    title:[...tr.cells].map(txt).find(t=>t)||''};
+});
+// 无展开图标、无占位且其后没有子层级行的非本案根行(如空的外案[监]根)不含本案叶，不算展开状态未知；本案根与有子层级的行仍按未知阻断。
+const emptyForeignRoot=(i)=>{const x=rows[i];return x.level===0&&!x.hasCheckbox&&!(rows[i+1]&&rows[i+1].level>0)&&!(String(x.title).includes('[产]')&&String(x.title).includes(String(r.projectNo)));};
+expandUnknown=unknownIdx.filter(i=>!emptyForeignRoot(i)).length;
+const wrap=tables[0].querySelector('.el-table__body-wrapper');
+const overflow=wrap&&Number.isFinite(wrap.scrollHeight)&&Number.isFinite(wrap.clientHeight)?wrap.scrollHeight-wrap.clientHeight>1:null;
+const coverageProven=overflow===false&&expandUnknown===0&&collapsed===0&&rows.length>0;
+const m=assignLeafMembership(rows,r.projectNo);
+const declared=r.declaredSourceVisible===true&&Number.isInteger(r.declaredLeafCount)?r.declaredLeafCount:null;
+const comp=leafCompleteness({ownCount:m.ownIds.length,declaredLeafCount:declared,collapsedCount:collapsed,
+  unreadableCount:m.unreadableCount,expandStateKnown:rows.length>0&&expandUnknown===0,coverageProven});
+const blocks=comp.why.slice();
+if(m.unknownState)blocks.push('UNKNOWN_STATE');
+if(Number.isInteger(r.crossCheckLeafCount)&&r.crossCheckLeafCount!==m.ownIds.length)blocks.push('CROSS_CHECK_MISMATCH');
+if(blocks.length)return {ready:false,reason:'COMPLETE_SELECTION_STATE_UNAVAILABLE',blockReasons:blocks,roots:m.roots,documentCount:rows.length};
+const foreignSelectedCount=m.foreignSelected.length+m.orphanSelected.length;
+if(foreignSelectedCount)return {ready:false,reason:'SELECTION_MISMATCH',foreignSelectedCount,documentCount:rows.length};
+if(r.expectedLeafIds&&(r.expectedLeafIds.length!==m.ownIds.length||
+  !m.ownIds.every(id=>r.expectedLeafIds.includes(id))))return {ready:false,reason:'SELECTION_MISMATCH',documentCount:rows.length};
+const ownRows=rows.filter(x=>x.id&&m.ownIds.includes(x.id));
+if(ownRows.some(x=>x.disabled))return {ready:false,reason:'COMPLETE_SELECTION_STATE_UNAVAILABLE',blockReasons:['OWN_LEAF_DISABLED']};
+return {ready:true,leaves:ownRows.map(x=>({id:x.id,rwid:r.rwid,title:x.title})),documentCount:rows.length,
+  selectedLeafIds:m.ownSelected,allCurrentSelected:m.ownIds.every(id=>m.ownSelected.includes(id)),foreignSelectedCount:0,
+  foreignLeafCount:m.foreignIds.length,canSelectAll:m.foreignIds.length===0&&m.orphanCount===0};
+`;
+// SELECTION_BODY_END
+function guardsSource() {
+  const module = fs.readFileSync(path.join(__dirname, 'browser_source_capture.mjs'), 'utf8');
+  return module.split('// VISIBLE_GUARDS_START\n')[1].split('// VISIBLE_GUARDS_END')[0];
+}
+function selectionReaderSource() {
+  return 'function readPackageSelection(r){' + guardsSource() + SELECTION_BODY + '}';
 }
 // PACKAGE_SELECTION_READER_END
 function buildDownloadCode(r) {
   if (!['edge','chrome'].includes(r.browser) || !/^[a-z0-9][a-z0-9-]{0,47}$/.test(r.session || '')) throw new Error('Invalid session');
   if (!/^\d+$/.test(r.rwid || '') || !/^\d{8}[A-Z]\d{9}$/.test(r.projectNo || '') || !r.unitName) throw new Error('Missing case identity');
+  if (!String(r.org || '').trim()) throw new Error('Missing expected organization (消防管辖)');
   if (!Number.isInteger(r.expectedLeafCount) || r.expectedLeafCount < 1) throw new Error('Missing verified leaf count');
   if (!Array.isArray(r.expectedLeafIds) || r.expectedLeafIds.length !== r.expectedLeafCount ||
       r.expectedLeafIds.some(id => typeof id !== 'string' || !/^\d+$/.test(id)) ||
@@ -66,12 +79,12 @@ function buildDownloadCode(r) {
   const origin = new URL(r.origin);
   if (!['http:','https:'].includes(origin.protocol) || origin.origin !== r.origin) throw new Error('Invalid origin');
   return `async (page) => {
-    const r=${JSON.stringify({origin:r.origin,rwid:r.rwid,projectNo:r.projectNo,unitName:r.unitName,expectedLeafCount:r.expectedLeafCount,expectedLeafIds:r.expectedLeafIds})};
+    const r=${JSON.stringify({origin:r.origin,rwid:r.rwid,projectNo:r.projectNo,unitName:r.unitName,expectedLeafCount:r.expectedLeafCount,expectedLeafIds:r.expectedLeafIds,org:r.org,crossCheckLeafCount:Number.isInteger(r.crossCheckLeafCount)?r.crossCheckLeafCount:null,declaredLeafCount:Number.isInteger(r.declaredLeafCount)?r.declaredLeafCount:null,declaredSourceVisible:r.declaredSourceVisible===true})};
     if(await page.evaluate(()=>document.visibilityState)==='hidden') return {state:'SOURCE_DOCUMENT_HIDDEN',submitted:false};
     if(!page.url().startsWith(r.origin+'/#/xfjd/projectDetail?') || page.url().match(/[?&]RWID=([^&]+)/)?.[1]!==r.rwid) return {state:'IDENTITY_MISMATCH',submitted:false};
     const text=(await page.locator('.avue-view:visible').innerText()).replace(/\\s+/g,'');
     if(!text.includes('项目编号：'+r.projectNo) || !text.includes('单位名称'+r.unitName.replace(/\\s+/g,''))) return {state:'IDENTITY_MISMATCH',submitted:false};
-    const leaves=await page.evaluate(${readPackageSelection.toString()},r);
+    const leaves=await page.evaluate(${selectionReaderSource()},r);
     if(!leaves.ready)return {state:leaves.reason,submitted:false};
     if(!leaves.allCurrentSelected||leaves.selectedLeafIds.length!==r.expectedLeafCount||
        !leaves.selectedLeafIds.every(id=>r.expectedLeafIds.includes(id)))
@@ -134,7 +147,7 @@ function main() {
     const match=output.match(/### Result\s*\r?\n(\{[^\r\n]+\})/);
     if(match&&!output.includes('### Error'))try{
       const parsed=JSON.parse(match[1]);
-      if(['SOURCE_DOCUMENT_HIDDEN','COMPLETE_SELECTION_STATE_UNAVAILABLE','IDENTITY_MISMATCH',
+      if(['SOURCE_DOCUMENT_HIDDEN','SOURCE_LOADING','IDENTITY_BLOCKED','COMPLETE_SELECTION_STATE_UNAVAILABLE','IDENTITY_MISMATCH',
           'SELECTION_MISMATCH','NATIVE_FILE_CHECK_REQUIRED','CLICK_OUTCOME_UNKNOWN'].includes(parsed.state))
         result={state:parsed.state,submitted:parsed.submitted,downloadEvent:parsed.downloadEvent,selectedLeaves:parsed.selectedLeaves};
     }catch{}
@@ -154,5 +167,5 @@ function main() {
   process.argv=[process.execPath,runtime.cli_entry,'-s='+r.browser+'-'+r.session,'run-code',code];
   require(runtime.cli_entry);
 }
-module.exports={buildDownloadCode,recordActionIntent,readPackageSelection};
+module.exports={buildDownloadCode,recordActionIntent,selectionReaderSource,guardsSource};
 if(require.main===module)try{main();}catch(e){console.error('Download not started: '+e.message);process.exitCode=1;}

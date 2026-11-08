@@ -35,6 +35,9 @@ else:
 SCHEMA_VERSION = "LocalVerificationV1"
 PROOF_NAME = "local-verification.json"
 _VOLATILE = {"verifiedAt"}
+CONFIRMED_SCHEMA = "ConfirmedDocumentsV1"
+CONFIRMED_NAME = "confirmed-documents.json"
+_CONFIRMED_VOLATILE = {"generatedAt"}
 
 
 def _sha(path: Path) -> str:
@@ -380,3 +383,106 @@ def verify_and_archive(api: Any, layout: Any, project: str, *, archive: bool) ->
             errorSummary=None,
         )
     return result
+
+
+def build_confirmed_documents(
+    api: Any, layout: Any, project: str, confirmation: dict[str, Any], *, now: str | None = None
+) -> dict[str, Any]:
+    """Derive the confirmed-document axis from split-index plus caller-supplied confirmation evidence.
+
+    只读：不写文件、不调用字段裁决的抛错路径。仅收 split-index 中已存在、路径/摘要/页数仍相符的条目；
+    held 与未确认条目单列；全案核验（caseLevelVerified）固定 False，字段裁决只摘要引用。"""
+    work = layout.work_case_dir(project)
+    ws._assert_safe_tree(work, layout.root, "活动项目工作区")
+    chain = _split_chain(api, layout, work, project)
+    if chain is None:
+        raise api.RegistryError("没有 split-index.json，不能形成已确认文书清单")
+    index = layout.project_recorded_paths(api.read_json(work / "split-index.json"))
+    by_relative = {item["relativePath"]: item for item in index["items"]}
+    if confirmation.get("projectNo") != project:
+        raise api.RegistryError("确认清单项目编号与工作区不一致")
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in confirmation.get("items") or []:
+        relative = raw.get("relativePath")
+        entry = by_relative.get(relative)
+        if entry is None:
+            raise api.RegistryError(f"确认条目不在 split-index：{relative}")
+        if relative in seen:
+            raise api.RegistryError(f"确认条目重复：{relative}")
+        if str(raw.get("sha256")) != str(entry.get("sha256")):
+            raise api.RegistryError(f"确认条目摘要与 split-index 不一致：{relative}")
+        basis = raw.get("basis")
+        if not isinstance(basis, list) or not basis or not raw.get("level"):
+            raise api.RegistryError(f"确认条目缺少确认等级或依据：{relative}")
+        checked_basis = []
+        for evidence in basis:
+            path = Path(str(evidence.get("path", "")))
+            if not path.is_file() or _sha(path).removeprefix("sha256:") != str(evidence.get("sha256", "")).removeprefix("sha256:"):
+                raise api.RegistryError(f"确认依据缺失或摘要不符：{evidence.get('path')}")
+            checked_basis.append({"kind": evidence.get("kind"), "path": evidence["path"], "sha256": evidence["sha256"]})
+        seen.add(relative)
+        items.append(
+            {
+                "localRef": entry.get("localRef"),
+                "relativePath": relative,
+                "sha256": entry["sha256"],
+                "pageCount": entry["pageCount"],
+                "sourceRelativePath": entry.get("sourceRelativePath"),
+                "sourceSha256": entry.get("sourceSha256"),
+                "pageStart": entry.get("pageStart"),
+                "pageEnd": entry.get("pageEnd"),
+                "docTypeCandidate": entry.get("docTypeCandidate"),
+                "typeEvidenceLevel": entry.get("typeEvidenceLevel"),
+                "boundaryEvidenceTier": entry.get("boundaryEvidenceTier"),
+                "sourceForm": entry.get("sourceForm"),
+                "r8": entry.get("r8"),
+                "confirmation": {"level": raw["level"], "basis": checked_basis},
+            }
+        )
+    if not items:
+        raise api.RegistryError("没有任何可确认条目")
+    items.sort(key=lambda item: item["relativePath"])
+    content = hashlib.sha256(
+        json.dumps([[i["localRef"], i["sha256"]] for i in items], ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    resolution = work / "field-resolution.json"
+    resolution_summary = None
+    if resolution.is_file():
+        value = api.read_json(resolution)
+        unresolved = value.get("unresolvedFields") or value.get("unresolved") or []
+        resolution_summary = {"sha256": _sha(resolution), "unresolvedCount": len(unresolved)}
+    return {
+        "schemaVersion": CONFIRMED_SCHEMA,
+        "scope": "DOCUMENT_SUBSET",
+        "projectNo": project,
+        "generatedAt": now or ws._utc_now(),
+        "caseLevelVerified": False,
+        "splitIndexSha256": chain["indexSha256"],
+        "contentListSha256": content,
+        "items": items,
+        "unconfirmedSplitItems": sorted(r for r in by_relative if r not in seen),
+        "held": confirmation.get("held") or [],
+        "fieldResolution": resolution_summary,
+        "note": "文书子集已确认轴；不等于全案LOCAL_VERIFIED、材料齐全或归档；缺件属来源现状",
+    }
+
+
+def write_confirmed_documents(api: Any, layout: Any, project: str, document: dict[str, Any]) -> tuple[Path, str]:
+    path = layout.work_case_dir(project) / CONFIRMED_NAME
+    payload = (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    comparable = lambda value: {k: v for k, v in value.items() if k not in _CONFIRMED_VOLATILE}  # noqa: E731
+    if path.exists():
+        previous = _json(path)
+        if comparable(previous) == comparable(document):
+            return path, "REUSED"
+        stamp = ws._timestamp_slug(previous.get("generatedAt") or ws._utc_now())
+        archived = path.with_name(f"confirmed-documents.superseded-{stamp}.json")
+        if archived.exists():
+            raise api.RegistryError("旧已确认文书清单的保留副本已存在，拒绝覆盖")
+        path.replace(archived)
+        status = "SUPERSEDED_PREVIOUS"
+    else:
+        status = "CREATED"
+    ws._atomic_bytes(path, payload, overwrite=False)
+    return path, status

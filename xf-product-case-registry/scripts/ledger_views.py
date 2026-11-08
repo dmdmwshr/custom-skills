@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import calendar
 import hashlib
+import json
 import re
 from collections import Counter
 from datetime import date, datetime
@@ -14,12 +15,119 @@ from zoneinfo import ZoneInfo
 if __package__:
     from . import local_validity
     from . import source_coverage as coverage_api
+    from . import source_facts
     from . import workspace_state as ws
 else:
     import local_validity
     import source_coverage as coverage_api
+    import source_facts
     import workspace_state as ws
 
+
+
+# 业务视图 18 列的显式宽度(字符数)。顺序与导出表头一致；新增/删除表头列时必须同步，回归测试会校验两者等长。
+LEDGER_COLUMN_WIDTHS = [
+    24, 34, 12, 15, 10, 15, 15, 20, 20, 16, 15, 13, 16, 27, 22, 48, 27, 28, 24, 30, 30, 34,
+]
+
+_UNQUALIFIED_CELL = re.compile(r"^(?:[1-9][0-9]*项)?不合格(?:[(（][^)）]*[)）])?$")
+_BASIS_LABEL = {
+    "QUALITY": "产品质量不合格",
+    "MARKET_ACCESS": "市场准入不合格",
+    "QUALITY_AND_MARKET_ACCESS": "产品质量与市场准入均不合格",
+}
+_METHOD_LABEL = {"SAMPLING": "抽样送检", "ONSITE": "现场检查"}
+_RESULT_LABEL = {"QUALIFIED": "合格", "UNQUALIFIED": "不合格", "PENDING": "结果待定"}
+
+
+def _cell_outcome(text: str) -> str:
+    text = text.strip()
+    if _UNQUALIFIED_CELL.fullmatch(text):
+        return "UNQUALIFIED"
+    if text.startswith("未发现不合格现象"):
+        return "NO_FINDING"
+    if text == "未检查":
+        return "NOT_CHECKED"
+    return "OTHER"
+
+
+def _group_outcome(cells: list[str]) -> str | None:
+    outcomes = {_cell_outcome(cell) for cell in cells}
+    if not cells:
+        return None
+    if "UNQUALIFIED" in outcomes:
+        return "UNQUALIFIED"
+    if outcomes == {"NO_FINDING"}:
+        return "NO_FINDING"
+    if outcomes <= {"NO_FINDING", "NOT_CHECKED"}:
+        return "NOT_CHECKED"
+    return "OTHER"
+
+
+def source_product_summary(evidence: dict[str, Any], project: str) -> dict[str, Any] | None:
+    """Product quality and market-access cells exactly as the source detail page showed them.
+
+    Kept apart from every local record or classification: a market-access finding is never
+    reported as a quality finding, and neither is derived from document titles or task codes.
+    """
+    field_sets = []
+    if isinstance(evidence.get("fields"), dict) and evidence.get("projectNo") == project:
+        field_sets.append(evidence["fields"])
+    for item in (evidence.get("records") or {}).values():
+        if isinstance(item, dict) and item.get("projectNo") == project and isinstance(item.get("fields"), dict):
+            field_sets.append(item["fields"])
+    products = [
+        p for fields in field_sets for p in (fields.get("检查产品信息") or []) if isinstance(p, dict)
+    ]
+    if not products:
+        return None
+
+    def cells(key: str) -> list[str]:
+        values = [str(p.get(key, "")).strip() for p in products]
+        return list(dict.fromkeys(v for v in values if v))
+
+    quality, market = cells("产品质量现场检查情况"), cells("市场准入检查情况")
+    quality_outcome, market_outcome = _group_outcome(quality), _group_outcome(market)
+    if quality_outcome == "UNQUALIFIED" and market_outcome == "UNQUALIFIED":
+        basis = "QUALITY_AND_MARKET_ACCESS"
+    elif quality_outcome == "UNQUALIFIED":
+        basis = "QUALITY"
+    elif market_outcome == "UNQUALIFIED":
+        basis = "MARKET_ACCESS"
+    else:
+        basis = None
+    return {
+        "qualityCells": quality,
+        "marketAccessCells": market,
+        "qualityOutcome": quality_outcome,
+        "marketAccessOutcome": market_outcome,
+        "unqualifiedBasis": basis,
+    }
+
+
+def record_initial_fact(manifest: dict[str, Any]) -> str:
+    """The local inspection record's own initial facts; not a source conclusion."""
+    products = (manifest.get("initialInspection") or {}).get("products") or []
+    facts = []
+    for product in products:
+        if not isinstance(product, dict):
+            continue
+        result = effective_result(product)
+        if product.get("method") is None and result == "UNKNOWN":
+            continue  # nothing registered locally; do not print a placeholder as if it were a fact
+        facts.append(f"{_METHOD_LABEL.get(product.get('method'), '方式未登记')}·{_RESULT_LABEL.get(result, '未登记')}")
+    return "；".join(dict.fromkeys(facts))
+
+
+def ledger_header_height(headers, widths):
+    """表头按中文约 2 个字符宽、每行约 16 磅估算所需高度，至少 32 磅，使长表头换行后完整可见。"""
+    import math
+
+    lines = max(
+        (math.ceil(sum(2 if ord(ch) > 127 else 1 for ch in str(h)) * 1.15 / max(w - 1, 1)) for h, w in zip(headers, widths)),
+        default=1,
+    )
+    return max(32, 16 * lines + 8)
 
 def recent_window(today: date | None = None) -> dict[str, str]:
     today = today or datetime.now(ZoneInfo("Asia/Shanghai")).date()
@@ -397,6 +505,24 @@ def _local_completion_valid(
     return True
 
 
+def source_facts_layer(work: Path) -> dict[str, Any]:
+    """Read-only view of the stored source layer; never writes, never infers a station value."""
+    path = work / source_facts.STORE_FILE
+    if not path.is_file():
+        return {"stored": False, "observationCount": 0, "stationActivity": source_facts.station_activity(None)}
+    try:
+        store = json.loads(path.read_text(encoding="utf-8"))
+        observations = store["sourceFacts"]["observations"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"stored": False, "error": "SOURCE_FACTS_UNREADABLE", "observationCount": 0,
+                "stationActivity": source_facts.station_activity(None)}
+    return {
+        "stored": True,
+        "observationCount": len(observations),
+        "stationActivity": source_facts.station_activity(store),
+    }
+
+
 def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any]:
     work, manifest, state, issues = case_inputs(layout, project, record)
     source = record.get("source") or {}
@@ -527,10 +653,20 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
     retained_source_issues = gaps_acknowledged(source)
     if material_gaps:
         issues.append("SOURCE_MATERIALS_INCOMPLETE")
+    delivery = source.get("downloadDelivery") or {}
+    # 下载到包即“已收到”，独立于接件通过(PACKAGE_READY)、材料齐全与文书/云同步；
+    # 拒收（INVALID/guard）仍记已收到但不等于已采纳。
+    package_received = bool(
+        delivery.get("received")
+        or source.get("status") in {"PACKAGE_READY", "PACKAGE_RECEIVED", "PACKAGE_READY_TO_ATTACH"}
+        or (delivery.get("status") in {"READY", "INVALID"} and delivery.get("zipCandidates"))
+        or manifest.get("packageSha256")
+    )
     stages = {
         "sourceRegistered": bool(
             source.get("projectIdentitySource") in {"DETAIL", "MANUAL_DETAIL"} or source.get("rwid")
         ),
+        "packageReceived": package_received,
         "materialsCollected": not material_gaps
         and (
             source.get("status") in {"PACKAGE_READY", "PACKAGE_RECEIVED"}
@@ -549,11 +685,8 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         and isinstance(binding.get("qualification"), dict)
     ):
         classification = {k: binding["qualification"].get(k) for k in classification}
-    if (
-        not manifest
-        and classification["initialResult"] == "UNKNOWN"
-        and source.get("classification")
-    ):
+    source_summary = None
+    if source.get("classification"):
         candidate = source["classification"]
         try:
             evidence_path = layout.root / candidate["evidencePath"]
@@ -561,7 +694,19 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
             if evidence.get("projectNo") == project and candidate["evidenceSha256"] == (
                 "sha256:" + hashlib.sha256(evidence_path.read_bytes()).hexdigest()
             ):
-                classification = {k: candidate.get(k) for k in classification}
+                source_summary = source_product_summary(evidence, project)
+                # A local record that is still sampling/pending, or has no final product result,
+                # must not hide an independently valid source conclusion bound to its evidence
+                # digest. The local record's own date and reinspection state are kept.
+                if classification["initialResult"] == "UNKNOWN":
+                    merged = {k: candidate.get(k) for k in classification}
+                    if classification["initialInspectionDate"]:
+                        merged["initialInspectionDate"] = classification["initialInspectionDate"]
+                        merged["statisticsYear"] = classification["statisticsYear"]
+                    merged["reinspectionPending"] = bool(
+                        classification["reinspectionPending"] or merged["reinspectionPending"]
+                    )
+                    classification = merged
         except (OSError, KeyError, ws.WorkspaceStateError):
             issues.append("CLASSIFICATION_EVIDENCE_UNTRUSTED")
     if source.get("changePending") and source.get("pendingClassification"):
@@ -589,6 +734,8 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         "projectNo": project,
         "unitName": record.get("unitName"),
         **classification,
+        "sourceProduct": source_summary,
+        "recordInitialFact": record_initial_fact(manifest),
         "stages": stages,
         "complete": bool(
             stages["sourceRegistered"]
@@ -638,6 +785,7 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         },
         "waiting": record.get("nasVerification", {}).get("status"),
         "issues": issues,
+        "sourceFacts": source_facts_layer(work),
     }
 
 
@@ -821,6 +969,23 @@ def _excel_evidence_note(row: dict[str, Any]) -> str:
     return "；".join(notes)
 
 
+def _basis_columns(row: dict[str, Any]) -> list[str]:
+    """Quality, market access and the confirmed-unqualified basis stay in separate columns."""
+    summary = row.get("sourceProduct")
+    if summary is None:
+        basis = "未取得来源产品检查原文" if row["initialResult"] == "UNQUALIFIED" else ""
+        return [basis, "", "", row.get("recordInitialFact") or ""]
+    basis = _BASIS_LABEL.get(summary["unqualifiedBasis"], "") if row["initialResult"] == "UNQUALIFIED" else ""
+    if row["initialResult"] == "UNQUALIFIED" and not basis:
+        basis = "来源产品原文未见不合格(依据见证据说明)"
+    return [
+        basis,
+        "；".join(summary["qualityCells"]),
+        "；".join(summary["marketAccessCells"]),
+        row.get("recordInitialFact") or "",
+    ]
+
+
 def add_ledger_sheets(workbook: Any, layout: Any) -> None:
     """Export four views of one evidence snapshot; the workbook is never a second ledger."""
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -853,6 +1018,10 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
         "证据说明",
         "来源年度清单",
         "文书提示不合格候选",
+        "不合格依据",
+        "来源产品质量现场检查原文",
+        "来源市场准入检查原文",
+        "本地检查记录初查事实",
     ]
     stage_names = (
         "sourceRegistered",
@@ -885,6 +1054,7 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
                     if row["sourceAnnualMember"]
                     else "未纳入当前年度已核实范围",
                     "是，仅提示需核实结果" if row["unqualifiedCandidate"] else "否",
+                    *_basis_columns(row),
                 ]
             )
         sheet.freeze_panes = "A2"
@@ -905,11 +1075,11 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
                     cell.fill = PatternFill(
                         "solid", fgColor="17365D" if cell.row == 1 else "EAF2F8"
                     )
-        for column, width in enumerate(
-            [24, 34, 12, 15, 10, 13, 13, 13, 13, 13, 12, 12, 25, 25, 48, 30, 27], 1
-        ):
+        # 每个表头列都显式给宽度(曾 18 列只给 17 项，最后一列回落默认窄宽度)；表头高度按最长表头所需行数计算，
+        # 避免 LibreOffice 等导出路径中长表头被挤压或相邻表头连排。
+        for column, width in enumerate(LEDGER_COLUMN_WIDTHS, 1):
             sheet.column_dimensions[get_column_letter(column)].width = width
-        sheet.row_dimensions[1].height = 32
+        sheet.row_dimensions[1].height = ledger_header_height(headers, LEDGER_COLUMN_WIDTHS)
     workbook.active = 0
     info = workbook["使用说明"]
     info.append(
@@ -979,6 +1149,191 @@ def add_ledger_sheets(workbook: Any, layout: Any) -> None:
             cell.alignment = Alignment(wrap_text=True, vertical="center")
 
 
+PACKAGE_WINDOW_MONTHS_DEFAULT = 2
+PACKAGE_REFRESH_DAYS_DEFAULT = 7
+_OPEN_STATUSES = ("处理中", "已检查")
+
+
+def rolling_window(months: int, today: date | None = None) -> dict[str, str]:
+    """Asia/Shanghai 闭区间：今日减 months 个自然月（同日不存在取该月末），起止均含。"""
+    today = today or datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    month_index = today.year * 12 + today.month - 1 - months
+    year, month = divmod(month_index, 12)
+    month += 1
+    start = date(year, month, min(today.day, calendar.monthrange(year, month)[1]))
+    return {"startDate": start.isoformat(), "endDate": today.isoformat()}
+
+
+def _status_class(text: Any) -> str | None:
+    """只把已见证据的取值归类：已结案=CLOSED；处理中/已检查=OPEN；其余一律未知（None）。"""
+    value = str(text or "").strip()
+    if value.startswith("已结案"):
+        return "CLOSED"
+    if value.startswith(_OPEN_STATUSES):
+        return "OPEN"
+    return None
+
+
+def package_decision(
+    facts: dict[str, Any],
+    *,
+    today: date | None = None,
+    months: int = PACKAGE_WINDOW_MONTHS_DEFAULT,
+    refresh_days: int = PACKAGE_REFRESH_DAYS_DEFAULT,
+) -> dict[str, Any]:
+    """纯函数：只读决定“复用/首次获取/周期更新候选/仅显式更新/暂缓”及原因码，不产生任何副作用。
+
+    默认任何已验证有效包都复用；状态/日期未知不妨碍复用；complete 不盖过明确合法的近期更新；
+    材料缺失从不是重下理由；已结案与合格案不周期更新。
+    """
+    today = today or datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    window = rolling_window(months, today)
+    has_package = bool(facts.get("hasPackage"))
+    result = facts.get("initialResult") or "UNKNOWN"
+    status = facts.get("sourceStatus")
+    out: dict[str, Any] = {"window": window, "refreshDays": refresh_days, "reasons": [],
+                            "localComplete": bool(facts.get("localComplete"))}
+
+    def done(code: str, action: str, *reasons: str) -> dict[str, Any]:
+        out.update(code=code, action=action)
+        out["reasons"].extend(reasons)
+        return out
+
+    if has_package and facts.get("packageIssue") in {"UNKNOWN", "AMBIGUOUS_CHAIN"}:
+        return done("PKG_HOLD_PACKAGE_UNKNOWN", "HOLD", facts["packageIssue"])
+    if has_package and not facts.get("packageValid", True):
+        return done("PKG_BAD_LOCAL", "EXPLICIT_ONLY", facts.get("packageIssue") or "PACKAGE_UNREADABLE")
+    if result != "UNQUALIFIED":
+        # 用户口径：2026消防产品案卷整包先全部获取(合格/未知也取)，已有有效包复用；不合格案优先靠排序，不靠准入。
+        reason = "RESULT_QUALIFIED" if result == "QUALIFIED" else "RESULT_UNKNOWN"
+        if has_package:
+            return done("PKG_REUSE_EXISTING", "REUSE", reason)
+        return done("PKG_ACQUIRE_FIRST", "ACQUIRE_FIRST", reason)
+    # 已确认不合格
+    if status == "CLOSED":
+        return done("PKG_REUSE_CLOSED" if has_package else "PKG_ACQUIRE_FIRST",
+                    "REUSE" if has_package else "ACQUIRE_FIRST")
+    if not has_package:
+        return done("PKG_ACQUIRE_FIRST", "ACQUIRE_FIRST", *(["STATUS_UNKNOWN"] if status is None else []))
+    if status != "OPEN":
+        return done("PKG_REUSE_EXISTING", "REUSE", "STATUS_UNKNOWN")
+    check_date = facts.get("checkDate")
+    if check_date is None:
+        return done("PKG_REUSE_EXISTING", "REUSE", facts.get("dateIssue") or "DATE_UNKNOWN")
+    if check_date > today:
+        return done("PKG_REUSE_EXISTING", "REUSE", "DATE_IN_FUTURE")
+    if check_date < date.fromisoformat(window["startDate"]):
+        return done("PKG_ACTIVE_OLDER_MANUAL", "EXPLICIT_ONLY", "OLDER_THAN_WINDOW")
+    attached = facts.get("attachedAt")
+    last = None
+    if attached:
+        try:
+            last = datetime.fromisoformat(str(attached)).astimezone(ZoneInfo("Asia/Shanghai")).date()
+        except ValueError:
+            last = None
+    if last is not None and (today - last).days < refresh_days:
+        out["nextEligibleAt"] = date.fromordinal(last.toordinal() + refresh_days).isoformat()
+        return done("PKG_REUSE_EXISTING", "REUSE", "WITHIN_REFRESH_INTERVAL")
+    return done("PKG_REFRESH_DUE_RECENT_UNQUALIFIED", "REFRESH_CANDIDATE")
+
+
+def _package_capture_index(layout: Any) -> dict[str, dict[str, Any]]:
+    """一次扫描正式 capture：每案的源状态观察（已结案单调优先）与已登记包。"""
+    index: dict[str, dict[str, Any]] = {}
+    for state in coverage_api.formal_captures(layout):
+        stamp = str(state.get("updatedAt") or state.get("createdAt") or "")
+        for key, record in (state.get("records") or {}).items():
+            project = record.get("projectNo") or (record.get("detail") or {}).get("projectNo")
+            if not project:
+                continue
+            entry = index.setdefault(project, {"status": None, "statusAt": "", "packages": {}})
+            detail = (record.get("detail") or {}).get("fields") or {}
+            klass = _status_class((record.get("fields") or {}).get("taskStatus")) or _status_class(
+                detail.get("检查情况")
+            )
+            if klass == "CLOSED" or (klass and entry["status"] != "CLOSED" and stamp >= entry["statusAt"]):
+                entry["status"], entry["statusAt"] = klass, stamp
+            package = record.get("package")
+            if package and package.get("sha256"):
+                entry["packages"][package["sha256"]] = package
+                # 捕获RWID随包摘要保留，供归档定位核对水位RWID（同摘要多RWID冲突视为UNKNOWN）
+                rwids = entry.setdefault("rwids", {}).setdefault(package["sha256"], set())
+                rwids.add(str(key))
+    return index
+
+
+def _package_head(
+    layout: Any, project: str, packages: dict[str, dict[str, Any]], rwids: dict[str, set] | None = None
+) -> tuple[dict[str, Any] | None, str]:
+    """返回（当前代包, 状态）。状态 OK/NO_PACKAGE/AMBIGUOUS_CHAIN/FILE_MISSING/SHA_MISMATCH/UNKNOWN。
+
+    多包仅在合法代链上取链头；其余按无法识别处理。FILE_MISSING 常见于已归档移动的旧包，
+    只说明登记路径下已无文件，不是“坏包”结论，也绝不触发自动下载。"""
+    if not packages:
+        return None, "NO_PACKAGE"
+    superseded = {p.get("supersedes") for p in packages.values() if p.get("supersedes")}
+    heads = [p for sha, p in packages.items() if sha not in superseded]
+    if len(heads) != 1:
+        return None, "AMBIGUOUS_CHAIN"
+    head = heads[0]
+    if __package__:
+        from . import capture_source_case as capture
+    else:
+        import capture_source_case as capture
+    captured = (rwids or {}).get(head.get("sha256")) or set()
+    if len(captured) > 1:
+        return head, "UNKNOWN"  # 同一包摘要被多个RWID登记：身份不明，不能统计为可复用
+    located = capture.locate_package(layout, project, head, next(iter(captured)) if captured else None)
+    if located["state"] != "OK":
+        return head, located["state"]
+    return head, "OK"
+
+
+def _check_date(row: dict[str, Any]) -> tuple[date | None, str | None]:
+    value = row.get("initialInspectionDate")
+    if not value:
+        return None, "DATE_UNKNOWN"
+    try:
+        return date.fromisoformat(str(value)[:10]), None
+    except ValueError:
+        return None, "DATE_CONFLICT"
+
+
+def package_facts(layout: Any, index: dict[str, Any], project: str, row: dict[str, Any]) -> dict[str, Any]:
+    entry = index.get(project) or {"status": None, "packages": {}}
+    head, package_state = _package_head(layout, project, entry["packages"], entry.get("rwids"))
+    check_date, issue = _check_date(row)
+    return {
+        "hasPackage": bool(entry["packages"]),
+        "packageValid": package_state in {"OK", "NO_PACKAGE"},
+        "packageIssue": package_state,
+        "attachedAt": (head or {}).get("attachedAt"),
+        "sourceStatus": entry["status"],
+        "initialResult": row.get("initialResult"),
+        "checkDate": check_date,
+        "dateIssue": issue,
+        "localComplete": bool(row.get("complete")),
+    }
+
+
+def package_decision_for_project(
+    layout: Any,
+    project: str,
+    *,
+    today: date | None = None,
+    months: int = PACKAGE_WINDOW_MONTHS_DEFAULT,
+    refresh_days: int = PACKAGE_REFRESH_DAYS_DEFAULT,
+) -> dict[str, Any]:
+    ledger = ws.load_waterline(layout)
+    record = (ledger.get("cases") or {}).get(project)
+    if not record:
+        raise ws.WorkspaceStateError("总账没有该项目")
+    row = describe(layout, project, record)
+    facts = package_facts(layout, _package_capture_index(layout), project, row)
+    return {"projectNo": project, **package_decision(facts, today=today, months=months, refresh_days=refresh_days)}
+
+
+
 def scan_plan(
     layout: Any,
     batch_id: str | None = None,
@@ -986,6 +1341,9 @@ def scan_plan(
     mode: str = "auto",
     year: int | None = None,
     limit: int = 10,
+    package_months: int = PACKAGE_WINDOW_MONTHS_DEFAULT,
+    package_refresh_days: int = PACKAGE_REFRESH_DAYS_DEFAULT,
+    today: date | None = None,
 ) -> dict[str, Any]:
     ledger = ws.load_waterline(layout)
     annual = coverage_api.annual_coverage(layout, year, details=True, ledger=ledger)
@@ -1119,6 +1477,16 @@ def scan_plan(
             "timezone": "Asia/Shanghai",
         }
     )
+    package_index = _package_capture_index(layout)
+    package_decisions = []
+    for project, record in ledger["cases"].items():
+        row = describe(layout, project, record)
+        decision = package_decision(
+            package_facts(layout, package_index, project, row),
+            today=today, months=package_months, refresh_days=package_refresh_days,
+        )
+        package_decisions.append({"projectNo": project, **decision})
+    package_decisions.sort(key=lambda d: (d["action"] != "REFRESH_CANDIDATE", d["projectNo"]))
     return {
         "schemaVersion": "SourceScanPlanV2",
         "readOnly": True,
@@ -1140,6 +1508,15 @@ def scan_plan(
         "pendingOutsideWindowRetained": True,
         "pendingCount": len(pending),
         "pending": pending[:limit],
+        "packagePolicy": {
+            "windowMonths": package_months,
+            "refreshDays": package_refresh_days,
+            "dateField": "来源检查日期(initialInspectionDate)",
+            "window": package_decisions[0]["window"] if package_decisions else rolling_window(package_months, today),
+            "readOnly": True,
+        },
+        "packageDecisionCounts": dict(Counter(d["code"] for d in package_decisions)),
+        "packageDecisions": [d for d in package_decisions if d["action"] in {"REFRESH_CANDIDATE"}][:limit],
         "sourceActionCount": len(actions),
         "sourceActionCounts": dict(Counter(a["action"] for a in actions)),
         "sourceActions": actions[:limit],

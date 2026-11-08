@@ -11,6 +11,7 @@ import re
 import shutil
 import stat
 import sys
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -22,13 +23,21 @@ from urllib.parse import unquote
 from pypdf import PdfReader
 
 if __package__:
+    from .mineru_v4 import OPTIONS as MINERU_OPTIONS
     from .mineru_v4 import TASK_SCHEMA, engine_profile, run_task
     from .mineru_v4 import MinerUV4Error as OcrError
+    from .mineru_v4 import _unpack as unpack_zip
 else:
+    from mineru_v4 import OPTIONS as MINERU_OPTIONS
     from mineru_v4 import TASK_SCHEMA, engine_profile, run_task
     from mineru_v4 import MinerUV4Error as OcrError
+    from mineru_v4 import _unpack as unpack_zip
 
 SCHEMA = "OcrResultV1"
+ADOPTION_SCHEMA = "OcrAdoptionReceiptsV1"
+ADOPTED_MINERU = "AdoptedMinerUV4TaskResultV1"
+ADOPTED_DOCLING = "AdoptedDoclingResultV1"
+MINERU_OPTIONS_VERSION = "4.0.12"
 LEGACY_OPTIONS = {
     "backend": "hybrid-auto-engine",
     "method": "auto",
@@ -188,6 +197,19 @@ def validate_sources(
     return result
 
 
+def _page_blocks_complete(page: Any, structured: Any) -> bool:
+    """MinerU 4.0.12 writes a blank page as only ``{"page_idx": n}`` in middle JSON.
+
+    That is complete only when the same page's structured content is an explicit empty list;
+    a missing block list next to a non-empty structured page stays incomplete.
+    """
+    if not isinstance(page, dict) or not isinstance(structured, dict):
+        return False
+    if isinstance(page.get("blocks"), list):
+        return True
+    return "blocks" not in page and structured.get("blocks") == []
+
+
 def artifact_snapshot(directory: Path, alias: str, pages: int) -> list[dict[str, Any]] | None:
     """Require complete structured pages, original PDF, text, and referenced images.
 
@@ -243,7 +265,10 @@ def artifact_snapshot(directory: Path, alias: str, pages: int) -> list[dict[str,
                 or not isinstance(contents.get("pages"), list)
                 or [page.get("page_idx") for page in contents["pages"] if isinstance(page, dict)]
                 != list(range(pages))
-                or any(not isinstance(page.get("blocks"), list) for page in page_data)
+                or any(
+                    not _page_blocks_complete(page, structured)
+                    for page, structured in zip(page_data, contents["pages"], strict=True)
+                )
             ):
                 return None
         elif not isinstance(contents, list):
@@ -285,6 +310,43 @@ def artifact_snapshot(directory: Path, alias: str, pages: int) -> list[dict[str,
         return None
 
 
+def docling_artifact_snapshot(
+    directory: Path, alias: str, pages: int
+) -> list[dict[str, Any]] | None:
+    """Complete adopted Docling result: DoclingDocument JSON, Markdown and the exact source copy."""
+    try:
+        safe_path(directory)
+        if not directory.is_dir():
+            return None
+        target = directory / alias
+        required = [target / f"{alias}.json", target / f"{alias}.md", target / f"{alias}_origin.pdf"]
+        if any(
+            not safe_path(path, directory).is_file() or path.stat().st_size == 0
+            for path in required
+        ):
+            return None
+        document = json.loads(required[0].read_text(encoding="utf-8"))
+        if (
+            not isinstance(document, dict)
+            or document.get("schema_name") != "DoclingDocument"
+            or not isinstance(document.get("pages"), dict)
+            or len(document["pages"]) != pages
+            or not required[1].read_text(encoding="utf-8").strip()
+            or len(PdfReader(str(required[2])).pages) != pages
+        ):
+            return None
+        return [
+            {
+                "relativePath": path.relative_to(directory).as_posix(),
+                "sha256": file_hash(path),
+                "sizeBytes": path.stat().st_size,
+            }
+            for path in sorted(required)
+        ]
+    except Exception:
+        return None
+
+
 def cached_mapping_valid(
     mapping: dict[str, Any],
     item: dict[str, Any],
@@ -292,19 +354,26 @@ def cached_mapping_valid(
     output: Path,
     profile: dict[str, Any],
 ) -> bool:
+    recorded = mapping.get("engineProfile")
+    docling = isinstance(recorded, dict) and recorded.get("transport") == ADOPTED_DOCLING
     if (
         mapping.get("sourceSha256") != item["sha256"]
-        or not compatible_cached_profile(mapping.get("engineProfile"), profile)
+        or not (docling or compatible_cached_profile(recorded, profile))
         or mapping.get("sourceRelativePath") != item["relative"]
         or mapping.get("pageCount") != item["pages"]
     ):
         return False
     try:
         directory = safe_path(work / relative_path(mapping["outputDir"]), output)
-        snapshot = artifact_snapshot(directory, item["alias"], item["pages"])
+        snapshot = (docling_artifact_snapshot if docling else artifact_snapshot)(
+            directory, item["alias"], item["pages"]
+        )
         if snapshot is None or snapshot != mapping.get("artifacts"):
             return False
-        if mapping.get("engineProfile", {}).get("transport") == TASK_SCHEMA:
+        if docling or mapping.get("engineProfile", {}).get("transport") in {
+            TASK_SCHEMA,
+            ADOPTED_MINERU,
+        }:
             origin = next((entry for entry in snapshot if "_origin." in entry["relativePath"]), {})
             return origin.get("sha256") == item["sha256"]
         return True
@@ -315,6 +384,18 @@ def cached_mapping_valid(
 def compatible_cached_profile(previous: Any, current: dict[str, Any]) -> bool:
     if previous == current:
         return True
+    # A verified, explicitly adopted MinerU 4 task result is a distinct, honestly labelled
+    # profile; it is reusable only for the same engine version and recognition options.
+    if (
+        isinstance(previous, dict)
+        and previous.get("transport") == ADOPTED_MINERU
+        and current.get("transport") == TASK_SCHEMA
+    ):
+        return (
+            previous.get("engineVersion") == current.get("engineVersion")
+            and previous.get("options") == current.get("options")
+            and previous.get("producer") == "mineru"
+        )
     # Keep separately identified, fully hashed MinerU 3 receipts as historical
     # results. Never relabel their engine or fabricate a schema-2.0 document.
     return (
@@ -481,6 +562,7 @@ def _run_locked(
 
     def checkpoint() -> None:
         result["mappings"] = [mappings[key] for key in sorted(mappings)]
+        result["engine"] = engine_label(result["mappings"])
         result["pending"] = [
             item["relative"] for item in items if item["relative"] not in completed
         ]
@@ -613,3 +695,375 @@ def _run_locked(
 
 def _input_receipt(item: dict[str, Any]) -> dict[str, Any]:
     return {key: item[key] for key in ("relative", "sha256", "pages", "alias", "inputName")}
+
+
+def engine_label(mappings: list[dict[str, Any]]) -> str:
+    docling = any(
+        isinstance(entry.get("engineProfile"), dict)
+        and entry["engineProfile"].get("transport") == ADOPTED_DOCLING
+        for entry in mappings
+    )
+    return "MinerU-Docker+Docling-CPU" if docling else "MinerU-Docker"
+
+
+def _read_previous_index(work: Path, path_transform: Any = None) -> tuple[dict[str, Any], dict]:
+    index_path = safe_path(work / "ocr-result.json", work)
+    try:
+        previous = (
+            json.loads(index_path.read_text(encoding="utf-8")) if index_path.is_file() else {}
+        )
+    except (ValueError, OSError):
+        previous = {}
+    if not isinstance(previous, dict):
+        previous = {}
+    if path_transform:
+        previous = path_transform(previous)
+    listed = previous.get("mappings", [])
+    mappings = {
+        entry["sourceRelativePath"]: entry
+        for entry in (listed if isinstance(listed, list) else [])
+        if isinstance(entry, dict) and isinstance(entry.get("sourceRelativePath"), str)
+    }
+    if not (previous.get("schemaVersion") == SCHEMA and previous.get("workDir") == str(work)):
+        # Same rule as a normal run: an untrusted index never provides cache hits.
+        mappings = {
+            key: {k: v for k, v in entry.items() if k not in {"engineProfile", "artifacts"}}
+            for key, entry in mappings.items()
+        }
+    return previous, mappings
+
+
+def _recorded_file(value: Any, what: str) -> tuple[Path, str]:
+    """A receipt file reference: it must exist and equal its recorded digest."""
+    if not isinstance(value, dict) or not isinstance(value.get("path"), str):
+        raise OcrError(f"采纳回执缺少{what}路径")
+    digest = value.get("sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise OcrError(f"采纳回执缺少{what}摘要")
+    path = safe_path(Path(value["path"]))
+    if not path.is_file() or file_hash(path) != digest:
+        raise OcrError(f"{what}缺失或与回执摘要不一致；不采纳")
+    return path, digest
+
+
+def _record_json(value: Any, what: str) -> tuple[dict[str, Any], str]:
+    path, digest = _recorded_file(value, what)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise OcrError(f"{what}无法读取；不采纳") from error
+    if not isinstance(record, dict):
+        raise OcrError(f"{what}格式无效；不采纳")
+    return record, digest
+
+
+def _check_attempt(
+    attempt: dict[str, Any], item: dict[str, Any], project: str | None, *, state: str, status: str
+) -> None:
+    if (
+        attempt.get("sha") != item["sha256"].split(":", 1)[1]
+        or attempt.get("pages") != item["pages"]
+        or attempt.get("state") != state
+        or attempt.get("status") != status
+        or not isinstance(attempt.get("taskId"), str)
+        or (project is not None and attempt.get("pn") != project)
+    ):
+        raise OcrError("原识别任务记录与本案该文件不一致；不采纳")
+
+
+def _adopt_mineru(
+    entry: dict[str, Any], item: dict[str, Any], result_dir: Path, project: str | None
+) -> dict[str, Any]:
+    task = entry.get("task")
+    if not isinstance(task, dict) or not isinstance(task.get("taskId"), str):
+        raise OcrError("采纳回执缺少原任务编号")
+    attempt, attempt_sha = _record_json(entry.get("attemptRecord"), "原任务记录")
+    _check_attempt(attempt, item, project, state="DONE", status="completed")
+    options = attempt.get("options")
+    if (
+        attempt["taskId"] != task["taskId"]
+        or not isinstance(options, dict)
+        or options.get("tier") != "standard"
+        or options.get("ocr_mode") != "auto"
+        or options.get("output_formats") != "zip"
+        or options.get("page_range") not in {"all", None}
+    ):
+        raise OcrError("原任务编号或识别选项与回执不符；不采纳")
+    archive, archive_sha = _recorded_file(entry.get("resultZip"), "原结果包")
+    if attempt.get("resultSha256") != archive_sha.split(":", 1)[1]:
+        raise OcrError("原结果包摘要与原任务记录不符；不采纳")
+    with tempfile.TemporaryDirectory(dir=result_dir.parent) as temporary:
+        unpacked = Path(temporary) / "native-zip"
+        unpacked.mkdir()
+        unpack_zip(archive, unpacked)
+        middles = list(unpacked.glob("**/middle_json.json"))
+        if len(middles) != 1 or (unpacked / "manifest.json").exists():
+            raise OcrError("原结果包无法唯一绑定单个输入文件；不采纳")
+        folder = middles[0].parent
+        if any(
+            not (folder / name).is_file()
+            for name in ("middle_json.json", "markdown.md", "structured_content.json")
+        ):
+            raise OcrError("原结果包缺少正文、结构或内容索引；不采纳")
+        middle = json.loads((folder / "middle_json.json").read_text(encoding="utf-8"))
+        producer = (middle.get("metadata") or {}).get("producer") or {}
+        tier = ((middle.get("extensions") or {}).get("mineru") or {}).get("tier")
+        if (
+            producer.get("name") != "mineru"
+            or producer.get("version") != MINERU_OPTIONS_VERSION
+            or tier != "standard"
+        ):
+            raise OcrError("原结果包不是 MinerU 4.0.12 standard 产物；不采纳")
+        alias = item["alias"]
+        target = result_dir / alias
+        copy_tree_contents(folder, target)
+        for before, after in (
+            ("middle_json.json", alias + "_middle.json"),
+            ("markdown.md", alias + ".md"),
+            ("structured_content.json", alias + "_structured_content.json"),
+        ):
+            (target / before).rename(target / after)
+        shutil.copyfile(item["source"], target / (alias + "_origin" + item["source"].suffix))
+    snapshot = artifact_snapshot(result_dir, alias, item["pages"])
+    origin = next((f for f in snapshot or [] if "_origin." in f["relativePath"]), {})
+    if snapshot is None or origin.get("sha256") != item["sha256"]:
+        raise OcrError("原结果不完整或页数与本案文件不符；不采纳")
+    return {
+        "engineProfile": {
+            "transport": ADOPTED_MINERU,
+            "producer": "mineru",
+            "engineVersion": MINERU_OPTIONS_VERSION,
+            "options": MINERU_OPTIONS.copy(),
+            "imageIdRecorded": False,
+        },
+        "artifacts": snapshot,
+        "adoption": {
+            "kind": "MINERU_V4_TASK",
+            "taskId": task["taskId"],
+            "taskStatus": "completed",
+            "attemptRecordSha256": attempt_sha,
+            "resultZipSha256": archive_sha,
+            "engineEvidence": "middle_json.metadata.producer=mineru 4.0.12; extensions.mineru.tier=standard",
+        },
+    }
+
+
+def _adopt_docling(
+    entry: dict[str, Any], item: dict[str, Any], result_dir: Path, project: str | None
+) -> dict[str, Any]:
+    result = entry.get("result")
+    if not isinstance(result, dict) or entry.get("cloudModelCalls") != 0:
+        raise OcrError("Docling 回执缺少结果或未声明零云模型调用；不采纳")
+    document_path, document_sha = _recorded_file(result.get("json"), "Docling JSON")
+    markdown_path, markdown_sha = _recorded_file(result.get("markdown"), "Docling Markdown")
+    if item["source"].suffix != ".pdf" or entry.get("device") != "CPU":
+        raise OcrError("本接入只采纳 CPU Docling 的 PDF 结果；不采纳")
+    version = entry.get("engineVersion")
+    if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise OcrError("Docling 回执缺少引擎版本；不采纳")
+    superseded = []
+    for failed in entry.get("supersedes") or []:
+        record, record_sha = _record_json(failed.get("attemptRecord"), "被替补的 MinerU 失败记录")
+        _check_attempt(record, item, project, state="FAILED", status="failed")
+        superseded.append(
+            {"taskId": record["taskId"], "taskStatus": "failed", "attemptRecordSha256": record_sha}
+        )
+    if not superseded:
+        raise OcrError("Docling 替补必须绑定被其替补的 MinerU 失败任务；不采纳")
+    alias = item["alias"]
+    target = result_dir / alias
+    target.mkdir(parents=True)
+    shutil.copyfile(document_path, target / f"{alias}.json")
+    shutil.copyfile(markdown_path, target / f"{alias}.md")
+    shutil.copyfile(item["source"], target / f"{alias}_origin.pdf")
+    snapshot = docling_artifact_snapshot(result_dir, alias, item["pages"])
+    origin = next((f for f in snapshot or [] if "_origin." in f["relativePath"]), {})
+    if snapshot is None or origin.get("sha256") != item["sha256"]:
+        raise OcrError("Docling 结果不完整或页数与本案文件不符；不采纳")
+    return {
+        "engineProfile": {
+            "transport": ADOPTED_DOCLING,
+            "engine": "Docling",
+            "engineVersion": version,
+            "engineVersionSource": "receipt",
+            "device": "CPU",
+            "cloudModelCalls": 0,
+        },
+        "artifacts": snapshot,
+        "adoption": {
+            "kind": "DOCLING_CPU",
+            "jsonSha256": document_sha,
+            "markdownSha256": markdown_sha,
+            "supersededMinerUAttempts": superseded,
+        },
+    }
+
+
+def adopted_mapping_valid(
+    mapping: dict[str, Any], item: dict[str, Any], work: Path, output: Path
+) -> bool:
+    """Re-check an already adopted mapping without contacting any engine."""
+    profile = mapping.get("engineProfile")
+    if (
+        not isinstance(profile, dict)
+        or profile.get("transport") not in {ADOPTED_MINERU, ADOPTED_DOCLING}
+        or mapping.get("sourceSha256") != item["sha256"]
+        or mapping.get("sourceRelativePath") != item["relative"]
+        or mapping.get("pageCount") != item["pages"]
+    ):
+        return False
+    try:
+        directory = safe_path(work / relative_path(mapping["outputDir"]), output)
+        check = docling_artifact_snapshot if profile["transport"] == ADOPTED_DOCLING else artifact_snapshot
+        snapshot = check(directory, item["alias"], item["pages"])
+        origin = next((f for f in snapshot or [] if "_origin." in f["relativePath"]), {})
+        return snapshot is not None and snapshot == mapping.get("artifacts") and origin.get("sha256") == item["sha256"]
+    except (KeyError, TypeError, OcrError):
+        return False
+
+
+def copy_tree_contents(source: Path, target: Path) -> None:
+    """Copy directories and file bytes only.
+
+    shutil.copytree also copies directory metadata; DrvFs/network mounts (the D-drive work
+    root) can refuse that with EPERM although the bytes copy fine. Adoption verifies content
+    digests afterwards, so timestamps and modes carry no meaning here.
+    """
+    target.mkdir(parents=True)
+    for current, directories, files in os.walk(source):
+        relative = Path(current).relative_to(source)
+        for name in directories:
+            (target / relative / name).mkdir()
+        for name in files:
+            shutil.copyfile(Path(current) / name, target / relative / name)
+
+
+def adopt_existing_results(
+    *,
+    work: Path,
+    inventory: dict[str, Any],
+    output: Path,
+    receipts: dict[str, Any],
+    allowed_roots: list[Path] | None = None,
+    project: str | None = None,
+    path_transform: Any = None,
+) -> dict[str, Any]:
+    """Adopt already finished, verifiable recognition results into OcrResultV1.
+
+    No engine is started, no request is sent and no source is changed. Each result is bound to
+    the project, member path, member digest, page count, real engine and original task, and
+    only accepted when its recorded digests match the files on disk. Rejected entries leave
+    earlier mappings untouched and stay pending; accepted ones are saved before an error is raised.
+    """
+    work, output = safe_path(work), safe_path(output, work)
+    if output == work:
+        raise OcrError("OCR 输出必须使用本案 work-dir 内的独立子目录")
+    entries = receipts.get("entries") if isinstance(receipts, dict) else None
+    if (
+        not isinstance(receipts, dict)
+        or receipts.get("schemaVersion") != ADOPTION_SCHEMA
+        or not isinstance(entries, list)
+        or not entries
+        or any(not isinstance(entry, dict) for entry in entries)
+    ):
+        raise OcrError("采纳回执格式无效")
+    if project is not None and receipts.get("projectNo") != project:
+        raise OcrError("采纳回执不属于本案；不采纳")
+    selected = [relative_path(entry.get("sourceRelativePath")) for entry in entries]
+    if len(set(selected)) != len(selected):
+        raise OcrError("采纳回执含重复来源")
+    items = {i["relative"]: i for i in validate_sources(inventory, selected, allowed_roots)}
+    with project_lock(work):
+        output.mkdir(parents=True, exist_ok=True)
+        previous, mappings = _read_previous_index(work, path_transform)
+        run_name = "adopted-" + uuid.uuid4().hex
+        run_dir = output / run_name
+        result_dir = run_dir / ("result-" + uuid.uuid4().hex)
+        accepted, already, rejected = [], [], {}
+        for entry, relative in zip(entries, selected, strict=True):
+            item = items[relative]
+            existing = mappings.get(relative)
+            if existing and adopted_mapping_valid(existing, item, work, output):
+                already.append(relative)
+                continue
+            try:
+                if entry.get("sourceSha256") != item["sha256"] or entry.get("pageCount") != item["pages"]:
+                    raise OcrError("回执中的文件摘要或页数与本案清点不一致；不采纳")
+                kind = entry.get("engine")
+                build = {"MINERU_V4_TASK": _adopt_mineru, "DOCLING_CPU": _adopt_docling}.get(kind)
+                if build is None:
+                    raise OcrError("回执中的识别引擎未知；不采纳")
+                result_dir.mkdir(parents=True, exist_ok=True)
+                before = file_hash(item["source"])
+                part = build(entry, item, result_dir, project)
+                if file_hash(item["source"]) != before:
+                    raise OcrError("采纳期间源文件发生变化；不采纳")
+            except (OcrError, OSError, ValueError, KeyError, TypeError, shutil.Error) as error:
+                rejected[relative] = str(error)
+                shutil.rmtree(result_dir / item["alias"], ignore_errors=True)
+                continue
+            mappings[relative] = {
+                "sourceRelativePath": relative,
+                "sourceSha256": item["sha256"],
+                "pageCount": item["pages"],
+                "outputDir": result_dir.relative_to(work).as_posix(),
+                "engineProfile": part["engineProfile"],
+                "artifacts": part["artifacts"],
+                "attemptId": run_name,
+                "completedAt": utc_now(),
+                "adoption": {**part["adoption"], "receiptSha256": object_hash(entry)},
+            }
+            accepted.append(relative)
+        if not accepted:
+            # Only this call's own, still empty staging directory.
+            shutil.rmtree(run_dir, ignore_errors=True)
+        else:
+            write_json(
+                run_dir / "adoption.json",
+                {
+                    "schemaVersion": ADOPTION_SCHEMA,
+                    "projectNo": receipts.get("projectNo"),
+                    "adoptedAt": utc_now(),
+                    "accepted": accepted,
+                    "rejected": rejected,
+                    "networkRequests": 0,
+                    "engineInvocations": 0,
+                },
+            )
+        completed = [rel for rel in selected if rel in mappings and rel not in rejected]
+        result = {
+            "schemaVersion": SCHEMA,
+            "engine": engine_label(list(mappings.values())),
+            "workDir": str(work),
+            "startedAt": previous.get("startedAt") or utc_now(),
+            "status": "PARTIAL" if rejected else "COMPLETED",
+            "mappings": [mappings[key] for key in sorted(mappings)],
+            "pending": sorted(rejected),
+            "runStats": {
+                "selectedFiles": len(selected),
+                "cachedFiles": len(already),
+                "legacyCachedFiles": 0,
+                "adoptedFiles": len(accepted),
+                "engineInvocations": 0,
+                "resumedTasks": 0,
+                "batch": False,
+                "completedFiles": len(completed),
+            },
+            "updatedAt": utc_now(),
+        }
+        if rejected:
+            result["errorType"] = "OcrError"
+        elif accepted or already:
+            result["completedAt"] = utc_now()
+        write_json(safe_path(work / "ocr-result.json", work), result)
+        summary = {
+            "status": result["status"],
+            **result["runStats"],
+            "rejected": rejected,
+        }
+        if rejected:
+            raise OcrError(
+                "部分既有识别结果未被采纳（已采纳 "
+                f"{len(accepted)} 份已保存）：" + json.dumps(rejected, ensure_ascii=False)
+            )
+        return summary

@@ -1690,6 +1690,7 @@ def test_await_download_records_stall_and_auto_attaches_a_complete_zip(
     )
     completed = downloads / "completed.zip"
     _write_zip(completed, {"document.txt": b"completed"})
+    completed_sha = __import__("hashlib").sha256(completed.read_bytes()).hexdigest()
     attached = source.await_download(
         layout,
         "fixture-batch",
@@ -1712,6 +1713,12 @@ def test_await_download_records_stall_and_auto_attaches_a_complete_zip(
     )
     assert not completed.exists()
     assert captured_attached["status"] == "READY_FOR_ORGANIZATION"
+    # 包一到即登记“已收到”(摘要/大小/建议名)，且不含绝对下载路径；与接件通过分层。
+    received = captured_attached["records"]["fixture-rwid-await"]["downloadDelivery"]["received"]
+    assert received["sha256"] == "sha256:" + completed_sha and received["sizeBytes"] > 0
+    assert "downloads" not in json.dumps(received)
+    waterline_source = workspace.load_waterline(layout)["cases"][PROJECT_A]["source"]
+    assert waterline_source["status"] == "PACKAGE_READY"
 
 
 def test_attach_package_renames_mojibake_zip_and_is_idempotent(

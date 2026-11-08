@@ -634,3 +634,110 @@ def test_retired_commands_fail_before_any_side_effect(
     assert "已退役" in err and "local-verify" in err
     assert snapshot(case.layout.root) == before  # no ledger, timing or workspace write
     assert snapshot(tmp_path) == home_before  # no auth config or any other file created
+
+
+def _subset_fixture(case: Case, tmp_path: Path, *, inventory: bool = True, name: str = "notice.pdf") -> tuple[Path, dict]:
+    """inventory 后手工写一个 split-index 条目（复制来源PDF为 normalized 件），并生成确认清单与依据文件。"""
+    if inventory:
+        assert case.run("inventory", str(case.zip), "--work-dir", str(case.work)) == 0
+    inventory = json.loads((case.work / "inventory.json").read_text(encoding="utf-8"))
+    origin = next(f for f in inventory["files"] if f["relativePath"] == "通知书.pdf")
+    target = case.work / "normalized" / name
+    target.parent.mkdir(exist_ok=True)
+    target.write_bytes(Path(origin["absolutePath"]).read_bytes())
+    sha, pages = cli.pdf_info(target)
+    item = {
+        "sourceRelativePath": "通知书.pdf", "pageStart": 1, "pageEnd": 2, "relativePath": f"normalized/{name}",
+        "docTypeCandidate": "责令限期改正通知书", "typeEvidenceLevel": "L2", "localRef": f"LREF2|{PROJECT}|x#p1-2#s1",
+        "sourceSha256": origin["sha256"], "absolutePath": str(target), "sha256": sha, "pageCount": pages,
+    }
+    (case.work / "split-index.json").write_text(
+        json.dumps({"splitIndexVersion": 2, "generatedAt": "2026-11-07T00:00:00Z", "items": [item]}, ensure_ascii=False),
+        encoding="utf-8")
+    basis = tmp_path / "basis.json"
+    basis.write_text('{"reviewed": true}', encoding="utf-8")
+    confirmation = {
+        "projectNo": PROJECT, "held": [{"seq": 9, "docType": "空白页候选"}],
+        "items": [{"relativePath": f"normalized/{name}", "sha256": sha, "level": "REVIEWED_PAGE_BOUNDS",
+                   "basis": [{"kind": "review", "path": str(basis), "sha256": hashlib.sha256(basis.read_bytes()).hexdigest()}]}],
+    }
+    path = tmp_path / "confirmation.json"
+    path.write_text(json.dumps(confirmation, ensure_ascii=False), encoding="utf-8")
+    return path, confirmation
+
+
+def test_confirmed_documents_and_copy_only_subset_leave_originals_and_case_state_alone(
+    case: Case, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    confirmation_path, confirmation = _subset_fixture(case, tmp_path)
+    capsys.readouterr()
+    before_state = case.record()["state"]
+    pending_before, work_before = snapshot(case.pending), snapshot(case.work)
+    assert case.run("confirm-documents", "--project", PROJECT, "--confirmation", str(confirmation_path), "--check-only") == 0
+    checked = json.loads(capsys.readouterr().out)
+    assert checked["status"] == "CHECK_ONLY" and checked["wrote"] is False and checked["items"] == 1
+    assert snapshot(case.work) == work_before
+    assert case.run("confirm-documents", "--project", PROJECT, "--confirmation", str(confirmation_path)) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["write"] == "CREATED" and created["caseLevelVerified"] is False
+    document = json.loads((case.work / "confirmed-documents.json").read_text(encoding="utf-8"))
+    assert document["held"] and document["unconfirmedSplitItems"] == [] and document["caseLevelVerified"] is False
+    assert case.run("confirm-documents", "--project", PROJECT, "--confirmation", str(confirmation_path)) == 0
+    assert json.loads(capsys.readouterr().out)["write"] == "REUSED"
+
+    work_after_confirm = snapshot(case.work)
+    assert case.run("archive-document-subset", "--project", PROJECT, "--check-only") == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "WOULD_CREATE"
+    assert not case.layout.completed_case_dir(PROJECT).exists()
+    assert case.run("archive-document-subset", "--project", PROJECT) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "CREATED" and result["pointer"] == "ADDED"
+    leaf = Path(result["target"])
+    assert leaf.name == document["contentListSha256"] and (leaf / "normalized" / "notice.pdf").is_file()
+    assert snapshot(case.pending) == pending_before                                  # 原ZIP/待处理原位原字节
+    assert snapshot(case.work) == work_after_confirm                                  # 活动工作区原位原字节
+    record = case.record()
+    assert record["state"] == before_state and "completions" not in (record.get("history") or {})
+    assert record["documentSubsets"][0]["caseLevelVerified"] is False
+    assert not views.describe(case.layout, PROJECT, record)["complete"]               # 不冒全案完成
+    leaf_snapshot = snapshot(leaf)
+    assert case.run("archive-document-subset", "--project", PROJECT) == 0
+    again = json.loads(capsys.readouterr().out)
+    assert again["status"] == "REUSED" and again["pointer"] == "REUSED" and snapshot(leaf) == leaf_snapshot
+    (leaf / "normalized" / "notice.pdf").write_bytes(b"tampered")                      # 同叶内容不同：拒绝覆盖
+    assert case.run("archive-document-subset", "--project", PROJECT) != 0
+    capsys.readouterr()
+
+
+def test_confirmation_with_wrong_digest_or_unknown_item_is_rejected(
+    case: Case, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    confirmation_path, confirmation = _subset_fixture(case, tmp_path)
+    capsys.readouterr()
+    bad = json.loads(json.dumps(confirmation))
+    bad["items"][0]["sha256"] = "sha256:" + "0" * 64
+    other = tmp_path / "bad.json"
+    other.write_text(json.dumps(bad), encoding="utf-8")
+    assert case.run("confirm-documents", "--project", PROJECT, "--confirmation", str(other), "--check-only") != 0
+    bad = json.loads(json.dumps(confirmation))
+    bad["items"][0]["relativePath"] = "normalized/missing.pdf"
+    other.write_text(json.dumps(bad), encoding="utf-8")
+    assert case.run("confirm-documents", "--project", PROJECT, "--confirmation", str(other), "--check-only") != 0
+    assert not (case.work / "confirmed-documents.json").exists()
+    capsys.readouterr()
+
+
+def test_full_case_archive_still_works_after_a_document_subset_leaf_exists(
+    case: Case, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    case.organize()
+    confirmation_path, _ = _subset_fixture(case, tmp_path, inventory=False, name="subset_notice.pdf")
+    assert case.run("confirm-documents", "--project", PROJECT, "--confirmation", str(confirmation_path)) == 0
+    assert case.run("archive-document-subset", "--project", PROJECT) == 0
+    leaf_parent = case.layout.completed_case_dir(PROJECT) / ws.DOCUMENT_SUBSET_DIR
+    subset_snapshot = snapshot(leaf_parent)
+    capsys.readouterr()
+    assert case.run("local-verify", "--project", PROJECT) == 0           # 保留目录不被当成“旧版平铺内容”
+    assert json.loads(capsys.readouterr().out)["status"] == "COMPLETED"
+    assert snapshot(leaf_parent) == subset_snapshot                      # 子集叶原位原字节
+    assert case.record()["documentSubsets"]                              # 子集指针保留

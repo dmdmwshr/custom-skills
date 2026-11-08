@@ -16,6 +16,7 @@ ZIP 安全门禁和工作区交接。
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -64,6 +65,7 @@ SOURCE_EVIDENCE_VERSION = "SourceEvidenceV1"
 DOWNLOAD_BASELINE_VERSION = "DownloadBaselineV1"
 TAIL_CURSOR_VERSION = "TailCursorV1"
 DOWNLOAD_WAIT_VERSION = "DownloadWaitV1"
+REFRESH_REASONS = frozenset({"RECENT_UNQUALIFIED", "BAD_LOCAL", "SPECIAL_ISSUE", "USER_REQUEST"})
 CAPTURE_FILE_NAME = "browser-capture.json"
 EVIDENCE_FILE_NAME = "source-evidence.json"
 try:
@@ -863,6 +865,16 @@ def _record_download_delivery(
         "partialCandidates": list(result.get("partialCandidates") or []),
         "zipCandidates": list(result.get("zipCandidates") or []),
     }
+    if delivery["status"] == "READY" and result.get("downloadPath"):
+        # 包一到即登记“已收到”事实（摘要/大小/建议文件名，不含绝对路径），
+        # 与后续接件通过、材料齐全、文书处理、云同步分层，互不替代。
+        received_path = Path(str(result["downloadPath"]))
+        delivery["received"] = {
+            "sha256": _sha256(received_path),
+            "sizeBytes": received_path.stat().st_size,
+            "originalSuggestedName": result.get("originalSuggestedName"),
+            "receivedAt": observed_at,
+        }
     record = state["records"][record_key]
     record["downloadDelivery"] = delivery
     state["updatedAt"] = observed_at
@@ -1382,8 +1394,9 @@ def _material_collection_active(
             from ledger_views import describe
         project = str(record.get("projectNo") or "")
         current = load_waterline(layout).get("cases", {}).get(project)
-        if not current or describe(layout, project, current)["initialResult"] != "UNQUALIFIED":
-            raise SourceIntakeError("项目当前初查结果已变化，保留采集请求并先核实分类")
+        # 2026消防产品案卷整包默认全部获取(不合格优先排序，不以分类为准入)：只要求总账仍有该项目。
+        if not current:
+            raise SourceIntakeError("项目已不在总账，保留采集请求并先核实身份")
     return True
 
 
@@ -1427,8 +1440,6 @@ def request_case_material_collection(
         raise SourceIntakeError("年度身份与项目总账绑定不一致，拒绝提升")
     if _verified_completed_waterline(layout, project):
         raise SourceIntakeError("该项目已完成并通过完成核验，沿用原断点，不重新采集")
-    if describe(layout, project, ledger["cases"][project])["initialResult"] != "UNQUALIFIED":
-        raise SourceIntakeError("当前入口只提升已确认初查不合格案，待确认或合格案保留最小索引")
     if record.get("materialCollection") is not None:
         _material_collection_active(layout, state, key, record)
         return state
@@ -1440,12 +1451,471 @@ def request_case_material_collection(
         "projectNo": project,
         "sourceRecordFingerprint": _record_equivalence(record),
         "requestedAt": requested,
+        "initialResultAtRequest": describe(layout, project, ledger["cases"][project])["initialResult"],
     }
     state["materialRwids"] = list(dict.fromkeys([*state.get("materialRwids", []), key]))
     _refresh_progress(state)
     state["updatedAt"] = requested
     _write_json(path, state)
     return state
+
+
+OBSERVED_ADMISSION_VERSION = "ObservedMaterialAdmissionV1"
+_ADMITTED_PROJECT = re.compile(r"^\d{8}C2026\d{5}$")
+_PRODUCT_ROOT = re.compile(r"\[产\]\S*?-(\d{8}C\d{9})-")
+_PRODUCT_BLOCK = re.compile(r"检查产品信息\s*[(（](\d+)[)）]")
+
+
+def _admission_basis(observation: dict[str, Any], evidence_sha: str) -> dict[str, Any]:
+    """只从现场详情原文推出本案身份与产品依据；没有任何调用方可传入的“已确认”布尔。"""
+
+    body = str(observation.get("body") or "")
+    project = _require_project_no(str(observation.get("projectNo") or "").strip().upper())
+    if not _ADMITTED_PROJECT.fullmatch(project):
+        raise SourceIntakeError("准入只接受 2026 年消防产品监督案卷项目编号")
+    safe_url = sanitize_source_url(str(observation.get("url") or ""))
+    url_rwid = _source_url_rwid(safe_url)
+    rwid = _require_rwid(url_rwid)
+    if observation.get("rwidFromUrl") not in (None, rwid):
+        raise SourceIntakeError("详情读取的 RWID 与来源 URL 不一致")
+    unit = str(observation.get("unit") or "").strip()
+    brigade = str(observation.get("brigade") or "").strip()
+    if not unit or not brigade:
+        raise SourceIntakeError("详情缺少单位名称或消防管辖，不能准入")
+    if not re.search(rf"项目编号[:：]\s*{re.escape(project)}", body):
+        raise SourceIntakeError("详情原文的项目编号与准入项目不一致")
+    if not re.search(rf"单位名称\s+{re.escape(unit)}\s", body) or not re.search(
+        rf"消防管辖\s+{re.escape(brigade)}\s", body
+    ):
+        raise SourceIntakeError("详情原文的单位或大队与读取身份不一致")
+    roots = set(_PRODUCT_ROOT.findall(body))
+    if roots != {project}:
+        raise SourceIntakeError("详情文书目录没有唯一的本案 [产] 产品根，不放行")
+    # 类别由本案 [产] 根与四身份证明；检查产品信息数量只是事实：匹配到才转整数(0 保留 0)，区段缺失存 None。
+    block = _PRODUCT_BLOCK.search(body)
+    product_items = int(block.group(1)) if block else None
+    return {
+        "schemaVersion": OBSERVED_ADMISSION_VERSION,
+        "basis": "OBSERVED_DETAIL_PRODUCT_CASE",
+        "coverageExcluded": True,
+        "projectNo": project,
+        "rwid": rwid,
+        "unitName": unit,
+        "sourceOrganization": brigade,
+        "sourceUrl": safe_url,
+        "evidenceSha256": evidence_sha,
+        "productItems": product_items,
+        "productRoot": project,
+    }
+
+
+def admit_observed_material_case(
+    workspace: Any,
+    batch_id: str,
+    observation: dict[str, Any] | str | Path,
+    *,
+    admitted_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """已证单案材料采集准入：不经年度清单，只认现场详情原文证明的本案四身份与 [产] 产品根。
+
+    记录标 coverageExcluded，不计年度清单、不改批级年度条件；同 RWID/项目/证据重复调用 0 写。
+    先完整校验，再依次写总账与批次(各自原子写)，重入按同一证据对账补全，不双登记。
+    """
+
+    if __package__:
+        from . import source_coverage as coverage
+    else:
+        import source_coverage as coverage
+    layout = _layout(workspace)
+    path, state = _load_capture(layout, batch_id)
+    if (
+        not state.get("derivedFrom")
+        or state.get("filters", {}).get("selectionMode") != coverage.ANNUAL_MODE
+        or state.get("stableRounds", 0) < 2
+        or state.get("listResult") != "STABLE"
+        or state.get("scope") != "all"
+    ):
+        raise SourceIntakeError("单案材料准入只能进入既有、已核实的整包采集材料批次")
+    if isinstance(observation, dict):
+        evidence_sha = _fingerprint(observation)
+        observed = observation
+    else:
+        # 摘要与参与身份校验的内容取自同一次读取的字节，文件在两步之间变化也不会失配。
+        try:
+            raw = Path(observation).read_bytes()
+            observed = json.loads(raw.decode("utf-8-sig"))
+        except (OSError, ValueError) as error:
+            raise SourceIntakeError(f"无法读取现场详情读取文件：{error}") from error
+        if not isinstance(observed, dict):
+            raise SourceIntakeError("现场详情读取文件必须是 JSON 对象")
+        evidence_sha = "sha256:" + hashlib.sha256(raw).hexdigest()
+    basis = _admission_basis(observed, evidence_sha)
+    key, project = basis["rwid"], basis["projectNo"]
+    records = state.setdefault("records", {})
+    existing = records.get(key)
+    if existing is not None:
+        prior = existing.get("materialAdmission") or {}
+        if existing.get("projectNo") != project or prior.get("evidenceSha256") != evidence_sha or any(
+            prior.get(k) != basis[k] for k in ("basis", "unitName", "sourceOrganization", "projectNo")
+        ):
+            raise SourceIntakeError("批次已有该 RWID 的不同身份或不同依据，拒绝覆盖")
+    for other_key, other in records.items():
+        if other_key != key and other.get("projectNo") == project:
+            raise SourceIntakeError("同一项目已绑定其他 RWID，保留冲突不放行")
+    if any(
+        conflict.get("rwid") == key or key in conflict.get("rwids", [])
+        for conflict in state.get("conflicts", [])
+    ):
+        raise SourceIntakeError("当前案卷仍有未解决的来源冲突，保留原断点")
+    ledger = load_waterline(layout) if load_waterline else {"cases": {}}
+    bindings = coverage.identity_bindings(coverage.formal_captures(layout), ledger)
+    if bindings.get(key, {project}) != {project}:
+        raise SourceIntakeError("该 RWID 已绑定其他项目编号，拒绝准入")
+    case = ledger.get("cases", {}).get(project)
+    source_part = (case or {}).get("source") or {}
+    if case is not None:
+        prior_ledger = source_part.get("materialAdmission") or {}
+        bound = {source_part.get("rwid"), *(source_part.get("annualIdentitiesByRwid") or {})} - {None}
+        if bound and bound != {key}:
+            raise SourceIntakeError("总账里该项目已绑定其他 RWID，拒绝准入")
+        if prior_ledger:
+            # 总账已有本类准入：只有依据与身份逐项相同的原证据才允许恢复；RWID/项目相同不足以接受换证据。
+            if any(prior_ledger.get(k) != basis[k] for k in (
+                "basis", "projectNo", "rwid", "unitName", "sourceOrganization", "evidenceSha256", "sourceUrl",
+            )):
+                raise SourceIntakeError("总账已有该项目的不同准入依据或身份，保留冲突不推进")
+        else:
+            for ledger_key, basis_key in (("unitName", "unitName"), ("brigadeName", "sourceOrganization")):
+                if case.get(ledger_key) not in (None, "", basis[basis_key]):
+                    raise SourceIntakeError("总账里该项目的单位或大队与现场详情不一致，保留冲突不推进")
+    moment = _timestamp(admitted_at)
+    if case is None or (source_part.get("materialAdmission") or {}).get("evidenceSha256") != evidence_sha:
+        _maybe_waterline(
+            layout,
+            project,
+            unitName=basis["unitName"],
+            brigadeName=basis["sourceOrganization"],
+            source={
+                "batchId": batch_id,
+                "rwid": key,
+                "projectIdentitySource": "DETAIL",
+                "lastObservedAt": moment,
+                "materialAdmission": {**basis, "admittedAt": moment},
+            },
+        )
+    if existing is None:
+        record = {
+            "rwid": key,
+            "projectNo": project,
+            "fields": {"rwid": key, "unitName": basis["unitName"], "sourceOrganization": basis["sourceOrganization"]},
+            "inspectionStages": [],
+            "sourceAppearances": [],
+            "detail": {
+                "projectNo": project,
+                "capturedAt": moment,
+                "sourceUrl": basis["sourceUrl"],
+                "fields": {"projectNo": project, "unitName": basis["unitName"]},
+                "admissionEvidenceSha256": evidence_sha,
+            },
+            "materialAdmission": {**basis, "admittedAt": moment},
+        }
+        record["sourceRecordFingerprint"] = _record_equivalence(record)
+        records[key] = record
+        state["updatedAt"] = moment
+        _write_json(path, state)
+    return request_case_material_collection(layout, batch_id, key, project, requested_at=moment)
+
+
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+SEGMENT_SET_KEY = "screenshotSegmentSets"
+
+
+def _png_dimensions(path: Path) -> tuple[int, int]:
+    with path.open("rb") as stream:
+        head = stream.read(24)
+    if len(head) < 24 or head[:8] != _PNG_MAGIC or head[12:16] != b"IHDR":
+        raise SourceIntakeError(f"分段图不是有效 PNG：{path.name}")
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
+def _checked_segment_set(index: dict[str, Any], rwid: str, project: str, index_dir: Path | None = None) -> list[dict[str, Any]]:
+    """同案、顺序、重叠和末端都证明过的分段集合；任何一项缺失都不升级为“完整”。"""
+
+    if str(index.get("rwid")) != rwid or index.get("projectNo") != project:
+        raise SourceIntakeError("分段索引的 RWID/项目编号与批次记录不是同一案")
+    url = index.get("sourceUrl")
+    if not isinstance(url, str) or re.findall(r"[?&#]RWID=(\d+)", url) != [rwid]:
+        raise SourceIntakeError("分段索引的来源 URL 与 RWID 不一致")
+    segments = index.get("segments")
+    if not isinstance(segments, list) or not segments:
+        raise SourceIntakeError("分段索引没有分段")
+    out: list[dict[str, Any]] = []
+    scroll_height = None
+    for position, item in enumerate(segments):
+        if not isinstance(item, dict) or item.get("index") != position:
+            raise SourceIntakeError("分段序号必须从 0 连续")
+        png = Path(str(item.get("png", "")))
+        if not png.is_file() and index_dir is not None:  # 索引里的绝对路径来自另一主机/盘符：只按同目录同文件名找，摘要仍须相符
+            png = index_dir / re.split(r"[\\/]", str(item.get("png", "")))[-1]
+        if not png.is_file():
+            raise SourceIntakeError(f"分段图不存在：第 {position} 段")
+        sha = _sha256(png)
+        if sha != "sha256:" + str(item.get("sha256", "")).removeprefix("sha256:"):
+            raise SourceIntakeError(f"分段图摘要与索引不一致：第 {position} 段")
+        width, height = _png_dimensions(png)
+        if (item.get("width"), item.get("height")) != (width, height):
+            raise SourceIntakeError(f"分段图尺寸与索引不一致：第 {position} 段")
+        cover_from, cover_to, height_total = item.get("coverFrom"), item.get("coverTo"), item.get("scrollHeight")
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (cover_from, cover_to, height_total)) or cover_to <= cover_from:
+            raise SourceIntakeError(f"分段覆盖区间无效：第 {position} 段")
+        scroll_height = height_total if scroll_height is None else scroll_height
+        if height_total != scroll_height:
+            raise SourceIntakeError("各段记录的页面总高度不一致")
+        if position == 0 and cover_from != 0:
+            raise SourceIntakeError("首段必须从页面顶部开始")
+        if position and cover_from > out[-1]["coverTo"]:
+            raise SourceIntakeError(f"第 {position - 1} 与 {position} 段之间有未覆盖空隙")
+        if position and cover_from < out[-1]["coverFrom"]:
+            raise SourceIntakeError("分段覆盖顺序倒退")
+        out.append({"index": position, "png": png, "sha256": sha, "width": width, "height": height,
+                    "coverFrom": cover_from, "coverTo": cover_to, "scrollHeight": height_total})
+    if out[-1]["coverTo"] < scroll_height - 1:
+        raise SourceIntakeError("末段没有覆盖到页面末端")
+    return out
+
+
+def attach_detail_segments(
+    workspace: Any,
+    batch_id: str,
+    index_path: str | Path,
+    *,
+    attached_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """把一案已有的多段详情截图按覆盖索引正常绑定为永久 D 引用。
+
+    只增叶：首段必须已是该案登记的详情截图(保留旧引用与原图)，其余段复制为 ``案卷详情_<sha12>.png``，
+    索引本身以字节副本保存；同一索引重入 0 写。同案身份、顺序/重叠、末端覆盖和每段摘要/尺寸全部成立才写，
+    否则拒绝且不留半成品引用。其他案的单张引用不因此升级。
+    """
+
+    layout = _layout(workspace)
+    path, state = _load_capture(layout, batch_id)
+    try:
+        raw = Path(index_path).read_bytes()
+        index = json.loads(raw.decode("utf-8-sig"))
+    except (OSError, ValueError) as error:
+        raise SourceIntakeError(f"无法读取分段覆盖索引：{error}") from error
+    if not isinstance(index, dict):
+        raise SourceIntakeError("分段覆盖索引必须是 JSON 对象")
+    index_sha = "sha256:" + hashlib.sha256(raw).hexdigest()
+    rwid, project = str(index.get("rwid", "")), str(index.get("projectNo", ""))
+    record = (state.get("records") or {}).get(rwid)
+    if not isinstance(record, dict) or record.get("projectNo") != project:
+        raise SourceIntakeError("批次里没有该 RWID/项目编号的记录")
+    detail_key = "collectionDetail" if isinstance(record.get("collectionDetail"), dict) else "detail"
+    detail = record.get(detail_key)
+    if not isinstance(detail, dict) or not detail.get("screenshot"):
+        raise SourceIntakeError("该案还没有已登记的详情截图，不能绑定分段")
+    segments = _checked_segment_set(index, rwid, project, Path(index_path).parent)
+    registered = {detail["screenshot"].get("sha256")} | {o.get("sha256") for o in detail.get("screenshotObservations") or []}
+    if segments[0]["sha256"] not in registered:
+        raise SourceIntakeError("首段不是该案已登记的详情截图，拒绝绑定")
+    stored_first = _workspace_relative_path(layout, detail["screenshot"].get("relativePath"), "已登记详情截图")
+    if not stored_first.is_file() or _sha256(stored_first) != detail["screenshot"].get("sha256"):
+        raise SourceIntakeError("已登记详情截图与本地证据无法对账")
+    existing_sets = list(detail.get(SEGMENT_SET_KEY) or [])
+    if any(item.get("indexSha256") == index_sha for item in existing_sets):
+        return {"status": "REUSED", "projectNo": project, "rwid": rwid, "indexSha256": index_sha, "segments": len(segments)}
+    case_dir = _case_evidence_dir(layout, state, project, batch_id)
+    refs = []
+    for item in segments:
+        target = case_dir / f"案卷详情_{item['sha256'].removeprefix('sha256:')[:12]}.png"
+        _copy_immutable(item["png"], target)
+        refs.append({**_evidence_file(target, Path(layout.root)), "index": item["index"], "coverFrom": item["coverFrom"],
+                     "coverTo": item["coverTo"], "width": item["width"], "height": item["height"]})
+    index_target = case_dir / f"案卷详情覆盖索引_{index_sha.removeprefix('sha256:')[:12]}.json"
+    if index_target.exists():
+        if _sha256(index_target) != index_sha:
+            raise SourceIntakeError("覆盖索引目标已存在且内容不同")
+    else:
+        index_target.write_bytes(raw)
+        if _sha256(index_target) != index_sha:
+            raise SourceIntakeError("覆盖索引复制后的哈希不一致")
+    moment = _timestamp(attached_at)
+    detail[SEGMENT_SET_KEY] = [*existing_sets, {
+        "indexSha256": index_sha, "index": _evidence_file(index_target, Path(layout.root)), "attachedAt": moment,
+        "sourceUrl": index["sourceUrl"], "scrollHeight": segments[0]["scrollHeight"], "segments": refs,
+        "coverage": "CONTIGUOUS_TOP_TO_END", "firstSegmentReusesRegisteredScreenshot": True,
+    }]
+    state["updatedAt"] = moment
+    _write_json(path, state)
+    return {"status": "BOUND", "projectNo": project, "rwid": rwid, "indexSha256": index_sha, "segments": len(segments),
+            "references": [r["relativePath"] for r in refs]}
+
+
+def derive_material_batch(
+    workspace: Any,
+    source_batch_id: str,
+    batch_id: str,
+    rwids: list[str],
+    *,
+    created_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """从已稳定的年度批次派生“整包采集专用批次”。
+
+    只复制所选 RWID 的年度身份记录、查询证据和稳定结论，原批次不改；派生批次不带年度字段，
+    因此不会进入年度覆盖对账，也不会替代原年度基线。写入、下载与接件均落在新批次。
+    """
+
+    if __package__:
+        from . import source_coverage as coverage
+    else:
+        import source_coverage as coverage
+    layout = _layout(workspace)
+    _require_safe_component(batch_id, "批次编号")
+    _, source_state = _load_capture(layout, source_batch_id)
+    filters = source_state.get("filters", {})
+    if (
+        filters.get("selectionMode") != coverage.ANNUAL_MODE
+        or source_state.get("stableRounds", 0) < 2
+        or source_state.get("listResult") != "STABLE"
+        or source_state.get("conflicts")
+        or coverage.query_evidence_issue(layout, source_state)
+    ):
+        raise SourceIntakeError("派生整包批次必须基于已核实类别的稳定年度清单")
+    path = _capture_path(layout, batch_id)
+    if path.exists():
+        raise SourceIntakeError("采集批次已存在，拒绝覆盖")
+    keys = [_require_rwid(item) for item in rwids]
+    records = source_state.get("records", {})
+    missing = [key for key in keys if key not in records or records[key].get("aliasOf")]
+    if missing or len(set(keys)) != len(keys):
+        raise SourceIntakeError("所选 RWID 不在原年度批次或重复，拒绝派生")
+    created = _timestamp(created_at)
+    derived_filters = {k: v for k, v in filters.items() if k != "year"}
+    derived_filters["derivedFromBatchId"] = source_batch_id
+    state: dict[str, Any] = {
+        "schemaVersion": BROWSER_CAPTURE_VERSION,
+        "batchId": batch_id,
+        "workspaceRoot": source_state["workspaceRoot"],
+        "sourceOrigin": source_state["sourceOrigin"],
+        "filters": derived_filters,
+        "filterFingerprint": _fingerprint(derived_filters),
+        "scope": "all",
+        "status": "BASELINE_INDEXED",
+        "currentRound": source_state.get("currentRound", 2),
+        "stableRounds": source_state["stableRounds"],
+        "listResult": "STABLE",
+        "rounds": {},
+        "records": {
+            key: {k: v for k, v in copy.deepcopy(records[key]).items() if k != "materialCollection"}
+            for key in keys
+        },
+        "conflicts": [],
+        "anomalies": [],
+        "detailRwids": [],
+        "actionRwids": [],
+        "materialRwids": [],
+        "queryEvidence": source_state["queryEvidence"],
+        "derivedFrom": {
+            "batchId": source_batch_id,
+            "sourceListCount": source_state.get("sourceListCount"),
+            "sourceFilterFingerprint": source_state.get("filterFingerprint"),
+            "rwidCount": len(keys),
+        },
+        "createdAt": created,
+        "updatedAt": created,
+    }
+    _write_json(path, state)
+    return state
+
+
+def extend_material_batch(
+    workspace: Any,
+    batch_id: str,
+    source_batch_id: str,
+    rwids: list[str],
+    *,
+    updated_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """向已派生的整包采集专用批次追加另一类别稳定年度批次中的所选 RWID 身份记录。
+
+    每条追加记录保留 derivedFromBatchId，原稳定批次和查询证据不改；已存在的 RWID 不覆盖。
+    """
+
+    if __package__:
+        from . import source_coverage as coverage
+    else:
+        import source_coverage as coverage
+    layout = _layout(workspace)
+    path, state = _load_capture(layout, batch_id)
+    if not state.get("derivedFrom") or state.get("filters", {}).get("selectionMode") != coverage.ANNUAL_MODE:
+        raise SourceIntakeError("只能向派生整包采集批次追加记录")
+    _, source_state = _load_capture(layout, source_batch_id)
+    if (
+        source_state.get("filters", {}).get("selectionMode") != coverage.ANNUAL_MODE
+        or source_state.get("stableRounds", 0) < 2
+        or source_state.get("listResult") != "STABLE"
+        or source_state.get("conflicts")
+        or coverage.query_evidence_issue(layout, source_state)
+    ):
+        raise SourceIntakeError("追加来源必须是已核实类别的稳定年度清单")
+    keys = [_require_rwid(item) for item in rwids]
+    records = source_state.get("records", {})
+    missing = [key for key in keys if key not in records or records[key].get("aliasOf")]
+    if missing or len(set(keys)) != len(keys):
+        raise SourceIntakeError("所选 RWID 不在来源年度批次或重复，拒绝追加")
+    added = []
+    for key in keys:
+        if key in state["records"]:
+            continue
+        record = {k: v for k, v in copy.deepcopy(records[key]).items() if k != "materialCollection"}
+        record["derivedFromBatchId"] = source_batch_id
+        state["records"][key] = record
+        added.append(key)
+    if added:
+        extra = state["derivedFrom"].setdefault("extendedFrom", {})
+        extra[source_batch_id] = {
+            "taskCategory": source_state["filters"].get("taskCategory"),
+            "sourceListCount": source_state.get("sourceListCount"),
+            "sourceFilterFingerprint": source_state.get("filterFingerprint"),
+            "queryEvidence": source_state.get("queryEvidence"),
+            "rwidCount": len([k for k, r in state["records"].items() if r.get("derivedFromBatchId") == source_batch_id]),
+        }
+        state["updatedAt"] = _timestamp(updated_at)
+        _write_json(path, state)
+    return state
+
+
+def _inherited_material_state(
+    layout: Any,
+    state: dict[str, Any],
+    rwid: str,
+    record: dict[str, Any],
+    detail_key: str,
+    existing: dict[str, Any],
+) -> dict[str, Any] | None:
+    """证明派生整包批次里的旧 collectionDetail 确由来源批次原样继承；证明不了返回 None。
+
+    只比对来源批次磁盘记录，不信任标签或 derivedFrom 字样：旧详情(以及一同继承的 downloadDelivery)
+    必须与来源批次同一 RWID 的记录逐字段相等，且本记录尚未绑定案卷包。
+    """
+
+    source_id = (state.get("derivedFrom") or {}).get("batchId")
+    if detail_key != "collectionDetail" or not source_id or record.get("package"):
+        return None
+    try:
+        _, source_state = _load_capture(layout, source_id)
+    except SourceIntakeError:
+        return None
+    source_record = (source_state.get("records") or {}).get(rwid) or {}
+    if not source_record.get("collectionDetail") or source_record["collectionDetail"] != existing:
+        return None
+    carried: dict[str, Any] = {"sourceBatchId": source_id, "collectionDetail": copy.deepcopy(existing)}
+    delivery = record.get("downloadDelivery")
+    if delivery is not None and delivery == source_record.get("downloadDelivery"):
+        carried["downloadDelivery"] = copy.deepcopy(delivery)
+    return carried
 
 
 def _is_acceptance_sample(state: dict[str, Any]) -> bool:
@@ -2340,8 +2810,15 @@ def add_detail(
     *,
     captured_at: datetime | str | None = None,
     screenshot: str | Path | None = None,
+    supersede_carried: bool = False,
 ) -> dict[str, Any]:
-    """接收详情结构和截图，生成/更新 SourceEvidenceV1。"""
+    """接收详情结构和截图，生成/更新 SourceEvidenceV1。
+
+    supersede_carried 只是请求：仅当旧 collectionDetail 经来源批次磁盘记录证明确由派生时继承、
+    记录未绑包，且本次现场详情通过上方全部身份校验并带有效截图时，才把旧值移为前代引用并解除
+    对应的那条 DETAIL_CONFLICT(冲突须明确记录与被移旧指纹相同的 existingFingerprint；缺失则冲突保留待核)；
+    证明不了继承关系就拒绝且不写任何状态。
+    """
 
     layout = _layout(workspace)
     capture_path, state = _load_capture(layout, batch_id)
@@ -2592,13 +3069,29 @@ def add_detail(
             alias_of = canonical
     detail_key = "collectionDetail" if annual_materials else "detail"
     existing = record.get(detail_key)
+    carried_supersede: dict[str, Any] | None = None
     if existing and existing.get("fingerprint") != fingerprint:
-        state.setdefault("conflicts", []).append(
-            {"type": "DETAIL_CONFLICT", "rwid": record_key, "projectNo": project_no}
-        )
-        state["status"] = "NEEDS_MANUAL_REVIEW"
-        _write_json(capture_path, state)
-        raise SourceIntakeError("同一 RWID 的详情发生变化，已转人工处理")
+        if supersede_carried:
+            carried_supersede = _inherited_material_state(
+                layout, state, record_key, record, detail_key, existing
+            )
+            if carried_supersede is None:
+                raise SourceIntakeError("无法证明旧详情由来源批次继承或记录已绑包，拒绝移出，冲突保持")
+            carried_supersede["supersededFingerprint"] = existing.get("fingerprint")
+            existing = None  # 现场新观察重新取证：截图必须为本次提供，不沿用前代截图
+        else:
+            state.setdefault("conflicts", []).append(
+                {
+                    "type": "DETAIL_CONFLICT",
+                    "rwid": record_key,
+                    "projectNo": project_no,
+                    "existingFingerprint": existing.get("fingerprint"),
+                    "observedFingerprint": fingerprint,
+                }
+            )
+            state["status"] = "NEEDS_MANUAL_REVIEW"
+            _write_json(capture_path, state)
+            raise SourceIntakeError("同一 RWID 的详情发生变化，已转人工处理")
     screenshot_source = (
         Path(screenshot if screenshot is not None else screenshot_path)
         if (screenshot is not None or screenshot_path is not None)
@@ -2704,14 +3197,58 @@ def add_detail(
         state["actionRwids"] = [item for item in state.get("actionRwids", []) if item != record_key]
     record["projectNo"] = project_no
     record[detail_key] = detail_record
+    if carried_supersede is not None:
+        old_fingerprint = carried_supersede.pop("supersededFingerprint")
+        record.setdefault("carriedFromSourceBatch", []).append(
+            {
+                **carried_supersede,
+                "supersededAt": captured,
+                "supersededByFingerprint": fingerprint,
+                "supersededByScreenshotSha256": (screenshot_record or {}).get("sha256"),
+            }
+        )
+        if "downloadDelivery" in carried_supersede:
+            record.pop("downloadDelivery", None)
+        remaining_conflicts = []
+        for conflict in state.get("conflicts") or []:
+            if (
+                conflict.get("type") == "DETAIL_CONFLICT"
+                and conflict.get("rwid") == record_key
+                and conflict.get("projectNo") == project_no
+                and conflict.get("existingFingerprint")
+                and conflict.get("existingFingerprint") == old_fingerprint
+            ):
+                # 冲突原字段(含形成冲突时的 observedFingerprint)逐项原样保留；当前处理的新观察另列。
+                state.setdefault("resolvedConflicts", []).append(
+                    {
+                        **copy.deepcopy(conflict),
+                        "resolvedAt": captured,
+                        "resolution": "CARRIED_DETAIL_SUPERSEDED_BY_VERIFIED_NEW_OBSERVATION",
+                        "resolvedByObservedFingerprint": fingerprint,
+                        "resolvedByScreenshotSha256": (screenshot_record or {}).get("sha256"),
+                    }
+                )
+            else:
+                remaining_conflicts.append(conflict)
+        state["conflicts"] = remaining_conflicts
     evidence_path, evidence = _load_evidence(layout, project_no, batch_id, state=state)
     if batch_id not in evidence["batchIds"]:
         evidence["batchIds"].append(batch_id)
     evidence_record = evidence["records"].setdefault(record_key, {})
     prior_fingerprint = evidence_record.get("fingerprint")
+    superseded = None
     if prior_fingerprint and prior_fingerprint != detail_record["fingerprint"]:
-        raise SourceIntakeError("本地来源证据已有不同详情，拒绝覆盖")
+        if not annual_materials:
+            raise SourceIntakeError("本地来源证据已有不同详情，拒绝覆盖")
+        # 整包采集中的来源变化：旧观察原样保存到 previousObservations(新代际)，旧原图/旧批次原文不删不改。
+        superseded = {k: v for k, v in evidence_record.items() if k != "previousObservations"}
+        superseded["supersededAt"] = captured
+    previous = list(evidence_record.get("previousObservations") or [])
+    if superseded is not None:
+        previous.append(superseded)
     evidence_record.update(detail_record)
+    if previous:
+        evidence_record["previousObservations"] = previous
     if alias_of and record.get("package"):
         evidence["records"].setdefault(alias_of, {"projectNo": project_no})["package"] = record[
             "package"
@@ -3183,7 +3720,11 @@ def _sync_attached_package(
     evidence_record = evidence["records"].setdefault(record_key, {"projectNo": project_no})
     prior_package = evidence_record.get("package")
     if prior_package and prior_package.get("sha256") != package["sha256"]:
-        raise SourceIntakeError("本地来源证据已绑定不同案卷包，拒绝覆盖")
+        if package.get("supersedes") != prior_package.get("sha256"):
+            raise SourceIntakeError("本地来源证据已绑定不同案卷包，拒绝覆盖")
+        evidence_record.setdefault("previousPackages", []).append(
+            {key: prior_package.get(key) for key in ("sha256", "relativePath", "attachedAt", "generation")}
+        )
     evidence_record["package"] = package
     evidence["updatedAt"] = package["attachedAt"]
     _write_json(evidence_path, evidence)
@@ -3220,6 +3761,8 @@ def _sync_attached_package(
                 "packageRelativePath": package["relativePath"],
                 "downloadSelection": package["downloadSelection"],
                 "downloadDisposition": package.get("downloadDisposition"),
+                "packageGeneration": package.get("generation") or 1,
+                "packageSupersedes": package.get("supersedes"),
                 **({"classification": classification} if classification is not None else {}),
             },
             local={
@@ -3265,8 +3808,18 @@ def attach_package(
     stability_checks: int = 3,
     stability_interval: float = 0.05,
     sleep_fn: Any = time.sleep,
+    refresh_of_sha: str | None = None,
+    refresh_reason: str | None = None,
 ) -> dict[str, Any]:
-    """接收唯一完整 ZIP，安全检查后按项目号+哈希绑定原始包。"""
+    """接收唯一完整 ZIP，安全检查后按项目号+哈希绑定原始包。
+
+    refresh_of_sha/refresh_reason 仅用于受审计的显式更新：新包作为新一代接入，
+    旧包字节与登记永久保留；缺理由、理由不合法或与当前代不符一律拒绝。
+    """
+    if (refresh_of_sha is None) != (refresh_reason is None):
+        raise SourceIntakeError("显式更新必须同时给出被更新的包摘要和理由")
+    if refresh_reason is not None and refresh_reason not in REFRESH_REASONS:
+        raise SourceIntakeError("显式更新理由不在允许集合内")
 
     layout = _layout(workspace)
     capture_path, state = _load_capture(layout, batch_id)
@@ -3373,8 +3926,13 @@ def attach_package(
     _copy_immutable(source, stored)
     _, existing_evidence = _load_evidence(layout, selected_project, batch_id, state=state)
     prior_package = (existing_evidence.get("records", {}).get(record_key) or {}).get("package")
+    generation_prior = None
     if prior_package and prior_package.get("sha256") != sha:
-        raise SourceIntakeError("来源证据已绑定不同案卷包，拒绝自动恢复")
+        if refresh_of_sha is None or prior_package.get("sha256") != refresh_of_sha:
+            raise SourceIntakeError("来源证据已绑定不同案卷包，拒绝自动恢复")
+        generation_prior, prior_package = prior_package, None
+    elif refresh_of_sha is not None and not prior_package:
+        raise SourceIntakeError("显式更新找不到被更新的当前代包，拒绝")
     attached_at = (prior_package or {}).get("attachedAt") or _timestamp()
     package = {
         "originalSuggestedName": (prior_package or {}).get("originalSuggestedName")
@@ -3396,6 +3954,10 @@ def attach_package(
             "consumedAt": consumption["consumedAt"],
         },
     }
+    if generation_prior is not None:
+        package["supersedes"] = generation_prior["sha256"]
+        package["refreshReason"] = refresh_reason
+        package["generation"] = int(generation_prior.get("generation") or 1) + 1
     return _sync_and_cleanup_download_copy(
         layout,
         capture_path,
@@ -3425,6 +3987,8 @@ def await_download(
     stability_interval: float = 1.0,
     sleep_fn: Any = time.sleep,
     monotonic_fn: Any = time.monotonic,
+    refresh_of_sha: str | None = None,
+    refresh_reason: str | None = None,
 ) -> dict[str, Any]:
     """等待来源系统异步生成包；可在唯一 ZIP 稳定后自动交给既有绑定门禁。"""
 
@@ -3487,6 +4051,8 @@ def await_download(
         stability_checks=stability_checks,
         stability_interval=stability_interval,
         sleep_fn=sleep_fn,
+        refresh_of_sha=refresh_of_sha,
+        refresh_reason=refresh_reason,
     )
     return {**envelope, "status": "ATTACHED", "capture": capture}
 
@@ -3504,6 +4070,7 @@ __all__ = [
     "TAIL_CURSOR_VERSION",
     "SourceIntakeError",
     "add_detail",
+    "admit_observed_material_case",
     "add_page",
     "attach_package",
     "await_download",

@@ -1,5 +1,7 @@
 # 工作目录、本地水位与案卷清单
 
+> 文书属性与本地引用清单（来源形态、用途类别、文号、日期、页数、包内位置、稳定引用键、材料分轴状态）的字段见 [文书分类](document-classification.md)；它是本地派生记录，不替代 manifest、水位或 field-resolution.json。
+
 `CaseImportManifestV2.schema.json` 是本地案卷清单字段的唯一契约（旧上传接口已退役，清单仅用于本地校验与核验）。本文件规定真实业务数据如何在可切换工作根中落盘，以及来源证据如何与清单隔离。案卷文件只保存在本地，统计数据由飞书维护。
 
 ## 工作根解析与目录
@@ -33,6 +35,8 @@
 `下载交付异常_<RWID>.json` 只表达本案下载断点，不是 ZIP 或上传输入。外部 Edge 顺序取流失败时固定使用错误码 `EDGE_CDP_STREAM_UNAVAILABLE`，只允许保存项目编号、RWID、预期字节数、已接收字节数、失败阶段、发生时间和 `nonBlocking=true`；不得保存请求 ID、来源 URL、响应建议名、响应头全文、Cookie、令牌、浏览器存储或配置。对应 `CaseWaterlineV1` 仍为 `DETAIL_CAPTURED / PACKAGE_WAITING / NOT_STARTED`，单案异常不改变其他项目水位。
 
 每个项目工作区只保留一套当前根级控制文件：`inventory.json`、`ocr-result.json`、`split-plan.json`、`split-index.json`、`image-normalization.json`、按需生成的 `field-resolution.json`、`case-data.json`、`manifest.json`、`upload-map.json`（clientRef 到本地 PDF 的文件映射，沿用原名，仅用于本地核验）、`local-verification.json`（LocalVerificationV1 本地核验凭证），以及 `normalized/` 下的规范 PDF。历史 `upload-state.json`、`content-verification.json` 和旧补录状态文件只读保留，不再生成。CLI/OCR 生成的结构化诊断文件、文本层清单和专用输出子目录可按原名保留，不得改成另一套事实源。同一项目编号同时只能有一个写执行单元；跨项目并行时，每个执行单元显式绑定项目编号和上述两个项目目录。不得在工作根散落一次性包装脚本、第二份完整 manifest、手工复制的状态文件或以“第几行”命名的业务文件。
+
+已有 `split-index.json` 之后追加新拆分条目用 `registry_cli.py split --incremental`：旧条目字段、顺序和旧 PDF 字节保持不变；计划中与旧条目相同的项（来源分段、元数据一致且输出摘要未变）复用，全部复用时不改索引、不动水位；同一输出路径的来源分段或元数据冲突、旧输出缺失或字节已变、目标已存在但不在旧索引、旧索引缺失，均在写入前拒绝。新 PDF 先在 `.split-incremental-*` 批次临时目录生成并核验，再独占写入 `normalized/` 并追加索引；中途失败保留 `split-incremental-intent.json` 和临时目录，下一次增量拆分在核对目标实际摘要前拒绝运行，不盲重跑、不自动回滚。
 
 ## BrowserCaptureV1
 
@@ -173,3 +177,10 @@ Excel 至少展示项目编号、单位、大队、标签、来源进度、本�
 来源记录保存累计 observationsByRwid/documentFingerprints、独立 lastObservedAt 和 latestDocumentCreatedAt；本地处理用 workflowUpdatedAt。changePending 表示旧案出现新材料尚待处理，不能被普通刷新清除。原始包摘要、V6 系统绑定和 archive.workspacePath 对应的归档代际继续保留。
 
 content-verification.json 是本地逐文件核验回执，不是第二套上传状态或业务账本。ContentVerificationV1 绑定项目、origin、caseId、manifestSha256；每份含 fileId、sha256、sizeBytes、contentGeneration、verifiedAt 和 verifiedAgainstManifestSha256。全部当前文件通过且目录回读一致才写 completedAt。旧 V6 VERIFIED 仅有目录与飞牛证据时为 LEGACY_UNSPECIFIED，不自动视为逐份正文核验。
+
+
+## 详情截图引用层级
+
+- `screenshot`：登记时的首张详情截图；`screenshotObservations`：同一详情的其他观察截图(各带 sha256/大小/时点)，二者只证明文件存在与摘要，不证明视觉完整。
+- `screenshotSegmentSets`：经 `source attach-detail-segments` 证明“同案、顺序、重叠、到达页面末端”的分段集合，`coverage=CONTIGUOUS_TOP_TO_END`。只有这一层可以说“该案详情页已被连续覆盖”；没有这一层的案卷保持“引用存在、完整性未知”。
+- 检查产品信息数量(`productItems`)只是事实：0 保留 0，区段缺失为 None；类别由本案唯一 [产] 根和四身份证明，不由数量决定。

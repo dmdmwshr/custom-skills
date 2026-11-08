@@ -207,7 +207,11 @@ def validate_cases(
             if initial is None:
                 errors.append(f"{project}: 存在复查行但缺少初查行")
             elif text(initial.get("qualified")) != "不合格" and "qualified" not in _manual(initial):
-                errors.append(f"{project}: 只有初查不合格才允许生成复查行")
+                # A source record may explicitly mark a recheck while the earlier
+                # sampling outcome remains pending. Do not manufacture that outcome.
+                phase_source = text(recheck.get("inspection_phase_source"))
+                if not phase_source or phase_source not in recheck.get("source_files", []):
+                    errors.append(f"{project}: 初查结论未证明不合格时，复查须有 source_files 内的 inspection_phase_source")
             elif (
                 text(recheck.get("inspection_date"))
                 and text(recheck.get("inspection_date")) == text(initial.get("inspection_date"))
@@ -215,17 +219,16 @@ def validate_cases(
                 and not text(recheck.get("inspection_date_source"))
             ):
                 errors.append(f"{project}: 复查日期与初查日期相同且无独立来源，疑似复制初查日期")
-        failed_recheck = recheck is not None and text(recheck.get("qualified")) == "不合格"
         for case in group:
-            if text(case.get("case_type")) == "行案" and not failed_recheck:
+            case_type = text(case.get("case_type"))
+            source = text(case.get("case_type_source"))
+            if source and source not in case.get("source_files", []):
+                errors.append(f"{project}/{phase_of(case)}: case_type_source 不在 source_files 中")
+            if case_type in {"行案", "刑案"} and not source:
                 if "case_type" in _manual(case):
-                    warnings.append(
-                        f"{project}/{phase_of(case)}: 行案为人工裁决，保留；系统规则不会据此改值"
-                    )
+                    warnings.append(f"{project}/{phase_of(case)}: 案卷类型为人工裁决，保留并待来源核对")
                 else:
-                    errors.append(
-                        f"{project}/{phase_of(case)}: 只有复查不合格项目才允许 case_type 写 行案"
-                    )
+                    warnings.append(f"{project}/{phase_of(case)}: 历史案卷类型缺少独立来源，不由复查结果推定或改写")
 
     return {
         "status": "ok" if not errors else "errors_found",

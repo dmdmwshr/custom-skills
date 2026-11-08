@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import tomllib
 import unicodedata
@@ -31,6 +32,8 @@ PROJECT_NO = re.compile(r"^\d{8}[A-Z]\d{9}$")
 SHA256 = re.compile(r"^sha256:[a-f0-9]{64}$")
 SAFE_NAME = re.compile(r"^[^<>:\"/\\|?*\x00-\x1f]{1,120}$")
 ARCHIVE_GENERATION = re.compile(r"^\d{8}T\d{6}Z-[a-f0-9]{12}$")
+DOCUMENT_SUBSET_DIR = "文书子集"  # 已处理案卷/<项目>/ 下的保留目录：只复制的已确认文书子集，不是归档代际
+DOCUMENT_SUBSET_LEAF = re.compile(r"^[a-f0-9]{64}$")
 TERMINAL_BATCH_STATES = {
     "COMPLETE",
     "COMPLETED",
@@ -338,7 +341,9 @@ def _read_raw_config(path: Path) -> dict[str, Any]:
     return section
 
 
-def read_workspace_config(config_path: str | os.PathLike[str] | None = None) -> WorkspaceConfig:
+def read_workspace_config(
+    config_path: str | os.PathLike[str] | None = None, *, require_download_dir: bool = True
+) -> WorkspaceConfig:
     path = _config_path(config_path)
     section = _read_raw_config(path)
     root_value, download_value = section.get("root"), section.get("download_dir")
@@ -354,8 +359,14 @@ def read_workspace_config(config_path: str | os.PathLike[str] | None = None) -> 
         not isinstance(p, str) or not p for p in reference_values
     ):
         raise WorkspaceStateError("workspace.reference_roots 必须是历史访问根数组")
+    # 纯本地读取只需保留配置里的下载目录值；缺失、普通文件或重解析路径留给真正下载的命令校验。
+    downloads = (
+        secure_download_dir(download_value)
+        if require_download_dir
+        else _absolute_path(download_value, "下载目录")
+    )
     return WorkspaceConfig(
-        secure_workspace_root(root_value), secure_download_dir(download_value), path,
+        secure_workspace_root(root_value), downloads, path,
         secure_workspace_root(identity_value) if identity_value else None,
         tuple(secure_workspace_root(p) for p in reference_values),
     )
@@ -396,10 +407,6 @@ def configure_workspace(
         raise WorkspaceStateError("配置工作根时必须显式提供 work_root")
     path = _config_path(config_path)
     root = secure_workspace_root(work_root)
-    if download_dir is None:
-        download_dir = Path.home() / "Downloads"
-    downloads = secure_download_dir(download_dir)
-
     identity_root = None
     reference_roots = ()
     if path.exists():
@@ -411,6 +418,11 @@ def configure_workspace(
             BusinessLayout.from_root(previous.work_root)
         ):
             raise WorkspaceStateError("旧工作根仍有未完成采集批次，不得跨根续跑")
+
+    # 下载目录只在确实要写入配置时校验，先于它报告更根本的批次冲突。
+    if download_dir is None:
+        download_dir = Path.home() / "Downloads"
+    downloads = secure_download_dir(download_dir)
 
     layout = ensure_workspace_layout(BusinessLayout.from_root(
         root, identity_root=identity_root, reference_roots=reference_roots
@@ -433,7 +445,7 @@ def switch_mirror_access(
     *, work_root: str | os.PathLike[str], config_path: str | os.PathLike[str] | None = None
 ) -> dict[str, Any]:
     """Change only the access configuration after proving both existing trees identical."""
-    config, previous = resolve_workspace(config_path=config_path)
+    config, previous = resolve_workspace(config_path=config_path, require_download_dir=False)
     target_root = secure_workspace_root(work_root)
     if target_root == previous.root:
         raise WorkspaceStateError("目标已经是当前主操作根，无需重复切换")
@@ -534,11 +546,12 @@ def resolve_workspace(
     download_dir: str | os.PathLike[str] | None = None,
     config_path: str | os.PathLike[str] | None = None,
     create_layout: bool = False,
+    require_download_dir: bool = True,
 ) -> tuple[WorkspaceConfig, BusinessLayout]:
     path = _config_path(config_path)
     stored: WorkspaceConfig | None = None
     if path.exists():
-        stored = read_workspace_config(path)
+        stored = read_workspace_config(path, require_download_dir=require_download_dir)
     if work_root is None and stored is None:
         raise WorkspaceStateError("未配置工作根；请先执行 workspace configure")
     root = secure_workspace_root(work_root if work_root is not None else stored.work_root)
@@ -547,7 +560,14 @@ def resolve_workspace(
         if download_dir is not None
         else (stored.download_dir if stored is not None else Path.home() / "Downloads")
     )
-    downloads = secure_download_dir(raw_download)
+    if require_download_dir:
+        downloads = secure_download_dir(raw_download)
+    else:
+        # 纯本地查询不使用下载目录：目录存在则照常校验，缺失时不报错也不创建。
+        try:
+            downloads = secure_download_dir(raw_download)
+        except WorkspaceStateError:
+            downloads = _absolute_path(raw_download, "下载目录")
     identity_root = stored.identity_root if stored and root == stored.work_root else None
     reference_roots = stored.reference_roots if stored and root == stored.work_root else ()
     layout = BusinessLayout.from_root(
@@ -1382,6 +1402,111 @@ def _assert_safe_tree(path: Path, boundary: Path, label: str) -> Path:
     return path
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def archive_document_subset(
+    layout: BusinessLayout,
+    project_no: str,
+    *,
+    confirmed: Mapping[str, Any],
+    confirmed_file: Path,
+    check_only: bool = False,
+) -> dict[str, Any]:
+    """Copy (never move) already confirmed normalized documents into an immutable subset leaf.
+
+    Target: 已处理案卷/<项目>/文书子集/<内容清单SHA-256>/。原 ZIP、活动工作区、旧 split-index 和旧输出原位原字节保留；
+    不写 history.completions，不改 state/local/archive，不冒 LOCAL_VERIFIED。CaseWaterlineV1 只追加子集指针。
+    相同内容清单重跑只复用；同一叶已存在但内容不同则拒绝。"""
+    project = _project_no(project_no)
+    if confirmed.get("schemaVersion") != "ConfirmedDocumentsV1" or confirmed.get("projectNo") != project:
+        raise WorkspaceStateError("已确认文书清单版本或项目编号不符")
+    leaf = confirmed.get("contentListSha256")
+    items = confirmed.get("items")
+    if not isinstance(leaf, str) or not DOCUMENT_SUBSET_LEAF.fullmatch(leaf) or not isinstance(items, list) or not items:
+        raise WorkspaceStateError("已确认文书清单缺少内容清单摘要或条目")
+    work = layout.work_case_dir(project)
+    _assert_safe_tree(work, layout.root, "活动项目工作区")
+    sources: list[tuple[Path, str, str]] = []
+    for item in items:
+        relative = item.get("relativePath")
+        expected = str(item.get("sha256", "")).removeprefix("sha256:")
+        if not isinstance(relative, str) or not relative.startswith("normalized/") or ".." in Path(relative).parts:
+            raise WorkspaceStateError("已确认文书条目路径必须在 normalized/ 内")
+        path = _validated_workspace_path(work / relative, layout.root, "已确认文书", must_exist=True)
+        if not path.is_file() or _sha256(path) != expected:
+            raise WorkspaceStateError(f"已确认文书缺失或摘要已变化：{relative}")
+        sources.append((path, relative, expected))
+    manifest_source = _validated_workspace_path(confirmed_file, layout.root, "已确认文书清单", must_exist=True)
+    parent = layout.completed_case_dir(project)
+    target = parent / DOCUMENT_SUBSET_DIR / leaf
+    for candidate, label in ((parent, "已处理案卷项目目录"), (parent / DOCUMENT_SUBSET_DIR, "文书子集目录"), (target, "文书子集叶")):
+        _validated_workspace_path(candidate, layout.root, label, must_exist=False) if candidate.parent.is_dir() else None
+    result = {"projectNo": project, "target": str(target), "contentListSha256": leaf, "files": len(sources) + 1}
+    if target.exists():
+        for path, relative, expected in sources:
+            copy = target / relative
+            if not copy.is_file() or _sha256(copy) != expected:
+                raise WorkspaceStateError(f"文书子集叶已存在但内容不同，拒绝覆盖：{relative}")
+        if not (target / "confirmed-documents.json").is_file() or _sha256(target / "confirmed-documents.json") != _sha256(manifest_source):
+            raise WorkspaceStateError("文书子集叶已存在但清单不同，拒绝覆盖")
+        result["status"] = "REUSED"
+    elif check_only:
+        result["status"] = "WOULD_CREATE"
+        return result
+    else:
+        parent.mkdir(exist_ok=True)
+        (parent / DOCUMENT_SUBSET_DIR).mkdir(exist_ok=True)
+        temporary = parent / DOCUMENT_SUBSET_DIR / f".tmp-{leaf}"
+        if temporary.exists():
+            raise WorkspaceStateError("存在遗留的文书子集临时目录，需人工核对，不自动删除")
+        try:
+            temporary.mkdir()
+            for path, relative, expected in sources:
+                destination = temporary / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, destination)
+                if _sha256(destination) != expected:
+                    raise WorkspaceStateError(f"复制后摘要不一致：{relative}")
+            shutil.copyfile(manifest_source, temporary / "confirmed-documents.json")
+            os.rename(temporary, target)
+        except Exception:
+            if temporary.exists():
+                shutil.rmtree(temporary, ignore_errors=True)  # 仅本次自建的临时目录
+            raise
+        result["status"] = "CREATED"
+    if check_only:
+        return result
+    with _waterline_lock(layout):
+        data = load_waterline(layout)
+        record = data.get("cases", {}).get(project)
+        if record is None:
+            raise WorkspaceStateError("总账没有该项目，不写文书子集指针")
+        pointers = record.setdefault("documentSubsets", [])
+        if not any(p.get("contentListSha256") == leaf for p in pointers):
+            pointers.append(
+                {
+                    "contentListSha256": leaf,
+                    "path": str(target),
+                    "itemCount": len(sources),
+                    "confirmedDocumentsSha256": _sha256(manifest_source),
+                    "scope": "DOCUMENT_SUBSET",
+                    "caseLevelVerified": False,
+                    "copiedAt": _utc_now(),
+                }
+            )
+            _save_waterline_unlocked(layout, data)
+            result["pointer"] = "ADDED"
+        else:
+            result["pointer"] = "REUSED"
+    return result
+
+
 def _has_open_amendment(layout: BusinessLayout, project: str) -> bool:
     record = load_waterline(layout).get("cases", {}).get(project) or {}
     return (record.get("amendment") or {}).get("status") == "OPEN"
@@ -1459,7 +1584,8 @@ def archive_verified_case(
             legacy_entries = [
                 child.name
                 for child in completed_parent.iterdir()
-                if not child.is_dir() or not ARCHIVE_GENERATION.fullmatch(child.name)
+                if not (child.is_dir() and child.name == DOCUMENT_SUBSET_DIR)
+                and (not child.is_dir() or not ARCHIVE_GENERATION.fullmatch(child.name))
             ]
             if legacy_entries:
                 raise WorkspaceStateError("已处理案卷存在旧版平铺内容，需先人工核对迁移")

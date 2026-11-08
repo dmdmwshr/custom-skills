@@ -1,6 +1,6 @@
 # 案卷字段抽取与校验规则
 
-由原 xf-product-case-filler 并入。本规则只约束抽取结果的**只读校验**（`fields validate`）与人工整理口径；不写 Excel、不改名或删除任何截图。统计数据由飞书维护，Excel 导出不是默认流程。
+原 xf-product-case-filler 规则已并入并退役卸载。本规则只约束抽取结果的**只读校验**（`fields validate`）与人工整理口径；不写 Excel、不改名或删除任何截图。统计数据由飞书维护，Excel 导出不是默认流程。
 
 ## 稳定键与阶段
 

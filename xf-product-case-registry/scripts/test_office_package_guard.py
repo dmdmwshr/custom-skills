@@ -525,3 +525,119 @@ def test_existing_outer_nested_zip_rejection_is_preserved(tmp_path: Path):
         with pytest.raises(source.SourceIntakeError, match="嵌套 ZIP"):
             source.safe_extract_package(outer, target)
         assert not target.exists()
+
+
+# ---- Word 嵌入(混淆)字体：只放行有 fontTable 关系 + fontKey 且还原后是真实字体结构的 .odttf ----
+
+FONT_KEY = "{1B2C3D4E-5F60-7182-93A4-B5C6D7E8F901}"
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def _sfnt(table_tags=(b"head", b"cmap")) -> bytes:
+    """合成最小 TrueType：表目录 + head(含魔数) + 其它占位表。"""
+    count = len(table_tags)
+    offset = 12 + 16 * count
+    directory = struct.pack(">4sHHHH", b"\x00\x01\x00\x00", count, 0, 0, 0)
+    body = b""
+    for tag in table_tags:
+        data = bytearray(64)
+        if tag == b"head":
+            data[12:16] = struct.pack(">I", guard.HEAD_MAGIC)
+        directory += struct.pack(">4sIII", tag, 0, offset + len(body), len(data))
+        body += bytes(data)
+    return directory + body
+
+
+def _obfuscate(font: bytes, key: str = FONT_KEY) -> bytes:
+    material = bytes.fromhex(key.strip("{}").replace("-", ""))[::-1]
+    head = bytes(byte ^ material[index % 16] for index, byte in enumerate(font[:32]))
+    return head + font[32:]
+
+
+def _with_font(
+    font: bytes | None = None,
+    *,
+    key: str = FONT_KEY,
+    obfuscate_key: str = FONT_KEY,
+    part: str = "word/fonts/font1.odttf",
+    content_type: str = guard.OBFUSCATED_FONT_TYPE,
+    rel_type: str | None = None,
+    relation_owner: str = "word/_rels/fontTable.xml.rels",
+    embed_id: str = "rId1",
+) -> dict[str, bytes]:
+    parts = _parts()
+    font = _sfnt() if font is None else font
+    parts[part] = _obfuscate(font, obfuscate_key)
+
+    def add_overrides(root: ET.Element) -> None:
+        for name, kind in (
+            ("word/fontTable.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"),
+            (part, content_type),
+        ):
+            ET.SubElement(root, f"{{{guard.CONTENT_NS}}}Override", PartName="/" + name, ContentType=kind)
+
+    _change_root(parts, "[Content_Types].xml", add_overrides)
+    parts["word/fontTable.xml"] = (
+        f'<w:fonts xmlns:w="{W_NS}" xmlns:r="{R_NS}"><w:font w:name="Fixture">'
+        f'<w:embedRegular r:id="{embed_id}" w:fontKey="{key}"/></w:font></w:fonts>'
+    ).encode()
+    rels = ET.Element(f"{{{guard.REL_NS}}}Relationships")
+    ET.SubElement(
+        rels, f"{{{guard.REL_NS}}}Relationship", Id="rId1",
+        Type=rel_type or guard.OFFICE_REL_PREFIXES[0] + "font", Target=part.removeprefix("word/"),
+    )
+    parts[relation_owner] = _xml(rels)
+    if relation_owner != "word/_rels/fontTable.xml.rels":
+        parts.setdefault("word/_rels/fontTable.xml.rels", _xml(ET.Element(f"{{{guard.REL_NS}}}Relationships")))
+    return parts
+
+
+def test_standard_obfuscated_embedded_font_docx_is_accepted():
+    result = guard.inspect_docx_package(io.BytesIO(_archive(_with_font())), filename="fixture.docx")
+    assert result["documentType"] == "DOCX"
+
+
+@pytest.mark.parametrize(
+    "font",
+    [b"MZ not a font " * 8, bytes(200), _sfnt(table_tags=(b"cmap",)), b"\x00\x01\x00\x00" + b"\xff" * 64],
+)
+def test_non_font_binary_with_font_name_and_type_is_rejected(font):
+    assert not _check(_with_font(font))
+
+
+def test_fontkey_that_does_not_restore_the_font_is_rejected():
+    assert not _check(_with_font(obfuscate_key="{00000000-0000-0000-0000-000000000001}"))
+
+
+@pytest.mark.parametrize("content_type", ["application/octet-stream", "font/ttf"])
+def test_embedded_font_requires_the_exact_obfuscated_content_type(content_type):
+    assert not _check(_with_font(content_type=content_type))
+
+
+@pytest.mark.parametrize("part", ["word/media/font1.odttf", "word/fonts/sub/font1.odttf", "font1.odttf"])
+def test_embedded_font_must_live_directly_under_word_fonts(part):
+    assert not _check(_with_font(part=part))
+
+
+def test_embedded_font_without_fonttable_relationship_is_rejected():
+    parts = _with_font()
+    del parts["word/_rels/fontTable.xml.rels"]
+    assert not _check(parts)
+
+
+def test_font_relationship_from_another_owner_or_wrong_type_is_rejected():
+    assert not _check(_with_font(relation_owner="word/_rels/document.xml.rels"))
+    assert not _check(_with_font(rel_type=guard.OFFICE_REL_PREFIXES[0] + "oleObject"))
+
+
+@pytest.mark.parametrize("key", ["{not-a-guid}", "1B2C3D4E-5F60-7182-93A4-B5C6D7E8F901", ""])
+def test_invalid_fontkey_or_mismatched_embed_id_is_rejected(key):
+    assert not _check(_with_font(key=key))
+    assert not _check(_with_font(embed_id="rId9"))
+
+
+def test_real_nested_zip_still_rejected_even_when_named_as_embedded_font():
+    parts = _with_font(font=_archive({"inside.txt": b"nested"}))
+    with pytest.raises(guard.OfficePackageError):
+        guard.inspect_docx_package(io.BytesIO(_archive(parts)), filename="fixture.docx")

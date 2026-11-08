@@ -41,6 +41,89 @@ def case_context(layout, batch_id: str, rwid: str, project: str) -> dict:
             "unitName": str(unit), "batchId": batch_id}
 
 
+def recorded_package_shas(layout, project: str) -> list[str]:
+    """只读已登记的包摘要（不回读字节），供坏包诊断判断唯一登记。"""
+    shas = []
+    for state in coverage.formal_captures(layout):
+        for record in state.get("records", {}).values():
+            package = record.get("package")
+            if record.get("projectNo") == project and package and package["sha256"] not in shas:
+                shas.append(package["sha256"])
+    return shas
+
+
+class PackageUnreadable(source.SourceIntakeError):
+    """原包无法回读。state: FILE_MISSING/SHA_MISMATCH 为可靠结论；UNKNOWN 为路径安全/身份/读取失败，不得当作坏包。"""
+
+    def __init__(self, state: str, message: str):
+        super().__init__(message)
+        self.state = state
+
+
+_WATERLINE_CACHE: dict = {}
+
+
+def _waterline_cases(layout) -> dict:
+    """同一进程内按文件 mtime/大小复用只读水位解析，避免逐案重复读取大 JSON。"""
+    stat = layout.waterline_json.stat()
+    key = (str(layout.waterline_json), stat.st_mtime_ns, stat.st_size)
+    if _WATERLINE_CACHE.get("key") != key:
+        _WATERLINE_CACHE["key"] = key
+        _WATERLINE_CACHE["cases"] = ws.load_waterline(layout).get("cases") or {}
+    return _WATERLINE_CACHE["cases"]
+
+
+def _safe_registered(layout, path: Path, label: str) -> Path:
+    """读取/枚举前验证完整祖先链（含 Windows 目录联接/重解析点）和真实业务根，不只看最终文件。"""
+    return ws._validated_workspace_path(path, layout.root, label, must_exist=False)
+
+
+def locate_package(layout, project: str, package: dict, rwid: str | None = None) -> dict:
+    """按登记位置回读原包：先看捕获登记的待处理路径，再看水位里本案已登记的归档原件位置（历史逻辑根映射）。
+
+    只在本案登记的路径内按摘要核对，不全盘找同名文件；归档代别只认同一摘要。
+    每个登记目录/候选文件在读取或枚举前都核查完整祖先链与业务根；不安全/越界/身份冲突为 UNKNOWN。"""
+    sha = package.get("sha256")
+    if not sha:
+        return {"state": "UNKNOWN", "path": None, "reason": "包登记缺少摘要"}
+    bad = None
+    try:
+        pending = source._workspace_relative_path(layout, package.get("relativePath"), "原案卷包")
+        _safe_registered(layout, pending, "原案卷包")
+        if pending.is_file():
+            if source._sha256(pending) == sha:
+                return {"state": "OK", "path": pending, "location": "PENDING"}
+            bad = pending
+    except Exception as error:  # noqa: BLE001 - 路径安全失败不能当作缺失
+        return {"state": "UNKNOWN", "path": None, "reason": f"登记路径不可安全回读：{type(error).__name__}"}
+    try:
+        record = _waterline_cases(layout).get(project)
+        folders, files = [], []
+        if record:
+            registered = (record.get("source") or {}).get("rwid")
+            if rwid and registered and str(registered) != str(rwid):
+                return {"state": "UNKNOWN", "path": None, "reason": "水位 RWID 与捕获登记不一致"}
+            for entry in (record.get("history") or {}).get("completions") or []:
+                if entry.get("packageSha256") == sha and entry.get("originalPath"):
+                    folders.append(layout.resolve_recorded_path(entry["originalPath"]))
+            for previous in (record.get("source") or {}).get("previousGenerations") or []:
+                if previous.get("packageSha256") == sha and previous.get("packageRelativePath"):
+                    files.append(source._workspace_relative_path(layout, previous["packageRelativePath"], "旧代原包"))
+        for folder in dict.fromkeys(folders):
+            _safe_registered(layout, folder, "归档原件目录")      # 枚举前先验祖先链
+            if folder.is_dir():
+                files.extend(sorted(folder.rglob("*.zip")))
+        for path in files:
+            _safe_registered(layout, path, "归档原包")
+            if path.is_file() and not ws._is_reparse(path) and source._sha256(path) == sha:
+                return {"state": "OK", "path": path, "location": "ARCHIVED"}
+    except Exception as error:  # noqa: BLE001
+        return {"state": "UNKNOWN", "path": None, "reason": f"归档位置不可安全回读：{type(error).__name__}"}
+    if bad is not None:
+        return {"state": "SHA_MISMATCH", "path": bad, "reason": "登记路径文件摘要与登记不符，且归档位置无同摘要原包"}
+    return {"state": "FILE_MISSING", "path": None, "reason": "登记路径与本案归档登记位置均无此摘要的原包"}
+
+
 def verified_package(layout, project: str) -> dict | None:
     """Existing packages lead back to their original capture, never to another click."""
     found = []
@@ -49,17 +132,52 @@ def verified_package(layout, project: str) -> dict | None:
             if record.get("projectNo") != project or not record.get("package"):
                 continue
             package = record["package"]
-            path = source._workspace_relative_path(layout, package.get("relativePath"), "原案卷包")
-            if not path.is_file() or source._sha256(path) != package.get("sha256"):
-                raise source.SourceIntakeError("原案卷包与哈希无法回读；保留失败断点，不重新打包")
+            located = locate_package(layout, project, package, key)
+            if located["state"] != "OK":
+                raise PackageUnreadable(
+                    located["state"], "原案卷包与哈希无法回读；保留失败断点，不重新打包（" + located["reason"] + "）")
             found.append({"status": "RESUME_ORIGINAL_PACKAGE", "projectNo": project,
-                          "batchId": state["batchId"], "rwid": key, "package": package})
-    if len({item["package"]["sha256"] for item in found}) > 1:
-        raise source.SourceIntakeError("同一项目已有不同原包，保留冲突，不重新采集")
+                          "batchId": state["batchId"], "rwid": key, "package": package,
+                          "location": located["location"]})
+    by_sha = {}
+    for item in found:
+        by_sha.setdefault(item["package"]["sha256"], item)
+    if len(by_sha) > 1:
+        # 仅明确合法的新代链才可选当前代：每个更新代的 supersedes 必须指向另一已存在的包，
+        # 且链线性（唯一链头、所有旧代都在链上）。attachedAt 最新不是依据；无法识别的多包仍是冲突。
+        successors = {}
+        for sha, item in by_sha.items():
+            prior = item["package"].get("supersedes")
+            if prior is None:
+                continue
+            if prior not in by_sha or prior in successors or prior == sha:
+                raise source.SourceIntakeError("同一项目已有不同原包且代链不合法，保留冲突，不重新采集")
+            successors[prior] = sha
+        heads = [sha for sha in by_sha if sha not in successors]
+        if len(heads) != 1:
+            raise source.SourceIntakeError("同一项目已有不同原包，保留冲突，不重新采集")
+        chain, cursor = [], heads[0]
+        while cursor is not None:
+            chain.append(cursor)
+            cursor = by_sha[cursor]["package"].get("supersedes")
+        if set(chain) != set(by_sha):
+            raise source.SourceIntakeError("同一项目已有不同原包且不在同一代链上，保留冲突，不重新采集")
+        head = dict(by_sha[heads[0]])
+        head["generations"] = list(reversed(chain))
+        return head
     return found[0] if found else None
 
 
-def pending_download_request(layout, project: str) -> dict | None:
+def _request_package_attached(directory: Path, request: dict) -> bool:
+    capture_path = directory / "browser-capture.json"
+    if not capture_path.is_file():
+        return False
+    state = json.loads(capture_path.read_text(encoding="utf-8"))
+    record = (state.get("records") or {}).get(str(request.get("rwid")))
+    return bool(record and record.get("package"))
+
+
+def pending_download_request(layout, project: str, *, ignore_attached: bool = False) -> dict | None:
     """Read only small request metadata; retain unknown action outcomes across batches."""
     for directory in sorted(layout.capture_batches.iterdir()):
         if not directory.is_dir():
@@ -70,6 +188,8 @@ def pending_download_request(layout, project: str) -> dict | None:
             request = ws._read_progress_json(path, layout.root, "原下载请求")
             if request.get("projectNo") != project:
                 continue
+            if ignore_attached and _request_package_attached(directory, request):
+                continue  # 显式刷新只忽略已接件完成的旧请求；未接件的在途/未知请求仍须先对账
             checkpoint = Path(str(request.get("checkpointPath") or ""))
             ws._validated_workspace_path(checkpoint, layout.root, "原下载动作", must_exist=False)
             action = {}

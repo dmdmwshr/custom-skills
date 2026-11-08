@@ -69,6 +69,20 @@ PASSIVE_REL_TYPES = {
     "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail",
 }
 MAIN_REL_TYPES = {prefix + "officeDocument" for prefix in OFFICE_REL_PREFIXES}
+# Word“嵌入字体”：仅 word/fonts/*.odttf、内容类型 obfuscatedFont，并由 word/fontTable.xml 的 font 关系 + embed*/fontKey 精确引用。
+OBFUSCATED_FONT_TYPE = "application/vnd.openxmlformats-officedocument.obfuscatedFont"
+FONT_REL_TYPES = {prefix + "font" for prefix in OFFICE_REL_PREFIXES}
+FONT_TABLE_PART = "word/fontTable.xml"
+FONT_PART_DIR = "word/fonts"
+EMBED_FONT_NAMES = {"embedRegular", "embedBold", "embedItalic", "embedBoldItalic"}
+RELATIONSHIP_ID_NAMESPACES = {
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships",
+}
+FONT_KEY = re.compile(r"^\{[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$")
+SFNT_SIGNATURES = {b"\x00\x01\x00\x00", b"true", b"OTTO"}
+MAX_FONT_TABLES = 128
+HEAD_MAGIC = 0x5F0F3CF5
 HYPERLINK_REL_TYPES = {prefix + "hyperlink" for prefix in OFFICE_REL_PREFIXES}
 XML_CONTENT_TYPES = {
     "application/xml",
@@ -287,6 +301,91 @@ def _image_matches(data: bytes, content_type: str) -> bool:
     return data.startswith(signatures[content_type])
 
 
+def _deobfuscate_font(data: bytes, font_key: str) -> bytes:
+    """按 OOXML 嵌入字体规则：GUID 十六进制串按字节倒序成 16 字节密钥，异或字体前 32 字节。"""
+    key = bytes.fromhex(font_key.strip("{}").replace("-", ""))[::-1]
+    _require(len(data) >= 32 and len(key) == 16, "DOCX 嵌入字体长度不合法")
+    head = bytes(byte ^ key[index % 16] for index, byte in enumerate(data[:32]))
+    return head + data[32:]
+
+
+def _font_structure_ok(data: bytes) -> bool:
+    """还原后必须是实际 TrueType/OpenType 结构：签名、表目录、表范围与 head 魔数均相符。"""
+    if len(data) < 12 or data[:4] not in SFNT_SIGNATURES:
+        return False
+    table_count = int.from_bytes(data[4:6], "big")
+    directory_end = 12 + 16 * table_count
+    if not 1 <= table_count <= MAX_FONT_TABLES or directory_end > len(data):
+        return False
+    tags: set[bytes] = set()
+    head_offset = None
+    for index in range(table_count):
+        entry = data[12 + 16 * index : 28 + 16 * index]
+        tag, offset, length = entry[:4], int.from_bytes(entry[8:12], "big"), int.from_bytes(entry[12:16], "big")
+        if not all(0x20 <= byte <= 0x7E for byte in tag) or tag in tags:
+            return False
+        if offset < directory_end or offset + length > len(data):
+            return False
+        tags.add(tag)
+        if tag == b"head":
+            if length < 54:
+                return False
+            head_offset = offset
+    if head_offset is None:
+        return False
+    return int.from_bytes(data[head_offset + 12 : head_offset + 16], "big") == HEAD_MAGIC
+
+
+def _validate_embedded_fonts(
+    font_data: dict[str, bytes],
+    font_relationships: dict[str, str],
+    xml_parts: dict[str, ET.Element],
+    types: dict[str, str],
+) -> None:
+    """嵌入字体部件必须被 fontTable 关系与 embed*/fontKey 一一引用，且还原后是真实字体。"""
+    if not font_data and not font_relationships:
+        return
+    table = xml_parts.get(FONT_TABLE_PART)
+    _require(
+        table is not None
+        and types.get(FONT_TABLE_PART)
+        == "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml",
+        "DOCX 嵌入字体缺少 fontTable",
+    )
+    _require(
+        sorted(font_relationships.values()) == sorted(font_data)
+        and len(set(font_relationships.values())) == len(font_relationships),
+        "DOCX 嵌入字体与 fontTable 关系不一一对应",
+    )
+    keys: dict[str, str] = {}
+    for item in table.iter():
+        local = item.tag.rsplit("}", 1)[-1]
+        if local not in EMBED_FONT_NAMES or not item.tag.startswith("{"):
+            continue
+        _require(item.tag[1:].rsplit("}", 1)[0] in WORD_NAMESPACES, "DOCX 字体嵌入元素命名空间不合法")
+        relation = [
+            value for key, value in item.attrib.items()
+            if key.startswith("{") and key[1:].rsplit("}", 1)[0] in RELATIONSHIP_ID_NAMESPACES
+            and key.rsplit("}", 1)[-1] == "id"
+        ]
+        font_key = [
+            value for key, value in item.attrib.items()
+            if key.startswith("{") and key[1:].rsplit("}", 1)[0] in WORD_NAMESPACES
+            and key.rsplit("}", 1)[-1] == "fontKey"
+        ]
+        _require(
+            len(relation) == 1 and len(font_key) == 1 and bool(FONT_KEY.match(font_key[0]))
+            and relation[0] not in keys,
+            "DOCX 嵌入字体 r:id 或 fontKey 不合法",
+        )
+        keys[relation[0]] = font_key[0]
+    _require(set(keys) == set(font_relationships), "DOCX 嵌入字体 r:id 与关系不一致")
+    for relation_id, part in font_relationships.items():
+        restored = _deobfuscate_font(font_data[part], keys[relation_id])
+        _require(_font_structure_ok(restored), "DOCX 嵌入字体不是有效字体结构")
+        _require(not zipfile.is_zipfile(io.BytesIO(restored)), "DOCX 内部仍包含嵌套 ZIP")
+
+
 def inspect_docx_package(
     source: str | Path | BinaryIO,
     *,
@@ -388,6 +487,8 @@ def inspect_docx_package(
                     "DOCX 缺少 OPC 必要部件",
                 )
                 xml_parts: dict[str, ET.Element] = {}
+                font_data: dict[str, bytes] = {}
+                font_relationships: dict[str, str] = {}
                 _require(
                     files["[Content_Types].xml"].file_size <= MAX_XML_BYTES,
                     "DOCX XML 部件超过安全上限",
@@ -409,6 +510,12 @@ def inspect_docx_package(
                         _require(
                             files[name].file_size <= MAX_XML_BYTES, "DOCX XML 部件超过安全上限"
                         )
+                    elif suffix == ".odttf":
+                        _require(
+                            content_type == OBFUSCATED_FONT_TYPE
+                            and PurePosixPath(name).parent.as_posix() == FONT_PART_DIR,
+                            "DOCX 包含未知或嵌入二进制部件",
+                        )
                     else:
                         _require(
                             IMAGE_TYPES.get(suffix) == content_type, "DOCX 包含未知或嵌入二进制部件"
@@ -418,6 +525,8 @@ def inspect_docx_package(
                     _require(not zipfile.is_zipfile(io.BytesIO(data)), "DOCX 内部仍包含嵌套 ZIP")
                     if suffix in {".xml", ".rels"}:
                         xml_parts[name] = _xml(data)
+                    elif suffix == ".odttf":
+                        font_data[name] = data
                     else:
                         _require(_image_matches(data, content_type), "DOCX 图片内容与类型不匹配")
                 main_parts: list[str] = []
@@ -437,7 +546,10 @@ def inspect_docx_package(
                             and not len(rel)
                             and bool(relation_id)
                             and relation_id not in ids
-                            and relation_type in PASSIVE_REL_TYPES,
+                            and (
+                                relation_type in PASSIVE_REL_TYPES
+                                or (relation_type in FONT_REL_TYPES and owner == FONT_TABLE_PART)
+                            ),
                             "DOCX 关系重复、未知或包含活动对象",
                         )
                         ids.add(relation_id)
@@ -460,8 +572,15 @@ def inspect_docx_package(
                             resolved in types and not resolved.endswith(".rels"),
                             "DOCX 关系目标部件缺失或不合法",
                         )
+                        if relation_type in FONT_REL_TYPES:
+                            _require(
+                                mode == "Internal" and resolved in font_data,
+                                "DOCX 字体关系必须指向嵌入字体部件",
+                            )
+                            font_relationships[relation_id] = resolved
                         if not owner and relation_type in MAIN_REL_TYPES:
                             main_parts.append(resolved)
+                _validate_embedded_fonts(font_data, font_relationships, xml_parts, types)
                 _require(
                     len(main_parts) == 1 and types[main_parts[0]] == MAIN_CONTENT_TYPE,
                     "DOCX 包关系必须指向唯一非宏 Word 主文档",
