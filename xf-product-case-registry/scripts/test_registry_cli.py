@@ -976,3 +976,25 @@ def test_feishu_source_build_parser_requires_every_pinned_input() -> None:
         trimmed = required[:index] + required[index + 2:]
         with pytest.raises(SystemExit):
             cli.build_parser().parse_args(["feishu-source-build", *trimmed])
+
+
+def test_initial_product_ref_only_recheck_same_case_and_old_input_valid(tmp_path: Path) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    data["initialInspection"]["products"] = [{"clientRef": "product:initial", "name": "产品"}]
+    data["recheckInspection"] = {
+        "clientRef": "recheck",
+        "stage": "RECHECK",
+        "products": [{"clientRef": "product:recheck", "name": "复查产品"}],
+    }
+    assert validate_manifest(data, {"file:one": str(source)}) == []  # 旧输入无该字段仍有效
+    data["recheckInspection"]["products"][0]["initialProductRef"] = "product:initial"
+    assert validate_manifest(data, {"file:one": str(source)}) == []
+    data["recheckInspection"]["products"][0]["initialProductRef"] = "product:missing"
+    assert any("initialProductRef" in e for e in validate_manifest(data, {"file:one": str(source)}))
+    data["recheckInspection"]["products"][0]["initialProductRef"] = "product:recheck"
+    assert any("initialProductRef" in e for e in validate_manifest(data, {"file:one": str(source)}))
+    data["recheckInspection"]["products"][0].pop("initialProductRef")
+    data["initialInspection"]["products"][0]["initialProductRef"] = "product:initial"
+    assert any("只适用于 RECHECK" in e for e in validate_manifest(data, {"file:one": str(source)}))

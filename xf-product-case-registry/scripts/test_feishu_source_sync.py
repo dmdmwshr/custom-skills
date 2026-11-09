@@ -1420,8 +1420,26 @@ class BuildTransport(MemoryTransport):
         return {"ok": True, "data": {"record": {"record_id": record_id}}}
 
 
-def run_build(tmp_path, records, *, waterline=None, transport=None, capture_sha=None, batch=20, ledger_dir=None):
+RESULT_F, DATE_SRC_F = "fld77TOx5G", "fld4upZMpZ"
+
+
+def _add_lifecycle_fields(v3: Path, v9: Path) -> None:
+    """Expose 初查结果 / 初查日期来源 as the v11 contract does (v3 create candidates + v9 whitelist, with option lists)."""
+    fields = [
+        {**_f(RESULT_F, "初查结果", "select", "source-sync-whitelist", "allowed(v11)"), "options": [{"name": n} for n in ("合格", "不合格", "待核实", "待结果")]},
+        {**_f(DATE_SRC_F, "初查日期来源", "select", "source-sync-whitelist", "allowed(v11)"), "options": [{"name": n} for n in ("登记系统", "来源详情", "监督系统")]},
+    ]
+    doc = json.loads(v3.read_text(encoding="utf-8"))
+    doc["baseContract"]["tables"]["案卷主表"]["fields"] += fields
+    doc["extension"]["createFieldsCandidate"] += [_cand(CASE, f["fieldId"], f["name"], "select", "create-once-source-scalar", "candidate-ready", "omit unknown") for f in fields]
+    v3.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    v9.write_text(json.dumps(doc["baseContract"], ensure_ascii=False), encoding="utf-8")
+
+
+def run_build(tmp_path, records, *, waterline=None, transport=None, capture_sha=None, batch=20, ledger_dir=None, lifecycle=False):
     v3, v9 = make_basic_contracts(tmp_path)
+    if lifecycle:
+        _add_lifecycle_fields(v3, v9)
     capture, water, routes = make_basic_inputs(tmp_path, records, waterline)
     transport = transport or BuildTransport()
     report = sync.build_basic_specs(
@@ -1525,9 +1543,9 @@ def test_build_omits_the_date_but_keeps_the_main_row_when_the_basis_is_not_prove
     assert reason in report["initialDatesOmitted"][0]["reason"]
 
 
-def test_build_without_a_registered_initial_date_omits_it_silently_and_never_uses_the_acceptance_date(tmp_path):
+def test_build_without_a_registered_initial_date_and_without_any_acceptance_date_omits_it_silently(tmp_path):
     report, creates = _date_build(tmp_path, PN_NEW, {"initialResult": "QUALIFIED"})
-    assert DATE_FIELD not in creates[PN_NEW]["fields"] and report["initialDatesOmitted"] == []
+    assert DATE_FIELD not in creates[PN_NEW]["fields"] and report["initialDatesOmitted"] == [] and report["initialDateAcceptanceFallbacks"] == []
 
 
 @pytest.mark.parametrize("tree,reason", [
@@ -1918,3 +1936,267 @@ def test_the_normal_generation_and_execution_flow_never_writes_or_emits_a_human_
     sync.run(spec_path, execute_flag=True, transport=transport, ledger_dir=tmp_path / "build-ledger")
     events = [json.loads(line) for p in (tmp_path / "build-ledger" / "targets").glob("*.jsonl") for line in p.read_text(encoding="utf-8").splitlines()]
     assert events and not [e for e in events if e["event"] in {"human_release", "reconciled"}]
+
+
+# ---------------------------------------------------------------------------------------------
+# R35-D1/D2: the latest base contract (DENIED / options) decides before any extension candidate
+# ---------------------------------------------------------------------------------------------
+
+CHECK_RESULT, PRODUCT_RESULT, PRODUCT_KEY_F, PRODUCT_PARENT = "fld1RPp2yY", "fldJUpLw89", "fldqlwHjUW", "fldD2pT8R7"
+
+
+def make_reopen_contract(tmp_path: Path, *, extension_reopens: bool = True) -> Path:
+    path = make_v3_contract(tmp_path, child_ready=True)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    tables = value["baseContract"]["tables"]
+    tables["检查明细"]["fields"].append({**_f(CHECK_RESULT, "检查结果", "select", "source-unconfirmed-readonly", "DENIED-until-0104-confirms"),
+                                      "options": [{"name": "合格", "optionId": "o1"}, {"name": "不合格", "optionId": "o2"}, {"name": "待核实", "optionId": "o3"}]})
+    tables["产品明细"]["fields"] += [
+        _f(PRODUCT_PARENT, "检查键", "link", "structural-relation"),
+        {**_f(PRODUCT_RESULT, "检查结果", "select", "source-unconfirmed-readonly", "DENIED-until-0104-confirms"),
+         "options": [{"name": "合格", "optionId": "p1"}, {"name": "不合格", "optionId": "p2"}]},
+    ]
+    cands = value["extension"]["createFieldsCandidate"]
+    cands += [_cand(PRODUCT, PRODUCT_KEY_F, "产品键", "text", "create-once-identity", "candidate-ready", "required; block"),
+              _cand(PRODUCT, PRODUCT_PARENT, "检查键", "link", "create-once-parent-link", "candidate-ready", "required; block")]
+    if extension_reopens:  # an old extension proposes the two unconfirmed result fields as create-once scalars
+        cands += [_cand(CHECK, CHECK_RESULT, "检查结果", "select", "create-once-source-scalar", "candidate-ready", "omit unknown"),
+                  _cand(PRODUCT, PRODUCT_RESULT, "检查结果", "select", "create-once-source-scalar", "candidate-ready", "omit unknown")]
+    path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _chain(result_table, result_field, value="不合格"):
+    basis = {"kind": "source-observed", "valueState": "observed", "sourceRef": "fixture", "observedAt": "2026-11-09T00:00:00Z"}
+    check_key = "32002299C202600001|初查"
+    check_fields = {CHECK_KEY: {"new": check_key, "basis": basis}, CHECK_PARENT: {"new": "recPLACEHOLDER1", "basis": basis}}
+    product_fields = {PRODUCT_KEY_F: {"new": check_key + "|p1", "basis": basis}, PRODUCT_PARENT: {"new": "recPLACEHOLDER1", "basis": basis}}
+    (check_fields if result_table == CHECK else product_fields)[result_field] = {"new": value, "basis": basis}
+    return [
+        _wire_case(),
+        {"tableId": CHECK, "stableKey": {"fieldId": CHECK_KEY, "value": check_key},
+         "parent": {"createRef": "32002299C202600001", "stableKey": {"fieldId": KEY, "value": "32002299C202600001"}}, "fields": check_fields},
+        {"tableId": PRODUCT, "stableKey": {"fieldId": PRODUCT_KEY_F, "value": check_key + "|p1"},
+         "parent": {"createRef": check_key, "stableKey": {"fieldId": CHECK_KEY, "value": check_key}}, "fields": product_fields},
+    ]
+
+
+@pytest.mark.parametrize("mode", ["plan", "execute"])
+@pytest.mark.parametrize("table,field", [(CHECK, CHECK_RESULT), (PRODUCT, PRODUCT_RESULT)])
+def test_r35_d1_latest_denied_result_fields_cannot_be_reopened_by_old_extension(tmp_path, mode, table, field):
+    contract = make_reopen_contract(tmp_path)
+    transport = MemoryTransport()
+    spec = v3_spec(tmp_path, contract, _chain(table, field), mode=mode)
+    with pytest.raises(sync.SyncError, match="不得重开|不允许该字段创建"):
+        _run_v3(spec, transport, tmp_path / "ledger", execute=(mode == "execute"))
+    assert not transport.creates and transport.finds == 0
+
+
+def test_r35_d1_legal_identity_routing_parent_chain_still_creates_once_without_denied_fields(tmp_path):
+    contract = make_reopen_contract(tmp_path)
+    chain = _chain(CHECK, CHECK_RESULT)
+    del chain[1]["fields"][CHECK_RESULT]
+    transport = MemoryTransport()
+    report = _run_v3(v3_spec(tmp_path, contract, chain), transport, tmp_path / "ledger", execute=True)
+    assert [e["status"] for e in report["records"]] == ["CREATED_VERIFIED"] * 3
+    assert [t for t, _ in transport.creates] == [CASE, CHECK, PRODUCT]
+    assert all(CHECK_RESULT not in f and PRODUCT_RESULT not in f for _, f in transport.creates)
+    again = _run_v3(v3_spec(tmp_path, contract, chain, log="again"), transport, tmp_path / "ledger", execute=True)
+    assert [e["status"] for e in again["records"]] == ["ALREADY_PRESENT_VERIFIED"] * 3 and len(transport.creates) == 3
+
+
+def test_r35_d2_field_index_keeps_options_syncwrite_and_composite_key(tmp_path):
+    contract = make_reopen_contract(tmp_path)
+    value = sync.load_contract_v3(contract, sha(contract))
+    meta = sync.field_index(value["base"])[CHECK][CHECK_RESULT]
+    assert meta["options"] == ["合格", "不合格", "待核实"] and meta["syncWrite"].startswith("DENIED") and meta["key"] == f"{CHECK}/{CHECK_RESULT}"
+    assert value["sha256"] == sha(contract)
+
+
+def test_r35_d2_plan_reports_the_exact_contract_sha_and_execute_refuses_a_swapped_one(tmp_path):
+    contract = make_reopen_contract(tmp_path, extension_reopens=False)
+    plan = _run_v3(v3_spec(tmp_path, contract, [_wire_case()], mode="plan"), MemoryTransport(), tmp_path / "ledger")
+    assert plan["contractSha256"] == sha(contract)
+    value = sync.load_contract_v3(contract, sha(contract))
+    checked = sync.validate_create_spec(json.loads(v3_spec(tmp_path, contract, [_wire_case()]).read_text(encoding="utf-8")), value)
+    spec = json.loads(v3_spec(tmp_path, contract, [_wire_case()], log="swap").read_text(encoding="utf-8"))
+    spec["contract"]["sha256"] = "0" * 64
+    transport = MemoryTransport()
+    ledger = sync.Ledger(tmp_path / "ledger2", isolated_test=True)
+    ledger.initialize()
+    with pytest.raises(sync.SyncError, match="合同摘要不一致"):
+        sync.execute_creates(spec, checked, transport, ledger)
+    assert not transport.creates and transport.finds == 0
+
+
+def test_r35_d2_unknown_select_option_blocks_only_the_affected_entity(tmp_path):
+    contract = make_reopen_contract(tmp_path, extension_reopens=False)
+    value = json.loads(contract.read_text(encoding="utf-8"))
+    value["extension"]["createFieldsCandidate"].append(_cand(CHECK, CHECK_RESULT, "检查结果", "select", "create-once-source-scalar", "candidate-ready", "omit unknown"))
+    contract.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(sync.SyncError, match="不得重开|不允许该字段创建"):
+        _run_v3(v3_spec(tmp_path, contract, _chain(CHECK, CHECK_RESULT, "不合格")), MemoryTransport(), tmp_path / "ledger", execute=True)
+    # an unknown option on an allowed select field blocks just that entity: the routing field accepts only listed options
+    base_value = json.loads(contract.read_text(encoding="utf-8"))
+    for f in base_value["baseContract"]["tables"]["案卷主表"]["fields"]:
+        if f["fieldId"] == SELECT_TEAM:
+            f["options"] = [{"name": "新吴大队", "optionId": "x1"}]
+    contract.write_text(json.dumps(base_value, ensure_ascii=False), encoding="utf-8")
+    report = _run_v3(v3_spec(tmp_path, contract, [_wire_case()], mode="plan", log="opt"), MemoryTransport(), tmp_path / "ledger")
+    assert report["creates"][0]["action"] == "blocked" and any("选项不在最新合同中" in b for b in report["creates"][0]["blocked"])
+
+
+# ---------------------------------------------------------------------------------------------
+# R35-D4: the confirmed lifecycle rules reach the normal sync build (date fallback, 初查结果, 来源外显)
+# ---------------------------------------------------------------------------------------------
+
+def _detail_with_acceptance(project, rwid, acceptance="2026年11月04日", **kw):
+    record = _detail(project, rwid, **kw)
+    record["collectionDetail"]["fields"]["受理日期"] = acceptance
+    return record
+
+
+def _first_create(report):
+    return json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))["creates"][0]["fields"]
+
+
+def test_r35_d4_acceptance_date_is_a_recorded_fallback_when_no_electronic_initial_day_is_proven(tmp_path):
+    report, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")})
+    field = _first_create(report)[DATE_FIELD]
+    assert field["new"] == "2026-11-04" and "受理日期" in field["basis"]["sourceRef"] and "后备原因" in field["basis"]["sourceRef"]
+    assert report["initialDateAcceptanceFallbacks"] == [{"projectNo": PN_NEW, "rwid": "1001", "value": "2026-11-04", "reason": "未登记可证的电子初查日"}]
+
+
+def test_r35_d4_electronic_day_wins_over_a_different_acceptance_day_and_the_difference_is_kept(tmp_path):
+    original = _original(tmp_path, PN_NEW, "1001", [_row("2026-11-03")])
+    water = {PN_NEW: {"source": {"classification": _classification(original, "2026-11-03")}}}
+    report, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water)
+    assert _first_create(report)[DATE_FIELD]["new"] == "2026-11-03" and report["initialDateAcceptanceFallbacks"] == []
+    assert report["initialDateConflicts"] == [{"projectNo": PN_NEW, "rwid": "1001", "electronic": "2026-11-03", "acceptance": "2026-11-04", "handling": "以电子监督检查记录为准，保留差异"}]
+
+
+@pytest.mark.parametrize("classification_kind,label", [("UNQUALIFIED", "不合格"), ("QUALIFIED", "合格"), ("PENDING", "待结果"), ("NONE", "待核实")])
+def test_r35_d4_create_carries_initial_result_and_supervision_system_source_from_the_latest_contract(tmp_path, classification_kind, label):
+    original = _original(tmp_path, PN_NEW, "1001", [_row("2026-11-03")])
+    base = _classification(original, "2026-11-03")
+    cls = {"UNQUALIFIED": {"initialResult": "UNQUALIFIED"}, "QUALIFIED": {"initialResult": "QUALIFIED"},
+           "PENDING": {"initialResult": "UNKNOWN", "reinspectionPending": True}, "NONE": {"initialResult": "UNKNOWN"}}[classification_kind]
+    water = {PN_NEW: {"source": {"classification": {**base, **cls}}}}
+    report, _, _ = run_build(tmp_path, {"1001": _detail(PN_NEW, "1001")}, waterline=water, lifecycle=True)
+    fields = _first_create(report)
+    assert fields[RESULT_F]["new"] == label and fields[DATE_SRC_F]["new"] == "监督系统"
+    assert report["lifecycleFieldsSkipped"] == []
+
+
+def test_r35_d4_without_proven_classification_the_result_is_pending_verification_never_a_guess(tmp_path):
+    report, _, _ = run_build(tmp_path, {"1001": _detail(PN_NEW, "1001")}, waterline={PN_NEW: {"source": {"classification": {"initialResult": "UNQUALIFIED", "evidencePath": "nope.json", "evidenceSha256": "sha256:" + "0" * 64}}}}, lifecycle=True)
+    assert _first_create(report)[RESULT_F]["new"] == "待核实"
+
+
+def test_r35_d4_contract_without_the_fields_skips_them_and_reports_it_instead_of_failing(tmp_path):
+    report, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")})
+    fields = _first_create(report)
+    assert RESULT_F not in fields and DATE_SRC_F not in fields
+    assert report["lifecycleFieldsSkipped"] and report["status"] == "OK"
+
+
+def test_r35_d4_fill_upgrades_a_pending_result_with_expected_old_and_never_overwrites_a_final_value(tmp_path):
+    original = _original(tmp_path, PN_FILL, "1002", [_row("2026-11-03")])
+    other = _original(tmp_path, PN_OTHER, "1003", [_row("2026-11-03")], name="other.json")
+    water = {PN_FILL: {"source": {"classification": {**_classification(original, "2026-11-03"), "initialResult": "UNQUALIFIED"}}},
+             PN_OTHER: {"source": {"classification": {**_classification(other, "2026-11-03"), "initialResult": "UNQUALIFIED"}}}}
+    transport = BuildTransport()
+    transport.rows[(CASE, "recEXIST000001")] = {KEY: PN_FILL, UNIT: "合成单位", ADDR: "合成地址1号", RESULT_F: ["待核实"], DATE_FIELD: "2026-11-03", DATE_SRC_F: ["监督系统"]}
+    transport.rows[(CASE, "recEXIST000002")] = {KEY: PN_OTHER, UNIT: "合成单位", ADDR: "合成地址1号", RESULT_F: ["合格"], DATE_FIELD: "2026-11-03", DATE_SRC_F: ["监督系统"]}
+    report, _, _ = run_build(tmp_path, {"1002": _detail(PN_FILL, "1002"), "1003": _detail(PN_OTHER, "1003")}, waterline=water, transport=transport, lifecycle=True)
+    fill = json.loads(Path(next(s for s in report["specs"] if s["kind"] == "fill")["path"]).read_text(encoding="utf-8"))
+    assert [u["recordId"] for u in fill["updates"]] == ["recEXIST000001"]
+    assert fill["updates"][0]["fields"][RESULT_F] == {"new": "不合格", "expectedOld": "待核实", "basis": fill["updates"][0]["fields"][RESULT_F]["basis"]}
+    assert [d["projectNo"] for d in report["differing"]] == [PN_OTHER]
+    fill_path = Path(next(s for s in report["specs"] if s["kind"] == "fill")["path"])
+    done = sync.run(fill_path, execute_flag=True, transport=transport, ledger_dir=tmp_path / "ledger-fill")
+    assert done["status"] == "OK" and transport.rows[(CASE, "recEXIST000001")][RESULT_F] == ["不合格"]
+    assert transport.rows[(CASE, "recEXIST000002")][RESULT_F] == ["合格"]            # 已是终局值的行一字不动
+    transport.rows[(CASE, "recEXIST000001")][RESULT_F] = ["合格"]                     # 同期被人改成别的终局值：旧值保护拒绝
+    spec = json.loads(fill_path.read_text(encoding="utf-8"))
+    spec["logDir"] = str(tmp_path / "logs" / "fill-again")
+    fill_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(sync.RuntimeSyncError, match="旧值"):
+        sync.run(fill_path, execute_flag=True, transport=transport, ledger_dir=tmp_path / "ledger-fill2")
+    assert transport.rows[(CASE, "recEXIST000001")][RESULT_F] == ["合格"]
+
+
+# ---------------------------------------------------------------------------------------------
+# R36-D2-C: V2 update values are validated against the latest contract options before any call or write
+# ---------------------------------------------------------------------------------------------
+
+EXACT_CONTRACT = Path("/mnt/d/ws/05-temp/20261105_案卷汇总_不合格名录与下载核查/review/r35-field-lifecycle-prep-20261109/review-entry-prep/"
+                      "freeze-r35-delivery-20261109/permission-deliverables/字段合同-20261109.json")
+CONTRACT_PARAMS = [pytest.param(None, id="p18-contract"),
+                   pytest.param(EXACT_CONTRACT, id="c8e537-contract", marks=pytest.mark.skipif(not EXACT_CONTRACT.is_file(), reason="准确字段合同不可达"))]
+
+
+def _option_spec(tmp_path, contract_path, value, mode, *, expected_old="合格", field_id=RESULT, name="opt"):
+    path = contract_path or CONTRACT
+    spec = make_spec(tmp_path, mode, contract={"path": str(path), "sha256": sha(path)}, logDir=str(tmp_path / ("log-" + name)))
+    spec["allowlist"] = {CASE: {"records": [REC], "fields": [field_id]}}
+    item = {"new": value, "basis": basis()}
+    if expected_old is not None:
+        item["expectedOld"] = expected_old
+    spec["updates"] = [{"tableId": CASE, "recordId": REC, "stableKey": {"fieldId": KEY, "value": STABLE}, "fields": {field_id: item}}]
+    return spec, path
+
+
+def _meta_of(path):
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {t["tableId"]: {f["fieldId"]: f for f in t["fields"]} for t in data["tables"].values()}
+
+
+EXACT_ONLY = CONTRACT_PARAMS[1:]   # 旧 P18 合同没有列出该字段的选项，无法据以校验
+
+
+@pytest.mark.parametrize("contract_path", EXACT_ONLY)
+@pytest.mark.parametrize("mode", ["plan", "execute"])
+def test_r36_d2_c_a_select_value_outside_the_latest_contract_options_is_refused_before_any_call_or_write(tmp_path, contract_path, mode):
+    spec, path = _option_spec(tmp_path, contract_path, "不存在的选项", mode)
+    svc = FakeService(_meta_of(path), base_rows())
+    before = copy.deepcopy(svc.rows)
+    with pytest.raises(sync.SyncError, match="选项不在最新合同"):
+        run(tmp_path, spec, svc, flag="execute" if mode == "execute" else "none")
+    assert svc.calls == [] and svc.upserts == [] and svc.rows == before
+    assert not any(p.is_file() for p in (tmp_path / "ledger" / "targets").rglob("*")) and not (tmp_path / "log-opt").exists()   # 账无事件、无日志目录
+
+
+@pytest.mark.parametrize("contract_path", EXACT_ONLY)
+def test_r36_d2_c_a_legal_contract_option_plans_and_executes_with_the_old_value_guard(tmp_path, contract_path):
+    path = contract_path or CONTRACT
+    allowed = _meta_of(path)[CASE][RESULT]["options"]
+    names = [o["name"] if isinstance(o, dict) else o for o in allowed]
+    assert "不合格" in names and "合格" in names, "夹具假设：初查结果选项含合格/不合格"
+    plan_spec, _ = _option_spec(tmp_path, contract_path, "不合格", "plan", name="plan")
+    plan = run(tmp_path, plan_spec, FakeService(_meta_of(path), base_rows()), flag="none")
+    assert plan["executable"] is True and plan["externalCalls"] == 0 and plan["requests"][0]["wire"][RESULT] == ["不合格"]
+    exec_spec, _ = _option_spec(tmp_path, contract_path, "不合格", "execute", name="exec")
+    svc = FakeService(_meta_of(path), base_rows())
+    report = run(tmp_path, exec_spec, svc)
+    assert report["status"] == "OK" and svc.rows[(CASE, REC)][RESULT] == ["不合格"] and len(svc.upserts) == 1
+    # 旧值防覆盖仍生效：期望旧值与真实旧值不同时保留双方，不写
+    conflict_spec, _ = _option_spec(tmp_path, contract_path, "不合格", "execute", expected_old="不合格", name="conflict")
+    svc2 = FakeService(_meta_of(path), base_rows())
+    with pytest.raises(sync.RuntimeSyncError, match="旧值"):
+        run(tmp_path, conflict_spec, svc2)
+    assert svc2.rows[(CASE, REC)][RESULT] == ["合格"] and svc2.upserts == []
+
+
+@pytest.mark.parametrize("contract_path", CONTRACT_PARAMS)
+def test_r36_d2_c_the_original_wrong_table_field_bad_digest_and_option_cases_stay_refused_with_zero_calls(tmp_path, contract_path):
+    path = contract_path or CONTRACT
+    wrong, _ = _option_spec(tmp_path, contract_path, "合格", "plan", field_id="fld1RPp2yY", name="wrong-field")   # 检查层结果在别表且最新合同 DENIED
+    svc = FakeService(_meta_of(path), base_rows())
+    with pytest.raises(sync.SyncError):
+        run(tmp_path, wrong, svc, flag="none")
+    bad, _ = _option_spec(tmp_path, contract_path, "不合格", "execute", name="bad-sha")
+    bad["contract"]["sha256"] = "0" * 64
+    with pytest.raises(sync.SyncError):
+        run(tmp_path, bad, svc)
+    assert svc.calls == [] and svc.upserts == []

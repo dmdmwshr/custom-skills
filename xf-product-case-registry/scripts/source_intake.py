@@ -2254,6 +2254,17 @@ def _prepare_acceptance_queue(state: dict[str, Any], records: dict[str, dict[str
     state["actionRwids"] = actions
 
 
+def _observation_registered(source_part: dict[str, Any], observed_at: datetime | str | None, batch_id: Any) -> bool:
+    """True when the ledger already records this exact observation instant and batch, so re-recording it is no change."""
+
+    try:
+        recorded = _timestamp(source_part.get("lastObservedAt")) if source_part.get("lastObservedAt") else None
+        moment = _timestamp(observed_at)
+    except (TypeError, ValueError):
+        return False
+    return recorded == moment and (source_part.get("batchId") == batch_id or batch_id in (source_part.get("batchIds") or []))
+
+
 def _prepare_incremental_queue(
     layout: Any,
     state: dict[str, Any],
@@ -2283,17 +2294,33 @@ def _prepare_incremental_queue(
             old = previous.get("source", {}).get("observationsByRwid", {}).get(rwid, {})
             incoming = {document_fingerprint(a) for a in record.get("sourceAppearances", [])}
             seen = set(old.get("documentFingerprints") or [])
+            row = (
+                describe(layout, project, previous)
+                if incoming and incoming <= seen and not previous.get("source", {}).get("changePending")
+                else None
+            )
+            stable_reuse = bool(
+                row is not None
+                and row["lifecycle"]["stable"]
+                and row["stages"]["packageReceived"]
+            )
+            # Unchanged documents and no concrete source cause (e.g. only a local gap such as an unrecorded
+            # initialProductRef): nothing a source revisit could change, so reuse the received package locally.
+            cause_free_reuse = bool(
+                row is not None
+                and not stable_reuse
+                and row["stages"]["packageReceived"]
+                and not row["lifecycle"]["sourceCauses"]
+                and row["lifecycle"]["category"] != "NEEDS_SOURCE"
+            )
             if (
-                incoming
-                and incoming <= seen
-                and not previous.get("source", {}).get("changePending")
-                and not describe(layout, project, previous)["systemChanged"]
+                row is not None
+                and not row["systemChanged"]
                 and (
                     _verified_completed_waterline(layout, project)
-                    or (
-                        previous.get("source", {}).get("indexOnly") is True
-                        and describe(layout, project, previous)["initialResult"] == "QUALIFIED"
-                    )
+                    or (previous.get("source", {}).get("indexOnly") is True and row["initialResult"] == "QUALIFIED")
+                    or stable_reuse
+                    or cause_free_reuse
                 )
             ):
                 record.update(
@@ -2301,14 +2328,19 @@ def _prepare_incremental_queue(
                         "projectNo": project,
                         "skippedAsUnchanged": True,
                         "skippedAsCompletedProject": previous.get("state") == "COMPLETED",
-                        "skipReason": "SOURCE_DOCUMENTS_ALREADY_VERIFIED",
+                        "skipReason": "STABLE_CASE_LOCAL_REUSE"
+                        if stable_reuse and previous.get("state") != "COMPLETED"
+                        else "NO_SOURCE_CAUSE_LOCAL_REUSE"
+                        if cause_free_reuse and previous.get("state") != "COMPLETED"
+                        else "SOURCE_DOCUMENTS_ALREADY_VERIFIED",
                     }
                 )
-                _maybe_waterline(
-                    layout,
-                    project,
-                    source={"lastObservedAt": _timestamp(observed_at), "batchId": state["batchId"]},
-                )
+                if not _observation_registered(previous.get("source") or {}, observed_at, state["batchId"]):
+                    _maybe_waterline(
+                        layout,
+                        project,
+                        source={"lastObservedAt": _timestamp(observed_at), "batchId": state["batchId"]},
+                    )
                 continue
         actions.append(rwid)
     state["detailRwids"] = list(actions)

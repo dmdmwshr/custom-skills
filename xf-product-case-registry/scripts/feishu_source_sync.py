@@ -48,6 +48,13 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+if __package__:
+    from . import case_lifecycle
+    from . import field_validation as fv
+else:
+    import case_lifecycle
+    import field_validation as fv
+
 SPEC_SCHEMA = "FeishuSourceSyncSpecV2"
 REPORT_SCHEMA = "FeishuSourceSyncReportV2"
 WHITELIST = "source-sync-whitelist"
@@ -71,6 +78,7 @@ ALWAYS_DENIED = {
     "fld5E2njAU": "案卷.是否微型消防站(人工)",
     "fldrKL9rDE": "案卷.是否核实(人工)",
     "fldW2kJC0V": "案卷.核实说明(人工)",
+    "fldtBHoCzK": "案卷.是否维修后灭火器(人工，2026-11-09 起由大队填报)",
     "fldoFEnhmd": "案卷.涉及网售产品(人工关系)",
     "fld4atEDRT": "检查.是否核实(人工)",
     "fldYkXBvEt": "检查.核实说明(人工)",
@@ -226,8 +234,16 @@ def load_contract(path: Path, expected_sha: str) -> dict[str, Any]:
     return contract
 
 
+def _option_names(options: Any) -> list[str] | None:
+    """Select option names from either contract shape ([{name, optionId}] or [name]); None when the contract lists none."""
+    if not isinstance(options, list):
+        return None
+    names = [o.get("name") if isinstance(o, dict) else o for o in options]
+    return [n for n in names if isinstance(n, str)]
+
+
 def field_index(contract: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]]:
-    """tableId -> fieldId -> {name, type, class, table}."""
+    """tableId -> fieldId -> {name, type, class, table, syncWrite, options, key(tableId/fieldId)}."""
     index: dict[str, dict[str, dict[str, Any]]] = {}
     for table_name, table in contract["tables"].items():
         table_id = table.get("tableId")
@@ -239,6 +255,9 @@ def field_index(contract: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]
                 "type": field["type"],
                 "class": field["class"],
                 "table": table_name,
+                "syncWrite": field.get("syncWrite"),
+                "options": _option_names(field.get("options")),
+                "key": f"{table_id}/{field['fieldId']}",
             }
             for field in table.get("fields", [])
         }
@@ -342,6 +361,9 @@ def validate_spec(spec: Any, contract: dict[str, Any]) -> dict[str, Any]:
             value = item["new"]
             if isinstance(value, (str, int, float, bool)) and value in NEGATIVE_LITERALS:
                 _require(basis.get("explicitNegative") is True, "“否/0”只能来自来源明确否定(basis.explicitNegative)")
+            if meta["type"] == "select" and meta.get("options") is not None:
+                # 最新合同列出的选项是唯一合法取值；合同外的值在任何 transport 调用与业务/账写入前拒绝。
+                _require(isinstance(value, str) and value in meta["options"], f"选项不在最新合同中：{meta['name']}={value!r}")
             writes[field_id] = {
                 "name": meta["name"], "type": meta["type"], "new": value, "wire": wire_value(meta["type"], value),
                 "basis": basis, "expectedOld": item.get("expectedOld", "__absent__"),
@@ -949,6 +971,14 @@ def norm_or_none(field_type: str, cell: Any) -> Any:
 SPEC_SCHEMA_V3 = "FeishuSourceSyncSpecV3"
 REPORT_SCHEMA_V3 = "FeishuSourceSyncReportV3"
 CREATE_CLASSES = {"create-once-identity", "create-once-source-scalar", "create-once-routing", "create-once-parent-link"}
+# The latest base contract decides first: an extension candidate may only open a create class on a base field of the matching
+# class, and never a field whose base syncWrite is DENIED (e.g. the unconfirmed 检查结果 fields).
+CREATE_BASE_CLASS = {
+    "create-once-identity": {"source-sync-whitelist"},
+    "create-once-source-scalar": {"source-sync-whitelist"},
+    "create-once-routing": {"admin-only"},
+    "create-once-parent-link": {"structural-relation"},
+}
 TABLE_RANK = {"案卷主表": 0, "检查明细": 1, "产品明细": 2}
 PROJECT_NO = re.compile(r"^\d{8}[A-Z]\d{9}$")
 TEAM_TABLE_NAME = "大队底册"
@@ -966,7 +996,7 @@ def load_contract_v3(path: Path, expected_sha: str) -> dict[str, Any]:
         raise SyncError("V3 合同缺少完整 v9 baseContract")
     if not isinstance(extension, dict) or not isinstance(extension.get("createFieldsCandidate"), list):
         raise SyncError("V3 合同缺少 create-once 扩展")
-    return {"base": base, "extension": extension}
+    return {"base": base, "extension": extension, "sha256": expected_sha}
 
 
 def _link_wire(value: Any) -> list[dict[str, str]]:
@@ -1043,6 +1073,14 @@ def validate_create_spec(spec: Any, v3: dict[str, Any]) -> dict[str, Any]:
             meta, cand = index[table_id].get(field_id), candidates.get(field_id)
             _require(meta is not None and cand is not None and cand.get("tableId") == table_id, f"字段不在 V3 创建候选中(默认拒绝)：{field_id}")
             _require(cand.get("proposedCreateClass") in CREATE_CLASSES, f"字段不是 create-once 类别：{field_id}")
+            _require(
+                meta["class"] in CREATE_BASE_CLASS[cand["proposedCreateClass"]],
+                f"最新保护合同不允许该字段创建(基础合同类别 {meta['class']} 不开放 {cand['proposedCreateClass']}；扩展候选不得重开)：{meta['name']}",
+            )
+            _require(
+                not str(meta.get("syncWrite") or "").upper().startswith("DENIED"),
+                f"最新保护合同对该字段的 syncWrite 为 DENIED，扩展候选不得重开：{meta['name']}",
+            )
             _require(not str(cand.get("candidateState", "")).startswith("blocked"), f"合同未放行该字段创建(候选仍 blocked)：{meta['name']}")
             _require(isinstance(item, dict), "每个字段需 {new, basis}")
             basis = item.get("basis")
@@ -1060,6 +1098,8 @@ def validate_create_spec(spec: Any, v3: dict[str, Any]) -> dict[str, Any]:
             if isinstance(value, (str, int, float, bool)) and value in NEGATIVE_LITERALS:
                 _require(basis.get("explicitNegative") is True, "“否/0”只能来自来源明确否定")
             wire = _link_wire(value) if meta["type"] == "link" else wire_value(meta["type"], value)
+            if meta["type"] == "select" and meta.get("options") is not None and value not in meta["options"]:
+                blocked.append(f"选项不在最新合同中：{meta['name']}={value}")
             writes[field_id] = {"name": meta["name"], "type": meta["type"], "new": value, "wire": wire, "basis": basis, "class": cand["proposedCreateClass"]}
         _require(stable_field in writes and writes[stable_field]["new"] == key["value"], "稳定键字段必须作为 create-once-identity 写入且等于 stableKey.value")
         for field_id, cand in candidates.items():  # required fields missing => only this entity is blocked
@@ -1083,7 +1123,7 @@ def validate_create_spec(spec: Any, v3: dict[str, Any]) -> dict[str, Any]:
         plan.append({"tableId": table_id, "tableName": table_name, "stableKey": key, "writes": writes, "skipped": skipped,
                      "blocked": blocked, "route": route_info, "parent": parent, "rank": TABLE_RANK[table_name]})
     plan.sort(key=lambda item: item["rank"])  # case -> check -> product, stable within a rank
-    return {"index": index, "plan": plan, "routes": route_by_source, "contractConflicts": contract_conflicts}
+    return {"index": index, "plan": plan, "routes": route_by_source, "contractConflicts": contract_conflicts, "contractSha256": v3["sha256"]}
 
 
 def _create_key(spec: dict[str, Any], item: dict[str, Any]) -> str:
@@ -1107,6 +1147,7 @@ def plan_creates(spec: dict[str, Any], checked: dict[str, Any], ledger: Ledger) 
                      "skippedFields": {f: s["valueState"] for f, s in i["skipped"].items()}, "blocked": i["blocked"],
                      "parent": i["parent"], "action": "blocked" if i["blocked"] else "create-if-fresh-scan-proves-absent"} for i in checked["plan"]],
         "ledgerBlocks": blocks, "executable": not blocks and all(not i["blocked"] for i in checked["plan"]),
+        "contractSha256": checked["contractSha256"],
         "contractConflicts": checked.get("contractConflicts", []),
         "note": "plan 不读云；创建前仍须 fresh 全页键扫描证明 0 匹配",
     }
@@ -1123,6 +1164,8 @@ def _create_wire(item: dict[str, Any], parent_record: str | None) -> dict[str, A
 
 def execute_creates(spec: dict[str, Any], checked: dict[str, Any], transport: Transport, ledger: Ledger) -> dict[str, Any]:
     base, index = spec["target"]["baseToken"], checked["index"]
+    if checked.get("contractSha256") != spec["contract"].get("sha256"):
+        raise SyncError("规划与执行使用的合同摘要不一致；不得换合同(未发起任何外部调用)")
     blocks = _create_blocks(spec, checked, ledger)
     if blocks:
         raise SyncError("目标存在未对账的早先创建，已拒绝(未发起任何外部调用)；先 reconcile 或人工放行：" + json.dumps(blocks, ensure_ascii=False))
@@ -1131,7 +1174,7 @@ def execute_creates(spec: dict[str, Any], checked: dict[str, Any], transport: Tr
     keys = [_create_key(spec, i) for i in checked["plan"] if not i["blocked"]]
     report: dict[str, Any] = {"schema": REPORT_SCHEMA_V3, "mode": "execute", "runId": run_id, "operator": operator(), "startedAt": now(),
                               "baseToken": base, "profile": spec["target"]["profile"], "ledgerDir": str(ledger.root),
-                              "contractSha256": spec["contract"]["sha256"], "records": [], "status": "RUNNING",
+                              "contractSha256": checked["contractSha256"], "records": [], "status": "RUNNING",
                               "contractConflicts": checked.get("contractConflicts", [])}
     created: dict[str, str] = {}
     stop = False
@@ -1427,6 +1470,9 @@ def _verify_terminal_proof(proof: Any, item, intent, base: str, record_id: str) 
 # ---------------------------------------------------------------------------------------------
 
 BASIC_FIELDS = {"key": "fld1lHXHpk", "unit": "fld2Lo4dpD", "addr": "fld71ckPl9", "date": "fld5azNPuE", "team": "fld2Kdm4i2", "link": "fldlw1KAaR"}
+# 2026-11-09 必有字段：初查结果（含待结果/待核实）与外显初查日期来源。字段与选项以最新合同为准，合同没有则整项跳过并在报告列出。
+LIFECYCLE_FIELDS = {"result": "fld77TOx5G", "date_source": "fld4upZMpZ"}
+PENDING_LABELS = {"待结果", "待核实"}
 BUILD_SCHEMA = "FeishuBasicFieldBuildReportV1"
 RWID_IN_URL = re.compile(r"[?&#]RWID=(\d+)")
 ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -1523,7 +1569,7 @@ def _entity_evidence(rwid: str, record: Any, capture_name: str, capture_sha: str
         return f"{capture_name}#records.{rwid}.collectionDetail.fields.{field} | batchSha256={capture_sha} | url={url} | projectNo={project}"
 
     return {"projectNo": project, "rwid": rwid, "unit": unit, "address": address, "jurisdiction": jurisdiction,
-            "capturedAt": captured, "ref": ref, "url": url}, []
+            "acceptance": _text(fields.get("受理日期")), "capturedAt": captured, "ref": ref, "url": url}, []
 
 
 def _initial_date(waterline_case: Any, root: Path, project: str, rwid: str) -> tuple[tuple[str, str, str] | None, str | None]:
@@ -1590,6 +1636,44 @@ def _initial_date(waterline_case: Any, root: Path, project: str, rwid: str) -> t
     return (claimed, f"{path_text} | {actual_sha} | {where} | projectNo={project} | RWID={rwid} | url={url}", observed), None
 
 
+def _proven_classification(waterline_case: Any, root: Path) -> dict[str, Any] | None:
+    """The waterline classification, only when its stored original exists inside the root with the recorded SHA."""
+    source = waterline_case.get("source") if isinstance(waterline_case, dict) else None
+    cls = (source or {}).get("classification") if isinstance(source, dict) else None
+    if not isinstance(cls, dict):
+        return None
+    path_text, recorded = _text(cls.get("evidencePath")), _text(cls.get("evidenceSha256"))
+    if not path_text or not recorded:
+        return None
+    relative = Path(path_text.replace("\\", "/"))
+    try:
+        original = (root / relative).resolve()
+        original.relative_to(root.resolve())
+    except (ValueError, OSError):
+        return None
+    if relative.is_absolute() or not original.is_file() or "sha256:" + file_sha(original) != recorded:
+        return None
+    return cls
+
+
+def _lifecycle_values(index_case: dict[str, dict[str, Any]], candidates: set[str], classification: dict[str, Any] | None,
+                      resolved: dict[str, Any], *, create: bool) -> tuple[dict[str, str], list[str]]:
+    """New-cell values for 初查结果 / 初查日期来源, limited to what the latest contract exposes and its option lists."""
+    values: dict[str, str] = {}
+    skipped: list[str] = []
+    wanted = {LIFECYCLE_FIELDS["result"]: case_lifecycle.initial_result_label(classification)}
+    if resolved.get("value"):
+        wanted[LIFECYCLE_FIELDS["date_source"]] = resolved["externalSource"]
+    for field_id, value in wanted.items():
+        meta = index_case.get(field_id)
+        usable = meta is not None and (field_id in candidates if create else meta["class"] == WHITELIST)
+        if not usable or (meta.get("options") is not None and value not in meta["options"]):
+            skipped.append(f"{field_id}={value}")
+            continue
+        values[field_id] = value
+    return values, skipped
+
+
 def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: Path, v3_path: Path, v3_sha: str,
                       v9_path: Path, v9_sha: str, routes_path: Path, routes_sha: str, target: dict[str, str],
                       transport: Any, out_dir: Path, log_root: Path, batch_size: int = HARD_CAP_RECORDS,
@@ -1613,6 +1697,10 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
     index = field_index(v3["base"])
     for field_id in BASIC_FIELDS.values():
         _require(field_id in index[case_table], f"合同缺少案卷字段 {field_id}")
+    candidate_ids = {c["fieldId"] for c in v3["extension"]["createFieldsCandidate"]}
+    lifecycle_skipped: list[dict[str, Any]] = []
+    date_fallbacks: list[dict[str, Any]] = []
+    date_conflicts: list[dict[str, Any]] = []
     capture = json.loads(capture_path.read_text(encoding="utf-8"))
     waterline = json.loads(waterline_path.read_text(encoding="utf-8")).get("cases", {})
     routes_doc = json.loads(routes_path.read_text(encoding="utf-8"))
@@ -1633,7 +1721,8 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
             continue
         live_routes[route["sourceJurisdictionExact"]] = {"sourceJurisdictionExact": route["sourceJurisdictionExact"], "teamOptionExact": route["teamOptionExact"],
                                                          "teamTableId": team_table_id, "teamRecordId": record_id}
-    cloud = transport.list_rows(target["baseToken"], case_table, list(BASIC_FIELDS.values()))
+    read_fields = list(BASIC_FIELDS.values()) + [f for f in LIFECYCLE_FIELDS.values() if f in index[case_table]]
+    cloud = transport.list_rows(target["baseToken"], case_table, read_fields)
     by_key: dict[str, list[str]] = {}
     for record_id, row in cloud.items():
         by_key.setdefault(_text(row.get(BASIC_FIELDS["key"])), []).append(record_id)
@@ -1678,6 +1767,14 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
         date, date_reason = _initial_date(waterline.get(project), waterline_path.parent, project, rwid)
         if date_reason:
             dates_omitted.append({"projectNo": project, "rwid": rwid, "reason": date_reason})
+        resolved = fv.resolve_initial_date(date[0] if date else None, evidence["acceptance"])
+        if date is None and resolved["value"]:  # 电子监督检查记录缺失/不可用/无法确认：受理日期后备，内部留痕，外显统一监督系统
+            date = (resolved["value"], f"{evidence['ref']('受理日期')} | 后备原因：{date_reason or '未登记可证的电子初查日'} | 受理日期原值={evidence['acceptance']}", evidence["capturedAt"])
+            date_fallbacks.append({"projectNo": project, "rwid": rwid, "value": resolved["value"], "reason": date_reason or "未登记可证的电子初查日"})
+        elif date is not None and resolved.get("conflict"):
+            date_conflicts.append({"projectNo": project, "rwid": rwid, "electronic": resolved["value"], "acceptance": resolved["acceptanceDate"], "handling": "以电子监督检查记录为准，保留差异"})
+        classification = _proven_classification(waterline.get(project), waterline_path.parent)
+        basis_ref = evidence["ref"]("检查产品信息") + (" | 总账分类证据已核" if classification else " | 缺可核的分类证据，初查结果按待核实")
         if not ids:
             route = live_routes.get(evidence["jurisdiction"])
             if route is None:
@@ -1694,6 +1791,11 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
                 fields[BASIC_FIELDS["addr"]] = {"new": evidence["address"], "basis": _record_basis(evidence["ref"]("单位地址"), observed)}
             if date:
                 fields[BASIC_FIELDS["date"]] = {"new": date[0], "basis": _record_basis(date[1], date[2])}
+            values, skipped = _lifecycle_values(index[case_table], candidate_ids, classification, fv.resolve_initial_date(date[0] if date else None, ""), create=True)
+            for fid, value in values.items():
+                fields[fid] = {"new": value, "basis": _record_basis(date[1] if fid == LIFECYCLE_FIELDS["date_source"] and date else basis_ref, date[2] if fid == LIFECYCLE_FIELDS["date_source"] and date else observed)}
+            if skipped:
+                lifecycle_skipped.append({"projectNo": project, "fields": skipped, "stage": "create"})
             creates.append({"tableId": case_table, "stableKey": {"fieldId": BASIC_FIELDS["key"], "value": project}, "routingSource": evidence["jurisdiction"], "fields": fields})
             continue
         row = cloud[ids[0]]
@@ -1710,6 +1812,22 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
                 update_fields[fid] = {"new": new, "expectedOld": None, "basis": basis}
             else:
                 differing.append({"projectNo": project, "field": name, "cloud": stored, "source": new, "handling": "云端非空且不同：不覆盖，报告交人工/来源裁决"})
+        values, skipped = _lifecycle_values(index[case_table], candidate_ids, classification, fv.resolve_initial_date(date[0] if date else None, ""), create=False)
+        for fid, value in values.items():
+            stored, ftype = row.get(fid), index[case_table][fid]["type"]
+            ref = date[1] if fid == LIFECYCLE_FIELDS["date_source"] and date else basis_ref
+            at = date[2] if fid == LIFECYCLE_FIELDS["date_source"] and date else evidence["capturedAt"]
+            if cell_is_empty(stored):
+                update_fields[fid] = {"new": value, "expectedOld": None, "basis": _record_basis(ref, at)}
+            elif cell_equals(ftype, stored, value):
+                already_equal += 1
+            elif fid == LIFECYCLE_FIELDS["result"] and any(cell_equals(ftype, stored, label) for label in PENDING_LABELS) and value not in PENDING_LABELS:
+                old_label = next(label for label in sorted(PENDING_LABELS) if cell_equals(ftype, stored, label))
+                update_fields[fid] = {"new": value, "expectedOld": old_label, "basis": _record_basis(ref, at)}   # 有因更新：待结果/待核实 -> 终局值
+            else:
+                differing.append({"projectNo": project, "field": index[case_table][fid]["name"], "cloud": stored, "source": value, "handling": "云端非空且不同：不覆盖，报告交人工/来源裁决"})
+        if skipped:
+            lifecycle_skipped.append({"projectNo": project, "fields": skipped, "stage": "fill"})
         if update_fields:
             fills.append({"tableId": case_table, "recordId": ids[0], "stableKey": {"fieldId": BASIC_FIELDS["key"], "value": project}, "fields": update_fields})
     # 3) specs (≤ batch_size per run, fresh logDir per spec)
@@ -1744,6 +1862,7 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
               "createdWithInitialDate": sum(1 for c in creates if BASIC_FIELDS["date"] in c["fields"]),
               "createdWithoutAddress": sum(1 for c in creates if BASIC_FIELDS["addr"] not in c["fields"]),
               "specs": specs, "blockedEntities": blocked, "differing": differing, "initialDatesOmitted": dates_omitted,
+              "initialDateAcceptanceFallbacks": date_fallbacks, "initialDateConflicts": date_conflicts, "lifecycleFieldsSkipped": lifecycle_skipped,
               "status": "PARTIAL" if blocked or route_problems else "OK"}
     (out_dir / "build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return report

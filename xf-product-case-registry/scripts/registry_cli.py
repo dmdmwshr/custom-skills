@@ -9,7 +9,7 @@ import re
 import shutil
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -860,6 +860,7 @@ def validate_manifest(
                     "problemDescription",
                     "reinspectionApplied",
                     "reinspectionResult",
+                    "initialProductRef",
                 },
                 f"{label}.products[{index}]",
                 errors,
@@ -889,6 +890,11 @@ def validate_manifest(
                     errors.append(f"产品 {key} 长度不得超过 {limit} 个字符")
             if not isinstance(product.get("name"), str) or not product["name"].strip():
                 errors.append("产品名称不能为空")
+            if "initialProductRef" in product:
+                if stage != "RECHECK":
+                    errors.append("initialProductRef 只适用于 RECHECK 产品")
+                elif not ref(product["initialProductRef"]):
+                    errors.append("initialProductRef 不合法")
             if "method" in product and product["method"] not in METHODS:
                 errors.append("产品 method 不合法")
             if "result" in product and product["result"] not in RESULTS:
@@ -933,6 +939,12 @@ def validate_manifest(
     inspect(root.get("initialInspection"), "INITIAL_CHECK", "initialInspection")
     if "recheckInspection" in root:
         inspect(root["recheckInspection"], "RECHECK", "recheckInspection")
+    for product_ref, (product_stage, product) in products.items():
+        target = product.get("initialProductRef")
+        if target is None:
+            continue
+        if target == product_ref or target not in products or products[target][0] != "INITIAL_CHECK":
+            errors.append(f"产品 {product_ref} 的 initialProductRef 必须指向本案 INITIAL_CHECK 产品")
     refs: set[str] = set()
     paths: set[str] = set()
     files = root.get("files") if isinstance(root.get("files"), list) else []
@@ -1479,6 +1491,24 @@ def ledger_status_command(args: argparse.Namespace) -> None:
                 source_year=source_year,
             )
         )
+    except workspace.WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def ledger_lifecycle_command(args: argparse.Namespace) -> None:
+    workspace = workspace_api()
+    today = None
+    if args.today:
+        try:
+            today = date.fromisoformat(args.today)
+        except ValueError as error:
+            raise RegistryError("--today 必须是 YYYY-MM-DD") from error
+    try:
+        _config, layout = workspace.resolve_workspace(
+            **workspace_kwargs(args), create_layout=False, require_download_dir=False
+        )
+        result = ledger_views.lifecycle_view(layout, from_year=args.from_year, today=today)
     except workspace.WorkspaceStateError as error:
         raise RegistryError(str(error)) from error
     print(json.dumps(result, ensure_ascii=False))
@@ -2214,6 +2244,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--view", choices=("all", "unqualified", "unknown", "unfinished"), default="all"
     )
     ledger_status.set_defaults(func=ledger_status_command)
+    ledger_lifecycle = ledger_sub.add_parser(
+        "lifecycle",
+        help="只读：2026+ 产品案按生命周期规则分为可直接复用/仅本地可补/必须核源，并列出具体原因",
+    )
+    add_workspace_resolution_options(ledger_lifecycle)
+    ledger_lifecycle.add_argument("--from-year", type=int, default=2026)
+    ledger_lifecycle.add_argument("--today", help="固定判断日（YYYY-MM-DD，上海日历日）；默认今天")
+    ledger_lifecycle.set_defaults(func=ledger_lifecycle_command)
     ledger_index = ledger_sub.add_parser(
         "index-history", help="复用本地正式批次清单补充总账索引，不扫描来源网页"
     )

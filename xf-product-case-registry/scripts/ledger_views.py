@@ -13,11 +13,13 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 if __package__:
+    from . import case_lifecycle
     from . import local_validity
     from . import source_coverage as coverage_api
     from . import source_facts
     from . import workspace_state as ws
 else:
+    import case_lifecycle
     import local_validity
     import source_coverage as coverage_api
     import source_facts
@@ -103,6 +105,139 @@ def source_product_summary(evidence: dict[str, Any], project: str) -> dict[str, 
         "marketAccessOutcome": market_outcome,
         "unqualifiedBasis": basis,
     }
+
+
+def _archived_manifest(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any]:
+    """Manifest of the ledger's explicit archived generation, even when a stub active workspace directory exists."""
+    candidate = (record.get("archive") or {}).get("workspacePath")
+    if not candidate:
+        return {}
+    try:
+        path = layout.resolve_recorded_path(candidate)
+        suffix = path.name.removeprefix(project + "-")
+        if path.parent != layout.root / "工作区" / "历史工作区" or not path.name.startswith(project + "-") or not ws.ARCHIVE_GENERATION.fullmatch(suffix):
+            return {}
+        manifest = _read(path / "manifest.json", layout.root)
+    except (ws.WorkspaceStateError, OSError, ValueError):
+        return {}
+    return manifest if manifest.get("case", {}).get("projectNo") == project else {}
+
+
+def _known_rwids(source: dict[str, Any]) -> set[str]:
+    """RWIDs this ledger record itself binds to the case (current, observed, annual identities, pending observation)."""
+    known = {str(source["rwid"])} if source.get("rwid") else set()
+    for key in ("observationsByRwid", "pendingObservationsByRwid", "annualIdentitiesByRwid"):
+        known |= {str(k) for k in (source.get(key) or {})}
+    return known
+
+
+def _product_root_problem(fields: dict[str, Any], project: str) -> str | None:
+    """A saved detail must show a [产] product root, and a case number in any [产] root must be this case's."""
+    roots = [
+        str((item.get("标题") or item.get("title") or "") if isinstance(item, dict) else item)
+        for item in (fields.get("文书目录") or [])
+    ]
+    product_roots = [t for t in roots if t.lstrip().startswith("[产]")]
+    if not product_roots:
+        return "NO_PRODUCT_ROOT"
+    numbers = {n for t in product_roots for n in re.findall(r"\d{8}C\d{9}", t)}
+    return None if numbers <= {project} else "FOREIGN_PRODUCT_ROOT"
+
+
+def _detail_problems(item: Any, key: str, project: str, source: dict[str, Any], known: set[str]) -> list[str]:
+    """Why a saved detail record cannot be consumed as this case's observation (empty list = trusted).
+
+    Three layers are bound separately, and a record's own digest is never enough by itself:
+    (1) content: ``businessFingerprint`` must equal the fingerprint recomputed from ``fields``;
+    (2) registration: the ledger must have registered *this* content for *this* RWID -- the current RWID through
+        ``detailBusinessFingerprint`` (required), any other bound RWID through ``observationsByRwid[rwid].fingerprint``
+        equal to the record's fingerprint;
+    (3) time: ``capturedAt`` must be a time the ledger registered for this RWID (``source.capturedAt`` for the current RWID,
+        ``observationsByRwid[rwid].observedAt``, ``classification.observedAt``), so an edited timestamp cannot manufacture a
+        later valid observation.
+    The detail must also name this project number, belong to an RWID the ledger binds to the case, and show this case's
+    product root. A legitimate later observation passes because intake registers its content and time together.
+    """
+    if not isinstance(item, dict) or not isinstance(item.get("fields"), dict) or not item["fields"]:
+        return ["NO_FIELDS"]
+    fields, problems = item["fields"], []
+    if item.get("projectNo") != project or str(fields.get("项目编号") or "").strip().upper() != project:
+        problems.append("PROJECT_MISMATCH")
+    if key not in known:
+        problems.append("RWID_NOT_BOUND_TO_CASE")
+    if __package__:
+        from . import source_intake
+    else:
+        import source_intake
+    recorded = item.get("businessFingerprint")
+    if not recorded:
+        problems.append("NO_DIGEST")
+    elif source_intake._business_detail_fingerprint(fields) != recorded:
+        problems.append("DIGEST_MISMATCH")
+    current = key == str(source.get("rwid") or "")
+    observation = (source.get("observationsByRwid") or {}).get(key) or {}
+    if current:
+        ledger_fp = source.get("detailBusinessFingerprint")
+        if not ledger_fp:
+            problems.append("LEDGER_BINDING_MISSING")
+        elif recorded and ledger_fp != recorded:
+            problems.append("LEDGER_DIGEST_MISMATCH")
+    elif observation.get("fingerprint") != source_intake._fingerprint(item):
+        problems.append("OBSERVATION_NOT_REGISTERED")
+    registered_times = {observation.get("observedAt"), (source.get("classification") or {}).get("observedAt")}
+    if current:
+        registered_times.add(source.get("capturedAt"))
+    if not item.get("capturedAt") or item["capturedAt"] not in registered_times:
+        problems.append("OBSERVED_AT_UNREGISTERED")
+    if (root := _product_root_problem(fields, project)):
+        problems.append(root)
+    return problems
+
+
+def _saved_detail(layout: Any, project: str, source: dict[str, Any]) -> tuple[tuple[dict[str, Any], str | None] | None, list[str]]:
+    """Latest *trusted* saved source detail of this exact project, and why other saved details were refused.
+
+    Used when the classification-bound evidence was rewritten later. A saved record is consumed only through
+    ``_detail_problems`` (verifiable own digest, ledger-bound RWID, same case fields, this case's product root); records
+    that fail are never used as a fallback, and their reasons are returned so the assessment keeps the case open.
+    """
+    candidates = [layout.pending_case_dir(project) / "source-evidence.json"]
+    completed = layout.completed_case_dir(project)
+    if completed.is_dir():
+        candidates += sorted(completed.glob("*/source-evidence.json"), reverse=True)
+    known, wanted, refused = _known_rwids(source), source.get("rwid"), []
+    for path in candidates:
+        try:
+            evidence = _read(path, layout.root)
+        except (ws.WorkspaceStateError, OSError, ValueError):
+            continue
+        if not evidence:
+            continue  # no such saved file
+        if evidence.get("projectNo") != project:
+            refused.append("EVIDENCE_PROJECT_MISMATCH")
+            continue
+        records = evidence.get("records") or {}
+        for key in ([wanted] if wanted in records else []) + [k for k in records if k != wanted]:
+            problems = _detail_problems(records[key], str(key), project, source, known)
+            if problems:
+                refused += [f"{key}:{p}" for p in problems]
+                continue
+            item = records[key]
+            captured = item.get("capturedAt")
+            return (item["fields"], (str(captured)[:10] if captured else None)), []
+    return None, refused
+
+
+def _evidence_fields(evidence: dict[str, Any], project: str) -> tuple[dict[str, Any], str | None] | None:
+    """Saved detail fields (and the observation day) of this project from a SourceEvidenceV1 / identity document."""
+    candidates = [(evidence.get("fields"), evidence.get("capturedAt"))] if evidence.get("projectNo") == project else []
+    for item in (evidence.get("records") or {}).values():
+        if isinstance(item, dict) and item.get("projectNo") == project:
+            candidates.append((item.get("fields"), item.get("capturedAt")))
+    for fields, captured in candidates:
+        if isinstance(fields, dict) and fields:
+            return fields, (str(captured)[:10] if captured else None)
+    return None
 
 
 def record_initial_fact(manifest: dict[str, Any]) -> str:
@@ -523,7 +658,7 @@ def source_facts_layer(work: Path) -> dict[str, Any]:
     }
 
 
-def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any]:
+def describe(layout: Any, project: str, record: dict[str, Any], *, today: date | None = None) -> dict[str, Any]:
     work, manifest, state, issues = case_inputs(layout, project, record)
     source = record.get("source") or {}
     archive = record.get("archive") or {}
@@ -686,6 +821,7 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
     ):
         classification = {k: binding["qualification"].get(k) for k in classification}
     source_summary = None
+    lifecycle_evidence: tuple[dict[str, Any], str | None] | None = None
     if source.get("classification"):
         candidate = source["classification"]
         try:
@@ -695,6 +831,7 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
                 "sha256:" + hashlib.sha256(evidence_path.read_bytes()).hexdigest()
             ):
                 source_summary = source_product_summary(evidence, project)
+                lifecycle_evidence = _evidence_fields(evidence, project)
                 # A local record that is still sampling/pending, or has no final product result,
                 # must not hide an independently valid source conclusion bound to its evidence
                 # digest. The local record's own date and reinspection state are kept.
@@ -730,10 +867,35 @@ def describe(layout: Any, project: str, record: dict[str, Any]) -> dict[str, Any
         for rwid, obs in (observations or {}).items()
         for fingerprint in obs.get("documentFingerprints", [])
     }
+    lifecycle_classification = {**classification, "projectInspectionStages": source.get("projectInspectionStages"),
+                                "sourceInspectionStages": source.get("sourceInspectionStages")}
+    refused_details: list[str] = []
+    if lifecycle_evidence is None:
+        lifecycle_evidence, refused_details = _saved_detail(layout, project, source)
+        if lifecycle_evidence and lifecycle_classification["initialResult"] == "UNKNOWN":
+            derived = source_qualification(
+                lifecycle_evidence[0], list(source.get("projectInspectionStages") or source.get("sourceInspectionStages") or [])
+            )
+            if derived:
+                lifecycle_classification.update({k: derived[k] for k in ("initialResult", "initialInspectionDate", "reinspectionPending")})
+    lifecycle_manifest = manifest or _archived_manifest(layout, project, record)
+    lifecycle = case_lifecycle.assess_case(
+        project=project,
+        evidence_fields=lifecycle_evidence[0] if lifecycle_evidence else None,
+        manifest=lifecycle_manifest or None,
+        ledger_identity={"unitName": record.get("unitName"), "unitAddress": source.get("address"), "brigade": record.get("brigadeCode")},
+        classification=lifecycle_classification,
+        observed_on=(lifecycle_evidence[1] if lifecycle_evidence else None),
+        has_package=package_received,
+        new_evidence=bool(source.get("changePending")),
+        today=today,
+        refused_evidence=None if lifecycle_evidence else refused_details,
+    )
     return {
         "projectNo": project,
         "unitName": record.get("unitName"),
         **classification,
+        "lifecycle": lifecycle,
         "sourceProduct": source_summary,
         "recordInitialFact": record_initial_fact(manifest),
         "stages": stages,
@@ -858,6 +1020,66 @@ def ledger_view(
             "receivedFiles": sum(r["files"]["received"] for r in rows),
         },
         "qualification": dict(Counter(r["initialResult"] for r in rows)),
+        "cases": rows,
+    }
+
+
+_PRODUCT_CASE = re.compile(r"^\d{8}C(\d{4})\d{5}$")
+
+
+def lifecycle_view(layout: Any, *, from_year: int = 2026, today: date | None = None) -> dict[str, Any]:
+    """Read-only classification of every known 2026+ product case by what it still needs.
+
+    REUSE_DIRECT: stable (identity complete, initial result final, recheck branch terminal, no change evidence)
+    or waiting for a known due day. LOCAL_SUPPLEMENT: the gap can be closed from materials already held locally.
+    NEEDS_SOURCE: a concrete cause justifies a source revisit. Counts are processed/undecided facts of this
+    ledger, not a statistic of the whole source year.
+    """
+    ledger = ws.load_waterline(layout)
+    rows = []
+    for project, record in sorted(ledger["cases"].items()):
+        match = _PRODUCT_CASE.match(project)
+        if not match or int(match.group(1)) < from_year:
+            continue
+        row = describe(layout, project, record, today=today)
+        life = row["lifecycle"]
+        rows.append(
+            {
+                "projectNo": project,
+                "unitName": row["unitName"],
+                "state": record.get("state"),
+                "category": life["category"],
+                "initialResult": life["initialResult"],
+                "recheckState": life["recheck"]["state"],
+                "administrativeClass": life["administrativeClass"],
+                "sourceCauses": life["sourceCauses"],
+                "localCauses": life["localCauses"],
+                "nextCheckOn": life["nextCheckOn"],
+                "packageReceived": row["stages"]["packageReceived"],
+                "archived": row["stages"]["archived"],
+                "missingRequired": sorted(k for k, v in life["required"].items() if v["state"] in {"missing", "conflict"}),
+                "evidenceRefused": life.get("evidenceRefused", []),
+                "pendingRequired": sorted(k for k, v in life["required"].items() if v["state"] == "pending"),
+            }
+        )
+    causes = Counter(c for r in rows for c in r["sourceCauses"] + r["localCauses"])
+    return {
+        "schemaVersion": "CaseLifecycleViewV1",
+        "generatedAt": ws._utc_now(),
+        "fromYear": from_year,
+        "identityKey": "projectNo",
+        "note": "仅已知总账里的 2026+ 产品案；总账成员数不是年度分母",
+        "counts": {
+            "cases": len(rows),
+            "byCategory": dict(Counter(r["category"] for r in rows)),
+            "byRecheckState": dict(Counter(r["recheckState"] for r in rows)),
+            "byAdministrativeClass": dict(Counter(r["administrativeClass"] for r in rows)),
+            "byCause": dict(sorted(causes.items())),
+            "archived": sum(r["archived"] for r in rows),
+            "packageReceived": sum(r["packageReceived"] for r in rows),
+            # 复查产品未经 initialProductRef 对应到同一初查产品：这些链保持待核实，可由本地文书核对补引用后再收口(不触发重采)
+            "recheckLinkUnproven": sum("RECHECK_PRODUCT_LINK_UNPROVEN" in r["localCauses"] for r in rows),
+        },
         "cases": rows,
     }
 
@@ -1224,6 +1446,16 @@ def package_decision(
         return done("PKG_REUSE_EXISTING", "REUSE", "DATE_IN_FUTURE")
     if check_date < date.fromisoformat(window["startDate"]):
         return done("PKG_ACTIVE_OLDER_MANUAL", "EXPLICIT_ONLY", "OLDER_THAN_WINDOW")
+    life = facts.get("lifecycle")
+    if life is not None:  # 2026-11-09：稳定案默认本地复用，只有具体原因才更新；不设统一过期天数
+        if life.get("stable"):
+            return done("PKG_REUSE_STABLE", "REUSE", "STABLE_NO_CAUSE")
+        causes = list(life.get("sourceCauses") or [])
+        if not causes:
+            if life.get("nextCheckOn"):
+                out["nextEligibleAt"] = life["nextCheckOn"]
+            return done("PKG_REUSE_EXISTING", "REUSE", "NO_CAUSE_YET")
+        out["causes"] = causes
     attached = facts.get("attachedAt")
     last = None
     if attached:
@@ -1234,7 +1466,7 @@ def package_decision(
     if last is not None and (today - last).days < refresh_days:
         out["nextEligibleAt"] = date.fromordinal(last.toordinal() + refresh_days).isoformat()
         return done("PKG_REUSE_EXISTING", "REUSE", "WITHIN_REFRESH_INTERVAL")
-    return done("PKG_REFRESH_DUE_RECENT_UNQUALIFIED", "REFRESH_CANDIDATE")
+    return done("PKG_REFRESH_DUE_RECENT_UNQUALIFIED", "REFRESH_CANDIDATE", *out.get("causes", []))
 
 
 def _package_capture_index(layout: Any) -> dict[str, dict[str, Any]]:
@@ -1313,6 +1545,7 @@ def package_facts(layout: Any, index: dict[str, Any], project: str, row: dict[st
         "checkDate": check_date,
         "dateIssue": issue,
         "localComplete": bool(row.get("complete")),
+        "lifecycle": row.get("lifecycle"),
     }
 
 

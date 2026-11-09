@@ -165,6 +165,7 @@ Excel 至少展示项目编号、单位、大队、标签、来源进度、本�
 - 初查阶段固定为 `INITIAL_CHECK`，复查固定为 `RECHECK`；现场判定、抽样送检或复检是业务方式，不是检查阶段。
 - 产品 `clientRef` 在清单中稳定。`repairSiteId` 只有证据明确时填写；非空 UUID 必须同时 `maintenance: "YES"`。
 - 产品为 `UNQUALIFIED` 时按 Schema 提供检查方式和非空问题描述；只有抽样送检才能填写复检申请或结果。
+- 可选 `initialProductRef`（2026-11-09）：只允许写在 `RECHECK` 产品上，指向同案 `INITIAL_CHECK` 产品的 `clientRef`，用于跨阶段同产品链（行政处罚归类等）。两端各自的 `clientRef` 保持不同且稳定；旧输入缺该字段继续有效，不批量猜填；名称、数组位置和数量不能代替连接。
 - 普通槽位的 `ELECTRONIC` 和 `SCANNED` 各最多一个；现场照片只能有一个 `SCANNED`。截图、原 ZIP 和组合件不能直接作为正式版本。
 - 每个 `files` 条目必须恰好被一个槽位版本或 `OTHER_ATTACHMENT` 引用。一个来源对应多个槽位时生成独立规范 PDF、独立 `fileRef` 和独立规范路径。
 - 拆分目标只能位于项目工作区的 `normalized/`，不得覆盖原件或已有文件；空白页不生成规范 PDF。

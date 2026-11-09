@@ -1129,3 +1129,448 @@ def test_scan_plan_lists_package_candidates_read_only(layout):
     plan = views.scan_plan(layout, mode="annual-baseline", today=_dt.date(2099, 1, 1))
     assert plan["packagePolicy"]["windowMonths"] == 2 and plan["packagePolicy"]["readOnly"] is True
     assert "packageDecisionCounts" in plan and ws.load_waterline(layout) == before
+
+
+# ---------------------------------------------------------------------------------------------
+# R35-D4: lifecycle rules reach the normal ledger view, package decision and classification report
+# ---------------------------------------------------------------------------------------------
+
+L1, L2, L3 = "99999999C209900001", "99999999C209900002", "99999999C209900003"
+
+
+def _detail_fields(*, status="已结案[合格]", quality="未发现不合格现象", market="未发现不合格现象", rows=None, accept="2099年01月05日"):
+    return {
+        "单位名称": "合成单位", "单位地址": "合成地址", "单位类别": "重点单位", "受理日期": accept, "消防管辖": "合成管辖",
+        "项目编号": "x", "检查情况": status,
+        "检查产品信息": rows if rows is not None else [{"产品质量现场检查情况": quality, "市场准入检查情况": market}],
+    }
+
+
+def _detail_record(project, fields, *, captured="2099-02-10T10:00:00+08:00", stages=None):
+    """A saved-detail record the way intake stores it: product root, own business fingerprint of its fields."""
+    full = {"文书目录": [{"title": f"[产]监督检查-{project}-1", "children": []}], **fields, "项目编号": project}
+    return {"projectNo": project, "capturedAt": captured, "fields": full, "projectInspectionStages": stages or [],
+            "businessFingerprint": source._business_detail_fingerprint(full)}
+
+
+def _save_detail(layout, project, fields, *, captured="2099-02-10T10:00:00+08:00", stages=None, rwid="777"):
+    record = _detail_record(project, fields, captured=captured, stages=stages)
+    write(layout.pending_case_dir(project) / "source-evidence.json", {
+        "projectNo": project, "schemaVersion": "SourceIdentityV1", "records": {rwid: record}})
+    # intake registers the content and the time together: detailBusinessFingerprint + capturedAt for the current RWID
+    ws.upsert_case(layout, project, unitName="合成单位", source={"projectIdentitySource": "DETAIL", "rwid": rwid, "status": "PACKAGE_READY",
+                                                              "detailBusinessFingerprint": record["businessFingerprint"], "capturedAt": captured,
+                                                              "packageSha256": "sha256:" + "c" * 64, "downloadDelivery": {"status": "READY", "zipCandidates": [{"name": "a.zip"}]}})
+
+
+def test_r35_d4_describe_uses_the_later_saved_detail_even_when_classification_digest_no_longer_matches(layout):
+    _save_detail(layout, L1, _detail_fields())
+    ws.upsert_case(layout, L1, source={"classification": {"initialResult": "QUALIFIED", "evidencePath": f"原始案卷\\待处理案卷\\{L1}\\source-evidence.json",
+                                                        "evidenceSha256": "sha256:" + "0" * 64, "observedAt": NOW}})
+    life = views.describe(layout, L1, ws.load_waterline(layout)["cases"][L1], today=_dt.date(2099, 2, 20))["lifecycle"]
+    assert life["required"]["unitName"]["state"] == "present" and life["required"]["unitCategory"]["value"] == "重点单位"
+    assert life["initialResult"] == "合格" and life["recheck"]["state"] == "初查合格无需复查" and life["stable"] is True
+    assert life["category"] == "REUSE_DIRECT" and life["initialDate"]["value"] == "2099-01-05" and life["initialDate"]["fallback"] is True
+    assert life["initialDate"]["externalSource"] == "监督系统"
+
+
+def test_r35_d4_waiting_for_a_sampling_report_is_pending_result_and_a_source_cause_not_a_guess(layout):
+    _save_detail(layout, L2, _detail_fields(status="处理中[抽样送检]", quality="抽样送检"))
+    life = views.describe(layout, L2, ws.load_waterline(layout)["cases"][L2], today=_dt.date(2099, 2, 20))["lifecycle"]
+    assert life["initialResult"] == "待结果" and life["sourceCauses"] == ["INITIAL_RESULT_PENDING"] and life["category"] == "NEEDS_SOURCE"
+    assert life["administrativeClass"] == "待核实"
+
+
+def test_r35_d4_package_decision_reuses_stable_cases_and_refreshes_only_for_a_cause():
+    stable = {"stable": True, "sourceCauses": [], "nextCheckOn": None}
+    assert views.package_decision(_facts(lifecycle=stable, attachedAt="2026-01-01T00:00:00+08:00"), today=TODAY)["code"] == "PKG_REUSE_STABLE"
+    quiet = {"stable": False, "sourceCauses": [], "nextCheckOn": "2026-12-01"}
+    d = views.package_decision(_facts(lifecycle=quiet, attachedAt="2026-01-01T00:00:00+08:00"), today=TODAY)
+    assert d["code"] == "PKG_REUSE_EXISTING" and d["nextEligibleAt"] == "2026-12-01" and "NO_CAUSE_YET" in d["reasons"]
+    caused = {"stable": False, "sourceCauses": ["RECHECK_RESULT_PENDING"], "nextCheckOn": None}
+    d = views.package_decision(_facts(lifecycle=caused, attachedAt="2026-10-01T00:00:00+08:00"), today=TODAY)
+    assert d["code"] == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED" and "RECHECK_RESULT_PENDING" in d["reasons"]
+    paced = views.package_decision(_facts(lifecycle=caused, attachedAt="2026-11-05T00:00:00+08:00"), today=TODAY)
+    assert paced["code"] == "PKG_REUSE_EXISTING" and "WITHIN_REFRESH_INTERVAL" in paced["reasons"]
+
+
+def test_r35_d4_lifecycle_view_counts_processed_and_undecided_and_is_read_only(layout):
+    _save_detail(layout, L1, _detail_fields())
+    _save_detail(layout, L2, _detail_fields(status="处理中[抽样送检]", quality="抽样送检"))
+    ws.upsert_case(layout, B, unitName="旧案")        # not a 2099 C-case: outside the product-case scope
+    before = layout.waterline_json.read_bytes()
+    view = views.lifecycle_view(layout, from_year=2099, today=_dt.date(2099, 2, 20))
+    assert layout.waterline_json.read_bytes() == before
+    assert view["counts"]["cases"] == 2 and view["counts"]["byCategory"] == {"REUSE_DIRECT": 1, "NEEDS_SOURCE": 1}
+    assert view["counts"]["byCause"] == {"INITIAL_RESULT_PENDING": 1}
+    assert "年度分母" in view["note"]
+
+
+def _queue_state(layout, project, fields, *, appearances=None, stages=None):
+    _save_detail(layout, project, fields, stages=stages, rwid="fixture-rwid")
+    appearance = {"文书名称": "检查记录", "创建日期": "2099-01-20"}
+    ws.upsert_case(layout, project, source={"observationsByRwid": {"fixture-rwid": {"documentFingerprints": [source._fingerprint(appearance)]}}})
+    state = {"filters": {"selectionMode": "RECENT_DOCUMENT_ACTIVITY"}, "batchId": "recent"}
+    records = {"fixture-rwid": {"rwid": "fixture-rwid", "fields": {}, "sourceAppearances": appearances or [appearance]}}
+    source._prepare_incremental_queue(layout, state, records, NOW)
+    return state, records["fixture-rwid"]
+
+
+def test_r35_d4_stable_unarchived_case_with_unchanged_documents_is_reused_locally_without_entering_detail(layout):
+    state, record = _queue_state(layout, L1, _detail_fields())
+    assert state["actionRwids"] == [] and record["skippedAsUnchanged"] is True
+    assert record["skipReason"] == "STABLE_CASE_LOCAL_REUSE" and record["projectNo"] == L1
+
+
+def test_r35_d4_new_document_pending_result_or_missing_package_still_enters_detail(layout):
+    appearance = {"文书名称": "检查记录", "创建日期": "2099-01-20"}
+    new_doc = [appearance, {"文书名称": "复查记录", "创建日期": "2099-02-20"}]
+    state, _ = _queue_state(layout, L1, _detail_fields(), appearances=new_doc)               # 新证据：重开
+    assert state["actionRwids"] == ["fixture-rwid"]
+    state, _ = _queue_state(layout, L2, _detail_fields(status="处理中[抽样送检]", quality="抽样送检"))   # 待结果：不稳定
+    assert state["actionRwids"] == ["fixture-rwid"]
+    _save_detail(layout, L3, _detail_fields())
+    ws.upsert_case(layout, L3, source={"status": "DETAIL_CAPTURED", "downloadDelivery": {}, "packageSha256": None})
+    row = views.describe(layout, L3, ws.load_waterline(layout)["cases"][L3])
+    assert row["lifecycle"]["stable"] is True        # 稳定与是否已收包是两个轴；跳过要求已收包
+
+
+def test_r35_d4_a_report_title_in_the_directory_does_not_turn_a_pending_sampling_result_into_a_local_supplement(layout):
+    waiting = _detail_fields(status="处理中[抽样送检]", quality="抽样送检")
+    waiting["文书目录"] = [{"title": "[产]开业检查", "children": [{"title": "产品检验", "children": [{"title": "检验报告"}]}]}]   # 实读多为型式试验报告
+    _save_detail(layout, L1, waiting)
+    life = views.describe(layout, L1, ws.load_waterline(layout)["cases"][L1], today=_dt.date(2099, 2, 20))["lifecycle"]
+    assert life["category"] == "NEEDS_SOURCE" and life["sourceCauses"] == ["INITIAL_RESULT_PENDING"] and life["localCauses"] == []
+
+
+# ---------------------------------------------------------------------------------------------
+# R36-D4-A: a saved detail is consumed only through its verifiable digest, ledger-bound RWID, same case and product root
+# ---------------------------------------------------------------------------------------------
+
+STALE = {"initialResult": "QUALIFIED", "evidenceSha256": "sha256:" + "0" * 64, "observedAt": NOW}
+
+
+def _bind_stale_classification(layout, project):
+    ws.upsert_case(layout, project, source={"classification": {**STALE, "evidencePath": f"原始案卷\\待处理案卷\\{project}\\source-evidence.json"}})
+
+
+def _life(layout, project):
+    return views.describe(layout, project, ws.load_waterline(layout)["cases"][project], today=_dt.date(2099, 2, 20))["lifecycle"]
+
+
+def _rewrite_evidence(layout, project, change):
+    path = layout.pending_case_dir(project) / "source-evidence.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    change(data)
+    write(path, data)
+
+
+def _tamper_address(data):
+    data["records"]["777"]["fields"]["单位地址"] = "未绑定摘要的新地址"          # 改了内容但没有新的业务摘要
+
+
+def _drop_digest(data):
+    del data["records"]["777"]["businessFingerprint"]
+
+
+def _wrong_rwid(data):
+    data["records"] = {"999": data["records"]["777"]}                               # 账本只绑定 777
+
+
+def _wrong_field_project(data):
+    record = data["records"]["777"]
+    record["fields"]["项目编号"] = L2
+    record["businessFingerprint"] = source._business_detail_fingerprint(record["fields"])   # 摘要自洽也不能救跨案项目编号
+
+
+def _non_product_root(data):
+    record = data["records"]["777"]
+    record["fields"]["文书目录"] = [{"title": "[消]其他监督", "children": []}]
+    record["businessFingerprint"] = source._business_detail_fingerprint(record["fields"])
+
+
+def _foreign_product_root(data):
+    record = data["records"]["777"]
+    record["fields"]["文书目录"] = [{"title": f"[产]监督检查-{L2}-1", "children": []}]
+    record["businessFingerprint"] = source._business_detail_fingerprint(record["fields"])
+
+
+@pytest.mark.parametrize("tamper,reason", [
+    (_tamper_address, "DIGEST_MISMATCH"), (_drop_digest, "NO_DIGEST"), (_wrong_rwid, "RWID_NOT_BOUND_TO_CASE"),
+    (_wrong_field_project, "PROJECT_MISMATCH"), (_non_product_root, "NO_PRODUCT_ROOT"), (_foreign_product_root, "FOREIGN_PRODUCT_ROOT"),
+])
+def test_r36_d4_a_an_unbound_expired_or_cross_case_saved_detail_is_never_stable_and_keeps_the_case_open(layout, tamper, reason):
+    _save_detail(layout, L1, _detail_fields())
+    _bind_stale_classification(layout, L1)
+    assert _life(layout, L1)["category"] == "REUSE_DIRECT"                       # 同一夹具未篡改前是合法已有详情
+    _rewrite_evidence(layout, L1, tamper)
+    life = _life(layout, L1)
+    assert life["stable"] is False and life["category"] == "NEEDS_SOURCE"
+    assert "SAVED_DETAIL_UNTRUSTED" in life["sourceCauses"] and any(reason in r for r in life["evidenceRefused"])
+
+
+def test_r36_d4_a_a_ledger_digest_that_disagrees_with_the_saved_current_rwid_detail_is_refused(layout):
+    _save_detail(layout, L1, _detail_fields())
+    _bind_stale_classification(layout, L1)
+    ws.upsert_case(layout, L1, source={"detailBusinessFingerprint": "sha256:" + "a" * 64})
+    life = _life(layout, L1)
+    assert life["stable"] is False and any("LEDGER_DIGEST_MISMATCH" in r for r in life["evidenceRefused"])
+
+
+def test_r36_d4_a_a_later_observation_with_a_matching_digest_and_ledger_binding_is_consumed(layout):
+    _save_detail(layout, L1, _detail_fields(status="处理中[抽样送检]", quality="抽样送检"))
+    _bind_stale_classification(layout, L1)
+    later = _detail_record(L1, _detail_fields(), captured="2099-02-18T09:00:00+08:00")      # 合格终局的新观察，写入时同时更新了业务摘要
+    _rewrite_evidence(layout, L1, lambda data: data["records"].update({"777": later}))
+    ws.upsert_case(layout, L1, source={"detailBusinessFingerprint": later["businessFingerprint"], "capturedAt": later["capturedAt"]})
+    life = _life(layout, L1)
+    assert life["initialResult"] == "合格" and life["stable"] is True and life["category"] == "REUSE_DIRECT" and life["evidenceRefused"] == []
+
+
+def test_r36_d4_a_one_case_may_have_several_rwids_each_judged_on_its_own_evidence(layout):
+    _save_detail(layout, L1, _detail_fields())
+    _bind_stale_classification(layout, L1)
+    second = _detail_record(L1, _detail_fields())
+    _rewrite_evidence(layout, L1, lambda data: (data["records"]["777"]["fields"].update({"单位地址": "被改且无摘要"}), data["records"].update({"888": second})))
+    assert _life(layout, L1)["category"] == "NEEDS_SOURCE"                               # 888 有记录但账本没有它的依据
+    ws.upsert_case(layout, L1, source={"observationsByRwid": {"888": {"fingerprint": source._fingerprint(second), "observedAt": second["capturedAt"]}}})
+    life = _life(layout, L1)
+    assert life["stable"] is True and life["category"] == "REUSE_DIRECT"                 # 888 现在有账本依据，777 的坏记录不影响它
+    _rewrite_evidence(layout, L1, lambda data: data["records"]["888"]["fields"].update({"单位地址": "也被改"}))
+    assert _life(layout, L1)["category"] == "NEEDS_SOURCE"                               # 两个都不可核：不稳定
+
+
+def test_r36_d4_a_repeated_normal_reads_of_a_stable_case_write_nothing(layout):
+    _save_detail(layout, L1, _detail_fields())
+    before = {str(p.relative_to(layout.root)): p.read_bytes() for p in layout.root.rglob("*") if p.is_file()}
+    for _ in range(2):
+        assert _life(layout, L1)["category"] == "REUSE_DIRECT"
+    assert before == {str(p.relative_to(layout.root)): p.read_bytes() for p in layout.root.rglob("*") if p.is_file()}
+
+
+# ---------------------------------------------------------------------------------------------
+# R36-D4-B: a recheck closes only the initial product it is linked to by initialProductRef
+# ---------------------------------------------------------------------------------------------
+
+from scripts import case_lifecycle as lifecycle  # noqa: E402
+
+
+def _chain_manifest(initial, recheck, *, date="2099-01-01"):
+    products = lambda rows: [{"clientRef": r[0], "result": r[1], "method": "ONSITE", **({"initialProductRef": r[2]} if len(r) > 2 else {})} for r in rows]  # noqa: E731
+    return {"case": {"unitName": "独验单位", "unitAddress": "独验地址", "unitCategory": "重点单位", "brigadeCode": "XISHAN", "inspectionForm": "ROUTINE"},
+            "initialInspection": {"inspectionDate": date, "products": products(initial)},
+            "recheckInspection": {"products": products(recheck)}}
+
+
+def _assess(manifest, **kw):
+    return lifecycle.assess_case(project=L1, manifest=manifest, has_package=True, today=_dt.date(2099, 2, 20), **kw)
+
+
+def test_r36_d4_b_a_recheck_linked_to_the_same_unqualified_product_closes_that_chain():
+    r = _assess(_chain_manifest([("a", "UNQUALIFIED")], [("r1", "QUALIFIED", "a")]))
+    assert r["recheck"]["closed"] is True and r["recheck"]["state"] == "复查有有效结果" and r["stable"] is True
+    assert r["sourceCauses"] == [] and r["localCauses"] == [] and r["category"] == "REUSE_DIRECT" and r["recheck"]["linkUnproven"] == 0
+
+
+def test_r36_d4_b_a_valid_recheck_of_another_product_cannot_close_an_unqualified_initial_product():
+    r = _assess(_chain_manifest([("product-a", "UNQUALIFIED")], [("product-b", "QUALIFIED")]))        # 未关联，数量相同
+    assert r["recheck"]["closed"] is False and r["stable"] is False and r["needsFollowUp"] is True
+    assert r["localCauses"] == ["RECHECK_PRODUCT_LINK_UNPROVEN"] and r["sourceCauses"] == [] and r["category"] == "LOCAL_SUPPLEMENT"
+    assert r["administrativeClass"] == "待核实" and r["recheck"]["linkUnproven"] == 2
+
+
+@pytest.mark.parametrize("recheck", [
+    [("r1", "QUALIFIED", "no-such-product")],            # 引用不存在
+    [("r1", "QUALIFIED", "b")],                           # 引用了另一个（合格）初查产品
+    [("r1", "UNKNOWN", "a")],                             # 关联正确但没有有效复查结果
+    [],                                                   # 没有任何复查
+])
+def test_r36_d4_b_wrong_unlinked_or_result_less_rechecks_never_close_the_chain(recheck):
+    r = _assess(_chain_manifest([("a", "UNQUALIFIED"), ("b", "QUALIFIED")], recheck))
+    assert r["recheck"]["closed"] is False and r["stable"] is False and r["category"] != "REUSE_DIRECT"
+    assert r["administrativeClass"] == "待核实"
+
+
+def test_r36_d4_b_in_a_mixed_case_an_unknown_link_blocks_only_its_own_chain():
+    manifest = _chain_manifest([("a", "UNQUALIFIED"), ("c", "UNQUALIFIED"), ("q", "QUALIFIED")],
+                               [("r-a", "UNQUALIFIED", "a"), ("r-x", "QUALIFIED")])
+    r = _assess(manifest)
+    by_ref = {c.get("initialRef"): c for c in r["chains"] if c["linked"]}
+    assert by_ref["a"]["recheck_state"] == "复查有有效结果" and by_ref["a"]["recheck_result"] == "不合格"        # 有证链照常终态
+    assert by_ref["q"]["recheck_state"] == "初查合格无需复查"
+    assert by_ref["c"]["recheck_state"] == "待核实" and by_ref["c"]["reasonCode"] == "LINK_UNPROVEN"
+    assert r["recheck"]["closed"] is False and r["recheck"]["otherState"] == "复查有有效结果" and r["stable"] is False
+    assert r["localCauses"] == ["RECHECK_PRODUCT_LINK_UNPROVEN"] and r["sourceCauses"] == []
+    assert r["administrativeClass"] == "是"            # a 链初查/复查都不合格，已证
+
+
+def test_r36_d4_b_another_chains_real_source_cause_is_not_hidden_by_an_unknown_link():
+    manifest = _chain_manifest([("a", "UNQUALIFIED"), ("c", "UNQUALIFIED")], [("r-a", "UNKNOWN", "a"), ("r-x", "QUALIFIED")])
+    r = _assess(manifest)
+    assert "RECHECK_PRODUCT_LINK_UNPROVEN" in r["localCauses"] and "RECHECK_RESULT_PENDING" in r["sourceCauses"]     # a: 复查已开展待结果
+
+
+def test_r36_d4_b_page_rows_without_product_references_stay_unlinked_and_open():
+    fields = {"单位名称": "独验单位", "单位地址": "独验地址", "单位类别": "重点单位", "消防管辖": "独验管辖", "受理日期": "2099年01月05日", "检查情况": "已结案",
+              "检查产品信息": [{"页面记录": {"SFCPFC": "0", "JCRQ": "2099-01-04"}, "产品质量现场检查情况": "1项不合格", "市场准入检查情况": "未发现不合格现象", "检查结果": "不合格"},
+                                {"页面记录": {"SFCPFC": "1"}, "产品质量现场检查情况": "未发现不合格现象", "市场准入检查情况": "未发现不合格现象", "检查结果": "合格"}]}
+    r = lifecycle.assess_case(project=L1, evidence_fields=fields, has_package=True, today=_dt.date(2099, 2, 20), observed_on="2099-02-10")
+    assert r["recheck"]["closed"] is False and r["stable"] is False and "RECHECK_PRODUCT_LINK_UNPROVEN" in r["localCauses"]
+    assert r["administrativeClass"] == "待核实"
+
+
+def test_r36_d4_b_an_unlinked_recheck_alone_is_a_local_gap_and_does_not_send_the_case_back_to_the_source(layout):
+    rows = [{"页面记录": {"SFCPFC": "0", "JCRQ": "2099-01-04"}, "产品质量现场检查情况": "1项不合格", "市场准入检查情况": "未发现不合格现象", "检查结果": "不合格"},
+            {"页面记录": {"SFCPFC": "1"}, "产品质量现场检查情况": "未发现不合格现象", "市场准入检查情况": "未发现不合格现象", "检查结果": "合格"}]
+    state, record = _queue_state(layout, L1, _detail_fields(status="已结案", rows=rows))
+    life = _life(layout, L1)
+    assert life["category"] == "LOCAL_SUPPLEMENT" and life["sourceCauses"] == [] and life["localCauses"] == ["RECHECK_PRODUCT_LINK_UNPROVEN"]
+    assert state["actionRwids"] == [] and record["skipReason"] == "NO_SOURCE_CAUSE_LOCAL_REUSE"
+
+
+# ---------------------------------------------------------------------------------------------
+# R37-D4-A: content, ledger registration and observation time are bound separately; R37-D4-QUEUE: zero repeated writes
+# ---------------------------------------------------------------------------------------------
+
+def _edit_and_refingerprint(data, **changes):
+    record = data["records"]["777"]
+    record["fields"].update(changes)
+    record["businessFingerprint"] = source._business_detail_fingerprint(record["fields"])
+
+
+def test_r37_d4_a_a_self_consistent_edit_without_ledger_registration_is_not_stable(layout):
+    _save_detail(layout, L1, _detail_fields())
+    _bind_stale_classification(layout, L1)
+    _rewrite_evidence(layout, L1, lambda data: _edit_and_refingerprint(data, 单位地址="文件内改并重算自指纹的新地址"))
+    life = _life(layout, L1)
+    assert life["stable"] is False and life["category"] == "NEEDS_SOURCE" and any("LEDGER_DIGEST_MISMATCH" in r for r in life["evidenceRefused"])
+    ws.upsert_case(layout, L1, source={"detailBusinessFingerprint": None})
+    # a ledger with no registered detail fingerprint at all cannot bind the current RWID either
+    data = ws.load_waterline(layout)
+    data["cases"][L1]["source"].pop("detailBusinessFingerprint", None)
+    ws.save_waterline(layout, data)
+    life = _life(layout, L1)
+    assert life["stable"] is False and any("LEDGER_BINDING_MISSING" in r for r in life["evidenceRefused"])
+
+
+def test_r37_d4_a_an_edited_timestamp_is_not_a_registered_observation_time(layout):
+    _save_detail(layout, L1, _detail_fields())
+    _bind_stale_classification(layout, L1)
+    _rewrite_evidence(layout, L1, lambda data: data["records"]["777"].update({"capturedAt": "2099-12-31T10:00:00+08:00"}))
+    life = _life(layout, L1)
+    assert life["stable"] is False and any("OBSERVED_AT_UNREGISTERED" in r for r in life["evidenceRefused"])
+
+
+def _due_case(layout):
+    """Unqualified case whose notice is dated 2099-01-05 (due 2099-02-05) with a recorded 2099-01-10 observation."""
+    rows = [{"页面记录": {"SFCPFC": "0", "JCRQ": "2099-01-04"}, "产品质量现场检查情况": "1项不合格", "市场准入检查情况": "未发现不合格现象", "检查结果": "不合格"}]
+    _save_detail(layout, L1, _detail_fields(status="已结案", rows=rows), captured="2099-01-10T10:00:00+08:00")
+    _bind_stale_classification(layout, L1)
+    manifest = _chain_manifest([("a", "UNQUALIFIED")], [])
+    manifest.pop("recheckInspection")
+    manifest["case"]["projectNo"] = L1
+    manifest["documentSlots"] = [{"slotCode": "RECTIFICATION_ORDER", "documentDate": "2099-01-05"}]
+    write(layout.work_case_dir(L1) / "manifest.json", manifest)
+
+
+def test_r37_d4_a_a_forged_later_capture_time_cannot_turn_a_pre_due_observation_into_a_due_one(layout):
+    _due_case(layout)
+    before = _life(layout, L1)
+    _rewrite_evidence(layout, L1, lambda data: data["records"]["777"].update({"capturedAt": "2099-02-10T10:00:00+08:00"}))
+    after = _life(layout, L1)
+    assert before["recheck"]["closed"] is False and after["recheck"]["closed"] is False and after["stable"] is False
+    assert any("OBSERVED_AT_UNREGISTERED" in r for r in after["evidenceRefused"])
+
+
+def test_r37_d4_a_a_registered_later_observation_does_close_the_due_chain(layout):
+    _due_case(layout)
+    later = _detail_record(L1, _detail_fields(status="已结案", rows=[{"页面记录": {"SFCPFC": "0", "JCRQ": "2099-01-04"}, "产品质量现场检查情况": "1项不合格", "市场准入检查情况": "未发现不合格现象", "检查结果": "不合格"}]),
+                           captured="2099-02-10T10:00:00+08:00")
+    _rewrite_evidence(layout, L1, lambda data: data["records"].update({"777": later}))
+    ws.upsert_case(layout, L1, source={"detailBusinessFingerprint": later["businessFingerprint"], "capturedAt": later["capturedAt"]})   # intake registers content and time together
+    life = _life(layout, L1)
+    assert life["evidenceRefused"] == [] and life["recheck"]["observedOn"] == "2099-02-10" and life["recheck"]["state"] == "到期确认未开展"
+
+
+def test_r37_d4_a_another_rwid_with_changed_content_but_an_old_registered_fingerprint_is_refused(layout):
+    _save_detail(layout, L1, _detail_fields())
+    _bind_stale_classification(layout, L1)
+    second = _detail_record(L1, _detail_fields())
+    old_fp = source._fingerprint(second)
+    second["fields"]["单位地址"] = "同RWID但未经新观察登记的内容"
+    second["businessFingerprint"] = source._business_detail_fingerprint(second["fields"])
+    _rewrite_evidence(layout, L1, lambda data: data["records"].clear() or data["records"].update({"888": second}))
+    ws.upsert_case(layout, L1, source={"observationsByRwid": {"888": {"fingerprint": old_fp, "observedAt": second["capturedAt"]}}})
+    life = _life(layout, L1)
+    assert life["stable"] is False and any("888:OBSERVATION_NOT_REGISTERED" in r for r in life["evidenceRefused"])
+
+
+def _count_persistence(monkeypatch):
+    counts = {"upsert": 0, "persistentSave": 0}
+    real_upsert, real_save = source.upsert_case, ws._save_waterline_unlocked
+
+    def upsert(*a, **k):
+        counts["upsert"] += 1
+        return real_upsert(*a, **k)
+
+    def save(*a, **k):
+        counts["persistentSave"] += 1
+        return real_save(*a, **k)
+
+    monkeypatch.setattr(source, "upsert_case", upsert)
+    monkeypatch.setattr(ws, "_save_waterline_unlocked", save)
+    return counts
+
+
+def _run_queue(layout, project, at, appearances=None, batch="synthetic"):
+    appearance = {"文书名称": "检查记录", "创建日期": "2099-01-20"}
+    state = {"filters": {"selectionMode": "RECENT_DOCUMENT_ACTIVITY"}, "batchId": batch}
+    records = {"777": {"rwid": "777", "fields": {}, "sourceAppearances": appearances or [appearance]}}
+    source._prepare_incremental_queue(layout, state, records, at)
+    return state, records["777"]
+
+
+def _prime_observation(layout, project):
+    appearance = {"文书名称": "检查记录", "创建日期": "2099-01-20"}
+    ws.upsert_case(layout, project, source={"observationsByRwid": {"777": {"documentFingerprints": [source._fingerprint(appearance)]}}})
+
+
+@pytest.mark.parametrize("kind", ["stable", "local-gap"])
+def test_r37_queue_the_same_registered_observation_makes_no_persistent_write_on_repeat(layout, monkeypatch, kind):
+    if kind == "stable":
+        _save_detail(layout, L1, _detail_fields())
+    else:
+        rows = [{"页面记录": {"SFCPFC": "0", "JCRQ": "2099-01-04"}, "产品质量现场检查情况": "1项不合格", "市场准入检查情况": "未发现不合格现象", "检查结果": "不合格"},
+                {"页面记录": {"SFCPFC": "1"}, "产品质量现场检查情况": "未发现不合格现象", "市场准入检查情况": "未发现不合格现象", "检查结果": "合格"}]
+        _save_detail(layout, L1, _detail_fields(status="已结案", rows=rows))
+    _prime_observation(layout, L1)
+    counts = _count_persistence(monkeypatch)
+    state, record = _run_queue(layout, L1, "2099-02-20T00:00:00Z")
+    assert state["actionRwids"] == [] and record["skipReason"] in {"STABLE_CASE_LOCAL_REUSE", "NO_SOURCE_CAUSE_LOCAL_REUSE"}
+    first = dict(counts)
+    assert first == {"upsert": 1, "persistentSave": 1}                       # 第一次登记这个观察
+    before = {str(p.relative_to(layout.root)): p.read_bytes() for p in layout.root.rglob("*") if p.is_file()}
+    for _ in range(3):
+        state, _ = _run_queue(layout, L1, "2099-02-20T00:00:00Z")
+        assert state["actionRwids"] == []
+    assert counts == first                                                    # 连续三次相同观察：底层 upsert/save 零调用
+    assert before == {str(p.relative_to(layout.root)): p.read_bytes() for p in layout.root.rglob("*") if p.is_file()}
+    state, _ = _run_queue(layout, L1, "2099-02-21T00:00:00Z")                 # 真正新的观察时点要登记一次，之后再重复又是零
+    assert state["actionRwids"] == [] and counts == {"upsert": 2, "persistentSave": 2}
+    _run_queue(layout, L1, "2099-02-21T00:00:00Z")
+    assert counts == {"upsert": 2, "persistentSave": 2}
+
+
+def test_r37_queue_zero_write_does_not_hide_new_documents_missing_packages_or_pending_results(layout, monkeypatch):
+    _save_detail(layout, L1, _detail_fields())
+    _prime_observation(layout, L1)
+    _run_queue(layout, L1, "2099-02-20T00:00:00Z")
+    counts = _count_persistence(monkeypatch)
+    state, _ = _run_queue(layout, L1, "2099-02-20T00:00:00Z", appearances=[{"文书名称": "检查记录", "创建日期": "2099-01-20"}, {"文书名称": "复查记录", "创建日期": "2099-02-20"}])
+    assert state["actionRwids"] == ["777"] and counts == {"upsert": 0, "persistentSave": 0}      # 新文书进入队列；队列本身不写
+    _save_detail(layout, L2, _detail_fields(status="处理中[抽样送检]", quality="抽样送检"))
+    ws.upsert_case(layout, L2, source={"rwid": "888", "observationsByRwid": {"888": {"documentFingerprints": [source._fingerprint({"文书名称": "检查记录", "创建日期": "2099-01-20"})]}}})
+    appearance = {"文书名称": "检查记录", "创建日期": "2099-01-20"}
+    state = {"filters": {"selectionMode": "RECENT_DOCUMENT_ACTIVITY"}, "batchId": "synthetic"}
+    source._prepare_incremental_queue(layout, state, {"888": {"rwid": "888", "fields": {}, "sourceAppearances": [appearance]}}, "2099-02-20T00:00:00Z")
+    assert state["actionRwids"] == ["888"]                                                     # 待结果有来源原因：仍回源
