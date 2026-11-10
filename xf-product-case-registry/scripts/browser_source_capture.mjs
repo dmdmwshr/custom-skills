@@ -349,7 +349,8 @@ function currentDetailObservation() {
     if (!icon && !tr.querySelector(".el-table__placeholder")) unknownExpand += 1;
     if (isExpandable) { expandable += 1; if (!isExpanded) collapsed += 1; }
     const at = (label, fallback) => (col(label) >= 0 ? cells[col(label)] : fallback) ?? "";
-    return { level: lv ? Number(lv[1]) : 0, title: cells.find((c) => c) ?? "", createdAt: at("创建时间", ""), approvalDate: at("审批日期", ""), status: at("状态", "") };
+    const unknownRow = !icon && !tr.querySelector(".el-table__placeholder");
+    return { level: lv ? Number(lv[1]) : 0, title: cells.find((c) => c) ?? "", createdAt: at("创建时间", ""), approvalDate: at("审批日期", ""), status: at("状态", ""), ...(unknownRow ? { expandUnknown: true } : {}) };
   });
   // Business labels and dates only: never copy URLs, file paths, raw requests or session data.
   const projectNo = fields.项目编号;
@@ -362,7 +363,7 @@ function currentDetailObservation() {
   const roots = [];
   const stack = [];
   for (const row of flat) {
-    const node = { title: row.title, createdAt: row.createdAt, approvalDate: row.approvalDate, status: row.status, currentProject: null, children: [] };
+    const node = { title: row.title, createdAt: row.createdAt, approvalDate: row.approvalDate, status: row.status, currentProject: null, children: [], ...(row.expandUnknown ? { expandUnknown: true } : {}) };
     while (stack.length && stack[stack.length - 1].level >= row.level) stack.pop();
     if (!stack.length) { node.currentProject = rootCurrent(row.title); roots.push(node); } else { node.currentProject = stack[stack.length - 1].node.currentProject; stack[stack.length - 1].node.children.push(node); }
     stack.push({ level: row.level, node });

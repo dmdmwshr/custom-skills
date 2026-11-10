@@ -762,6 +762,14 @@ def _followup_observations(
             refuse("OBSERVED_AT_UNREGISTERED")
         elif _product_root_problem(fields, project):
             refuse("PRODUCT_ROOT")
+        elif (
+            source.get("packageSha256")
+            and (evidence.get("priorBoundDetail") or {}).get("packageSha256")
+            and str(source["packageSha256"]).removeprefix("sha256:") != str(evidence["priorBoundDetail"]["packageSha256"]).removeprefix("sha256:")
+        ):
+            refuse("PACKAGE_MISMATCH")
+        elif (integrity_problem := source_intake.followup_integrity_problem(fields, project)):
+            refuse(integrity_problem)
         elif (brigade_problem := source_intake.followup_brigade_problem(
             fields, [*(baseline_brigades or []), _bound_detail_brigade(layout, entry)]
         )):

@@ -1397,9 +1397,13 @@ def bound_case(case):
                                  sleep_fn=lambda _: None)
 
 
+INTEGRITY_OK = {"renderedRows": 2, "expandableNodes": 1, "collapsedNodes": 0, "unknownExpandRows": 0,
+                "scrollOverflow": False, "coverageProven": True, "complete": True}
+
+
 def followup_fields(label):
     """后续观察必须显示本案 [产] 产品根。"""
-    return {**full_fields(), "备注": label,
+    return {**full_fields(), "备注": label, "文书目录完整性": dict(INTEGRITY_OK),
             "文书目录": [{"title": f"[产]监督检查-{PROJECT}-1", "children": [{"title": "合成检查记录"}]}]}
 
 
@@ -1695,5 +1699,309 @@ def test_r44_normal_cli_retry_after_injected_ledger_failure_repairs_and_is_idemp
     assert cli.main(argv) == 0
     assert len(_ledger_followups(case)) == 1
     assert cli.main(argv) == 0
+    assert len(_ledger_followups(case)) == 1
+    capsys.readouterr()
+
+
+# ---- R47：本案目录覆盖、既有登记包的新观察、复查标记消费 ----
+
+def _tree(own_children=True, external_empty=0, external_full=1):
+    rows = [{"title": f"[监]日常监督抽查-99999999J20260000{i}-外案", "children": [{"title": "监督检查"}]} for i in range(external_full)]
+    rows.append({"title": f"[产]监督检查-{PROJECT}-1", "children": [{"title": "合成检查记录"}] if own_children else []})
+    rows += [{"title": f"[监]责令期限届满复查-99999999J2026010{i}-外案", "children": [], "expandUnknown": True} for i in range(external_empty)]
+    return rows
+
+
+def _integrity_detail(label, *, tree=None, **integrity):
+    detail = followup_fields(label)
+    detail["文书目录"] = tree if tree is not None else _tree()
+    detail["文书目录完整性"] = {**INTEGRITY_OK, **integrity}
+    return detail
+
+
+def test_r47_integrity_accepts_complete_and_only_externally_accounted_unknown_rows(case):
+    bound_case(case)
+    # 与真实 083 同形：本案 [产] 树已全部展开，未知展开行是他案无子项的 [监] 根；读数器自己的 false 标记原样保留
+    detail = _integrity_detail("external-unknown", tree=_tree(external_empty=1), unknownExpandRows=1, coverageProven=False, complete=False)
+    result = source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL,
+                                             screenshot=new_screenshot(case, "ext"), observed_at="2026-11-10T09:00:00+08:00")
+    entry, = result["records"][RWID]["followupObservations"]
+    stored = json.loads((case.layout.root / entry["evidencePath"]).read_text(encoding="utf-8"))
+    assert stored["fields"]["文书目录完整性"]["coverageProven"] is False and stored["fields"]["文书目录完整性"]["complete"] is False
+    assert not any(str(i).startswith("FOLLOWUP_OBSERVATION_UNTRUSTED") for i in _describe(case).get("issues", []))
+
+
+@pytest.mark.parametrize("fault", ["own-unknown", "own-collapsed", "unaccounted-unknown", "own-root-empty", "scroll-overflow",
+                                   "integrity-missing", "not-complete", "no-tree", "own-unknown-with-foreign-empty",
+                                   "unmarked-foreign-empty", "marked-own-child"])
+def test_r47_integrity_refusals_write_nothing_at_registration(case, fault):
+    bound_case(case)
+    path, _ = source._load_capture(case.layout, BATCH)
+    before, ledger_before = path.read_bytes(), _ledger_followups(case)
+    if fault == "own-unknown":
+        detail = _integrity_detail(fault, tree=_tree(), unknownExpandRows=1, coverageProven=False, complete=False)   # 未知行无外案空根可对应
+    elif fault == "own-unknown-with-foreign-empty":
+        # 评审反例：本案树内有一个展开状态未知的空文件夹，同时存在一个他案空根；数量相等也不得把未知行归给他案根
+        tree = _tree(external_empty=1)
+        tree[1]["children"] = [{"title": "本案展开状态未知文件夹", "children": [], "expandUnknown": True}]
+        tree[2].pop("expandUnknown")
+        detail = _integrity_detail(fault, tree=tree, unknownExpandRows=1, coverageProven=False, complete=False)
+    elif fault == "unmarked-foreign-empty":
+        tree = _tree(external_empty=1)
+        tree[2].pop("expandUnknown")                      # 旧读数/无逐行标记：不能由空根数量推断归属
+        detail = _integrity_detail(fault, tree=tree, unknownExpandRows=1, coverageProven=False, complete=False)
+    elif fault == "marked-own-child":
+        tree = _tree(external_empty=1)
+        tree[1]["children"] = [{"title": "合成检查记录", "children": [], "expandUnknown": True}]
+        detail = _integrity_detail(fault, tree=tree, unknownExpandRows=2, coverageProven=False, complete=False)
+    elif fault == "own-collapsed":
+        detail = _integrity_detail(fault, collapsedNodes=1, coverageProven=False, complete=False)
+    elif fault == "unaccounted-unknown":
+        detail = _integrity_detail(fault, tree=_tree(external_empty=1), unknownExpandRows=2, coverageProven=False, complete=False)
+    elif fault == "own-root-empty":
+        detail = _integrity_detail(fault, tree=_tree(own_children=False), unknownExpandRows=1, coverageProven=False, complete=False)
+    elif fault == "scroll-overflow":
+        detail = _integrity_detail(fault, scrollOverflow=True)
+    elif fault == "integrity-missing":
+        detail = followup_fields(fault)
+        detail.pop("文书目录完整性")
+    elif fault == "not-complete":
+        detail = _integrity_detail(fault, complete=False, coverageProven=False)
+    else:
+        detail = _integrity_detail(fault, tree=[])
+    with pytest.raises(source.SourceIntakeError, match="目录覆盖|产品根" if fault == "no-tree" else "目录覆盖"):
+        source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL,
+                                        screenshot=new_screenshot(case, fault), observed_at="2026-11-10T09:00:00+08:00")
+    assert path.read_bytes() == before and _ledger_followups(case) == ledger_before
+    assert not (case.layout.batch_dir(BATCH) / "followup-observations").exists()
+
+
+@pytest.mark.parametrize("fault,expected", [("collapsed", "OWN_TREE_COLLAPSED"), ("unknown", "OWN_TREE_UNKNOWN"),
+                                            ("missing", "INTEGRITY_MISSING"), ("own-unknown-foreign-empty", "OWN_TREE_UNKNOWN")])
+def test_r47_consumer_does_not_trust_a_registered_followup_with_unproven_coverage(case, fault, expected):
+    """绕过登记入口（旧版/伪造）把未证覆盖的观察连同一致摘要写入证据与台账：消费者仍不采信。"""
+    bound_case(case)
+    base = _describe(case)
+    _followup(case, "good", observed_at="2026-11-10T09:00:00+08:00")
+    entry, = _ledger_followups(case).values()
+    target = case.layout.root / entry["evidencePath"]
+    evidence = json.loads(target.read_text(encoding="utf-8"))
+    if fault == "collapsed":
+        evidence["fields"]["文书目录完整性"].update(collapsedNodes=1, coverageProven=False, complete=False)
+    elif fault == "unknown":
+        evidence["fields"]["文书目录完整性"].update(unknownExpandRows=1, coverageProven=False, complete=False)
+    elif fault == "own-unknown-foreign-empty":
+        tree = _tree(external_empty=1)                    # 评审反例：本案树内未知文件夹 + 他案空根，数量相等
+        tree[1]["children"] = [{"title": "本案展开状态未知文件夹", "children": [], "expandUnknown": True}]
+        tree[2].pop("expandUnknown")
+        evidence["fields"]["文书目录"] = tree
+        evidence["fields"]["文书目录完整性"].update(unknownExpandRows=1, coverageProven=False, complete=False)
+    else:
+        evidence["fields"].pop("文书目录完整性")
+    evidence["fingerprint"] = source._fingerprint(evidence["fields"])
+    evidence["businessFingerprint"] = source._business_detail_fingerprint(evidence["fields"])
+    source._write_json(target, evidence)
+    ws.upsert_case(case.layout, PROJECT, source={"followupObservations": {entry["observationId"]: {
+        **entry, "fingerprint": evidence["fingerprint"], "businessFingerprint": evidence["businessFingerprint"],
+        "evidenceSha256": source._sha256(target)}}})
+    description = _describe(case)
+    assert any(str(i).endswith(":" + expected) for i in description.get("issues", []))
+    assert description["lifecycle"] == base["lifecycle"] or description["lifecycle"]["required"] == base["lifecycle"]["required"]
+
+
+def _legacy_case(case):
+    """包已在台账登记并在 D 上，但当前批次 capture 记录没有 package。"""
+    bound = bound_case(case)
+    path, state = source._load_capture(case.layout, BATCH)
+    package = state["records"][RWID].pop("package")
+    source._write_json(path, state)
+    ledger = ws.load_waterline(case.layout)["cases"][PROJECT]["source"]
+    assert ledger["packageSha256"] == package["sha256"]
+    return package, ledger
+
+
+def test_r47_legacy_registered_package_allows_new_observation_without_touching_the_package(case):
+    package, ledger = _legacy_case(case)
+    package_file = case.layout.root / ledger["packageRelativePath"]
+    package_bytes = package_file.read_bytes()
+    detail = followup_fields("legacy")
+    result = source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL,
+                                             screenshot=new_screenshot(case, "legacy"), observed_at="2026-11-10T09:00:00+08:00")
+    record = result["records"][RWID]
+    assert "package" not in record                                                  # 不把包重新绑进当前批次
+    entry, = record["followupObservations"]
+    stored = json.loads((case.layout.root / entry["evidencePath"]).read_text(encoding="utf-8"))
+    proof = stored["registeredPackage"]
+    assert proof["sha256"] == package["sha256"] and proof["sizeBytes"] == len(package_bytes) and proof["generation"] == 1
+    assert stored["priorBoundDetail"]["packageSha256"] == package["sha256"]
+    assert package_file.read_bytes() == package_bytes                               # 原包未重下/未改
+    assert len(_ledger_followups(case)) == 1
+    description = _describe(case)
+    assert not any(str(i).startswith("FOLLOWUP_OBSERVATION_UNTRUSTED") for i in description.get("issues", []))
+    assert description["sourceObservedAt"] == "2026-11-10T09:00:00+08:00"
+    # 同请求重复：幂等不双计
+    path, _ = source._load_capture(case.layout, BATCH); snapshot = path.read_bytes()
+    source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL,
+                                    screenshot=new_screenshot(case, "legacy"), observed_at="2026-11-10T09:00:00+08:00")
+    assert path.read_bytes() == snapshot and len(_ledger_followups(case)) == 1
+
+
+@pytest.mark.parametrize("fault", ["package-missing", "sha-mismatch", "rwid-not-bound", "generation-unproven", "outside-root", "no-registered-package"])
+def test_r47_legacy_package_refusals_write_nothing(case, fault):
+    package, ledger = _legacy_case(case)
+    package_file = case.layout.root / ledger["packageRelativePath"]
+    if fault == "package-missing":
+        package_file.unlink()
+    elif fault == "sha-mismatch":
+        package_file.write_bytes(package_file.read_bytes() + b"x")
+    elif fault == "rwid-not-bound":
+        ws.upsert_case(case.layout, PROJECT, source={"rwid": "90000000777", "annualIdentitiesByRwid": {}})
+        data = ws.load_waterline(case.layout)
+        data["cases"][PROJECT]["source"]["annualIdentitiesByRwid"] = {}
+        data["cases"][PROJECT]["source"]["observationsByRwid"] = {}
+        ws._save_waterline_unlocked(case.layout, data) if hasattr(ws, "_save_waterline_unlocked") else None
+    elif fault == "generation-unproven":
+        ws.upsert_case(case.layout, PROJECT, source={"packageGeneration": 0})
+    elif fault == "outside-root":
+        ws.upsert_case(case.layout, PROJECT, source={"packageRelativePath": "../outside.zip"})
+    else:
+        ws.upsert_case(case.layout, PROJECT, source={"packageSha256": None, "packageRelativePath": None})
+    path, _ = source._load_capture(case.layout, BATCH)
+    before, ledger_before = path.read_bytes(), _ledger_followups(case)
+    reason = {"package-missing": "实物缺失", "sha-mismatch": "摘要", "rwid-not-bound": "身份", "generation-unproven": "代际",
+              "outside-root": "业务根", "no-registered-package": "尚未绑定"}[fault]
+    with pytest.raises(source.SourceIntakeError, match=reason):
+        source.add_followup_observation(case.layout, BATCH, RWID, followup_fields(fault), source_url=DETAIL_URL,
+                                        screenshot=new_screenshot(case, fault), observed_at="2026-11-10T09:00:00+08:00")
+    assert path.read_bytes() == before and _ledger_followups(case) == ledger_before
+    assert not (case.layout.batch_dir(BATCH) / "followup-observations").exists()
+
+
+def test_r47_bound_package_that_disagrees_with_the_ledger_generation_is_refused(case):
+    bound_case(case)
+    ws.upsert_case(case.layout, PROJECT, source={"packageSha256": "sha256:" + "0" * 64})
+    path, _ = source._load_capture(case.layout, BATCH); before = path.read_bytes()
+    with pytest.raises(source.SourceIntakeError, match="代际"):
+        _followup(case, "gen", observed_at="2026-11-10T09:00:00+08:00")
+    assert path.read_bytes() == before and not _ledger_followups(case)
+
+
+def test_r47_legacy_package_partial_write_retry_completes_without_double_counting(case, monkeypatch):
+    _legacy_case(case)
+    detail, shot, at = followup_fields("legacy-partial"), new_screenshot(case, "legacy-partial"), "2026-11-10T09:00:00+08:00"
+    _fail_ledger_once(monkeypatch)
+    with pytest.raises(OSError):
+        source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL, screenshot=shot, observed_at=at)
+    assert not _ledger_followups(case)
+    result = source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL, screenshot=shot, observed_at=at)
+    assert len(result["records"][RWID]["followupObservations"]) == 1 and len(_ledger_followups(case)) == 1
+    assert not any(str(i).startswith("FOLLOWUP_OBSERVATION_UNTRUSTED") for i in _describe(case).get("issues", []))
+
+
+def test_r47_consumer_refuses_a_followup_whose_package_differs_from_the_ledger(case):
+    _legacy_case(case)
+    source.add_followup_observation(case.layout, BATCH, RWID, followup_fields("pkg"), source_url=DETAIL_URL,
+                                    screenshot=new_screenshot(case, "pkg"), observed_at="2026-11-10T09:00:00+08:00")
+    ws.upsert_case(case.layout, PROJECT, source={"packageSha256": "sha256:" + "1" * 64})
+    assert any(str(i).endswith(":PACKAGE_MISMATCH") for i in _describe(case).get("issues", []))
+
+
+def test_r47_visible_recheck_mark_is_consumed_through_the_normal_consumer(case):
+    """真实 063 形态：检查产品信息的结果列显示 [检]/[复查]，无 页面记录；不得判“观察期内未开展”。"""
+    bound_case(case)
+    rows = [
+        {"产品名称（规格型号）": "手提式干粉灭火器(MF/ABCE4)", "标称生产者": "甲厂", "产品质量现场检查情况": "不合格", "市场准入检查情况": "未发现不合格现象(1)",
+         "检查结果": "[检]", "检查结果标记": ["el-icon-error"]},
+        {"产品名称（规格型号）": "手提式干粉灭火器(MF/ABCE4)", "标称生产者": "乙厂", "产品质量现场检查情况": "未发现不合格现象", "市场准入检查情况": "未发现不合格现象(2)",
+         "检查结果": "[复查]", "检查结果标记": ["el-icon-success"]},
+    ]
+    detail = followup_fields("recheck")
+    detail["检查产品信息"] = rows
+    source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL,
+                                    screenshot=new_screenshot(case, "recheck"), observed_at="2026-11-10T09:00:00+08:00")
+    recheck = _describe(case)["lifecycle"]["recheck"]
+    assert recheck["state"] != "观察期内未开展" and recheck["state"] == "待核实"
+    assert recheck["linkUnproven"] >= 1 and not recheck["closed"]
+
+
+def _cli_argv(case, tmp_path, detail, label):
+    from scripts import registry_cli as cli  # noqa: F401
+    detail_file = tmp_path / f"detail-{label}.json"
+    detail_file.write_text(json.dumps(detail, ensure_ascii=False), encoding="utf-8")
+    config_path = tmp_path / "workspace.toml"
+    if not config_path.exists():
+        ws.configure_workspace(work_root=case.layout.root, download_dir=case.downloads, config_path=config_path)
+    return ["source", "add-observation", "--workspace-config", str(config_path), "--batch-id", BATCH, "--rwid", RWID,
+            "--detail-json", str(detail_file), "--source-url", DETAIL_URL, "--screenshot", str(new_screenshot(case, label)),
+            "--observed-at", "2026-11-10T09:00:00+08:00"]
+
+
+def _write_old_manifest(case):
+    """磁盘上的旧清单：只有初查产品、没有复查块，并带与之一致的上传断点(真实 063 形态)。"""
+    work = case.layout.work_case_dir(PROJECT)
+    work.mkdir(parents=True, exist_ok=True)
+    manifest = {"case": {"projectNo": PROJECT, "unitName": "合成单位"}, "packageSha256": "sha256:" + "a" * 64,
+                "initialInspection": {"inspectionDate": "2026-03-01", "products": [{"clientRef": "a", "result": "UNQUALIFIED", "method": "ONSITE"}]},
+                "files": [{"clientRef": "file-a", "sha256": "sha256:" + "b" * 64}]}
+    (work / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    digest = "sha256:" + hashlib.sha256((work / "manifest.json").read_bytes()).hexdigest()
+    (work / "upload-state.json").write_text(json.dumps({"stateVersion": 6, "projectNo": PROJECT, "manifestSha256": digest}), encoding="utf-8")
+    return work
+
+
+def test_r48_file_based_old_manifest_plus_cli_recheck_observation_is_unlinked_not_closed(case, tmp_path, capsys):
+    """旧磁盘清单(初查产品) + 经正常 CLI 登记的 [复查] 可见行：消费者不得判“观察期内未开展”也不得闭合。"""
+    from scripts import registry_cli as cli
+    _legacy_case(case)
+    _write_old_manifest(case)
+    before = _describe(case)["lifecycle"]["recheck"]
+    detail = followup_fields("r48-recheck")
+    detail["检查产品信息"] = [
+        {"产品名称（规格型号）": "手提式干粉灭火器(MF/ABCE4)", "产品质量现场检查情况": "不合格", "检查结果": "[检]", "检查结果标记": ["el-icon-error"]},
+        {"产品名称（规格型号）": "手提式干粉灭火器(MF/ABCE4)", "产品质量现场检查情况": "未发现不合格现象", "检查结果": "[复查]", "检查结果标记": ["el-icon-success"]}]
+    assert cli.main(_cli_argv(case, tmp_path, detail, "r48-recheck")) == 0
+    after = _describe(case)
+    assert not any(str(i).startswith("FOLLOWUP_OBSERVATION_UNTRUSTED") for i in after.get("issues", []))
+    recheck = after["lifecycle"]["recheck"]
+    assert recheck["state"] == "待核实" and recheck["closed"] is False and recheck["linkUnproven"] >= 1
+    assert before["linkUnproven"] == 0                                 # 对照：登记前旧清单无未关联行
+    capsys.readouterr()
+
+
+def test_r48_cli_persistence_calls_are_counted_per_phase(case, monkeypatch, tmp_path, capsys):
+    """初次失败 / 修复 / 原样重复三个阶段分别计数：捕获文件写、证据写、台账写，互不覆盖。"""
+    from scripts import registry_cli as cli
+    _legacy_case(case)
+    argv = _cli_argv(case, tmp_path, followup_fields("r48-count"), "r48-count")
+    capture_path, _ = source._load_capture(case.layout, BATCH)
+    counts = {"capture": 0, "ledger": 0, "ledger_failed": 0}
+    real_write, real_ledger = source._write_json, source._maybe_waterline
+
+    def write(path, data, *a, **kw):
+        if Path(path) == capture_path:
+            counts["capture"] += 1
+        return real_write(path, data, *a, **kw)
+
+    def ledger(layout, project, **fields):
+        if "followupObservations" in (fields.get("source") or {}):
+            counts["ledger"] += 1
+            if counts["ledger"] == 1:
+                counts["ledger_failed"] += 1
+                raise OSError("injected: ledger write failed after capture was saved")
+        return real_ledger(layout, project, **fields)
+
+    monkeypatch.setattr(source, "_write_json", write)
+    monkeypatch.setattr(source, "_maybe_waterline", ledger)
+    phases = {}
+    for name in ("initial-failure", "repair", "exact-repeat"):
+        start = dict(counts)
+        try:
+            code = cli.main(argv)
+        except OSError:
+            code = 1
+        phases[name] = {"exit": code, **{k: counts[k] - start[k] for k in counts}}
+    assert phases["initial-failure"]["exit"] != 0 and phases["initial-failure"]["capture"] == 1 and phases["initial-failure"]["ledger_failed"] == 1
+    assert phases["repair"]["exit"] == 0 and phases["repair"]["capture"] == 0 and phases["repair"]["ledger"] == 1   # 只补台账一侧，捕获不重写
+    assert phases["exact-repeat"]["exit"] == 0 and phases["exact-repeat"]["capture"] == 0 and phases["exact-repeat"]["ledger"] == 0
     assert len(_ledger_followups(case)) == 1
     capsys.readouterr()

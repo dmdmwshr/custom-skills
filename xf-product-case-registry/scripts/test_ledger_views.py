@@ -1589,3 +1589,65 @@ def test_r43_lifecycle_unit_name_containing_place_text_is_not_a_column_mixup(nam
     manifest["case"].update(unitName=name, unitAddress=address)
     required = _assess(manifest)["required"]["unitName"]
     assert required["state"] == state
+
+
+def _marked_rows(initial_result="不合格", recheck=True, mark_recheck="[复查]", mark_initial="[检]"):
+    """保存的可见详情行：结果列显示阶段标记，没有 页面记录(SFCPFC)。"""
+    rows = [{"产品名称（规格型号）": "手提式干粉灭火器(MF/ABCE4)", "产品质量现场检查情况": initial_result, "市场准入检查情况": "未发现不合格现象(1)",
+             "检查结果": mark_initial, "检查结果标记": ["el-icon-error" if initial_result == "不合格" else "el-icon-success"]}]
+    if recheck:
+        rows.append({"产品名称（规格型号）": "手提式干粉灭火器(MF/ABCE4)", "产品质量现场检查情况": "未发现不合格现象", "市场准入检查情况": "未发现不合格现象(2)",
+                     "检查结果": mark_recheck, "检查结果标记": ["el-icon-success"]})
+    return rows
+
+
+def _evidence_with_rows(rows):
+    return {"单位名称": "独验单位", "单位地址": "独验地址", "单位类别": "重点单位", "消防管辖": "独验管辖", "受理日期": "2099年01月05日",
+            "检查情况": "处理中", "检查产品信息": rows}
+
+
+def test_r47_visible_stage_marks_decide_the_row_stage_and_unmarked_rows_have_none():
+    assert lifecycle._row_stage({"检查结果": "[复查]"}) == "RECHECK"
+    assert lifecycle._row_stage({"检查结果": "[检]"}) == "INITIAL"
+    assert lifecycle._row_stage({"检查结果": "不合格"}) is None and lifecycle._row_stage({}) is None
+    assert lifecycle._row_stage({"页面记录": {"SFCPFC": "1"}, "检查结果": "[检]"}) == "RECHECK"      # 显式阶段优先于可见标记
+    assert lifecycle._row_stage({"页面记录": {"SFCPFC": "0"}, "检查结果": "[复查]"}) == "INITIAL"
+
+
+def test_r47_visible_recheck_row_without_manifest_is_started_but_unlinked_not_closed_and_not_reuse_direct():
+    r = lifecycle.assess_case(project=L1, evidence_fields=_evidence_with_rows(_marked_rows()), has_package=True,
+                              today=_dt.date(2099, 2, 20), observed_on="2099-02-10")
+    assert r["recheck"]["state"] != "观察期内未开展" and r["recheck"]["state"] == "待核实"
+    assert r["recheck"]["closed"] is False and r["recheck"]["linkUnproven"] >= 1
+    assert r["category"] != "REUSE_DIRECT" and "RECHECK_PRODUCT_LINK_UNPROVEN" in r["localCauses"]
+    assert r["administrativeClass"] == "待核实"                      # 不据单行复查合格推出“否”
+
+
+def test_r47_visible_recheck_row_is_not_hidden_behind_an_old_manifest_with_initial_products_only():
+    manifest = _chain_manifest([("a", "UNQUALIFIED")], [])
+    manifest.pop("recheckInspection")                                 # 旧 manifest：只有初查产品，没有复查块
+    with_manifest = lifecycle.assess_case(project=L1, manifest=manifest, evidence_fields=_evidence_with_rows(_marked_rows()),
+                                          has_package=True, today=_dt.date(2099, 2, 20), observed_on="2099-02-10")
+    without_manifest = lifecycle.assess_case(project=L1, evidence_fields=_evidence_with_rows(_marked_rows()), has_package=True,
+                                             today=_dt.date(2099, 2, 20), observed_on="2099-02-10")
+    for r in (with_manifest, without_manifest):
+        assert r["recheck"]["state"] == "待核实" and r["recheck"]["closed"] is False and r["recheck"]["linkUnproven"] >= 1
+        assert r["category"] != "REUSE_DIRECT"
+    # 对照：同一旧 manifest、证据没有复查行时，仍是原有的“观察期内未开展”判断(未受影响)
+    quiet = lifecycle.assess_case(project=L1, manifest=manifest, evidence_fields=_evidence_with_rows(_marked_rows(recheck=False)),
+                                  has_package=True, today=_dt.date(2099, 2, 20), observed_on="2099-02-10")
+    assert quiet["recheck"]["linkUnproven"] == 0 and "RECHECK_PRODUCT_LINK_UNPROVEN" not in quiet["localCauses"]
+
+
+def test_r47_manifest_with_its_own_recheck_products_is_not_double_counted_by_page_rows():
+    manifest = _chain_manifest([("a", "UNQUALIFIED")], [("r1", "QUALIFIED", "a")])
+    r = lifecycle.assess_case(project=L1, manifest=manifest, evidence_fields=_evidence_with_rows(_marked_rows()),
+                              has_package=True, today=_dt.date(2099, 2, 20), observed_on="2099-02-10")
+    assert r["recheck"]["closed"] is True and r["recheck"]["linkUnproven"] == 0 and r["recheck"]["state"] == "复查有有效结果"
+
+
+def test_r47_unmarked_rows_are_not_guessed_into_a_recheck():
+    rows = _marked_rows(mark_recheck="", mark_initial="")
+    r = lifecycle.assess_case(project=L1, evidence_fields=_evidence_with_rows(rows), has_package=True,
+                              today=_dt.date(2099, 2, 20), observed_on="2099-02-10")
+    assert r["recheck"]["linkUnproven"] == 0

@@ -66,10 +66,21 @@ def initial_result_label(classification: dict[str, Any] | None) -> str:
     return "待结果" if cls.get("reinspectionPending") else "待核实"
 
 
+_VISIBLE_STAGE_MARK = {"[复查]": "RECHECK", "[检]": "INITIAL", "[初查]": "INITIAL"}
+
+
 def _row_stage(row: dict[str, Any]) -> str | None:
+    """Inspection stage of a product row: the page record's SFCPFC when saved, else the stage mark the page itself shows.
+
+    Saved detail rows (``source add-detail`` / ``add-observation``) carry no ``页面记录``; the visible result cell shows the
+    stage as ``[检]`` (initial inspection) or ``[复查]`` (recheck). An unmarked row has no stage (None), never a guess.
+    """
     record = row.get("页面记录") if isinstance(row, dict) else None
     flag = record.get("SFCPFC") if isinstance(record, dict) else None
-    return {"0": "INITIAL", "1": "RECHECK"}.get(str(flag)) if flag is not None else None
+    if flag is not None:
+        return {"0": "INITIAL", "1": "RECHECK"}.get(str(flag))
+    mark = _text(row.get("检查结果")) if isinstance(row, dict) else ""
+    return _VISIBLE_STAGE_MARK.get(mark)
 
 
 def _row_result(row: dict[str, Any]) -> str | None:
@@ -183,6 +194,12 @@ def _chains_and_state(
         initials = [{"clientRef": f"row:{i}", "result": _row_result(r)} for i, r in enumerate(e_initial)]
         # Evidence rows carry no cross-stage reference, so recheck rows stay unlinked (never joined by name/position).
         rechecks = [{"clientRef": f"recheck-row:{i}", "initialProductRef": None, "result": _row_result(r)} for i, r in enumerate(e_recheck)]
+    if m_initial and not m_recheck and e_recheck:
+        # An older manifest knows only the initial products; a newer trusted reading that shows recheck rows must not be
+        # hidden behind it. The rows carry no initialProductRef, so they stay unlinked (LINK_UNPROVEN) like any page row.
+        rechecks = rechecks + [
+            {"clientRef": f"recheck-row:{i}", "initialProductRef": None, "result": _row_result(r)} for i, r in enumerate(e_recheck)
+        ]
     if (not initials or all(p["result"] is None for p in initials)) and initial_label in fv.INITIAL_RESULTS:
         initials = [{"clientRef": "case", "result": initial_label}]
     started: bool | None = True if (rechecks or has_recheck_block) else None

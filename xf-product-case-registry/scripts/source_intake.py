@@ -3463,6 +3463,63 @@ def detail_brigade(fields: Any) -> str | None:
     return compact or None
 
 
+def _expand_unknown_nodes(roots: list[dict]) -> list[tuple[dict, bool]]:
+    """Every node the reader marked ``expandUnknown``, with whether it is a top-level root."""
+
+    found: list[tuple[dict, bool]] = []
+
+    def walk(rows: Any, top: bool) -> None:
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict):
+                if row.get("expandUnknown") is True:
+                    found.append((row, top))
+                walk(row.get("children"), False)
+
+    walk(roots, True)
+    return found
+
+
+def followup_integrity_problem(fields: Any, project: str) -> str | None:
+    """Own-tree directory coverage of a follow-up observation, derived from the saved reading itself.
+
+    ``文书目录完整性`` is the page reader's own count (rendered rows, expandable/collapsed nodes, rows without an expand
+    control). A follow-up is a trustworthy picture of the case only when its own [产] tree is provably fully read: no
+    collapsed node, no scroll overflow, the case's own [产] root has content, and every unknown-expansion row is accounted
+    for by a leafless top-level root of *another* project (the reader counts such a root as unknown because it has neither
+    an expand icon nor an indent placeholder). The reader's ``complete``/``coverageProven`` flags are never rewritten and
+    an unaccounted unknown row, a leafless own root, a collapsed node or a missing reading is refused.
+    """
+
+    integrity = fields.get("文书目录完整性") if isinstance(fields, dict) else None
+    tree = fields.get("文书目录") if isinstance(fields, dict) else None
+    if not isinstance(integrity, dict) or not isinstance(tree, list) or not tree:
+        return "INTEGRITY_MISSING"
+    if integrity.get("scrollOverflow"):
+        return "SCROLL_OVERFLOW"
+    try:
+        collapsed = int(integrity.get("collapsedNodes") or 0)
+        unknown = int(integrity.get("unknownExpandRows") or 0)
+    except (TypeError, ValueError):
+        return "INTEGRITY_MISSING"
+    if collapsed > 0:
+        return "OWN_TREE_COLLAPSED"
+    roots = [row for row in tree if isinstance(row, dict)]
+    own = [row for row in roots if str(row.get("title", "")).lstrip().startswith("[产]") and project in str(row.get("title", ""))]
+    if not own or any(not row.get("children") for row in own):
+        return "OWN_TREE_UNKNOWN"
+    if unknown == 0:
+        return None if integrity.get("complete") is True else "COVERAGE_NOT_PROVEN"
+    # 未知展开行必须由读数器逐行标记(expandUnknown)，且每个标记恰是他案无子项的顶层根；数量对不上、标记落在
+    # 本案树内/子级、或没有任何标记(旧读数无法归属)一律拒绝，不由“外案空根数量”推断归属。
+    marked = _expand_unknown_nodes(roots)
+    if len(marked) != unknown:
+        return "OWN_TREE_UNKNOWN"
+    for node, top in marked:
+        if not top or node.get("children") or any(node is row for row in own) or project in str(node.get("title", "")):
+            return "OWN_TREE_UNKNOWN"
+    return None
+
+
 def followup_brigade_problem(observed_fields: Any, baselines: list[str | None]) -> str | None:
     """Fourth case identity of a follow-up observation: its fire jurisdiction must be shown and equal every known baseline.
 
@@ -3480,6 +3537,52 @@ def followup_brigade_problem(observed_fields: Any, baselines: list[str | None]) 
     if any(item != observed for item in known):
         return "BRIGADE_MISMATCH"
     return None
+
+
+def _normalized_sha(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return text if text.startswith("sha256:") else "sha256:" + text
+
+
+def _registered_package_proof(layout: Any, project_no: str, record_key: str) -> dict[str, Any] | None:
+    """A package the case ledger already registered for this RWID, proven on disk (None when the ledger holds none).
+
+    A batch capture can lack ``package`` although the case's package was received earlier (another batch, annual
+    baseline). The package itself is the evidence of receipt: it must exist inside the business root, its size and
+    SHA-256 must equal what the ledger recorded, the ledger must bind this RWID to the case, and its generation must be
+    stated. Anything else raises; nothing is downloaded, rewritten or re-bound.
+    """
+
+    if load_waterline is None:
+        return None
+    source = ((load_waterline(layout).get("cases") or {}).get(project_no) or {}).get("source") or {}
+    expected, relative = _normalized_sha(source.get("packageSha256")), source.get("packageRelativePath")
+    if not expected or not relative:
+        return None
+    known = {str(source["rwid"])} if source.get("rwid") else set()
+    for key in ("observationsByRwid", "pendingObservationsByRwid", "annualIdentitiesByRwid"):
+        known |= {str(item) for item in (source.get(key) or {})}
+    if record_key not in known:
+        raise SourceIntakeError("台账已登记的案卷包与该 RWID 的身份不一致，拒绝后续观察")
+    generation = source.get("packageGeneration")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        raise SourceIntakeError("台账已登记案卷包的代际无法证明，拒绝后续观察")
+    root = Path(layout.root).resolve()
+    package = (root / str(relative)).resolve()
+    if root not in package.parents or not package.is_file():
+        raise SourceIntakeError("台账已登记的案卷包不在业务根内或实物缺失，拒绝后续观察")
+    actual = _sha256(package)
+    if actual != expected:
+        raise SourceIntakeError("台账已登记的案卷包实物摘要与水位记录不符，拒绝后续观察")
+    return {
+        "sha256": actual,
+        "relativePath": str(relative),
+        "sizeBytes": package.stat().st_size,
+        "generation": generation,
+        "basis": "LEDGER_REGISTERED_PACKAGE",
+    }
 
 
 def _verify_followup_on_disk(layout: Any, evidence_path: Path, stored: dict[str, Any], entry: dict[str, Any]) -> None:
@@ -3549,8 +3652,19 @@ def add_followup_observation(
         raise SourceIntakeError("详情 RWID 不在已稳定清单中")
     if record.get("aliasOf"):
         raise SourceIntakeError(f"该 RWID 已合并，请使用主记录 {record['aliasOf']}")
-    if not record.get("package"):
-        raise SourceIntakeError("该 RWID 尚未绑定案卷包，首次详情请使用 add-detail")
+    package_proof: dict[str, Any] | None = None
+    if record.get("package"):
+        ledger_sha = _normalized_sha(
+            ((((load_waterline(layout).get("cases") or {}).get(str(record.get("projectNo"))) or {}).get("source") or {}).get("packageSha256"))
+            if load_waterline is not None
+            else None
+        )
+        if ledger_sha and ledger_sha != _normalized_sha(record["package"].get("sha256")):
+            raise SourceIntakeError("批次绑定的案卷包与台账登记的包代际不一致，拒绝后续观察")
+    else:
+        package_proof = _registered_package_proof(layout, str(record.get("projectNo") or ""), record_key)
+        if package_proof is None:
+            raise SourceIntakeError("该 RWID 尚未绑定案卷包，首次详情请使用 add-detail")
     existing = record.get("collectionDetail")
     if not isinstance(existing, dict) or not existing.get("fingerprint") or not existing.get("capturedAt"):
         raise SourceIntakeError("已绑包记录缺少可对账的整包详情，拒绝后续观察")
@@ -3585,6 +3699,8 @@ def add_followup_observation(
     baseline_brigades = [detail_brigade(existing.get("fields"))]
     if baseline_brigades[0] is None and ledger_case:
         baseline_brigades = [(ledger_case or {}).get("brigadeName")]
+    if (integrity_problem := followup_integrity_problem(clean_detail, project_no)):
+        raise SourceIntakeError(f"详情的本案文书目录覆盖不能证明，不能作为本案观察：{integrity_problem}")
     if (brigade_problem := followup_brigade_problem(clean_detail, baseline_brigades)):
         raise SourceIntakeError(f"详情消防管辖与已绑定案卷不一致或缺失，不能作为本案观察：{brigade_problem}")
     shots = [screenshot] if isinstance(screenshot, (str, Path)) else list(screenshot or [])
@@ -3638,7 +3754,7 @@ def add_followup_observation(
         "businessFingerprint": existing.get("businessFingerprint"),
         "capturedAt": existing.get("capturedAt"),
         "screenshotSha256": (existing.get("screenshot") or {}).get("sha256"),
-        "packageSha256": (record.get("package") or {}).get("sha256"),
+        "packageSha256": (record.get("package") or package_proof or {}).get("sha256"),
     }
     evidence = {
         "schemaVersion": FOLLOWUP_OBSERVATION_VERSION,
@@ -3656,6 +3772,7 @@ def add_followup_observation(
         "businessFingerprint": _business_detail_fingerprint(clean_detail),
         "screenshots": shot_records,
         "priorBoundDetail": prior,
+        **({"registeredPackage": package_proof} if package_proof else {}),
     }
     if not evidence_path.exists():
         directory.mkdir(parents=True, exist_ok=True)

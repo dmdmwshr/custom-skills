@@ -108,6 +108,10 @@ assert.throws(() => validateSourceDetail(detailFixture, { rwid: "fixture-detail"
   // 完整性不能由自身行数推出：零展开图标/占位、滚动溢出(虚拟化/被裁)、缺滚动容器 都保持 unknown
   assert.equal(mkDetail(false, { zeroIcons: true }).fields.文书目录完整性.complete, false);
   assert.equal(mkDetail(false, { zeroIcons: true }).fields.文书目录完整性.unknownExpandRows, 2);
+  // 逐行归属：未知展开行在其所在节点上显式标记 expandUnknown；有图标/占位的行不带该键
+  const zi = mkDetail(false, { zeroIcons: true }).fields.文书目录[0];
+  assert.equal(zi.expandUnknown, true); assert.equal(zi.children[0].expandUnknown, true);
+  assert.equal("expandUnknown" in open.fields.文书目录[0], false); assert.equal("expandUnknown" in open.fields.文书目录[0].children[0], false);
   assert.equal(mkDetail(false, { overflow: true }).fields.文书目录完整性.complete, false);
   assert.equal(mkDetail(false, { noBody: true }).fields.文书目录完整性.complete, false);
   // 产品根：同号[罚]不能归本案产品根；其他案号的可识别根=false；无法识别=null
