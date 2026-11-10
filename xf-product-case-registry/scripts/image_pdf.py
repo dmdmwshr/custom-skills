@@ -5,9 +5,9 @@ data without an alpha channel keeps its original zlib/IDAT stream (FlateDecode +
 only PNG alpha is split into a separate soft mask (a lossless re-compression of the same
 samples). Interlaced, tRNS, exotic or unreadable images are rejected instead of guessed.
 A JPEG whose entropy-verified stream ends at its own EOI marker may carry vendor trailer bytes
-(phone camera watermark/metadata blocks) after it: only the verified part is embedded, and the
-trailer length and digest are recorded in the mapping. A trailer that starts another image is
-rejected.
+(phone camera watermark/metadata blocks, or an appended smaller preview/depth JPEG) after it: only
+the verified primary image is embedded, and the trailer length, digest and any secondary size are
+recorded in the mapping. A trailer that starts an image not smaller than the primary is rejected.
 
 ``verify_pdf`` re-reads the produced PDF structure and compares the embedded pixel data with the
 source file, so a swapped image, a swapped PDF or tampered pixels are rejected. It does not depend
@@ -268,13 +268,18 @@ def inspect_jpeg(data: bytes) -> dict[str, Any]:
     if orientation not in _ROTATE:
         raise ImageNormalizationError("JPEG EXIF 方向为镜像类，不做猜测转换")
     end = _check_jpeg_scans(data)
-    trailing = data[end:]
+    trailing = data[end:].lstrip(b"\x00")
+    secondary = None
     if trailing.startswith(b"\xff\xd8"):
-        raise ImageNormalizationError("JPEG 结束标记之后还有另一幅图像数据，不做猜测")
+        secondary = _secondary_size(trailing)
+        if secondary is None or secondary[0] * secondary[1] >= width * height:
+            raise ImageNormalizationError("JPEG 结束标记之后还有另一幅不小于主图的图像数据，不做猜测")
     return {
         "end": end,
-        "trailingBytes": len(trailing),
-        "trailingSha256": sha256(trailing) if trailing else None,
+        "secondary": secondary,
+        "trailingBytes": len(data) - end,
+        "trailingSha256": sha256(data[end:]) if len(data) > end else None,
+        "secondaryImageSize": list(secondary) if secondary else None,
         "format": "JPEG",
         "width": width,
         "height": height,
@@ -283,6 +288,32 @@ def inspect_jpeg(data: bytes) -> dict[str, Any]:
         "dpi": dpi,
         "orientation": orientation,
     }
+
+
+def _secondary_size(data: bytes) -> tuple[int, int] | None:
+    """Pixel size from the frame header of an appended secondary JPEG (preview/depth block)."""
+    position = 2
+    while position + 4 <= len(data):
+        if data[position] != 0xFF:
+            return None
+        marker = data[position + 1]
+        if marker == 0xFF:
+            position += 1
+            continue
+        if marker in {0xD8, 0x01} or 0xD0 <= marker <= 0xD7:
+            position += 2
+            continue
+        if marker in {0xDA, 0xD9}:
+            return None
+        size = struct.unpack(">H", data[position + 2 : position + 4])[0]
+        if 0xC0 <= marker <= 0xCF and marker not in {0xC4, 0xC8, 0xCC}:
+            body = data[position + 4 : position + 2 + size]
+            if len(body) < 5:
+                return None
+            height, width = struct.unpack(">HH", body[1:5])
+            return (width, height) if width and height else None
+        position += 2 + size
+    return None
 
 
 _JPEG_MARKER_END = re.compile(rb"\xff+[^\x00\xd0-\xd7\xff]")
@@ -657,7 +688,7 @@ def build_pdf(data: bytes) -> tuple[bytes, dict[str, Any]]:
         **{key: plan[key] for key in ("bitDepth", "colorType", "ancillaryChunks") if key in plan},
         **{key: plan[key] for key in ("components", "orientation") if key in plan},
         **(
-            {key: plan[key] for key in ("trailingBytes", "trailingSha256")}
+            {key: plan[key] for key in ("trailingBytes", "trailingSha256", "secondaryImageSize")}
             if plan.get("trailingBytes")
             else {}
         ),

@@ -883,8 +883,14 @@ def test_jpeg_vendor_trailer_after_eoi_is_recorded_not_embedded() -> None:
     # the recorded source digest binds the full original bytes, not the trimmed ones
     assert mapping["sourceSha256"] == image_pdf.sha256(good + trailer)
     assert "trailingBytes" not in image_pdf.build_pdf(good)[1]
-    with pytest.raises(image_pdf.ImageNormalizationError, match="另一幅图像"):
-        image_pdf.build_pdf(good + b"\xff\xd8\xff\xe0" + b"\x00" * 20)
+    with pytest.raises(image_pdf.ImageNormalizationError, match="另一幅"):
+        image_pdf.build_pdf(good + b"\xff\xd8\xff\xe0" + b"\x00" * 20)  # unreadable second image
+    small = make_jpeg(16, 8)
+    pdf2, mapping2 = image_pdf.build_pdf(good + small + trailer)
+    assert mapping2["secondaryImageSize"] == [16, 8] and good in pdf2 and small not in pdf2
+    assert image_pdf.verify_pdf(pdf2, good + small + trailer, mapping2) == []
+    with pytest.raises(image_pdf.ImageNormalizationError, match="另一幅"):
+        image_pdf.build_pdf(good + make_jpeg(64, 64))  # second image larger than the primary
     with pytest.raises(image_pdf.ImageNormalizationError):
         image_pdf.build_pdf(good[:-2] + trailer)  # no EOI after the scan: still truncated
 
