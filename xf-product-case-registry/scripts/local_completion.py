@@ -20,6 +20,7 @@ if __package__:
         local_validity,
         manual_intake,
         normalized_sources,
+        office_normalized,
         supplements,
     )
     from . import workspace_state as ws
@@ -29,6 +30,7 @@ else:
     import local_validity
     import manual_intake
     import normalized_sources
+    import office_normalized
     import supplements
     import workspace_state as ws
 
@@ -186,6 +188,47 @@ def _image_proof(
     }
 
 
+def _office_proof(
+    api: Any, layout: Any, work: Path, project: str, files: dict[str, Any]
+) -> dict[str, Any]:
+    try:
+        index = office_normalized.load(work)
+    except (ValueError, KeyError, OSError) as error:
+        raise api.RegistryError(f"office-normalization.json 无法读取：{error}") from error
+    used = {
+        ref: index[item["workRelativePath"]]
+        for ref, item in files.items()
+        if item["workRelativePath"] in index
+    }
+    if not used:
+        return {}
+    entries = _image_sources(api, layout, work, project)
+    reasons: list[str] = []
+    for item in used.values():
+        reasons += office_normalized.verify_item(work, item, api.image_source_bytes(work, entries))
+    if reasons:
+        raise api.RegistryError(
+            "Word 规范化与源文件不一致：\n- " + "\n- ".join(sorted(set(reasons)))
+        )
+    return {
+        ref: {
+            k: item[k]
+            for k in (
+                "sourceRelativePath",
+                "sourceKind",
+                "sourceFormat",
+                "sourceSha256",
+                "sourceSizeBytes",
+                "outputSha256",
+                "outputPageCount",
+                "converter",
+                "renderingCheck",
+            )
+        }
+        for ref, item in sorted(used.items())
+    }
+
+
 def build_verification(api: Any, layout: Any, project: str, *, now: str | None = None) -> dict:
     """Build the proof from current disk state; never mutates any file."""
     work = layout.work_case_dir(project)
@@ -295,6 +338,7 @@ def build_verification(api: Any, layout: Any, project: str, *, now: str | None =
         ),
         "supplements": supplement_items,
         "imageNormalization": _image_proof(api, layout, work, project, files),
+        "officeNormalization": _office_proof(api, layout, work, project, files),
         "brigade": {
             "code": case["brigadeCode"],
             "scope": "LOCAL_ONLY"

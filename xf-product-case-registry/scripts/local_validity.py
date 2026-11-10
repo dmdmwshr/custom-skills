@@ -14,10 +14,11 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from . import normalized_sources
+    from . import normalized_sources, office_normalized
     from . import workspace_state as ws
 else:
     import normalized_sources
+    import office_normalized
     import workspace_state as ws
 
 UNTRUSTED_ISSUE = "LOCAL_COMPLETION_UNTRUSTED"
@@ -194,6 +195,28 @@ def _extension_reasons(
                 reasons.append(f"图片规范化记录与核验凭证不符：{ref}")
                 continue
             reasons.extend(normalized_sources.verify_item(work, item, source_bytes))
+    offices = embedded.get("officeNormalization") or {}
+    if offices:
+        try:
+            office_index = office_normalized.load(work)
+        except (ValueError, KeyError, OSError):
+            office_index = {}
+            reasons.append("归档工作区的 Word 规范化记录无法读取")
+
+        def office_source_bytes(item: dict[str, Any]) -> bytes:
+            relative = item["sourceRelativePath"]
+            for base in (work / "source", original):
+                candidate = base / relative
+                if candidate.is_file():
+                    return candidate.read_bytes()
+            raise OSError(relative)
+
+        for ref, proof in offices.items():
+            item = office_index.get(files.get(ref, {}).get("workRelativePath", ""))
+            if item is None or item.get("outputSha256") != proof.get("outputSha256"):
+                reasons.append(f"Word 规范化记录与核验凭证不符：{ref}")
+                continue
+            reasons.extend(office_normalized.verify_item(work, item, office_source_bytes))
     parent = (receipt.get("amendment") or {}).get("parent")
     if parent:
         if __package__:

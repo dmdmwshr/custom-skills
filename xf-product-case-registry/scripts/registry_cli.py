@@ -17,13 +17,14 @@ from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
 if __package__:
-    from . import image_pdf, ledger_views, normalized_sources
+    from . import image_pdf, ledger_views, normalized_sources, office_normalized
     from .ocr_runtime import OcrError, adopt_existing_results, run_ocr
     from .workflow_reporting import ReportingError, record_timing, render_report, write_report
 else:
     import image_pdf
     import ledger_views
     import normalized_sources
+    import office_normalized
     from ocr_runtime import OcrError, adopt_existing_results, run_ocr
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
@@ -637,6 +638,92 @@ def normalize_images_command(args: argparse.Namespace) -> None:
     print(json.dumps({"status": "NORMALIZED", "items": produced}, ensure_ascii=False))
 
 
+def normalize_office_command(args: argparse.Namespace) -> None:
+    """Bind one operator-rendered PDF to its Word (.docx/.doc) original with a verifiable record."""
+    work = Path(args.work_dir).resolve()
+    enforce_local_workspace_preflight(args, work)
+    inventory = project_local_path_fields(read_json(work / "inventory.json"), work, args)
+    sources = {
+        item["relativePath"]: item for item in inventory.get("files", []) if isinstance(item, dict)
+    }
+    try:
+        index = office_normalized.load(work)
+    except (ValueError, KeyError, OSError) as error:
+        raise RegistryError(f"office-normalization.json 无法读取：{error}") from error
+    relative = safe_relative(args.relative_path)
+    entry = sources.get(relative)
+    if not entry:
+        raise RegistryError(f"只能转换 inventory 中的 Word 原件：{relative}")
+    path = Path(entry["absolutePath"]).resolve()
+    if not inside(path, Path(inventory["sourceRoot"]).resolve()):
+        raise RegistryError("Word 原件路径越界")
+    data = path.read_bytes()
+    if office_normalized.sha256(data) != entry.get("sha256"):
+        raise RegistryError(f"Word 原件哈希已变化：{relative}")
+    converted = Path(args.converted_pdf).resolve()
+    if inside(converted, work):
+        raise RegistryError("转换结果必须是工作区之外的文件，由本命令复制入 normalized/")
+    if not converted.is_file():
+        raise RegistryError(f"转换结果不存在：{converted}")
+    pdf = converted.read_bytes()
+    try:
+        mapping = office_normalized.build_mapping(
+            data,
+            relative,
+            pdf,
+            converter_name=args.converter_name,
+            converter_version=args.converter_version,
+            rendering_check=args.rendering_check,
+        )
+    except office_normalized.OfficeNormalizationError as error:
+        raise RegistryError(f"{relative} 无法绑定：{error}") from error
+    stem = re.sub(r"[^\w.\-]+", "_", PurePosixPath(relative).stem, flags=re.UNICODE)[:60]
+    output = f"normalized/office_{mapping['sourceSha256'][7:19]}_{stem}.pdf"
+    target = (work / output).resolve()
+    if not inside(target, (work / "normalized").resolve()):
+        raise RegistryError("Word 规范化输出越界")
+    if target.exists():
+        if target.read_bytes() != pdf:
+            raise RegistryError(f"规范化目标已存在且与本次转换结果不符，拒绝覆盖：{output}")
+        status = "REUSED"
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("xb") as stream:
+            stream.write(pdf)
+        status = "CREATED"
+    sha, pages = pdf_info(target)
+    item = {
+        **mapping,
+        "sourceRelativePath": relative,
+        "sourceKind": entry.get("sourceKind", "ZIP_MEMBER"),
+        "outputRelativePath": output,
+        "normalizedAt": utc_now(),
+    }
+    previous = index.get(output)
+    if previous and previous.get("outputSha256") == sha:
+        item["normalizedAt"] = previous.get("normalizedAt", item["normalizedAt"])
+    index[output] = item
+    office_normalized.save(work, index, utc_now())
+    update_local_case_waterline(args, work, state="ORGANIZING", local_status="ORGANIZING")
+    print(
+        json.dumps(
+            {
+                "status": "NORMALIZED",
+                "items": [
+                    {
+                        "status": status,
+                        "source": relative,
+                        "output": output,
+                        "sha256": sha,
+                        "pageCount": pages,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
 def ocr_command(args: argparse.Namespace) -> None:
     work, inventory = (
         Path(args.work_dir).resolve(),
@@ -1175,6 +1262,22 @@ def compose_command(args: argparse.Namespace) -> None:
             "mimeType": "application/pdf",
             "pageCount": 1,
             "sourceKind": "IMAGE_NORMALIZED",
+        }
+    try:
+        office_items = office_normalized.load(work)
+    except (ValueError, KeyError, OSError) as error:
+        raise RegistryError(f"office-normalization.json 无法读取：{error}") from error
+    for relative, item in office_items.items():
+        reasons = office_normalized.verify_item(work, item, image_source_bytes(work, sources))
+        if reasons:
+            raise RegistryError("Word 规范化校验失败：\n- " + "\n- ".join(reasons))
+        sources[relative] = {
+            "relativePath": relative,
+            "absolutePath": str((work / relative).resolve()),
+            "sha256": item["outputSha256"],
+            "mimeType": "application/pdf",
+            "pageCount": item["outputPageCount"],
+            "sourceKind": "OFFICE_NORMALIZED",
         }
     manifest = {key: value for key, value in data.items() if key != "packageSha256"}
     manifest.update(
@@ -1961,6 +2064,18 @@ def build_parser() -> argparse.ArgumentParser:
     normalize.add_argument("--relative-path", action="append")
     add_workspace_resolution_options(normalize)
     normalize.set_defaults(func=normalize_images_command, workspace_required=True)
+    normalize_office = sub.add_parser(
+        "normalize-office",
+        help="把操作者转换并目视核对的 Word(.docx/.doc) PDF 绑定为规范 PDF 并保存转换记录",
+    )
+    normalize_office.add_argument("--work-dir", required=True)
+    normalize_office.add_argument("--relative-path", required=True)
+    normalize_office.add_argument("--converted-pdf", required=True)
+    normalize_office.add_argument("--converter-name", required=True)
+    normalize_office.add_argument("--converter-version", required=True)
+    normalize_office.add_argument("--rendering-check", required=True)
+    add_workspace_resolution_options(normalize_office)
+    normalize_office.set_defaults(func=normalize_office_command, workspace_required=True)
     compose = sub.add_parser("compose")
     compose.add_argument("--work-dir", required=True)
     compose.add_argument("--case-data", required=True)
@@ -2647,6 +2762,7 @@ def record_command_timing(
         "split",
         "compose",
         "normalize-images",
+        "normalize-office",
         "source",
     }:
         return
