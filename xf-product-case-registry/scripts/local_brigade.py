@@ -44,10 +44,18 @@ def _classification_texts(layout: Any, project: str, state: dict[str, Any]) -> l
         return []
     if not isinstance(value, dict) or value.get("projectNo") != project:
         return []
-    if "schemaVersion" in value and value["schemaVersion"] != "SourceEvidenceV1":
-        return []  # an explicit but wrong version is not accepted as this evidence
     rwids = _known_rwids(state)
     texts: list[str] = []
+    if value.get("schemaVersion") == "SourceIdentityV1":
+        # annual identity capture: one RWID per file, fields at the top level
+        fields = value.get("fields") or {}
+        if str(value.get("rwid")) in rwids and fields.get("项目编号") in (None, project):
+            text = fields.get(JURISDICTION_FIELD)
+            if isinstance(text, str):
+                texts.append(text)
+        return texts
+    if "schemaVersion" in value and value["schemaVersion"] != "SourceEvidenceV1":
+        return []  # an explicit but wrong version is not accepted as this evidence
     for rwid, item in (value.get("records") or {}).items():
         fields = (item or {}).get("fields") or {}
         identities = {item.get("projectNo"), fields.get("项目编号")} - {None}

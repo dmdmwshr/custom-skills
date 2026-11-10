@@ -1133,6 +1133,48 @@ def test_water_brigade_accepts_real_shape_evidence_without_schema_field(
     assert compose_with(case, data) == 0
 
 
+def bind_identity(case: Case, text: str, *, project: str = PROJECT, rwid: str = RWID) -> None:
+    prepare_rwid(case)
+    evidence = case.pending / "source-identity.json"
+    value = {
+        "schemaVersion": "SourceIdentityV1",
+        "projectNo": project,
+        "rwid": rwid,
+        "fields": {"消防管辖": text, "项目编号": project},
+    }
+    evidence.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    sha = "sha256:" + hashlib.sha256(evidence.read_bytes()).hexdigest()
+    ws.upsert_case(
+        case.layout,
+        PROJECT,
+        source={
+            "classification": {
+                "evidencePath": evidence.relative_to(case.layout.root).as_posix(),
+                "evidenceSha256": sha,
+            }
+        },
+    )
+
+
+def test_water_brigade_accepts_annual_source_identity_evidence_of_its_own_project(
+    case: Case, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = brigade_data(case, "SHUISHANG", "水上大队")
+    bind_identity(case, "无锡市消防救援支队水上大队")
+    assert compose_with(case, data) == 0
+    capsys.readouterr()
+    for kwargs in (
+        {"project": "260000000000000"},  # another project's identity file
+        {"rwid": "999999"},  # RWID not bound to this case
+    ):
+        bind_identity(case, "无锡市消防救援支队水上大队", **kwargs)
+        assert compose_with(case, data) == 2
+        assert "水上大队" in capsys.readouterr().err
+    bind_identity(case, "无锡市梁溪区消防救援局")  # another jurisdiction
+    assert compose_with(case, data) == 2
+    assert "水上大队" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
