@@ -239,3 +239,17 @@ ZIP 漏掉但当前叶子“查看”能打开 PDF 的，可从该已确认浏�
 - 首段必须已是该案登记的详情截图（保留旧引用和原图）；其余段复制为 `案卷详情_<sha12>.png`，索引按字节副本存为 `案卷详情覆盖索引_<sha12>.json`；批次记录的 `screenshotSegmentSets` 追加一组，旧的 `screenshot`/`screenshotObservations` 不变。
 - 同一索引重入返回 REUSED，批次与目录 0 写。索引里的绝对路径来自别的主机/盘符时，只按索引同目录同文件名找，摘要仍须相符。
 - 只升级被绑定的案；其他案的单张引用仍只是“文件存在、大小/摘要一致”，视觉完整性未知，不因此升级。
+
+## 已绑包案卷的后续观察（`source add-observation`）
+
+案卷整包已绑定后，现场详情又出现变化（例如单位名称更正）时，`add-detail` 会拒绝覆盖已绑定详情，`--supersede-carried` 也只处理未绑包的继承记录。此时用 `source add-observation` 保存新的同案真实观察：
+
+```
+source add-observation --batch-id <批次> --rwid <RWID> --detail-json <完整详情.json> --source-url <详情URL> --screenshot <完整详情截图.png> [--screenshot …] --observed-at <带时区的真实观察时间>
+```
+
+- `--observed-at` 必填，必须带时区，使用页面实际观察的时刻，不得用本地处理时间；业务观察日按上海时间折算。
+- 项目编号、URL 中的 RWID、清单案卷名称和本案 [产] 产品根任一不符，或缺截图、观察早于已绑定详情，都拒绝且不写任何文件。
+- 原包、整包详情、截图、完成凭证、归档代际、人工字段不改；新观察单独保存在批次 `followup-observations/`，并登记到台账 `source.followupObservations`，`ledger lifecycle` 取最新且可信的一次。
+- 同一时刻、同一内容的重放是幂等的；之后真实再次访问、事实相同，则是带自己时间的新观察。观察不等于重新打包或重新归档。
+- 只有旧指纹与新观察指纹都精确对应的 `DETAIL_CONFLICT` 才会被解除，其余冲突原样保留。

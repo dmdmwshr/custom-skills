@@ -300,3 +300,53 @@ def test_r35_d3_normal_cli_exit_code_accepts_pending_and_keeps_input_bytes(tmp_p
     assert cli.main(["fields", "validate", str(path)]) == 0
     report = json.loads(capsys.readouterr().out)
     assert path.read_bytes() == before and report["pendingResultFields"] and not [u for u in report["unknownFields"] if u["field"] == "online_sale"]
+
+
+VILLAGE_NAME = "无锡市锡山区羊尖镇廊下村民委员会."  # 来源独立字段原值(含句点)；052 现场详情
+VILLAGE_ADDRESS = "锡山区羊尖镇廊下村"
+
+
+def test_r43_a_source_confirmed_name_containing_place_words_is_not_a_column_mix_up() -> None:
+    legit = row(unit_name=VILLAGE_NAME, unit_address=VILLAGE_ADDRESS)
+    assert not any("串栏" in e for e in fv.validate_cases([legit])["errors"])
+    assert fv.unit_name_conflicts_address(VILLAGE_NAME, VILLAGE_ADDRESS) is False
+    # 名称延续到地名之后的真名称(地名在前、机构词在后)不被子串硬拒
+    assert fv.unit_name_conflicts_address("凤翔软件园某某物业管理有限公司", "凤翔软件园") is False
+
+
+@pytest.mark.parametrize(
+    ("name", "address"),
+    [
+        (VILLAGE_ADDRESS, VILLAGE_ADDRESS),                       # 名称栏就是地址
+        ("无锡市锡山区羊尖镇廊下村", VILLAGE_ADDRESS),              # 行政区划 + 地址，没有任何名称
+        ("廊下村办公室 锡山区羊尖镇廊下村.", VILLAGE_ADDRESS),      # 地名地址作结尾
+        ("某酒店 无锡市解放东路851号", "无锡市解放东路851号"),       # 具体门牌地址写进名称栏
+        ("无锡市解放东路851号某酒店", "无锡市解放东路851号"),       # 具体地址在前也是串栏
+    ],
+)
+def test_r43_a_real_column_mix_ups_are_still_rejected(name: str, address: str) -> None:
+    assert fv.unit_name_conflicts_address(name, address) is True
+    assert any("串栏" in e for e in fv.validate_cases([row(unit_name=name, unit_address=address)])["errors"])
+
+
+def test_r43_a_missing_name_or_address_never_counts_as_a_column_mix_up() -> None:
+    assert fv.unit_name_conflicts_address("", VILLAGE_ADDRESS) is False
+    assert fv.unit_name_conflicts_address(VILLAGE_NAME, "") is False
+    assert fv.unit_name_conflicts_address(None, None) is False
+
+
+def test_r43_a_name_fix_does_not_hide_other_missing_fields_in_the_same_normal_cli_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    incomplete = row(unit_name=VILLAGE_NAME, unit_address=VILLAGE_ADDRESS, source_files=[])
+    errors = fv.validate_cases([incomplete])["errors"]
+    assert not any("串栏" in e for e in errors)
+    assert any("source_files" in e for e in errors)              # 其他缺项仍单独报出，不被名称修正掩盖
+    path = tmp_path / "extractions.json"
+    path.write_text(json.dumps([incomplete], ensure_ascii=False), encoding="utf-8")
+    before = path.read_bytes()
+    assert cli.main(["fields", "validate", str(path)]) == 2
+    assert path.read_bytes() == before
+    captured = capsys.readouterr()
+    assert "字段校验发现错误" in captured.err
+    assert "source_files" in captured.out and "串栏" not in captured.out

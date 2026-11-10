@@ -1692,6 +1692,21 @@ def source_add_detail_command(args: argparse.Namespace) -> None:
     )
 
 
+def source_add_observation_command(args: argparse.Namespace) -> None:
+    if not str(args.source_url).strip():
+        raise RegistryError("详情来源地址不能为空")
+    run_source_action(
+        args,
+        "add_followup_observation",
+        batch_id=args.batch_id,
+        rwid=args.rwid,
+        detail=Path(args.detail_json),
+        source_url=args.source_url,
+        screenshot=[Path(item) for item in args.screenshot],
+        observed_at=args.observed_at,
+    )
+
+
 def source_admit_observed_case_command(args: argparse.Namespace) -> None:
     run_source_action(
         args,
@@ -2075,6 +2090,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="仅在旧详情经来源批次证明为继承且现场新观察通过全部校验时，移为前代并解除对应冲突",
     )
     source_detail.set_defaults(func=source_add_detail_command)
+
+    source_observation = source_sub.add_parser(
+        "add-observation",
+        help="已绑包案卷的后续真实观察：另存可信观察证据，不改已绑详情、案卷包、完成凭证和归档代际",
+    )
+    add_workspace_resolution_options(source_observation)
+    source_observation.add_argument("--batch-id", required=True)
+    source_observation.add_argument("--rwid", required=True)
+    source_observation.add_argument("--detail-json", required=True)
+    source_observation.add_argument("--source-url", required=True)
+    source_observation.add_argument(
+        "--screenshot", action="append", required=True, help="完整详情截图；长页分段时重复传入同一次观察的全部分段"
+    )
+    source_observation.add_argument(
+        "--observed-at", required=True, help="真实回源观察时间(ISO 8601，必须带时区偏移，原值保留；业务观察日按上海时区解释)"
+    )
+    source_observation.set_defaults(func=source_add_observation_command)
 
     source_admit = source_sub.add_parser(
         "admit-observed-case", help="已证单案材料准入：现场详情原文证明本案四身份与 [产] 产品根，不计年度清单"

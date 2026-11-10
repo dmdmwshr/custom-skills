@@ -3430,6 +3430,277 @@ def add_detail(
     return state
 
 
+FOLLOWUP_OBSERVATION_VERSION = "SourceFollowupObservationV1"
+FOLLOWUP_CLOCK_TOLERANCE_SECONDS = 300
+
+
+def _parse_observed_at(value: Any) -> datetime:
+    """A real observation time must carry its own zone offset (kept verbatim); naive or future times are refused."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise SourceIntakeError("后续观察必须提供真实观察时间")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as error:
+        raise SourceIntakeError("后续观察时间格式无效") from error
+    if parsed.tzinfo is None:
+        raise SourceIntakeError("后续观察时间必须带时区偏移，不按本地处理时刻推断")
+    if parsed.timestamp() > datetime.now(SHANGHAI).timestamp() + FOLLOWUP_CLOCK_TOLERANCE_SECONDS:
+        raise SourceIntakeError("后续观察时间晚于当前时刻，拒绝")
+    return parsed
+
+
+_BRIGADE_KEYS = {
+    "brigade", "brigadename", "lawenforcementunit", "大队", "大队名称", "所属大队", "执法单位", "消防管辖", "消防管辖单位",
+}
+
+
+def detail_brigade(fields: Any) -> str | None:
+    """Fire-jurisdiction (brigade) text of a detail, whitespace-insensitive, or None when the detail shows none."""
+
+    value = _find_first(fields, _BRIGADE_KEYS) if isinstance(fields, dict) else None
+    compact = re.sub(r"\s+", "", str(value)) if value not in (None, "") else ""
+    return compact or None
+
+
+def followup_brigade_problem(observed_fields: Any, baselines: list[str | None]) -> str | None:
+    """Fourth case identity of a follow-up observation: its fire jurisdiction must be shown and equal every known baseline.
+
+    ``baselines`` are the jurisdictions already established for the bound case (bound detail, still-trusted classification
+    evidence, ledger). A follow-up that shows none, shows another one, or has nothing to be reconciled against is not
+    a trustworthy observation of this case.
+    """
+
+    observed = detail_brigade(observed_fields)
+    if observed is None:
+        return "BRIGADE_MISSING"
+    known = [re.sub(r"\s+", "", str(item)) for item in baselines if item not in (None, "")]
+    if not known:
+        return "BRIGADE_BASELINE_UNKNOWN"
+    if any(item != observed for item in known):
+        return "BRIGADE_MISMATCH"
+    return None
+
+
+def _verify_followup_on_disk(layout: Any, evidence_path: Path, stored: dict[str, Any], entry: dict[str, Any]) -> None:
+    """A retry may only complete a follow-up whose saved evidence is still exactly what its capture entry recorded."""
+
+    if _sha256(evidence_path) != entry.get("evidenceSha256"):
+        raise SourceIntakeError("已落盘的后续观察证据与批次登记摘要不一致，无法补齐，拒绝")
+    for item in stored.get("screenshots") or []:
+        target = Path(layout.root) / str(item.get("relativePath"))
+        if not target.is_file() or _sha256(target) != item.get("sha256"):
+            raise SourceIntakeError("已落盘的后续观察截图缺失或已变化，无法补齐，拒绝")
+
+
+def _followup_ledger_registered(layout: Any, project_no: str, observation_id: str, entry: dict[str, Any]) -> bool:
+    if load_waterline is None:
+        return True
+    registered = (
+        (((load_waterline(layout).get("cases") or {}).get(project_no) or {}).get("source") or {}).get("followupObservations")
+        or {}
+    ).get(observation_id)
+    return isinstance(registered, dict) and all(registered.get(key) == value for key, value in entry.items())
+
+
+def _register_followup_in_ledger(
+    layout: Any, project_no: str, record_key: str, batch_id: str, entry: dict[str, Any], observed: datetime
+) -> None:
+    ledger_source: dict[str, Any] = {
+        "followupObservations": {entry["observationId"]: {**entry, "rwid": record_key, "batchId": batch_id}},
+    }
+    current_case = (load_waterline(layout).get("cases") or {}).get(project_no) if load_waterline is not None else None
+    last_observed = ((current_case or {}).get("source") or {}).get("lastObservedAt")
+    if not last_observed or datetime.fromisoformat(str(last_observed).replace("Z", "+00:00")).timestamp() < observed.timestamp():
+        ledger_source["lastObservedAt"] = entry["observedAtShanghai"]
+    _maybe_waterline(layout, project_no, source=ledger_source)
+
+
+def add_followup_observation(
+    workspace: Any,
+    batch_id: str,
+    rwid: str,
+    detail: dict[str, Any] | str | Path,
+    source_url: str | None = None,
+    screenshot: str | Path | list[str | Path] | tuple[str | Path, ...] | None = None,
+    *,
+    observed_at: str,
+) -> dict[str, Any]:
+    """Save a new real, same-case observation of a case whose package is already bound, without touching the bound material.
+
+    ``add_detail`` refuses a changed detail for a package-bound record (the bound detail, package and download
+    delivery must stay together). This keeps all of that byte-for-byte and stores the new observation as its own
+    immutable evidence file (``SourceFollowupObservationV1``: full visible fields, real observation time with its zone,
+    detail screenshots) next to a ledger entry under ``source.followupObservations``. The ledger's current detail
+    binding, classification, package, completion proof and archive generations are not rewritten, so a still-trusted old
+    classification can no longer hide the newer source fact: ``ledger_views.describe`` reads the newest trusted one.
+
+    Identity gates are those of ``add_detail`` (project number, RWID in the detail URL, unit name against the list's case
+    name) but any mismatch raises without writing anything. The same observation (same RWID, instant and content)
+    is idempotent; a later revisit with identical facts is a new observation with its own time. A conflict is released
+    only when its recorded old and observed fingerprints are exactly this record's detail and this observation.
+    """
+
+    layout = _layout(workspace)
+    capture_path, state = _load_capture(layout, batch_id)
+    record_key = _require_rwid(rwid)
+    record = (state.get("records") or {}).get(record_key)
+    if record is None:
+        raise SourceIntakeError("详情 RWID 不在已稳定清单中")
+    if record.get("aliasOf"):
+        raise SourceIntakeError(f"该 RWID 已合并，请使用主记录 {record['aliasOf']}")
+    if not record.get("package"):
+        raise SourceIntakeError("该 RWID 尚未绑定案卷包，首次详情请使用 add-detail")
+    existing = record.get("collectionDetail")
+    if not isinstance(existing, dict) or not existing.get("fingerprint") or not existing.get("capturedAt"):
+        raise SourceIntakeError("已绑包记录缺少可对账的整包详情，拒绝后续观察")
+    if not _material_collection_active(layout, state, record_key, record):
+        raise SourceIntakeError("该案没有有效的整包采集请求，拒绝后续观察")
+    observed = _parse_observed_at(observed_at)
+    if observed.timestamp() < datetime.fromisoformat(str(existing["capturedAt"])).timestamp():
+        raise SourceIntakeError("后续观察时间早于已绑定详情的观察时间，拒绝")
+    clean_detail = _clean_evidence(_json_input(detail, "案卷详情"))
+    project_raw = _find_first(clean_detail, _PROJECT_KEYS)
+    if project_raw in (None, ""):
+        raise SourceIntakeError("详情未显式提供项目编号")
+    project_no = _require_project_no(str(project_raw).strip().upper())
+    if record.get("projectNo") != project_no or existing.get("projectNo") not in (None, project_no):
+        raise SourceIntakeError("详情项目编号与已绑定案卷不一致")
+    safe_url = sanitize_source_url(source_url) if source_url else None
+    if not safe_url or _source_url_rwid(safe_url) != record_key:
+        raise SourceIntakeError("详情 URL 缺失或其 RWID 与记录不一致")
+    expected_names = {
+        item for value in _list_case_names(record) if (item := _normalized_case_name(value)) is not None
+    }
+    actual_name = _normalized_case_name(_find_first(clean_detail, _UNIT_NAME_KEYS))
+    if expected_names and actual_name not in expected_names:
+        raise SourceIntakeError("详情单位名称与本次清单案卷名称不一致")
+    if __package__:
+        from .ledger_views import _product_root_problem
+    else:
+        from ledger_views import _product_root_problem
+    if (root_problem := _product_root_problem(clean_detail, project_no)):
+        raise SourceIntakeError(f"详情没有本案 [产] 产品根，不能作为本案观察：{root_problem}")
+    ledger_case = (load_waterline(layout).get("cases") or {}).get(project_no) if load_waterline is not None else None
+    baseline_brigades = [detail_brigade(existing.get("fields"))]
+    if baseline_brigades[0] is None and ledger_case:
+        baseline_brigades = [(ledger_case or {}).get("brigadeName")]
+    if (brigade_problem := followup_brigade_problem(clean_detail, baseline_brigades)):
+        raise SourceIntakeError(f"详情消防管辖与已绑定案卷不一致或缺失，不能作为本案观察：{brigade_problem}")
+    shots = [screenshot] if isinstance(screenshot, (str, Path)) else list(screenshot or [])
+    if not shots:
+        raise SourceIntakeError("后续观察必须提供至少一张完整详情截图")
+    shot_paths = [Path(item) for item in shots]
+    for path in shot_paths:
+        if not path.is_file():
+            raise SourceIntakeError("详情截图不存在")
+    shot_shas = sorted({_sha256(path) for path in shot_paths})
+    fingerprint = _fingerprint(clean_detail)
+    observed_shanghai = _timestamp(observed.astimezone(SHANGHAI))
+    observation_id = "obs:" + hashlib.sha256(
+        json.dumps(
+            {"rwid": record_key, "observedInstant": observed_shanghai, "fingerprint": fingerprint},
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    directory = layout.batch_dir(batch_id) / "followup-observations" / project_no
+    evidence_path = directory / f"{record_key}-{observation_id[4:20]}.json"
+    existing_entries = [
+        item for item in record.get("followupObservations") or [] if item.get("observationId") == observation_id
+    ]
+    if evidence_path.exists():
+        stored = _read_json(evidence_path, "后续观察证据")
+        stored_shas = sorted(item.get("sha256") for item in stored.get("screenshots") or [])
+        if (
+            stored.get("schemaVersion") != FOLLOWUP_OBSERVATION_VERSION
+            or stored.get("observationId") != observation_id
+            or stored.get("fingerprint") != fingerprint
+            or stored_shas != shot_shas
+        ):
+            raise SourceIntakeError("同一观察已登记但证据不一致，拒绝覆盖")
+        if existing_entries:
+            # 同一观察、同一请求重放：证据与 capture 已落盘，只核实并补齐可能缺失的台账一侧，不重复追加
+            _verify_followup_on_disk(layout, evidence_path, stored, existing_entries[0])
+            if not _followup_ledger_registered(layout, project_no, observation_id, existing_entries[0]):
+                _register_followup_in_ledger(layout, project_no, record_key, batch_id, existing_entries[0], observed)
+            return state
+    shot_records = []
+    for path in sorted(shot_paths, key=lambda item: _sha256(item)):
+        sha = _sha256(path)
+        suffix = path.suffix.lower() or ".png"
+        target = directory / f"{record_key}-{observation_id[4:20]}-案卷详情_{sha.removeprefix('sha256:')[:12]}{suffix}"
+        _copy_immutable(path, target)
+        shot_records.append({**_evidence_file(target, Path(layout.root))})
+    shot_records = list({item["sha256"]: item for item in shot_records}.values())
+    prior = {
+        "fingerprint": existing.get("fingerprint"),
+        "businessFingerprint": existing.get("businessFingerprint"),
+        "capturedAt": existing.get("capturedAt"),
+        "screenshotSha256": (existing.get("screenshot") or {}).get("sha256"),
+        "packageSha256": (record.get("package") or {}).get("sha256"),
+    }
+    evidence = {
+        "schemaVersion": FOLLOWUP_OBSERVATION_VERSION,
+        "observationId": observation_id,
+        "projectNo": project_no,
+        "rwid": record_key,
+        "batchId": batch_id,
+        "observedAt": observed_at.strip(),
+        "observedAtShanghai": observed_shanghai,
+        "observedDay": observed_shanghai[:10],
+        "sourceUrl": safe_url,
+        "fields": clean_detail,
+        "tags": _derive_tags(clean_detail),
+        "fingerprint": fingerprint,
+        "businessFingerprint": _business_detail_fingerprint(clean_detail),
+        "screenshots": shot_records,
+        "priorBoundDetail": prior,
+    }
+    if not evidence_path.exists():
+        directory.mkdir(parents=True, exist_ok=True)
+        _write_json(evidence_path, evidence)
+    evidence_sha = _sha256(evidence_path)
+    relative = str(evidence_path.relative_to(layout.root))
+    entry = {
+        "observationId": observation_id,
+        "observedAt": evidence["observedAt"],
+        "observedAtShanghai": observed_shanghai,
+        "fingerprint": fingerprint,
+        "businessFingerprint": evidence["businessFingerprint"],
+        "evidencePath": relative,
+        "evidenceSha256": evidence_sha,
+    }
+    record.setdefault("followupObservations", [])
+    if not existing_entries:
+        record["followupObservations"].append(entry)
+    remaining = []
+    for conflict in state.get("conflicts") or []:
+        if (
+            conflict.get("type") == "DETAIL_CONFLICT"
+            and conflict.get("rwid") == record_key
+            and conflict.get("projectNo") == project_no
+            and conflict.get("existingFingerprint") == existing.get("fingerprint")
+            and conflict.get("observedFingerprint") == fingerprint
+        ):
+            state.setdefault("resolvedConflicts", []).append(
+                {
+                    **copy.deepcopy(conflict),
+                    "resolvedAt": observed_shanghai,
+                    "resolution": "FOLLOWUP_OBSERVATION_RECORDED_BOUND_MATERIAL_KEPT",
+                    "resolvedByObservationId": observation_id,
+                }
+            )
+        else:
+            remaining.append(conflict)
+    state["conflicts"] = remaining
+    _refresh_progress(state)
+    state["updatedAt"] = observed_shanghai
+    _write_json(capture_path, state)
+    _register_followup_in_ledger(layout, project_no, record_key, batch_id, entry, observed)
+    return state
+
+
 def _zip_member_name(info: zipfile.ZipInfo) -> tuple[str, str]:
     name = info.filename
     if not name or "\\" in name or "\0" in name:

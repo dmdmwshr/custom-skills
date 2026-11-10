@@ -998,3 +998,16 @@ def test_initial_product_ref_only_recheck_same_case_and_old_input_valid(tmp_path
     data["recheckInspection"]["products"][0].pop("initialProductRef")
     data["initialInspection"]["products"][0]["initialProductRef"] = "product:initial"
     assert any("只适用于 RECHECK" in e for e in validate_manifest(data, {"file:one": str(source)}))
+
+
+def test_r43_source_add_observation_requires_time_screenshot_and_detail_url() -> None:
+    base = ["source", "add-observation", "--batch-id", "b", "--rwid", "r", "--detail-json", "d.json",
+            "--source-url", "http://x/#/d?RWID=r", "--screenshot", "s.png", "--observed-at", "2026-11-10T09:00:00+08:00"]
+    parsed = cli.build_parser().parse_args(base)
+    assert parsed.observed_at == "2026-11-10T09:00:00+08:00" and parsed.screenshot == ["s.png"]
+    for drop in ("--observed-at", "--screenshot", "--detail-json"):
+        trimmed = list(base)
+        index = trimmed.index(drop)
+        del trimmed[index:index + 2]
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(trimmed)

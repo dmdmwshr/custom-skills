@@ -39,7 +39,8 @@ def fields(result="UNQUALIFIED"):
 
 
 def full_fields():
-    return {**fields(), "文书目录": [{"title": "合成初查", "currentProject": True,
+    return {**fields(), "消防管辖": "合成甲大队",
+            "文书目录": [{"title": "合成初查", "currentProject": True,
                                   "children": [{"title": "合成检查记录"}]}]}
 
 
@@ -1382,3 +1383,317 @@ def test_segment_index_with_foreign_absolute_paths_resolves_only_by_same_directo
     # 索引里的摘要必须与同目录文件相符；改过的文件被拒绝(前一次绑定已是 BOUND，故用新批次记录前的状态对照不在此测)
     with pytest.raises(source.SourceIntakeError, match="摘要"):
         source._checked_segment_set(index, RWID, PROJECT, again_dir)
+
+
+def bound_case(case):
+    """整包已绑定：请求 -> 整包详情 -> 下载基线 -> 接件，返回批次状态。"""
+    promote_and_capture(case)
+    baseline = source.record_download_baseline(case.layout, BATCH, RWID, case.downloads)
+    downloaded = case.downloads / "synthetic-case.zip"
+    with zipfile.ZipFile(downloaded, "w") as archive:
+        archive.writestr("synthetic.txt", "合成文书内容")
+    return source.attach_package(case.layout, BATCH, RWID, downloaded, download_baseline=baseline,
+                                 allowed_download_dir=case.downloads, stability_interval=0,
+                                 sleep_fn=lambda _: None)
+
+
+def followup_fields(label):
+    """后续观察必须显示本案 [产] 产品根。"""
+    return {**full_fields(), "备注": label,
+            "文书目录": [{"title": f"[产]监督检查-{PROJECT}-1", "children": [{"title": "合成检查记录"}]}]}
+
+
+def _followup(case, label, *, observed_at, detail=None, **kw):
+    return source.add_followup_observation(
+        case.layout, BATCH, RWID, detail or followup_fields(label), source_url=DETAIL_URL,
+        screenshot=new_screenshot(case, label), observed_at=observed_at, **kw)
+
+
+def test_r43_followup_observation_keeps_bound_material_and_is_idempotent(case):
+    bound = bound_case(case)
+    before = deepcopy(bound["records"][RWID])
+    shot = new_screenshot(case, "f1")
+    detail = followup_fields("后续观察")
+    at = "2026-11-09T15:39:25-08:00"                                      # = 上海 2026-11-10 07:39:25
+    result = source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL,
+                                             screenshot=shot, observed_at=at)
+    record = result["records"][RWID]
+    for key in ("package", "collectionDetail", "detail", "downloadBaseline"):
+        assert record.get(key) == before.get(key)
+    entry, = record["followupObservations"]
+    assert entry["observedAt"] == at and entry["observedAtShanghai"].startswith("2026-11-10T07:39:25")
+    evidence = json.loads((case.layout.root / entry["evidencePath"]).read_text(encoding="utf-8"))
+    assert evidence["observedDay"] == "2026-11-10" and evidence["fields"]["备注"] == "后续观察"
+    assert evidence["screenshots"] and evidence["priorBoundDetail"]["packageSha256"] == before["package"]["sha256"]
+    ledger = ws.load_waterline(case.layout)["cases"][PROJECT]["source"]
+    assert entry["observationId"] in ledger["followupObservations"]
+    # 同一观察、同一请求重放：字节不变
+    path, _ = source._load_capture(case.layout, BATCH)
+    snapshot = path.read_bytes()
+    source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL,
+                                    screenshot=shot, observed_at=at)
+    assert path.read_bytes() == snapshot
+    # 之后真实再访、事实相同：是新的观察，保留其自己的时间
+    later = "2026-11-10T09:00:00+08:00"
+    again = source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL,
+                                            screenshot=shot, observed_at=later)
+    assert len(again["records"][RWID]["followupObservations"]) == 2
+    assert again["records"][RWID]["package"] == before["package"]
+
+
+def test_r43_followup_observation_releases_only_its_exact_conflict(case):
+    bound_case(case)
+    path, state = source._load_capture(case.layout, BATCH)
+    fp_old = state["records"][RWID]["collectionDetail"]["fingerprint"]
+    detail = followup_fields("冲突观察")
+    fp_new = source._fingerprint(source._clean_evidence(detail))
+    state["conflicts"] = [
+        {"type": "DETAIL_CONFLICT", "rwid": RWID, "projectNo": PROJECT, "existingFingerprint": fp_old, "observedFingerprint": fp_new},
+        {"type": "DETAIL_CONFLICT", "rwid": RWID, "projectNo": PROJECT, "existingFingerprint": fp_old, "observedFingerprint": "sha256:other"},
+        {"type": "DETAIL_CONFLICT", "rwid": RWID, "projectNo": PROJECT},
+    ]
+    source._write_json(path, state)
+    result = source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL,
+                                             screenshot=new_screenshot(case, "f2"),
+                                             observed_at="2026-11-10T09:00:00+08:00")
+    assert len(result["conflicts"]) == 2 and not any(c.get("observedFingerprint") == fp_new for c in result["conflicts"])
+    resolved, = result["resolvedConflicts"]
+    assert resolved["resolution"] == "FOLLOWUP_OBSERVATION_RECORDED_BOUND_MATERIAL_KEPT"
+
+
+@pytest.mark.parametrize("fault", ["wrong-project", "wrong-url", "no-shot", "missing-shot", "naive-time",
+                                   "garbage-time", "earlier", "no-root", "wrong-name"])
+def test_r43_followup_observation_refusals_write_nothing(case, fault):
+    bound_case(case)
+    path, _ = source._load_capture(case.layout, BATCH)
+    before = path.read_bytes()
+    detail, url, shot, at = followup_fields(fault), DETAIL_URL, new_screenshot(case, "r"), "2026-11-10T09:00:00+08:00"
+    if fault == "wrong-project":
+        detail["项目编号"] = "99999999T209999999"
+    elif fault == "wrong-url":
+        url = DETAIL_URL.replace(RWID, "90000000999")
+    elif fault == "no-shot":
+        shot = None
+    elif fault == "missing-shot":
+        shot = case.layout.root / "absent.png"
+    elif fault == "naive-time":
+        at = "2026-11-10T09:00:00"
+    elif fault == "garbage-time":
+        at = "昨天"
+    elif fault == "earlier":
+        at = "2026-01-01T00:00:00+08:00"
+    elif fault == "no-root":
+        detail.pop("文书目录")
+    elif fault == "wrong-name":
+        detail["单位名称"] = "另一家单位"
+    with pytest.raises(source.SourceIntakeError):
+        source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=url, screenshot=shot, observed_at=at)
+    assert path.read_bytes() == before
+    assert not (case.layout.batch_dir(BATCH) / "followup-observations").exists()
+
+
+def test_r43_followup_observation_refuses_unbound_record(case):
+    promote_and_capture(case)
+    with pytest.raises(source.SourceIntakeError, match="尚未绑定"):
+        _followup(case, "unbound", observed_at="2026-11-10T09:00:00+08:00")
+
+
+def test_r43_describe_consumes_newer_followup_even_when_old_classification_is_trusted(case):
+    bound_case(case)
+    ledger = ws.load_waterline(case.layout)["cases"][PROJECT]
+    old = views.describe(case.layout, PROJECT, ledger)
+    newer = followup_fields("新观察")
+    newer["initialInspection"] = {"inspectionDate": "2025-12-01", "products": [{"method": "ONSITE", "result": "QUALIFIED"}]}
+    _followup(case, "describe", observed_at="2026-11-10T09:00:00+08:00", detail=newer)
+    ledger = ws.load_waterline(case.layout)["cases"][PROJECT]
+    new = views.describe(case.layout, PROJECT, ledger)
+    changed = {k for k in set(new) | set(old) if new.get(k) != old.get(k)}
+    assert changed - {"issues"}, "后续观察应被生命周期消费"
+    assert not any(str(i).startswith("FOLLOWUP_OBSERVATION_UNTRUSTED") for i in new.get("issues", []))
+    # 取证文件被篡改后不再被消费，并留下拒绝原因
+    entry, = ledger["source"]["followupObservations"].values()
+    target = case.layout.root / entry["evidencePath"]
+    target.write_bytes(target.read_bytes() + b" ")
+    bad = views.describe(case.layout, PROJECT, ws.load_waterline(case.layout)["cases"][PROJECT])
+    assert any(str(i).startswith("FOLLOWUP_OBSERVATION_UNTRUSTED") for i in bad.get("issues", []))
+    skip = {"issues", "sourceObservedAt", "workflowUpdatedAt"}                              # 台账最近观察时间随真实观察推进
+    assert {k: v for k, v in bad.items() if k not in skip} == {k: v for k, v in old.items() if k not in skip}
+
+
+# ---- R44：第四身份(消防管辖)与部分持久化后的同请求重试 ----
+
+def _ledger_followups(case):
+    return (ws.load_waterline(case.layout)["cases"][PROJECT]["source"].get("followupObservations") or {})
+
+
+def _describe(case):
+    return views.describe(case.layout, PROJECT, ws.load_waterline(case.layout)["cases"][PROJECT])
+
+
+def _lifecycle_brigade(description):
+    return description["lifecycle"]["required"]["brigade"].get("value")
+
+
+@pytest.mark.parametrize("fault", ["other-brigade", "missing-brigade"])
+def test_r44_followup_with_another_or_missing_fire_jurisdiction_is_refused_at_registration(case, fault):
+    bound_case(case)
+    path, _ = source._load_capture(case.layout, BATCH)
+    before, ledger_before = path.read_bytes(), _ledger_followups(case)
+    detail = followup_fields(fault)
+    if fault == "other-brigade":
+        detail["消防管辖"] = "合成乙大队"
+    else:
+        detail.pop("消防管辖")
+    with pytest.raises(source.SourceIntakeError, match="消防管辖"):
+        source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL,
+                                        screenshot=new_screenshot(case, fault), observed_at="2026-11-10T09:00:00+08:00")
+    assert path.read_bytes() == before and _ledger_followups(case) == ledger_before
+    assert not (case.layout.batch_dir(BATCH) / "followup-observations").exists()
+
+
+def test_r44_followup_with_the_same_fire_jurisdiction_still_registers_and_is_consumed(case):
+    bound_case(case)
+    detail = followup_fields("同大队")
+    detail["消防管辖"] = " 合成甲 大队 "                               # 空白差异不是另一个大队
+    _followup(case, "same-brigade", observed_at="2026-11-10T09:00:00+08:00", detail=detail)
+    assert len(_ledger_followups(case)) == 1
+    assert _lifecycle_brigade(_describe(case)) == " 合成甲 大队 ".strip() or _lifecycle_brigade(_describe(case))
+
+
+def test_r44_consumer_refuses_a_registered_followup_whose_jurisdiction_differs_even_when_old_classification_is_trusted(case):
+    """原 g2 夹具：旧 classification 仍有效，伪造/旧版登记的乙大队观察不得被消费。"""
+    bound_case(case)
+    old = _describe(case)
+    assert old["lifecycle"] and _lifecycle_brigade(old) == "合成甲大队"
+    _followup(case, "good", observed_at="2026-11-10T09:00:00+08:00")
+    # 绕过登记入口，直接把另一大队的观察连同一致的摘要写进证据与台账
+    entry, = _ledger_followups(case).values()
+    target = case.layout.root / entry["evidencePath"]
+    evidence = json.loads(target.read_text(encoding="utf-8"))
+    evidence["fields"]["消防管辖"] = "合成乙大队"
+    evidence["fingerprint"] = source._fingerprint(evidence["fields"])
+    evidence["businessFingerprint"] = source._business_detail_fingerprint(evidence["fields"])
+    source._write_json(target, evidence)
+    ws.upsert_case(case.layout, PROJECT, source={"followupObservations": {
+        entry["observationId"]: {**entry, "fingerprint": evidence["fingerprint"],
+                                  "businessFingerprint": evidence["businessFingerprint"],
+                                  "evidenceSha256": source._sha256(target)}}})
+    description = _describe(case)
+    assert _lifecycle_brigade(description) == "合成甲大队"                   # 仍用旧的可信分类证据
+    assert any(str(i).endswith(":BRIGADE_MISMATCH") for i in description.get("issues", []))
+
+
+def test_r44_consumer_refuses_a_followup_without_jurisdiction(case):
+    bound_case(case)
+    _followup(case, "good", observed_at="2026-11-10T09:00:00+08:00")
+    entry, = _ledger_followups(case).values()
+    target = case.layout.root / entry["evidencePath"]
+    evidence = json.loads(target.read_text(encoding="utf-8"))
+    evidence["fields"].pop("消防管辖")
+    evidence["fingerprint"] = source._fingerprint(evidence["fields"])
+    evidence["businessFingerprint"] = source._business_detail_fingerprint(evidence["fields"])
+    source._write_json(target, evidence)
+    ws.upsert_case(case.layout, PROJECT, source={"followupObservations": {
+        entry["observationId"]: {**entry, "fingerprint": evidence["fingerprint"],
+                                  "businessFingerprint": evidence["businessFingerprint"],
+                                  "evidenceSha256": source._sha256(target)}}})
+    assert any(str(i).endswith(":BRIGADE_MISSING") for i in _describe(case).get("issues", []))
+
+
+def _fail_ledger_once(monkeypatch):
+    real, calls = source._maybe_waterline, {"n": 0}
+
+    def flaky(layout, project, **fields):
+        if "followupObservations" in (fields.get("source") or {}) and calls["n"] == 0:
+            calls["n"] += 1
+            raise OSError("injected: ledger write failed after capture was saved")
+        return real(layout, project, **fields)
+
+    monkeypatch.setattr(source, "_maybe_waterline", flaky)
+    return calls
+
+
+def test_r44_same_request_retry_completes_the_missing_ledger_side_without_double_counting(case, monkeypatch):
+    bound_case(case)
+    detail, shot, at = followup_fields("partial"), new_screenshot(case, "partial"), "2026-11-10T09:00:00+08:00"
+    calls = _fail_ledger_once(monkeypatch)
+    with pytest.raises(OSError, match="injected"):
+        source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL, screenshot=shot, observed_at=at)
+    _, mid = source._load_capture(case.layout, BATCH)
+    assert len(mid["records"][RWID]["followupObservations"]) == 1 and not _ledger_followups(case)   # 中间态：capture 已有，台账无
+    assert not any(c.startswith("2026-11-10") for c in [str(_describe(case).get("sourceObservedAt"))])
+    # 新的同请求正常调用补齐
+    result = source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL, screenshot=shot, observed_at=at)
+    assert calls["n"] == 1 and len(result["records"][RWID]["followupObservations"]) == 1
+    ledger = _ledger_followups(case)
+    entry, = result["records"][RWID]["followupObservations"]
+    assert list(ledger) == [entry["observationId"]] and ledger[entry["observationId"]]["evidenceSha256"] == entry["evidenceSha256"]
+    description = _describe(case)
+    assert not any(str(i).startswith("FOLLOWUP_OBSERVATION_UNTRUSTED") for i in description.get("issues", []))
+    assert description["sourceObservedAt"] == at
+    # 再次重复：capture 与台账字节不再变化，计数仍为 1
+    path, _ = source._load_capture(case.layout, BATCH)
+    snapshot, ledger_json = path.read_bytes(), json.dumps(_ledger_followups(case), sort_keys=True)
+    source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL, screenshot=shot, observed_at=at)
+    assert path.read_bytes() == snapshot and json.dumps(_ledger_followups(case), sort_keys=True) == ledger_json
+    assert len(_ledger_followups(case)) == 1
+
+
+def test_r44_partial_write_retry_with_another_jurisdiction_is_refused_and_does_not_heal_the_ledger(case, monkeypatch):
+    bound_case(case)
+    shot, at = new_screenshot(case, "partial2"), "2026-11-10T09:00:00+08:00"
+    _fail_ledger_once(monkeypatch)
+    with pytest.raises(OSError):
+        source.add_followup_observation(case.layout, BATCH, RWID, followup_fields("partial2"), source_url=DETAIL_URL,
+                                        screenshot=shot, observed_at=at)
+    other = followup_fields("partial2")
+    other["消防管辖"] = "合成乙大队"
+    with pytest.raises(source.SourceIntakeError, match="消防管辖"):
+        source.add_followup_observation(case.layout, BATCH, RWID, other, source_url=DETAIL_URL, screenshot=shot, observed_at=at)
+    assert not _ledger_followups(case)
+
+
+@pytest.mark.parametrize("damage", ["evidence-changed", "screenshot-missing"])
+def test_r44_unrecoverable_partial_state_is_reported_not_completed_and_ledger_stays_empty(case, monkeypatch, damage):
+    bound_case(case)
+    detail, shot, at = followup_fields("partial3"), new_screenshot(case, "partial3"), "2026-11-10T09:00:00+08:00"
+    _fail_ledger_once(monkeypatch)
+    with pytest.raises(OSError):
+        source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL, screenshot=shot, observed_at=at)
+    _, mid = source._load_capture(case.layout, BATCH)
+    entry, = mid["records"][RWID]["followupObservations"]
+    evidence_path = case.layout.root / entry["evidencePath"]
+    if damage == "evidence-changed":
+        evidence_path.write_bytes(evidence_path.read_bytes() + b" ")
+    else:
+        stored = json.loads(evidence_path.read_text(encoding="utf-8"))
+        (case.layout.root / stored["screenshots"][0]["relativePath"]).unlink()
+    with pytest.raises(source.SourceIntakeError):
+        source.add_followup_observation(case.layout, BATCH, RWID, detail, source_url=DETAIL_URL, screenshot=shot, observed_at=at)
+    assert not _ledger_followups(case)
+
+
+def test_r44_normal_cli_retry_after_injected_ledger_failure_repairs_and_is_idempotent(case, monkeypatch, tmp_path, capsys):
+    from scripts import registry_cli as cli
+    bound_case(case)
+    detail_file = tmp_path / "detail.json"
+    detail_file.write_text(json.dumps(followup_fields("cli"), ensure_ascii=False), encoding="utf-8")
+    shot = new_screenshot(case, "cli")
+    config_path = tmp_path / "workspace.toml"
+    ws.configure_workspace(work_root=case.layout.root, download_dir=case.downloads, config_path=config_path)
+    argv = ["source", "add-observation", "--workspace-config", str(config_path), "--batch-id", BATCH, "--rwid", RWID,
+            "--detail-json", str(detail_file), "--source-url", DETAIL_URL, "--screenshot", str(shot),
+            "--observed-at", "2026-11-10T09:00:00+08:00"]
+    _fail_ledger_once(monkeypatch)
+    try:
+        failed = cli.main(argv)
+    except OSError:
+        failed = 1
+    assert failed != 0 and not _ledger_followups(case)
+    _, mid = source._load_capture(case.layout, BATCH)
+    assert len(mid["records"][RWID]["followupObservations"]) == 1       # 中间态真实落盘
+    assert cli.main(argv) == 0
+    assert len(_ledger_followups(case)) == 1
+    assert cli.main(argv) == 0
+    assert len(_ledger_followups(case)) == 1
+    capsys.readouterr()

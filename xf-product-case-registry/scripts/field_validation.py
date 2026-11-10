@@ -76,6 +76,32 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
     return cases
 
 
+_NAME_PUNCTUATION = re.compile(r"[\s\u3000.,，。、;；:：·\-—_()（）\[\]【】]+")
+_FINE_GRAINED_ADDRESS = re.compile(r"\d|[０-９]|[路街巷弄号室楼栋幢座层]")
+
+
+def unit_name_conflicts_address(unit_name: Any, unit_address: Any) -> bool:
+    """True only when the unit-name column really holds the address (column shift), not when a legitimate name embeds place text.
+
+    Conflict: the name equals the address; or the address is specific (house number, road, building, ...) and appears in the
+    name at all (an organisation plus its street address in the name column); or the address is only a place name and the
+    name ends with it (nothing but punctuation follows). A place-name address that is followed by further name text
+    (``廊下村`` -> ``廊下村民委员会``) belongs to a legitimate name that merely contains place words and is not rejected.
+    Missing values never conflict here; required-field checks stay with the callers.
+    """
+
+    name, address = text(unit_name), text(unit_address)
+    if not name or not address:
+        return False
+    if name == address:
+        return True
+    if address not in name:
+        return False
+    if _FINE_GRAINED_ADDRESS.search(address):
+        return True
+    return not _NAME_PUNCTUATION.sub("", name.rsplit(address, 1)[1])
+
+
 def _string_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
@@ -185,10 +211,8 @@ def validate_cases(
                 )
 
         unit_name, unit_address = text(case.get("unit_name")), text(case.get("unit_address"))
-        if unit_name and unit_address and (
-            unit_name == unit_address or unit_address in unit_name
-        ):
-            errors.append(f"{label} 单位名称与单位地址疑似串栏：unit_name 不得等于或包含 unit_address")
+        if unit_name_conflicts_address(unit_name, unit_address):
+            errors.append(f"{label} 单位名称与单位地址疑似串栏：unit_name 不得等于 unit_address，也不得把门牌/道路等具体地址写入名称栏，或以地名地址结尾")
 
         files = case.get("source_files")
         if not _string_list(files):

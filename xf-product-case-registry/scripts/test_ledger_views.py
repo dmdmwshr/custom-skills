@@ -1574,3 +1574,18 @@ def test_r37_queue_zero_write_does_not_hide_new_documents_missing_packages_or_pe
     state = {"filters": {"selectionMode": "RECENT_DOCUMENT_ACTIVITY"}, "batchId": "synthetic"}
     source._prepare_incremental_queue(layout, state, {"888": {"rwid": "888", "fields": {}, "sourceAppearances": [appearance]}}, "2099-02-20T00:00:00Z")
     assert state["actionRwids"] == ["888"]                                                     # 待结果有来源原因：仍回源
+
+
+@pytest.mark.parametrize("name,address,state", [
+    ("江阴市沈港桥东五金厂", "江阴市", "present"),                       # 名称含地名，不是地址栏错位
+    ("江阴市某某开发区管理委员会", "江阴市", "present"),
+    ("江阴市", "江阴市", "conflict"),                                      # 名称等于地址
+    ("某单位江阴市", "江阴市", "conflict"),                                # 以地名地址结尾
+    ("江阴市长江路88号某单位", "江阴市长江路88号", "conflict"),            # 把门牌写入名称栏
+    ("", "江阴市", "missing"),                                              # 必填为空仍判缺失
+])
+def test_r43_lifecycle_unit_name_containing_place_text_is_not_a_column_mixup(name, address, state):
+    manifest = _chain_manifest([("a", "UNQUALIFIED")], [("r1", "QUALIFIED", "a")])
+    manifest["case"].update(unitName=name, unitAddress=address)
+    required = _assess(manifest)["required"]["unitName"]
+    assert required["state"] == state

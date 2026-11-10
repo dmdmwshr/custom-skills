@@ -27,6 +27,37 @@ else:
 
 
 
+def _shanghai_zone() -> Any:
+    try:
+        return ZoneInfo("Asia/Shanghai")
+    except Exception:  # tzdata missing on a minimal host: Shanghai has no DST, fixed +08:00 is the same rule
+        from datetime import timezone, timedelta
+
+        return timezone(timedelta(hours=8), name="Asia/Shanghai")
+
+
+def _instant(value: Any) -> datetime | None:
+    """A zone-aware instant for an observation time; a naive time is read as Shanghai, an unparsable one is None."""
+
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=_shanghai_zone())
+
+
+def observation_day(value: Any) -> str | None:
+    """The Shanghai business day of an observation time (``2026-11-09T15:39:25-08:00`` is 2026-11-10), not a text prefix."""
+
+    parsed = _instant(value)
+    if parsed is not None:
+        return parsed.astimezone(_shanghai_zone()).date().isoformat()
+    text = str(value or "")[:10]
+    return text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else None
+
+
 # 业务视图 18 列的显式宽度(字符数)。顺序与导出表头一致；新增/删除表头列时必须同步，回归测试会校验两者等长。
 LEDGER_COLUMN_WIDTHS = [
     24, 34, 12, 15, 10, 15, 15, 20, 20, 16, 15, 13, 16, 27, 22, 48, 27, 28, 24, 30, 30, 34,
@@ -194,7 +225,7 @@ def _detail_problems(item: Any, key: str, project: str, source: dict[str, Any], 
     return problems
 
 
-def _saved_detail(layout: Any, project: str, source: dict[str, Any]) -> tuple[tuple[dict[str, Any], str | None] | None, list[str]]:
+def _saved_detail(layout: Any, project: str, source: dict[str, Any]) -> tuple[tuple[dict[str, Any], str | None, str | None] | None, list[str]]:
     """Latest *trusted* saved source detail of this exact project, and why other saved details were refused.
 
     Used when the classification-bound evidence was rewritten later. A saved record is consumed only through
@@ -224,11 +255,11 @@ def _saved_detail(layout: Any, project: str, source: dict[str, Any]) -> tuple[tu
                 continue
             item = records[key]
             captured = item.get("capturedAt")
-            return (item["fields"], (str(captured)[:10] if captured else None)), []
+            return (item["fields"], observation_day(captured), captured), []
     return None, refused
 
 
-def _evidence_fields(evidence: dict[str, Any], project: str) -> tuple[dict[str, Any], str | None] | None:
+def _evidence_fields(evidence: dict[str, Any], project: str) -> tuple[dict[str, Any], str | None, str | None] | None:
     """Saved detail fields (and the observation day) of this project from a SourceEvidenceV1 / identity document."""
     candidates = [(evidence.get("fields"), evidence.get("capturedAt"))] if evidence.get("projectNo") == project else []
     for item in (evidence.get("records") or {}).values():
@@ -236,7 +267,7 @@ def _evidence_fields(evidence: dict[str, Any], project: str) -> tuple[dict[str, 
             candidates.append((item.get("fields"), item.get("capturedAt")))
     for fields, captured in candidates:
         if isinstance(fields, dict) and fields:
-            return fields, (str(captured)[:10] if captured else None)
+            return fields, observation_day(captured), captured
     return None
 
 
@@ -658,6 +689,101 @@ def source_facts_layer(work: Path) -> dict[str, Any]:
     }
 
 
+def source_intake_brigade(fields: Any) -> str | None:
+    if __package__:
+        from . import source_intake
+    else:
+        import source_intake
+    return source_intake.detail_brigade(fields)
+
+
+def _bound_detail_brigade(layout: Any, entry: dict[str, Any]) -> str | None:
+    """Fire jurisdiction of the bound detail the follow-up was registered against (None when it cannot be read)."""
+
+    if __package__:
+        from . import source_intake
+    else:
+        import source_intake
+    try:
+        _, state = source_intake._load_capture(layout, str(entry["batchId"]))
+        record = (state.get("records") or {})[str(entry["rwid"])]
+        return source_intake.detail_brigade((record.get("collectionDetail") or {}).get("fields"))
+    except (KeyError, TypeError, ValueError, OSError, source_intake.SourceIntakeError):
+        return None
+
+
+def _followup_observations(
+    layout: Any, project: str, source: dict[str, Any], baseline_brigades: list[str | None] | None = None
+) -> tuple[list[tuple[datetime, dict[str, Any], str | None, str]], list[str]]:
+    """Trusted follow-up observations of a package-bound case (``source_intake.add_followup_observation``), newest first.
+
+    A follow-up is consumed only when the ledger registered it AND its immutable evidence file still matches: the file's
+    digest equals the ledger entry, it is the same case/RWID/observation id/time/fingerprint, its fields recompute to the
+    stored digests, it shows this case's product root, and every saved detail screenshot is still on disk with its digest.
+    Its fire jurisdiction (the case's fourth identity) must also be shown and equal to the jurisdiction already established
+    for the case: the bound detail in its batch, the still-trusted classification evidence and the ledger. Anything else
+    is reported by reason and ignored (never promoted to a fact).
+    """
+
+    entries = source.get("followupObservations")
+    if not isinstance(entries, dict) or not entries:
+        return [], []
+    if __package__:
+        from . import source_intake
+    else:
+        import source_intake
+    known = _known_rwids(source)
+    trusted: list[tuple[datetime, dict[str, Any], str | None, str]] = []
+    refused: list[str] = []
+    for observation_id, entry in entries.items():
+        def refuse(reason: str, observation_id: str = observation_id) -> None:
+            refused.append(f"{observation_id}:{reason}")
+
+        try:
+            path = layout.root / str(entry["evidencePath"])
+            evidence = _read(path, layout.root)
+            digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        except (OSError, KeyError, ValueError, ws.WorkspaceStateError):
+            refuse("EVIDENCE_UNREADABLE")
+            continue
+        fields = evidence.get("fields")
+        observed = _instant(entry.get("observedAt"))
+        if digest != entry.get("evidenceSha256"):
+            refuse("EVIDENCE_DIGEST_MISMATCH")
+        elif evidence.get("schemaVersion") != source_intake.FOLLOWUP_OBSERVATION_VERSION or evidence.get("observationId") != observation_id:
+            refuse("EVIDENCE_IDENTITY_MISMATCH")
+        elif evidence.get("projectNo") != project or str(evidence.get("rwid")) not in known or str(entry.get("rwid")) != str(evidence.get("rwid")):
+            refuse("CASE_OR_RWID_NOT_BOUND")
+        elif not isinstance(fields, dict) or str(fields.get("项目编号") or "").strip().upper() != project:
+            refuse("PROJECT_MISMATCH")
+        elif source_intake._fingerprint(fields) != evidence.get("fingerprint") or source_intake._business_detail_fingerprint(fields) != evidence.get("businessFingerprint"):
+            refuse("DIGEST_MISMATCH")
+        elif observed is None or entry.get("observedAt") != evidence.get("observedAt") or _instant(evidence.get("observedAtShanghai")) != observed:
+            refuse("OBSERVED_AT_UNREGISTERED")
+        elif _product_root_problem(fields, project):
+            refuse("PRODUCT_ROOT")
+        elif (brigade_problem := source_intake.followup_brigade_problem(
+            fields, [*(baseline_brigades or []), _bound_detail_brigade(layout, entry)]
+        )):
+            refuse(brigade_problem)
+        else:
+            shots = evidence.get("screenshots") or []
+            try:
+                shots_ok = bool(shots) and all(
+                    (layout.root / str(item["relativePath"])).is_file()
+                    and "sha256:" + hashlib.sha256((layout.root / str(item["relativePath"])).read_bytes()).hexdigest() == item.get("sha256")
+                    for item in shots
+                )
+            except (OSError, KeyError):
+                shots_ok = False
+            if not shots_ok:
+                refuse("SCREENSHOT_MISSING_OR_CHANGED")
+            else:
+                trusted.append((observed, fields, observation_day(evidence["observedAt"]), str(evidence["observedAt"])))
+    trusted.sort(key=lambda item: item[0], reverse=True)
+    return trusted, refused
+
+
 def describe(layout: Any, project: str, record: dict[str, Any], *, today: date | None = None) -> dict[str, Any]:
     work, manifest, state, issues = case_inputs(layout, project, record)
     source = record.get("source") or {}
@@ -821,7 +947,7 @@ def describe(layout: Any, project: str, record: dict[str, Any], *, today: date |
     ):
         classification = {k: binding["qualification"].get(k) for k in classification}
     source_summary = None
-    lifecycle_evidence: tuple[dict[str, Any], str | None] | None = None
+    lifecycle_evidence: tuple[dict[str, Any], str | None, str | None] | None = None
     if source.get("classification"):
         candidate = source["classification"]
         try:
@@ -875,6 +1001,23 @@ def describe(layout: Any, project: str, record: dict[str, Any], *, today: date |
         if lifecycle_evidence and lifecycle_classification["initialResult"] == "UNKNOWN":
             derived = source_qualification(
                 lifecycle_evidence[0], list(source.get("projectInspectionStages") or source.get("sourceInspectionStages") or [])
+            )
+            if derived:
+                lifecycle_classification.update({k: derived[k] for k in ("initialResult", "initialInspectionDate", "reinspectionPending")})
+    # A newer, trusted same-case observation saved next to the bound material beats the older evidence the ledger's
+    # classification still points to (which stays valid and untouched); it never replaces or re-verifies that material.
+    base_brigade = [source_intake_brigade(lifecycle_evidence[0]) if lifecycle_evidence else None]
+    if base_brigade == [None]:
+        base_brigade = [record.get("brigadeName")]
+    followups, refused_followups = _followup_observations(layout, project, source, base_brigade)
+    issues.extend(f"FOLLOWUP_OBSERVATION_UNTRUSTED:{reason}" for reason in refused_followups)
+    if followups:
+        base_instant = _instant(lifecycle_evidence[2]) if lifecycle_evidence else None
+        newest = followups[0]
+        if base_instant is None or newest[0] > base_instant:
+            lifecycle_evidence = (newest[1], newest[2], newest[3])
+            derived = source_qualification(
+                newest[1], list(source.get("projectInspectionStages") or source.get("sourceInspectionStages") or [])
             )
             if derived:
                 lifecycle_classification.update({k: derived[k] for k in ("initialResult", "initialInspectionDate", "reinspectionPending")})

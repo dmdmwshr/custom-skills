@@ -292,7 +292,7 @@ def _required_state(
     form = _text(case.get("inspectionForm"))
     out: dict[str, dict[str, Any]] = {"projectNo": present(project) if fv.PROJECT_NO.fullmatch(_text(project)) else missing("项目编号格式无效")}
     out["unitName"] = missing("单位名称缺失") if not unit else (
-        {"state": "conflict", "reason": "单位名称与单位地址串栏"} if address and (unit == address or address in unit) else present(unit)
+        {"state": "conflict", "reason": "单位名称与单位地址串栏"} if fv.unit_name_conflicts_address(unit, address) else present(unit)
     )
     out["unitAddress"] = present(address) if address else missing("单位地址缺失")
     out["brigade"] = present(brigade) if brigade else missing("所属大队缺失(详情消防管辖/同案文书)")
