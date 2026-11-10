@@ -872,6 +872,23 @@ def test_damaged_jpeg_scan_is_rejected_by_generation_and_verification(
     assert reasons and "无法读取" in reasons[0]
 
 
+def test_jpeg_vendor_trailer_after_eoi_is_recorded_not_embedded() -> None:
+    good = make_jpeg(48, 40)
+    trailer = b"\x00" * 64 + b"\x08\x36\x00\x00ctrace\x00\x00"
+    pdf, mapping = image_pdf.build_pdf(good + trailer)
+    assert mapping["trailingBytes"] == len(trailer)
+    assert mapping["trailingSha256"] == image_pdf.sha256(trailer)
+    assert good in pdf and trailer not in pdf
+    assert image_pdf.verify_pdf(pdf, good + trailer, mapping) == []
+    # the recorded source digest binds the full original bytes, not the trimmed ones
+    assert mapping["sourceSha256"] == image_pdf.sha256(good + trailer)
+    assert "trailingBytes" not in image_pdf.build_pdf(good)[1]
+    with pytest.raises(image_pdf.ImageNormalizationError, match="另一幅图像"):
+        image_pdf.build_pdf(good + b"\xff\xd8\xff\xe0" + b"\x00" * 20)
+    with pytest.raises(image_pdf.ImageNormalizationError):
+        image_pdf.build_pdf(good[:-2] + trailer)  # no EOI after the scan: still truncated
+
+
 def test_progressive_jpeg_is_rejected_as_unverifiable() -> None:
     data = make_jpeg()
     sof = data.index(b"\xff\xc0")

@@ -145,7 +145,7 @@ Excel 至少展示项目编号、单位、大队、标签、来源进度、本�
 
 ## 图片规范化、外加补采与本地大队
 
-- **图片**：`normalize-images --work-dir <工作区> --relative-path <inventory 或补采中的 PNG/JPEG>` 把选定原图忠实转成单页 PDF（`normalized/image_<摘要前12位>_<名称>.pdf`），JPEG 原字节直接嵌入，PNG 无透明时原 IDAT 流直接嵌入，仅透明通道拆为无损软遮罩；不缩放、不重绘、不换色。隔行 PNG、带 tRNS、镜像 EXIF 方向、渐进式/非顺序 JPEG、截断或损坏（含 PNG 像素流、JPEG 扫描熵数据无法完整解码）的图片拒绝而不猜测。源图摘要、字节数、像素尺寸、页面尺寸、方法和输出摘要写入 `image-normalization.json`（ImageNormalizationV1）。compose 和 `local-verify` 重新比对 PDF 内嵌像素与源图，被替换的源图或 PDF 都会被拒绝；归档后深度复核同样检查。case-data 的 `files[].sourceRelativePath` 填输出的 `normalized/...pdf`。
+- **图片**：`normalize-images --work-dir <工作区> --relative-path <inventory 或补采中的 PNG/JPEG>` 把选定原图忠实转成单页 PDF（`normalized/image_<摘要前12位>_<名称>.pdf`），JPEG 原字节直接嵌入，PNG 无透明时原 IDAT 流直接嵌入，仅透明通道拆为无损软遮罩；不缩放、不重绘、不换色。JPEG 若在已完整验证的扫描流及其结束标记之后带有手机厂商尾部数据（水印/元数据块），仅嵌入已验证部分，尾部字节数和摘要记入 `image-normalization.json`（`trailingBytes`/`trailingSha256`），源图摘要仍绑定完整原字节；尾部以另一幅图像开头则拒绝。隔行 PNG、带 tRNS、镜像 EXIF 方向、渐进式/非顺序 JPEG、截断或损坏（含 PNG 像素流、JPEG 扫描熵数据无法完整解码）的图片拒绝而不猜测。源图摘要、字节数、像素尺寸、页面尺寸、方法和输出摘要写入 `image-normalization.json`（ImageNormalizationV1）。compose 和 `local-verify` 重新比对 PDF 内嵌像素与源图，被替换的源图或 PDF 都会被拒绝；归档后深度复核同样检查。case-data 的 `files[].sourceRelativePath` 填输出的 `normalized/...pdf`。
 - **外加补采**：见[手动交件](manual-intake.md#本地扩展入口)；补采 PDF 只能先 split 再进入 compose。
 - **本地大队**：`case.brigadeCode` 除八个云端大队外允许 `SHUISHANG`，且必须同时写 `case.brigadeName: "水上大队"`；compose 与 `local-verify` 要求本案已绑定的真实来源证据（分类证据或手动交件回执）的“消防管辖”记载含“水上大队”。云端八队统计归属与权限不变，本地业务实体不新增虚假统计归属；其他代码、缺少名称或来源证据不足一律拒绝。
 

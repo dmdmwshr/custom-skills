@@ -4,6 +4,10 @@ The image bytes are never re-drawn or re-sampled. JPEG data is embedded as-is (D
 data without an alpha channel keeps its original zlib/IDAT stream (FlateDecode + PNG predictor);
 only PNG alpha is split into a separate soft mask (a lossless re-compression of the same
 samples). Interlaced, tRNS, exotic or unreadable images are rejected instead of guessed.
+A JPEG whose entropy-verified stream ends at its own EOI marker may carry vendor trailer bytes
+(phone camera watermark/metadata blocks) after it: only the verified part is embedded, and the
+trailer length and digest are recorded in the mapping. A trailer that starts another image is
+rejected.
 
 ``verify_pdf`` re-reads the produced PDF structure and compares the embedded pixel data with the
 source file, so a swapped image, a swapped PDF or tampered pixels are rejected. It does not depend
@@ -219,7 +223,7 @@ def _split_alpha(info: dict[str, Any]) -> tuple[bytes, bytes]:
 
 
 def inspect_jpeg(data: bytes) -> dict[str, Any]:
-    if not data.endswith(b"\xff\xd9"):
+    if not data.startswith(b"\xff\xd8") or b"\xff\xd9" not in data:
         raise ImageNormalizationError("JPEG 缺少结束标记，疑似截断")
     position, sof, adobe, dpi, orientation = 2, None, None, None, 1
     while position + 4 <= len(data):
@@ -263,8 +267,14 @@ def inspect_jpeg(data: bytes) -> dict[str, Any]:
         raise ImageNormalizationError("JPEG 位深或分量数不受支持")
     if orientation not in _ROTATE:
         raise ImageNormalizationError("JPEG EXIF 方向为镜像类，不做猜测转换")
-    _check_jpeg_scans(data)
+    end = _check_jpeg_scans(data)
+    trailing = data[end:]
+    if trailing.startswith(b"\xff\xd8"):
+        raise ImageNormalizationError("JPEG 结束标记之后还有另一幅图像数据，不做猜测")
     return {
+        "end": end,
+        "trailingBytes": len(trailing),
+        "trailingSha256": sha256(trailing) if trailing else None,
         "format": "JPEG",
         "width": width,
         "height": height,
@@ -358,7 +368,7 @@ def _decode_jpeg_segment(
         raise ImageNormalizationError("JPEG 扫描数据与帧尺寸不符，含多余数据，疑似损坏")
 
 
-def _check_jpeg_scans(data: bytes) -> None:
+def _check_jpeg_scans(data: bytes) -> int:
     """Entropy-decode every baseline scan (no IDCT): the whole file must be consistently coded.
 
     Header markers alone cannot show a damaged scan stream, so each Huffman-coded block is read
@@ -430,6 +440,7 @@ def _check_jpeg_scans(data: bytes) -> None:
         raise ImageNormalizationError("JPEG 结构不完整或损坏") from error
     if not done or frame is None or covered != {c[0] for c in frame[2]}:
         raise ImageNormalizationError("JPEG 缺少结束标记或有分量未被扫描覆盖")
+    return position
 
 
 def _check_one_jpeg_scan(
@@ -546,7 +557,7 @@ def _plan(data: bytes) -> dict[str, Any]:
             method="EMBED_JPEG_RAW",
             image_dict=f"/Type/XObject/Subtype/Image/Width {info['width']}/Height {info['height']}"
             f"/ColorSpace {space}/BitsPerComponent 8/Filter/DCTDecode{decode}",
-            payload=data,
+            payload=data[: info["end"]],
             smask=None,
         )
         return info
@@ -645,6 +656,11 @@ def build_pdf(data: bytes) -> tuple[bytes, dict[str, Any]]:
         "converter": dict(CONVERTER),
         **{key: plan[key] for key in ("bitDepth", "colorType", "ancillaryChunks") if key in plan},
         **{key: plan[key] for key in ("components", "orientation") if key in plan},
+        **(
+            {key: plan[key] for key in ("trailingBytes", "trailingSha256")}
+            if plan.get("trailingBytes")
+            else {}
+        ),
     }
     return bytes(body), mapping
 
