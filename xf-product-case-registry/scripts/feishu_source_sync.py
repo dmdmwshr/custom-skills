@@ -883,6 +883,8 @@ def _verify(index, plan, records, before, after) -> list[str]:
                 continue
             meta = meta_by_id.get(fid)
             derived = meta is not None and (meta["class"] in DERIVED_CLASSES or meta["type"] in DERIVED_TYPES)
+            if meta is not None and meta["type"] == "checkbox" and old_row.get(fid) in (None, False) and new_row.get(fid) in (None, False):
+                continue  # 未勾选复选框：服务端首次写入某行时会把空读数规范成 false，二者同为“未勾选”，不是人工值变化
             if not derived and canon(old_row.get(fid)) != canon(new_row.get(fid)):
                 violations.append(f"{item['recordId']}/{meta['name'] if meta else fid}：非目标字段发生变化（保护域/未知字段）")
     return violations

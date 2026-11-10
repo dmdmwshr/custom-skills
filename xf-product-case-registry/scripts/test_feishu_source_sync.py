@@ -550,6 +550,33 @@ def test_protection_violation_detected_on_readback_and_blocks(tmp_path, meta):
     assert ledger_events(tmp_path)[-1]["status"] == "VIOLATION"
 
 
+def test_unchecked_checkbox_null_to_false_is_not_a_human_value_change(tmp_path, meta):
+    """服务端首次写入某行会把空复选框读数规范成 false：二者同为未勾选，不算人工值变化；其余变化仍是违规。"""
+    def start_unset(svc):
+        svc.rows[(CASE, REC)][HUMAN_CHECKBOX] = None
+
+    def normalize(row):
+        if row.get(HUMAN_CHECKBOX) is None:
+            row[HUMAN_CHECKBOX] = False
+
+    svc = service(meta, mutate=normalize)
+    start_unset(svc)
+    assert run(tmp_path, make_spec(tmp_path), svc)["status"] == "OK"
+    assert svc.rows[(CASE, REC)][HUMAN_CHECKBOX] is False
+
+
+@pytest.mark.parametrize("before,after", [(True, False), (None, True), (False, True), (True, None)])
+def test_checkbox_real_changes_are_still_violations(tmp_path, meta, before, after):
+    def clobber(row):
+        row[HUMAN_CHECKBOX] = after
+
+    svc = service(meta, mutate=clobber)
+    svc.rows[(CASE, REC)][HUMAN_CHECKBOX] = before
+    with pytest.raises(sync.RuntimeSyncError):
+        run(tmp_path, make_spec(tmp_path), svc)
+    assert ledger_events(tmp_path)[-1]["status"] == "VIOLATION"
+
+
 def test_ignored_write_is_caught_by_readback(tmp_path, meta):
     svc = service(meta, ignore_writes_for=REC)
     with pytest.raises(sync.RuntimeSyncError, match="回读值不等于目标值"):
