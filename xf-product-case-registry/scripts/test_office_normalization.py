@@ -62,6 +62,14 @@ def test_pdf_inspection_rejects_active_content_and_truncated_files() -> None:
         office.inspect_pdf(pdf[: len(pdf) // 3])
 
 
+def test_pdf_inspection_ignores_action_lookalikes_inside_compressed_stream_bytes() -> None:
+    pdf = render()
+    noisy = pdf.replace(b"endstream", b"\x01/JS\xb8\x02/AA\xff\nendstream", 1)
+    assert noisy != pdf and office.inspect_pdf(noisy) == 1
+    with pytest.raises(office.OfficeNormalizationError, match="脚本"):
+        office.inspect_pdf(noisy.replace(b"%%EOF", b"<< /AA << /O 1 0 R >> >>\n%%EOF"))
+
+
 def test_mapping_requires_converter_and_rendering_check_and_verifies_both_files() -> None:
     source, pdf = docx_bytes(), render()
     with pytest.raises(office.OfficeNormalizationError, match="转换器"):

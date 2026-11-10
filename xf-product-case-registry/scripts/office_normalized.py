@@ -37,6 +37,7 @@ _MACRO_MARKERS = tuple(name.encode("utf-16le") for name in ("_VBA_PROJECT", "VBA
 _PDF_ACTIVE = re.compile(
     rb"/(JavaScript|JS|Launch|EmbeddedFile|OpenAction|AA|SubmitForm|ImportData)\b"
 )
+_STREAM_BODY = re.compile(rb"stream\r?\n.*?endstream", re.DOTALL)
 
 
 class OfficeNormalizationError(ValueError):
@@ -76,7 +77,8 @@ def inspect_pdf(data: bytes) -> int:
     """Return the page count of a plain, inactive PDF; raise otherwise."""
     if not data.startswith(b"%PDF-"):
         raise OfficeNormalizationError("转换结果不是 PDF")
-    if _PDF_ACTIVE.search(data):
+    # 动作名只可能出现在对象字典里；压缩流的二进制内容会偶然凑出 "/JS" 之类的字节，先剔除流体再检查
+    if _PDF_ACTIVE.search(_STREAM_BODY.sub(b"stream\nendstream", data)):
         raise OfficeNormalizationError("转换结果 PDF 含脚本/启动/内嵌文件动作")
     try:
         reader = PdfReader(io.BytesIO(data), strict=False)
