@@ -305,7 +305,7 @@ def _required_state(
     unit = _text(fields.get("单位名称")) or _text(case.get("unitName")) or _text(ledger.get("unitName"))
     address = _text(fields.get("单位地址")) or _text(case.get("unitAddress")) or _text(ledger.get("unitAddress"))
     brigade = _text(fields.get("消防管辖")) or _text(case.get("brigadeName") or case.get("brigadeCode")) or _text(ledger.get("brigade"))
-    category = _text(fields.get("单位类别")) or _text(case.get("unitCategory"))
+    category = _text(fields.get("单位类别")) or _text(case.get("unitCategory")) or _text(ledger.get("unitCategory"))
     form = _text(case.get("inspectionForm"))
     out: dict[str, dict[str, Any]] = {"projectNo": present(project) if fv.PROJECT_NO.fullmatch(_text(project)) else missing("项目编号格式无效")}
     out["unitName"] = missing("单位名称缺失") if not unit else (

@@ -156,6 +156,58 @@ def _archived_manifest(layout: Any, project: str, record: dict[str, Any]) -> dic
     return manifest if manifest.get("case", {}).get("projectNo") == project else {}
 
 
+def _identity_unit_category(
+    layout: Any,
+    project: str,
+    source: dict[str, Any],
+    lifecycle_evidence: Any,
+    manifest: dict[str, Any] | None,
+) -> str | None:
+    """Unit category from the newest trusted annual SourceIdentityV1 of this very case.
+
+    Only used when neither the saved detail nor the manifest carries a category. The identity file must
+    name this project, one RWID the ledger itself binds to the case, and its saved screenshot must still
+    match the recorded digest; the newest observation that shows a non-empty category wins.
+    """
+    detail = (lifecycle_evidence[0] if lifecycle_evidence else None) or {}
+    if str(detail.get("单位类别") or "").strip() or str(((manifest or {}).get("case") or {}).get("unitCategory") or "").strip():
+        return None
+    known = _known_rwids(source)
+    best: tuple[str, str] | None = None
+    batches = layout.root / "工作区" / "采集批次"
+    try:
+        paths = sorted(batches.glob(f"*/identities/{project}/*.json"))
+    except OSError:
+        return None
+    for path in paths:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
+            fields = value["fields"]
+            shot = value["screenshot"]
+            observed = str(value["observedAt"])
+            category = fields.get("单位类别")
+            if (
+                value.get("schemaVersion") != "SourceIdentityV1"
+                or value.get("projectNo") != project
+                or str(value.get("rwid")) not in known
+                or fields.get("项目编号") not in (None, project)
+                or not isinstance(category, str)
+                or not category.strip()
+            ):
+                continue
+            image = layout.resolve_recorded_path(layout.root / str(shot["relativePath"]).replace("\\", "/"))
+            if "sha256:" + hashlib.sha256(image.read_bytes()).hexdigest() != shot.get("sha256"):
+                continue
+        except (OSError, KeyError, TypeError, ValueError, ws.WorkspaceStateError):
+            continue
+        moment = _instant(observed)
+        if moment is None:
+            continue
+        if best is None or moment > (_instant(best[0]) or moment):
+            best = (observed, category.strip())
+    return best[1] if best else None
+
+
 def _known_rwids(source: dict[str, Any]) -> set[str]:
     """RWIDs this ledger record itself binds to the case (current, observed, annual identities, pending observation)."""
     known = {str(source["rwid"])} if source.get("rwid") else set()
@@ -1038,7 +1090,12 @@ def describe(layout: Any, project: str, record: dict[str, Any], *, today: date |
         project=project,
         evidence_fields=lifecycle_evidence[0] if lifecycle_evidence else None,
         manifest=lifecycle_manifest or None,
-        ledger_identity={"unitName": record.get("unitName"), "unitAddress": source.get("address"), "brigade": record.get("brigadeCode")},
+        ledger_identity={
+            "unitName": record.get("unitName"),
+            "unitAddress": source.get("address"),
+            "brigade": record.get("brigadeCode"),
+            "unitCategory": _identity_unit_category(layout, project, source, lifecycle_evidence, lifecycle_manifest),
+        },
         classification=lifecycle_classification,
         observed_on=(lifecycle_evidence[1] if lifecycle_evidence else None),
         has_package=package_received,
