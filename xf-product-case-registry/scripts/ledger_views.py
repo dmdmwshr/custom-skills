@@ -15,12 +15,14 @@ from zoneinfo import ZoneInfo
 if __package__:
     from . import case_lifecycle
     from . import local_validity
+    from . import product_links
     from . import source_coverage as coverage_api
     from . import source_facts
     from . import workspace_state as ws
 else:
     import case_lifecycle
     import local_validity
+    import product_links
     import source_coverage as coverage_api
     import source_facts
     import workspace_state as ws
@@ -1030,6 +1032,8 @@ def describe(layout: Any, project: str, record: dict[str, Any], *, today: date |
             if derived:
                 lifecycle_classification.update({k: derived[k] for k in ("initialResult", "initialInspectionDate", "reinspectionPending")})
     lifecycle_manifest = manifest or _archived_manifest(layout, project, record)
+    # Reviewed recheck->initial product links stored next to the archived generation (never rewrite the archive).
+    lifecycle_manifest = product_links.apply(layout, project, record, lifecycle_manifest)
     lifecycle = case_lifecycle.assess_case(
         project=project,
         evidence_fields=lifecycle_evidence[0] if lifecycle_evidence else None,

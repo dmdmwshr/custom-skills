@@ -33,6 +33,15 @@
 4. `local-verify`：重新核对清单、每份 PDF 摘要/页数、拆分链、原始 ZIP 摘要，并要求父代整树摘要与固定时一致、最新完成代际仍是该父代、包摘要与父代相同、清单相对父代有实质差异（含检查日期/阶段等检查自身字段、案件字段、产品、文件、槽位和附件；凭证 `amendment.changes` 列出 added/removed/changed；仅生成时间不同视为无差异而拒绝）。成功后新代际以“时间-清单摘要前 12 位”命名归档，`history.completions` 追加一条（含 `amendment.parentGeneration`），`amendment.status=COMPLETED`。任何失败都回滚，父代全文件摘要不变。
 5. `source abandon-amendment --project <项目> --reason <原因>`：父代未变化时，把待处理副本移入 `原始案卷/已放弃修订/<项目>/<修订标识>`、工作区移入 `工作区/历史工作区/<项目>-amendment-abandoned-<修订标识>`（均不删除），恢复父代完成记录；重复运行返回 `REUSED`。
 
+### 已归档案卷的复查产品对应复核（ProductLinkReviewV1）
+
+复查产品只经 `initialProductRef` 对应初查产品；名称、位置、数量不能代替。LOCAL_V1 案卷仍走 `source amend-archived`；旧式归档、不能或不必产生新代际的已完成案卷，用 `source link-products --project <项目> --links-file <绝对路径> --work-root <业务根>`：
+
+- 清单 JSON：`reviewer` 与 `links[]`，每条含 `recheckRef`、`initialRef`（必须是本案归档清单里的复查/初查产品）、`basis`、`statement`（至少 8 字，写明所依文书与具体事实）、`evidence[]`（`file` 为归档工作区 `source/` 内的相对文件名，`pages` 可选）。
+- `basis=IDENTICAL_ATTRIBUTES`：名称、型号、标称生产者逐项相同，且本案文书点名该产品；`EXPLICIT_STATEMENT`：本案复查文书明确写明复查/整改/更换/仍未整改的就是该初查产品。仅位置或名称相近不构成依据。
+- 只对 `COMPLETED` 案卷生效；写入账本 `productLinks`，绑定归档代际与归档清单的规范摘要，不改归档清单、原件、回执和凭证。清单已有 `initialProductRef` 的产品不覆盖；已登记到另一初查产品的不静默改写。
+- 生命周期视图读取时才把已核对的对应叠加到清单副本上；归档代际或清单变化后复核自动失效，需要重新登记。
+
 ### 外加补采文件（不属于 ZIP 成员）
 
 来源系统列出但 ZIP 缺少、随后从自身可见预览取得的文书（回执 `SourceDocumentRecoveryV1`）用 `source attach-supplement --project <项目> --file <绝对路径> --receipt <回执绝对路径> --work-root <业务根>` 绑定：

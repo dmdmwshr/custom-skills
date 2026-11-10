@@ -1890,6 +1890,10 @@ def source_attach_supplement_command(args: argparse.Namespace) -> None:
     _run_source_module(args, "supplements", "attach", args.project, args.file, args.receipt)
 
 
+def source_link_products_command(args: argparse.Namespace) -> None:
+    _run_source_module(args, "product_links", "attach", args.project, args.links_file)
+
+
 def source_rebind_evidence_command(args: argparse.Namespace) -> None:
     _run_source_module(
         args,
@@ -2293,6 +2297,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--receipt", required=True, help="SourceDocumentRecoveryV1 回执绝对路径"
     )
     attach_supplement.set_defaults(func=source_attach_supplement_command)
+
+    link_products = source_sub.add_parser(
+        "link-products",
+        help="已归档案卷：登记经文书核对的复查产品→初查产品对应(ProductLinkReviewV1)，不改归档清单",
+    )
+    add_workspace_resolution_options(link_products)
+    link_products.add_argument("--project", required=True)
+    link_products.add_argument(
+        "--links-file",
+        required=True,
+        help="含 reviewer 与 links 的 JSON 绝对路径（字段见 manual-intake.md）",
+    )
+    link_products.set_defaults(func=source_link_products_command)
 
     rebind_evidence = source_sub.add_parser(
         "rebind-evidence",

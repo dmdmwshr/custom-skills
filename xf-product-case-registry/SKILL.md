@@ -35,6 +35,7 @@ metadata:
 | 本地核验与归档 | `local-verify`（见下），凭证格式见本地格式的 LocalVerificationV1 |
 | 已归档案卷字段/分类修订（同一 ZIP） | [本地扩展入口](references/manual-intake.md#本地扩展入口)，source amend-archived、source abandon-amendment |
 | 来源列有但不在 ZIP 的文书（真实可见预览补采） | source attach-supplement，随后 split 引用 `补采材料/<文件>` |
+| 已归档案卷的复查产品→初查产品对应(旧式归档/不产生新代际) | [本地扩展入口](references/manual-intake.md#已归档案卷的复查产品对应复核productlinkreviewv1)，source link-products |
 | 一案已有多段详情截图（含覆盖索引）要成为永久 D 引用 | [浏览器采集](references/browser-acquisition.md)，source attach-detail-segments（首段须为已登记截图，同案/顺序/重叠/末端全证明才绑定，同索引重入 0 写） |
 | 已存详情要生成飞书基础字段（项目号、单位、地址、管辖→八队路由、有证据的初查日）说明 | [来源字段同步](references/source-sync.md)，feishu-source-build（只读云）→ feishu-source-sync；退出码 4 表示有被挡实体(PARTIAL)，不是整体完成 |
 | PNG/JPEG 原图需要进入规范成果 | `normalize-images --work-dir <工作区> --relative-path <图片>` |
