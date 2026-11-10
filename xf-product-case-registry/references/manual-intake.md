@@ -49,4 +49,4 @@
 ### 图片转 PDF 与水上大队来源的核验边界
 
 - `normalize-images` 及 local-verify 对 PNG 校验：CRC、IDAT 能被 zlib 完整解压且无多余数据、扫描行数与长度等于“高×(行宽+1)”、滤波字节合法、尺寸/色彩类型/位深一致；pHYs 横纵密度不等、JPEG(JFIF) 横纵密度不等、CMYK/YCCK JPEG、隔行 PNG、tRNS 透明表均拒绝（不支持，不做重绘或猜测）。JPEG 在生成（normalize-images）与校验（compose/local-verify 重新核对）两侧共用同一检查：逐扫描完整读取霍夫曼熵编码（不做 IDCT），要求霍夫曼表/量化表已定义、MCU 数与帧尺寸及采样因子一致、重启标记顺序与段数一致、位数不足（截断）或多余（≥2 字节）、无效编码、系数越界均拒绝，且每个分量都被扫描覆盖。只支持 8 位顺序（baseline/extended sequential）霍夫曼 JPEG；渐进式、无损、算术、分层 JPEG 因本地无法完整验证而明确拒绝。该检查为纯 Python 实现，不依赖 Pillow 或系统解码器，因此各平台行为一致；它证明熵数据可完整解码，不替代渲染目视核对。
-- 本地水上大队（SHUISHANG/“水上大队”）要求来源管辖证据：分类证据须带本案 `projectNo`，若有 `schemaVersion` 必须是 SourceEvidenceV1；记录须绑定本案已记录的来源标识，记录和字段中的项目编号若出现必须等于本案；手动交件回执须是 ManualCaseIntakeReceiptV1 且 `fields.projectNo` 为本案。外项目、无身份、版本错误一律不作依据。云端八大队口径不变。
+- 本地水上大队（SHUISHANG/“水上大队”）要求来源管辖证据：分类证据须带本案 `projectNo`，若有 `schemaVersion` 必须是 SourceEvidenceV1 或年度身份采集的 SourceIdentityV1；SourceEvidenceV1 的记录须绑定本案已记录的来源标识，SourceIdentityV1 的 `rwid` 须是本案已记录的来源标识、`fields.消防管辖` 为依据；记录和字段中的项目编号若出现必须等于本案；手动交件回执须是 ManualCaseIntakeReceiptV1 且 `fields.projectNo` 为本案。外项目、无身份、版本错误一律不作依据。云端八大队口径不变。
