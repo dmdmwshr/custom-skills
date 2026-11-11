@@ -96,7 +96,11 @@ ALWAYS_DENIED = {
 STABLE_KEYS = {"案卷主表": "fld1lHXHpk", "检查明细": "fld5ujrPv4", "产品明细": "fldqlwHjUW"}
 NEGATIVE_LITERALS = {"否", "0", 0, False}
 CLEAR_FINALS = {"OK", "UNCHANGED", "NOT_ATTEMPTED"}
-CLEAR_RECONCILED = {"APPLIED"}  # only positive evidence that the request took effect; an old value proves nothing
+# APPLIED: positive evidence that the request took effect. NOT_APPLIED_PROVEN: the strict technical recovery below (the run ended, the
+# service's own revision history shows no write after the intent, and a quiet window has passed). A bare old-value readback proves nothing.
+CLEAR_RECONCILED = {"APPLIED", "NOT_APPLIED_PROVEN"}
+RECOVERY_MIN_QUIET_SECONDS = 3600
+HISTORY_CREATE_SLACK_BEFORE, HISTORY_CREATE_SLACK_AFTER = 5, 120
 RELEASE_EVIDENCE_KINDS = {"request-terminal-proof", "service-side-record", "cli-process-log", "human-decision-record"}
 
 
@@ -118,6 +122,8 @@ class Transport(Protocol):
     # V3 create branch (optional for V2-only transports)
     def find_records(self, base: str, table: str, key_field_id: str, value: str) -> list[str]: ...
     def create_record(self, base: str, table: str, fields: dict[str, Any]) -> dict[str, Any]: ...
+    # Service-side revision history (optional: only the technical recovery below needs it)
+    def get_record_history(self, base: str, table: str, record_id: str) -> list[dict[str, Any]]: ...
 
 
 def now() -> str:
@@ -387,6 +393,14 @@ def validate_spec(spec: Any, contract: dict[str, Any]) -> dict[str, Any]:
         for item in evidence:
             _require(isinstance(item, dict) and item.get("kind") in RELEASE_EVIDENCE_KINDS, f"evidence.kind 必须是 {sorted(RELEASE_EVIDENCE_KINDS)} 之一")
             _require(isinstance(item.get("ref"), str) and item["ref"].strip(), "evidence.ref 不能为空")
+    recovery = spec.get("technicalRecovery")
+    if recovery is not None:
+        _require(spec["mode"] == "reconcile" and isinstance(recovery, dict), "technicalRecovery 仅限 reconcile 且为对象")
+        _require(spec.get("humanRelease") is None, "technicalRecovery 与 humanRelease 不能同时使用")
+        _require(recovery.get("kind") == "history-quiet-readback", "technicalRecovery.kind 必须是 history-quiet-readback")
+        _require(isinstance(recovery.get("intentId"), str) and recovery["intentId"].strip(), "technicalRecovery 需要精确 intentId(只恢复该意图)")
+        _require(isinstance(recovery.get("minQuietSeconds"), int) and not isinstance(recovery["minQuietSeconds"], bool)
+                 and recovery["minQuietSeconds"] >= RECOVERY_MIN_QUIET_SECONDS, f"minQuietSeconds 不得小于 {RECOVERY_MIN_QUIET_SECONDS}")
     return {"index": index, "allowed": allowed, "plan": plan}
 
 
@@ -553,6 +567,32 @@ class LarkCliTransport:
             if len(ids) < limit:
                 return result
             offset += limit
+
+    def get_record_history(self, base: str, table: str, record_id: str) -> list[dict[str, Any]]:
+        """Service-side revisions of one record (``+record-history-list``, read-only): [{rev, createTime(epoch s), operator, fieldIds}], newest first."""
+        items: list[dict[str, Any]] = []
+        max_version: int | None = None
+        for _ in range(40):
+            args = ["+record-history-list", "--base-token", base, "--table-id", table, "--record-id", record_id, "--page-size", "50"]
+            if max_version is not None:
+                args += ["--max-version", str(max_version)]
+            data = self._run(args).get("data")
+            page = data.get("items") if isinstance(data, dict) else None
+            if not isinstance(page, list):
+                raise RuntimeSyncError("历史结构异常：缺少 data.items")
+            for item in page:
+                if not isinstance(item, dict) or not isinstance(item.get("rev"), int) or not isinstance(item.get("create_time"), (int, float)):
+                    raise RuntimeSyncError("历史条目缺少 rev/create_time")
+                items.append({"rev": item["rev"], "createTime": float(item["create_time"]), "operator": item.get("operator"),
+                              "fieldIds": sorted({c.get("field_id") for c in (item.get("field_changes") or []) if isinstance(c, dict) and c.get("field_id")})})
+            if not data.get("has_more"):
+                if len({i["rev"] for i in items}) != len(items):
+                    raise RuntimeSyncError("历史含重复 rev")
+                return sorted(items, key=lambda i: -i["rev"])
+            if not page:
+                raise RuntimeSyncError("历史分页异常：has_more 但无条目")
+            max_version = min(i["rev"] for i in page) - 1
+        raise RuntimeSyncError("历史分页过多，拒绝作为证据")
 
     def delete_records(self, base: str, table: str, record_ids: list[str]) -> dict[str, Any]:
         """``+record-delete`` for exactly these ids (high-risk write: only ``feishu_scope_retire`` calls it, after its checks)."""
@@ -942,6 +982,18 @@ def reconcile(spec: dict[str, Any], checked: dict[str, Any], transport: Transpor
                                     "priorState": status["reason"], "originalIntent": intent})
                 entry["outcome"] = "HUMAN_RELEASED"
                 continue
+            recovery = spec.get("technicalRecovery")
+            if recovery is not None:
+                if recovery["intentId"] != intent["intentId"]:
+                    entry["outcome"] = "RECOVERY_NOT_FOR_THIS_INTENT"   # 恢复只对其精确 intentId 有效，不批量
+                    continue
+                outcome, observed, recovery_facts = _technical_recovery(index, item, intent, ledger.events(key), status, transport, base, recovery["minQuietSeconds"])
+                ledger.append(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome, "originalIntent": intent,
+                                    "observed": observed, "recovery": recovery_facts,
+                                    "detail": "严格技术恢复：原运行已结束、服务端历史在意图之后无该字段写入、读回等于旧值且静默期已过" if outcome == "NOT_APPLIED_PROVEN"
+                                    else "技术恢复证据不足，保持封锁：" + "；".join(recovery_facts.get("reasons", []))})
+                entry["outcome"], entry["observed"], entry["recovery"] = outcome, observed, recovery_facts
+                continue
             outcome, observed = _classify(index, item, intent, transport, base)
             ledger.append(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome,
                                 "originalIntent": intent, "observed": observed,
@@ -951,6 +1003,68 @@ def reconcile(spec: dict[str, Any], checked: dict[str, Any], transport: Transpor
     report["finishedAt"] = now()
     _write(log_dir, "reconcile-report.json", report)
     return report
+
+
+def _now_epoch() -> float:
+    return datetime.now(UTC).timestamp()
+
+
+def _iso_epoch(text: Any) -> float | None:
+    try:
+        return datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _technical_recovery(index, item, intent, events, status, transport, base, min_quiet, now_epoch: float | None = None) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Strict, ledger-recorded recovery of an UNKNOWN update intent. It never invents a human release and never edits the old events.
+
+    All of the following must hold, otherwise the target stays BLOCKED (RECOVERY_REFUSED):
+    the intent has exactly one ``final`` UNKNOWN event (the run ended and recorded it; PENDING/no final is not eligible);
+    the live row has the same stable key and every intent field still equals its old value (identity-checked read, ``OLD_VALUE_OBSERVED``);
+    the service's own revision history has no revision at/after the intent time that touches an intent field (or touches unknown fields);
+    at least ``min_quiet`` seconds passed since the final event.
+    """
+    reasons: list[str] = []
+    facts: dict[str, Any] = {"kind": "history-quiet-readback", "minQuietSeconds": min_quiet, "reasons": reasons}
+    if status.get("reason") not in {"UNKNOWN", "OLD_VALUE_OBSERVED", "RECOVERY_REFUSED"}:
+        reasons.append(f"账本状态 {status.get('reason')} 不可技术恢复(只限 UNKNOWN 终态的更新意图)")
+    finals = [e for e in events if e.get("event") == "final" and e.get("intentId") == intent["intentId"]]
+    if len(finals) != 1 or finals[0].get("status") != "UNKNOWN":
+        reasons.append("原意图须恰有一条 UNKNOWN 终态事件(进程已结束并记账)")
+    final_epoch = _iso_epoch(finals[0].get("at")) if len(finals) == 1 else None
+    intent_epoch = _iso_epoch(intent.get("at"))
+    if final_epoch is None or intent_epoch is None:
+        reasons.append("意图/终态时间无法解析")
+    current = now_epoch if now_epoch is not None else _now_epoch()
+    if final_epoch is not None:
+        facts["finalAt"], facts["quietSeconds"] = finals[0].get("at"), int(current - final_epoch)
+        if current - final_epoch < min_quiet:
+            reasons.append(f"静默期不足 {min_quiet} 秒")
+    if reasons:
+        return "RECOVERY_REFUSED", {}, facts
+    outcome, observed = _classify(index, item, intent, transport, base)
+    facts["readbackOutcome"] = outcome
+    if outcome != "OLD_VALUE_OBSERVED":
+        reasons.append(f"读回结果为 {outcome}，不是“身份相同且全部字段仍为旧值”")
+        return "RECOVERY_REFUSED", observed, facts
+    try:
+        history = transport.get_record_history(base, item["tableId"], item["recordId"])
+    except (RuntimeSyncError, AttributeError) as error:
+        reasons.append(f"服务端历史不可读：{error}")
+        return "RECOVERY_REFUSED", observed, facts
+    if not history:
+        reasons.append("服务端历史为空，不能作为证据")
+        return "RECOVERY_REFUSED", observed, facts
+    touched = set(intent["fields"])
+    after = [h for h in history if h["createTime"] >= intent_epoch - HISTORY_CREATE_SLACK_BEFORE]
+    bad = [h for h in after if not h["fieldIds"] or touched & set(h["fieldIds"])]
+    facts.update(historyRevisions=len(history), latestRev={"rev": history[0]["rev"], "createTime": history[0]["createTime"]},
+                 revisionsAtOrAfterIntent=[{"rev": h["rev"], "createTime": h["createTime"], "fieldIds": h["fieldIds"]} for h in after])
+    if bad:
+        reasons.append("服务端历史在意图之后出现涉及该字段(或字段不明)的修订，不能证明未生效")
+        return "RECOVERY_REFUSED", observed, facts
+    return "NOT_APPLIED_PROVEN", observed, facts
 
 
 def _classify(index, item, intent, transport, base) -> tuple[str, dict[str, Any]]:
@@ -1402,7 +1516,7 @@ def reconcile_creates(spec: dict[str, Any], checked: dict[str, Any], transport: 
                                     "evidence": release["evidence"], "acknowledgesLateWriteRisk": True, "priorState": status["reason"], "originalIntent": intent})
                 entry["outcome"] = "HUMAN_RELEASED"
                 continue
-            outcome, observed = _classify_create(index, item, intent, transport, base, proof)
+            outcome, observed = _classify_create(index, item, intent, transport, base, proof, ledger.events(key))
             ledger.append(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome, "originalIntent": intent,
                                 "observed": observed, "terminalProof": observed.get("verifiedProof", []) if outcome == "APPLIED" else [],
                                 "detail": "0 匹配不能证明迟到请求不会执行，保持封锁" if outcome == "ZERO_MATCH" else ""})
@@ -1412,7 +1526,7 @@ def reconcile_creates(spec: dict[str, Any], checked: dict[str, Any], transport: 
     return report
 
 
-def _classify_create(index, item, intent, transport, base, proof) -> tuple[str, dict[str, Any]]:
+def _classify_create(index, item, intent, transport, base, proof, events=()) -> tuple[str, dict[str, Any]]:
     key_field, key_value = intent["stableKey"]["fieldId"], intent["stableKey"]["value"]
     try:
         matches = transport.find_records(base, item["tableId"], key_field, key_value)
@@ -1435,12 +1549,49 @@ def _classify_create(index, item, intent, transport, base, proof) -> tuple[str, 
             return "DIVERGED", observed
     verified, reasons = _verify_terminal_proof(proof, item, intent, base, matches[0])
     if not verified:
+        verified, history_reasons = _verify_history_creation_proof(proof, item, intent, events, transport, base, matches[0])
+        reasons = [*reasons, *history_reasons]
+    if not verified:
         return "ONE_MATCH_NEEDS_TERMINAL_PROOF", {**observed, "proofRejected": reasons}
     return "APPLIED", {**observed, "verifiedProof": verified}
 
 
 def _jsonl(path: Path) -> list[Any]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _verify_history_creation_proof(proof: Any, item, intent, events, transport, base: str, record_id: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Causal proof from the service's own revision history, for an original run that left no receipt log.
+
+    Accepted only when the intent has exactly one UNKNOWN ``final`` event, no other create intent for this stable key lies in the window,
+    and the matched row's FIRST service revision was created inside [intent time - slack, final time + slack]. The unique stable-key match and the
+    field-by-field equality with the intent are checked by the caller. A free-text reference is not proof; the history is read here.
+    """
+    entries = [e for e in (proof if isinstance(proof, list) else []) if isinstance(e, dict) and e.get("kind") == "record-history-creation"]
+    if len(entries) != 1 or entries[0].get("intentId") != intent.get("intentId"):
+        return [], ["未提供针对该精确 intentId 的 record-history-creation 证明"]
+    finals = [e for e in events if e.get("event") == "final" and e.get("intentId") == intent["intentId"]]
+    if len(finals) != 1 or finals[0].get("status") != "UNKNOWN":
+        return [], ["原意图须恰有一条 UNKNOWN 终态事件"]
+    start, end = _iso_epoch(intent.get("at")), _iso_epoch(finals[0].get("at"))
+    if start is None or end is None:
+        return [], ["意图/终态时间无法解析"]
+    start, end = start - HISTORY_CREATE_SLACK_BEFORE, end + HISTORY_CREATE_SLACK_AFTER
+    others = [e for e in events if e.get("event") == "intent" and e.get("intentId") != intent["intentId"]
+              and (_iso_epoch(e.get("at")) or 0) >= start - 1 and (_iso_epoch(e.get("at")) or 0) <= end]
+    if others:
+        return [], ["同一稳定键在该窗口内另有创建意图，不能归因"]
+    try:
+        history = transport.get_record_history(base, item["tableId"], record_id)
+    except (RuntimeSyncError, AttributeError) as error:
+        return [], [f"服务端历史不可读：{error}"]
+    if not history:
+        return [], ["服务端历史为空"]
+    first = min(history, key=lambda h: h["rev"])
+    if not (start <= first["createTime"] <= end):
+        return [], ["该行的首个服务端修订不在原创建请求的时间窗口内"]
+    return [{"kind": "record-history-creation", "intentId": intent["intentId"], "recordId": record_id, "firstRev": first["rev"],
+             "firstRevCreateTime": first["createTime"], "operator": first.get("operator"), "window": [start, end]}], []
 
 
 def _verify_terminal_proof(proof: Any, item, intent, base: str, record_id: str) -> tuple[list[dict[str, Any]], list[str]]:
@@ -2070,9 +2221,23 @@ def _manifest_initial_date(root: Path, project: str, waterline_case: Any) -> tup
     return (day, ref, _text(last.get("verifiedAt")) or now()), None
 
 
+def _pending_human_release(ledger: Ledger | None, base: str, table_id: str, record_id: str, project: str, accepted: frozenset[str] = frozenset()) -> list[str]:
+    """Intent ids with a human_release the user never accepted, on this record's update target or its create target.
+
+    A target with such a history keeps its historical late-write risk: the maintenance builders refuse it instead of writing around the gate.
+    """
+    if ledger is None:
+        return []
+    found: list[str] = []
+    for key in (Ledger.target_key(base, table_id, record_id), Ledger.target_key(base, table_id, "create:" + project)):
+        found += [str(e.get("intentId")) for e in ledger.events(key) if e.get("event") == "human_release" and e.get("intentId") not in accepted]
+    return sorted(set(found))
+
+
 def build_date_correction_specs(*, plan_path: Path, plan_sha: str, waterline_path: Path, v3_path: Path, v3_sha: str, v9_path: Path,
                                 v9_sha: str, target: dict[str, str], transport: Any, out_dir: Path, log_root: Path,
-                                batch_size: int = HARD_CAP_RECORDS, scope_from: str = "2026-01-01") -> dict[str, Any]:
+                                batch_size: int = HARD_CAP_RECORDS, scope_from: str = "2026-01-01", ledger_dir: Path | None = None,
+                                isolated_test_ledger: bool = False) -> dict[str, Any]:
     """云端初查日期有据更正说明（V2 spec，旧值门禁）。
 
     计划逐项给出 projectNo、云端 recordId、此刻应有的旧值 expectedOld 与新日。生成前核对：新日等于本案已核验清单里的初查日、
@@ -2101,6 +2266,9 @@ def build_date_correction_specs(*, plan_path: Path, plan_sha: str, waterline_pat
     by_key: dict[str, list[str]] = {}
     for record_id, row in cloud.items():
         by_key.setdefault(_text(row.get(BASIC_FIELDS["key"])), []).append(record_id)
+    date_ledger = Ledger(ledger_dir, isolated_test=isolated_test_ledger) if ledger_dir is not None else None
+    if date_ledger is not None:
+        date_ledger.validate_root()
     updates: list[dict[str, Any]] = []
     refused: list[dict[str, Any]] = []
     for entry in entries:
@@ -2110,6 +2278,9 @@ def build_date_correction_specs(*, plan_path: Path, plan_sha: str, waterline_pat
         new_day, old_day, record_id = _text(entry.get("newDate")), _text(entry.get("expectedOld")), _text(entry.get("recordId"))
         if project in excluded:
             problems.append("案卷已移出活动集合")
+        pending_release = _pending_human_release(date_ledger, target["baseToken"], case_table, record_id, project)
+        if pending_release:
+            problems.append(f"历史上存在未获用户风险接受的 human_release({pending_release})：保持阻断，不生成说明")
         if proven is None:
             problems.append(f"无已核验的本案清单日期：{reason}")
         elif proven[0] != new_day:
@@ -2155,6 +2326,165 @@ def build_date_correction_specs(*, plan_path: Path, plan_sha: str, waterline_pat
         specs.append({"name": name, "path": str(path), "sha256": file_sha(path), "records": len(chunk), "kind": "datefix"})
     report = {"schema": "FeishuDateCorrectionBuildReportV1", "builtAt": now(), "externalCalls": "read-only fresh scan", "target": dict(target),
               "plan": {"path": str(plan_path), "sha256": plan_sha}, "counts": {"entries": len(entries), "toCorrect": len(updates), "refused": len(refused)},
+              "specs": specs, "refused": refused, "status": "OK" if not refused else "PARTIAL"}
+    (out_dir / "build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return report
+
+
+FIELD_PLAN_SCHEMA = "FeishuFieldPlanV1"
+
+
+def _evidence_ref(root: Path, item: Any) -> tuple[str | None, str | None]:
+    """One evidence file of a plan field: exists, sha256 equals the declared one. Returns (text for sourceRef, problem)."""
+    if not isinstance(item, dict) or not _text(item.get("path")) or not re.fullmatch(r"(sha256:)?[0-9a-f]{64}", _text(item.get("sha256"))):
+        return None, "evidence 需要 path 与 sha256"
+    path = Path(_text(item["path"]))
+    path = path if path.is_absolute() else root / path
+    try:
+        actual = file_sha(path)
+    except OSError:
+        return None, f"证据文件不可读：{item.get('path')}"
+    if actual != _text(item["sha256"]).removeprefix("sha256:"):
+        return None, f"证据文件摘要与计划不符：{item.get('path')}"
+    return f"{item['path']}@sha256={actual}", None
+
+
+def build_field_plan_specs(*, plan_path: Path, plan_sha: str, waterline_path: Path, contract_path: Path, contract_sha: str, target: dict[str, str],
+                           transport: Any, out_dir: Path, log_root: Path, ledger_dir: Path | None = None,
+                           batch_size: int = HARD_CAP_RECORDS, isolated_test_ledger: bool = False) -> dict[str, Any]:
+    """Evidence-checked V2 specs from a per-record field plan (maintenance of automatic source fields such as 统计归类).
+
+    Every plan field carries the new value, the exact old value expected now, and evidence files whose digests are re-computed here.
+    Refused, never partially written: a field the contract does not allow (class/type/option), an unreadable or changed evidence file,
+    a stable key that does not match the fresh cloud row, a current value that is not the planned old value (including human edits),
+    or a target whose ledger is still blocked. Execution stays with ``feishu-source-sync`` (P18 ledger, old-value guard, read-back).
+    """
+    _require(1 <= batch_size <= HARD_CAP_RECORDS, f"batch_size 必须是 1..{HARD_CAP_RECORDS}")
+    _require(file_sha(plan_path) == plan_sha, "字段计划摘要与固定值不一致")
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    _require(isinstance(plan, dict) and plan.get("schemaVersion") == FIELD_PLAN_SCHEMA, "字段计划版本不支持")
+    entries = plan.get("entries")
+    _require(isinstance(entries, list) and entries, "字段计划没有条目")
+    contract = load_contract(contract_path, contract_sha)
+    _require(target.get("baseToken") == contract["baseId"], "目标 Base 与合同不一致")
+    index = field_index(contract)
+    table_ids = {name: t["tableId"] for name, t in contract["tables"].items()}
+    root = waterline_path.parent
+    ledger = Ledger(ledger_dir, isolated_test=isolated_test_ledger) if ledger_dir is not None else None
+    if ledger is not None:
+        ledger.validate_root()
+    seen: set[tuple[str, str]] = set()
+    pending: dict[str, list[dict[str, Any]]] = {}
+    refused: list[dict[str, Any]] = []
+    unchanged = 0
+    for entry in entries:
+        problems: list[str] = []
+        table_name, record_id = _text(entry.get("table")), _text(entry.get("recordId"))
+        table_id = table_ids.get(table_name)
+        stable = entry.get("stableKey") if isinstance(entry.get("stableKey"), dict) else {}
+        if table_id is None or STABLE_KEYS.get(table_name) is None:
+            problems.append("表不在合同或没有稳定键")
+        elif stable.get("fieldId") != STABLE_KEYS[table_name] or not _text(stable.get("value")):
+            problems.append("稳定键字段/值无效")
+        if RECORD_ID.match(record_id) is None or (table_name, record_id) in seen:
+            problems.append("recordId 无效或重复")
+        seen.add((table_name, record_id))
+        fields_in = entry.get("fields") if isinstance(entry.get("fields"), dict) and entry.get("fields") else None
+        if fields_in is None:
+            problems.append("fields 为空")
+        planned: dict[str, dict[str, Any]] = {}
+        for fid, item in (fields_in or {}).items():
+            meta = index.get(table_id or "", {}).get(fid)
+            if not isinstance(item, dict) or meta is None or fid in ALWAYS_DENIED or meta["class"] != WHITELIST or meta["type"] not in SCALAR_TYPES or fid == STABLE_KEYS.get(table_name):
+                problems.append(f"字段 {fid} 合同不允许写入（类别/类型/永久禁写）")
+                continue
+            if "new" not in item or "expectedOld" not in item:
+                problems.append(f"字段 {meta['name']} 缺 new 或 expectedOld")
+                continue
+            if meta["type"] == "select" and meta["options"] is not None and item["new"] not in meta["options"]:
+                problems.append(f"选项不在合同中：{meta['name']}={item['new']!r}")
+                continue
+            refs = []
+            for ev in item.get("evidence") if isinstance(item.get("evidence"), list) and item.get("evidence") else [None]:
+                ref, why = _evidence_ref(root, ev)
+                if why:
+                    problems.append(f"字段 {meta['name']}：{why}")
+                else:
+                    refs.append(ref)
+            if not _text(item.get("basisRef")) or not _text(item.get("observedAt")):
+                problems.append(f"字段 {meta['name']} 缺 basisRef/observedAt")
+            planned[fid] = {"meta": meta, "item": item, "refs": refs}
+        if ledger is not None and table_id is not None and RECORD_ID.match(record_id) and ledger.state(Ledger.target_key(target["baseToken"], table_id, record_id))["state"] == "BLOCKED":
+            problems.append("该目标账本仍未决(BLOCKED)，先对账")
+        if table_id is not None and RECORD_ID.match(record_id):
+            release = _pending_human_release(ledger, target["baseToken"], table_id, record_id, _text(entry.get("projectNo")))
+            if release:
+                problems.append(f"历史上存在未获用户风险接受的 human_release({release})：保持阻断，不生成说明")
+        if problems:
+            refused.append({"projectNo": _text(entry.get("projectNo")), "table": table_name, "recordId": record_id, "problems": problems})
+            continue
+        pending.setdefault(table_name, []).append({"entry": entry, "planned": planned, "tableId": table_id})
+    updates: dict[str, list[dict[str, Any]]] = {}
+    for table_name, items in pending.items():
+        ids = [i["entry"]["recordId"] for i in items]
+        rows: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(ids), 50):
+            chunk_ids = ids[start:start + 50]
+            try:
+                rows.update(transport.get_records(target["baseToken"], items[0]["tableId"], chunk_ids))
+            except RuntimeSyncError:   # 块内有读不到的记录：逐条读，读不到的整条拒绝，其余照常
+                for record_id in chunk_ids:
+                    with contextlib.suppress(RuntimeSyncError):
+                        rows.update(transport.get_records(target["baseToken"], items[0]["tableId"], [record_id]))
+        for it in items:
+            entry, record_id = it["entry"], it["entry"]["recordId"]
+            row, problems = rows.get(record_id), []
+            if row is None:
+                problems.append("fresh 读取没有该记录")
+            else:
+                key_field = STABLE_KEYS[table_name]
+                if not cell_equals(index[it["tableId"]][key_field]["type"], row.get(key_field, "__absent__"), entry["stableKey"]["value"]):
+                    problems.append("fresh 稳定键与计划不一致")
+            writes: dict[str, Any] = {}
+            same = 0
+            for fid, pf in it["planned"].items():
+                if row is None or problems:
+                    break
+                meta, item = pf["meta"], pf["item"]
+                stored = row.get(fid, "__absent__")
+                if stored != "__absent__" and not cell_is_empty(stored) and cell_equals(meta["type"], stored, wire_value(meta["type"], item["new"])):
+                    same += 1   # 已是目标值：不写
+                    continue
+                old = item["expectedOld"]
+                if old is None:
+                    if stored == "__absent__" or not cell_is_empty(stored):
+                        problems.append(f"{meta['name']} 当前 {stored!r} 不是计划旧值(空)")
+                        break
+                elif stored == "__absent__" or cell_is_empty(stored) or not cell_equals(meta["type"], stored, wire_value(meta["type"], old)):
+                    problems.append(f"{meta['name']} 当前 {stored!r} 不是计划旧值 {old!r}（同期变化或人工改动，保留）")
+                    break
+                writes[fid] = {"new": item["new"], "expectedOld": old,
+                               "basis": _record_basis(f"{_text(item['basisRef'])} | 证据 " + "; ".join(pf["refs"]) + f" | 计划={plan_path.name}", _text(item["observedAt"]))}
+            if problems:
+                refused.append({"projectNo": _text(entry.get("projectNo")), "table": table_name, "recordId": record_id, "problems": problems})
+            elif writes:
+                updates.setdefault(table_name, []).append({"tableId": it["tableId"], "recordId": record_id, "stableKey": entry["stableKey"], "fields": writes})
+            else:
+                unchanged += 1
+    out_dir.mkdir(parents=True, exist_ok=True)
+    specs: list[dict[str, Any]] = []
+    for table_name, table_updates in updates.items():
+        for number, start in enumerate(range(0, len(table_updates), batch_size), start=1):
+            chunk = table_updates[start:start + batch_size]
+            name = f"fp-{table_ids[table_name]}-{number:02d}"
+            spec = {"mode": "execute", "target": dict(target), "limits": {"maxRecords": batch_size}, "logDir": str(log_root / name),
+                    "schemaVersion": SPEC_SCHEMA, "contract": {"path": str(contract_path), "sha256": contract_sha},
+                    "allowlist": {chunk[0]["tableId"]: {"records": [c["recordId"] for c in chunk], "fields": sorted({f for c in chunk for f in c["fields"]})}}, "updates": chunk}
+            path = out_dir / f"{name}.json"
+            path.write_text(json.dumps(spec, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+            specs.append({"name": name, "path": str(path), "sha256": file_sha(path), "records": len(chunk), "kind": "fieldplan", "table": table_name})
+    report = {"schema": "FeishuFieldPlanBuildReportV1", "builtAt": now(), "externalCalls": "read-only fresh read", "target": dict(target),
+              "plan": {"path": str(plan_path), "sha256": plan_sha}, "counts": {"entries": len(entries), "toWrite": sum(len(v) for v in updates.values()), "alreadyEqual": unchanged, "refused": len(refused)},
               "specs": specs, "refused": refused, "status": "OK" if not refused else "PARTIAL"}
     (out_dir / "build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return report

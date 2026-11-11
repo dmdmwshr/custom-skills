@@ -2644,8 +2644,20 @@ def build_parser() -> argparse.ArgumentParser:
         date_fix.add_argument(flag, required=True)
     date_fix.add_argument("--identity", default="user", choices=["user", "bot"])
     date_fix.add_argument("--batch-size", type=int, default=20)
+    date_fix.add_argument("--ledger-dir", help="唯一正式 P18 账本；给出时有未获用户接受的 human_release 历史的目标整条拒绝")
     date_fix.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     date_fix.set_defaults(func=feishu_date_correct_build_command)
+    field_plan = sub.add_parser(
+        "feishu-field-plan-build",
+        help="云端自动来源字段有据维护(如统计归类)：按逐条字段计划核对证据文件摘要、fresh 稳定键与旧值，生成带旧值门禁的 V2 说明；只读云，不写",
+    )
+    for flag in ("--plan", "--plan-sha", "--waterline", "--contract", "--contract-sha", "--base-token", "--profile", "--out-dir", "--log-root"):
+        field_plan.add_argument(flag, required=True)
+    field_plan.add_argument("--identity", default="user", choices=["user", "bot"])
+    field_plan.add_argument("--ledger-dir", help="唯一正式 P18 账本；给出时账本仍未决的目标整条拒绝")
+    field_plan.add_argument("--batch-size", type=int, default=20)
+    field_plan.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    field_plan.set_defaults(func=feishu_field_plan_build_command)
     feishu_retire = sub.add_parser(
         "feishu-scope-retire",
         help="删除云端范围外案卷及其自有检查/产品子行（先子后主）；计划绑定全字段快照，缺省只核对不删，--execute 才删，落账读回",
@@ -2867,9 +2879,33 @@ def feishu_date_correct_build_command(args: argparse.Namespace) -> None:
             plan_path=Path(args.plan), plan_sha=args.plan_sha, waterline_path=Path(args.waterline),
             v3_path=Path(args.contract_v3), v3_sha=args.contract_v3_sha, v9_path=Path(args.contract_v9), v9_sha=args.contract_v9_sha,
             target=target, transport=transport, out_dir=Path(args.out_dir), log_root=Path(args.log_root), batch_size=args.batch_size,
+            ledger_dir=Path(args.ledger_dir) if args.ledger_dir else None,
         )
     except module.SyncError as error:
         raise RegistryError(f"日期更正说明生成已拒绝：{error}") from error
+    except module.RuntimeSyncError as error:
+        print(f"ERROR: fresh 云读取失败，未生成说明：{error}", file=sys.stderr)
+        raise SystemExit(3) from error
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["status"] != "OK":
+        print("WARNING: 有条目被拒(PARTIAL)，其余说明已生成；退出码 4", file=sys.stderr)
+        raise SystemExit(4)
+
+
+def feishu_field_plan_build_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(
+        f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync"
+    )
+    target = {"baseToken": args.base_token, "profile": args.profile, "identity": args.identity}
+    try:
+        transport = module.LarkCliTransport(args.cli or module.DEFAULT_CLI, args.profile, args.identity)
+        report = module.build_field_plan_specs(
+            plan_path=Path(args.plan), plan_sha=args.plan_sha, waterline_path=Path(args.waterline), contract_path=Path(args.contract),
+            contract_sha=args.contract_sha, target=target, transport=transport, out_dir=Path(args.out_dir), log_root=Path(args.log_root),
+            ledger_dir=Path(args.ledger_dir) if args.ledger_dir else None, batch_size=args.batch_size,
+        )
+    except module.SyncError as error:
+        raise RegistryError(f"字段计划说明生成已拒绝：{error}") from error
     except module.RuntimeSyncError as error:
         print(f"ERROR: fresh 云读取失败，未生成说明：{error}", file=sys.stderr)
         raise SystemExit(3) from error

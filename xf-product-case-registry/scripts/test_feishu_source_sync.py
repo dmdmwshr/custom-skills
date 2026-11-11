@@ -97,6 +97,8 @@ class FakeService:
             return self._get(table, opt("--record-id"))
         if verb == "+record-upsert":
             return self._upsert(table, opt("--record-id")[0], json.loads(opt("--json")[0]))
+        if verb == "+record-history-list":
+            return self._ok({"items": self.b.get("history", []), "has_more": False})
         return SimpleNamespace(returncode=1, stdout=json.dumps({"ok": False}), stderr="")
 
     def _ok(self, data):
@@ -1038,6 +1040,11 @@ class MemoryTransport:
         if self.b.get("scan_fails"):
             raise sync.RuntimeSyncError("扫描失败")
         return [rid for (t, rid), row in self.rows.items() if t == table and row.get(key_field) == value]
+
+    def get_record_history(self, base, table, record_id):
+        if "history" not in self.b:
+            raise sync.RuntimeSyncError("无历史")
+        return self.b["history"](record_id)
 
     def _store(self, table, fields):
         self.counter += 1
@@ -2447,3 +2454,244 @@ def test_build_prefers_the_verified_manifest_initial_day_over_the_acceptance_fal
     manifest.write_text(manifest.read_text(encoding="utf-8").replace("2026-11-02", "2026-11-03"), encoding="utf-8")      # 清单被改：摘要不符，退回受理日期后备
     again, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water)
     assert _first_create(again)[DATE_FIELD]["new"] == "2026-11-04"
+
+
+# ------------------------------------------------------------------ strict technical recovery of an UNKNOWN update (no human release)
+
+
+def _later(monkeypatch, seconds=7200):
+    real = sync._now_epoch
+    monkeypatch.setattr(sync, "_now_epoch", lambda: real() + seconds)
+
+
+def _hist(created_before_intent=True, field_ids=(), at=None):
+    base = sync.now()
+    epoch = sync._iso_epoch(base)
+    items = [{"rev": 10, "create_time": epoch - 86400, "operator": "u", "field_changes": [{"field_id": HANDLER}]}]
+    if not created_before_intent:
+        items.insert(0, {"rev": 11, "create_time": at if at is not None else epoch + 1, "operator": "u", "field_changes": [{"field_id": f} for f in field_ids]})
+    return items
+
+
+def recovery_spec(tmp_path, name="recover", intent_id=None, quiet=7200, **extra):
+    intent = intent_id or ledger_events(tmp_path)[0]["intentId"]
+    return reconcile_spec(tmp_path, name, technicalRecovery={"kind": "history-quiet-readback", "intentId": intent, "minQuietSeconds": quiet}, **extra)
+
+
+def test_technical_recovery_clears_an_unknown_update_only_with_strict_evidence_and_allows_the_normal_write(tmp_path, meta, monkeypatch):
+    unknown_state(tmp_path, meta)
+    _later(monkeypatch)
+    recon = service(meta, history=_hist())
+    report = run(tmp_path, recovery_spec(tmp_path), recon, flag="reconcile", name="r.json")
+    target = report["targets"][0]
+    assert target["outcome"] == "NOT_APPLIED_PROVEN" and recon.upserts == [] and report["externalWrites"] == 0
+    assert target["recovery"]["revisionsAtOrAfterIntent"] == [] and target["recovery"]["quietSeconds"] >= 7200
+    events = ledger_events(tmp_path)
+    assert [e["event"] for e in events] == ["intent", "final", "reconciled"] and events[1]["status"] == "UNKNOWN"   # 原 UNKNOWN 保留
+    assert not any(e["event"] == "human_release" for e in events)
+    again = service(meta)
+    result = run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-after")), again, name="again.json")
+    assert result["records"][0]["status"] == "WRITTEN" and len(again.upserts) == 1
+
+
+def test_technical_recovery_is_refused_inside_the_quiet_window(tmp_path, meta):
+    unknown_state(tmp_path, meta)
+    recon = service(meta, history=_hist())
+    report = run(tmp_path, recovery_spec(tmp_path), recon, flag="reconcile", name="r.json")
+    assert report["targets"][0]["outcome"] == "RECOVERY_REFUSED" and "静默期" in " ".join(report["targets"][0]["recovery"]["reasons"])
+    blocked = service(meta)
+    with pytest.raises(sync.SyncError, match="RECOVERY_REFUSED"):
+        run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-retry")), blocked, name="retry.json")
+    assert blocked.calls == []
+
+
+def test_technical_recovery_is_refused_when_history_shows_a_later_revision_on_the_field(tmp_path, meta, monkeypatch):
+    unknown_state(tmp_path, meta)
+    _later(monkeypatch)
+    recon = service(meta, history=_hist(created_before_intent=False, field_ids=[UNIT]))
+    report = run(tmp_path, recovery_spec(tmp_path), recon, flag="reconcile", name="r.json")
+    assert report["targets"][0]["outcome"] == "RECOVERY_REFUSED"
+    assert ledger_events(tmp_path)[-1]["outcome"] == "RECOVERY_REFUSED"
+
+
+def test_technical_recovery_is_refused_when_a_later_revision_has_unknown_fields_or_history_is_empty(tmp_path, meta, monkeypatch):
+    unknown_state(tmp_path, meta)
+    _later(monkeypatch)
+    assert run(tmp_path, recovery_spec(tmp_path, "a"), service(meta, history=_hist(created_before_intent=False, field_ids=[])), flag="reconcile",
+               name="a.json")["targets"][0]["outcome"] == "RECOVERY_REFUSED"
+    assert run(tmp_path, recovery_spec(tmp_path, "b"), service(meta, history=[]), flag="reconcile", name="b.json")["targets"][0]["outcome"] == "RECOVERY_REFUSED"
+
+
+def test_technical_recovery_tolerates_a_later_revision_of_unrelated_fields(tmp_path, meta, monkeypatch):
+    unknown_state(tmp_path, meta)
+    _later(monkeypatch)
+    recon = service(meta, history=_hist(created_before_intent=False, field_ids=[HANDLER]))
+    assert run(tmp_path, recovery_spec(tmp_path), recon, flag="reconcile", name="r.json")["targets"][0]["outcome"] == "NOT_APPLIED_PROVEN"
+
+
+def test_technical_recovery_is_refused_when_the_live_value_is_not_the_old_value(tmp_path, meta, monkeypatch):
+    unknown_state(tmp_path, meta)
+    _later(monkeypatch)
+    recon = service(meta, history=_hist())
+    recon.rows[(CASE, REC)][UNIT] = "新单位"
+    report = run(tmp_path, recovery_spec(tmp_path), recon, flag="reconcile", name="r.json")
+    assert report["targets"][0]["outcome"] == "RECOVERY_REFUSED" and report["targets"][0]["recovery"]["readbackOutcome"] == "DIVERGED"
+
+
+def test_technical_recovery_needs_an_unknown_final_not_a_pending_intent(tmp_path, meta, monkeypatch):
+    ledger = sync.Ledger(tmp_path / "ledger")
+    ledger.initialize()
+    ledger.append(sync.Ledger.target_key(BASE, CASE, REC), {"event": "intent", "intentId": "i1", "stableKey": {"fieldId": KEY, "value": STABLE},
+                                                            "fields": {UNIT: {"name": "u", "old": "旧单位", "type": "text", "wire": "新单位"}}})
+    _later(monkeypatch)
+    report = run(tmp_path, recovery_spec(tmp_path, intent_id="i1"), service(meta, history=_hist()), flag="reconcile", name="p.json")
+    assert report["targets"][0]["outcome"] == "RECOVERY_REFUSED"
+
+
+def test_technical_recovery_applies_only_to_its_exact_intent_and_never_with_a_human_release(tmp_path, meta, monkeypatch):
+    unknown_state(tmp_path, meta)
+    _later(monkeypatch)
+    report = run(tmp_path, recovery_spec(tmp_path, intent_id="0" * 64), service(meta, history=_hist()), flag="reconcile", name="r.json")
+    assert report["targets"][0]["outcome"] == "RECOVERY_NOT_FOR_THIS_INTENT" and ledger_events(tmp_path)[-1]["event"] == "final"
+    both = recovery_spec(tmp_path, "both", humanRelease={"reason": "r", "operator": "o", "intentId": "i", "acknowledgesLateWriteRisk": True, "evidence": [{"kind": "x", "ref": "y"}]})
+    with pytest.raises(sync.SyncError):
+        run(tmp_path, both, service(meta, history=_hist()), flag="reconcile", name="both.json")
+
+
+@pytest.mark.parametrize("quiet", [0, 60, 3599])
+def test_technical_recovery_rejects_a_short_quiet_window_in_the_spec(tmp_path, meta, quiet):
+    unknown_state(tmp_path, meta)
+    with pytest.raises(sync.SyncError, match="minQuietSeconds"):
+        run(tmp_path, recovery_spec(tmp_path, quiet=quiet), service(meta, history=_hist()), flag="reconcile", name="q.json")
+
+
+# ------------------------------------------------------------------ create reconcile: causal proof from the service's own revision history
+
+
+def _creation_history(offset=0.5):
+    epoch = sync._iso_epoch(sync.now())
+    return lambda rid: [{"rev": 5, "createTime": epoch + offset, "operator": "u", "fieldIds": []}]
+
+
+def _history_proof(ledger, key):
+    return [{"kind": "record-history-creation", "intentId": sync.Ledger(ledger).state(key)["lastIntent"]["intentId"]}]
+
+
+def test_v3_history_creation_proof_clears_a_create_without_a_receipt_log(tmp_path):
+    contract, ledger, transport, key = _late_create(tmp_path, timeout_late=True)
+    transport.b["history"] = _creation_history()
+    target = _reconcile(tmp_path, contract, ledger, transport, "h1", requestTerminalProof=_history_proof(ledger, key))
+    assert target["outcome"] == "APPLIED" and target["observed"]["verifiedProof"][0]["kind"] == "record-history-creation"
+    assert sync.Ledger(ledger).state(key)["state"] == "CLEAR" and len(transport.creates) == 1
+    events = sync.Ledger(ledger).events(key)
+    assert [e["event"] for e in events][-1] == "reconciled" and events[-1]["terminalProof"][0]["kind"] == "record-history-creation"
+
+
+def test_v3_history_creation_proof_refuses_outside_the_window_or_without_exact_intent_or_history(tmp_path):
+    contract, ledger, transport, key = _late_create(tmp_path, timeout_late=True)
+    transport.b["history"] = _creation_history(offset=-3600)                         # 该行早于原请求就存在
+    assert _reconcile(tmp_path, contract, ledger, transport, "h-early", requestTerminalProof=_history_proof(ledger, key))["outcome"] == "ONE_MATCH_NEEDS_TERMINAL_PROOF"
+    transport.b["history"] = _creation_history(offset=3600)                          # 远晚于原请求
+    assert _reconcile(tmp_path, contract, ledger, transport, "h-late", requestTerminalProof=_history_proof(ledger, key))["outcome"] == "ONE_MATCH_NEEDS_TERMINAL_PROOF"
+    transport.b["history"] = _creation_history()
+    wrong = [{"kind": "record-history-creation", "intentId": "f" * 64}]
+    assert _reconcile(tmp_path, contract, ledger, transport, "h-intent", requestTerminalProof=wrong)["outcome"] == "ONE_MATCH_NEEDS_TERMINAL_PROOF"
+    assert _reconcile(tmp_path, contract, ledger, transport, "h-none")["outcome"] == "ONE_MATCH_NEEDS_TERMINAL_PROOF"
+    del transport.b["history"]
+    assert _reconcile(tmp_path, contract, ledger, transport, "h-unreadable", requestTerminalProof=_history_proof(ledger, key))["outcome"] == "ONE_MATCH_NEEDS_TERMINAL_PROOF"
+    transport.b["history"] = lambda rid: []
+    assert _reconcile(tmp_path, contract, ledger, transport, "h-empty", requestTerminalProof=_history_proof(ledger, key))["outcome"] == "ONE_MATCH_NEEDS_TERMINAL_PROOF"
+    assert sync.Ledger(ledger).state(key)["state"] == "BLOCKED"
+
+
+# ------------------------------------------------------------------ evidence-checked field plan (自动来源字段有据维护)
+
+
+def _fieldplan_setup(tmp_path, *, cloud=("登记系统",), new="监督系统", old="登记系统", tamper=False, field=DATE_SRC_F, plan_over=None):
+    v3, v9 = make_basic_contracts(tmp_path)
+    _add_lifecycle_fields(v3, v9)
+    evidence = tmp_path / "证据" / "manifest.json"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text(json.dumps({"initialInspection": {"inspectionDate": "2026-06-17"}}), encoding="utf-8")
+    digest_ = sha(evidence)
+    if tamper:
+        evidence.write_text("{}", encoding="utf-8")
+    water = tmp_path / "waterline.json"
+    water.write_text(json.dumps({"cases": {}}), encoding="utf-8")
+    entry = {"table": "案卷主表", "projectNo": PN_FILL, "recordId": "recEXIST000001", "stableKey": {"fieldId": KEY, "value": PN_FILL},
+             "fields": {field: {"new": new, "expectedOld": old, "basisRef": "本案已核验清单初查日", "observedAt": "2026-11-12T00:00:00+08:00",
+                                "evidence": [{"path": "证据/manifest.json", "sha256": digest_}]}}}
+    entry.update(plan_over or {})
+    plan = tmp_path / "fieldplan.json"
+    plan.write_text(json.dumps({"schemaVersion": sync.FIELD_PLAN_SCHEMA, "entries": [entry]}), encoding="utf-8")
+    transport = BuildTransport()
+    transport.rows[(CASE, "recEXIST000001")] = {KEY: PN_FILL, field: list(cloud) if isinstance(cloud, tuple) else cloud}
+    return v3, v9, water, plan, transport
+
+
+def _fieldplan(tmp_path, **kw):
+    v3, v9, water, plan, transport = _fieldplan_setup(tmp_path, **kw)
+    report = sync.build_field_plan_specs(plan_path=plan, plan_sha=sha(plan), waterline_path=water, contract_path=v9, contract_sha=sha(v9),
+                                         target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"}, transport=transport,
+                                         out_dir=tmp_path / "specs", log_root=tmp_path / "logs")
+    return report, transport
+
+
+def test_field_plan_builds_a_guarded_update_with_digest_checked_evidence(tmp_path):
+    report, transport = _fieldplan(tmp_path)
+    assert report["status"] == "OK" and report["counts"] == {"entries": 1, "toWrite": 1, "alreadyEqual": 0, "refused": 0}
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    item = spec["updates"][0]["fields"][DATE_SRC_F]
+    assert item["new"] == "监督系统" and item["expectedOld"] == "登记系统" and "@sha256=" in item["basis"]["sourceRef"] and "manifest.json" in item["basis"]["sourceRef"]
+    assert spec["allowlist"][CASE] == {"records": ["recEXIST000001"], "fields": [DATE_SRC_F]} and not transport.creates
+
+
+def test_field_plan_fill_of_an_empty_cell_and_already_equal_cells(tmp_path):
+    report, _ = _fieldplan(tmp_path, cloud=None, old=None)
+    assert report["status"] == "OK" and report["counts"]["toWrite"] == 1
+    again, _ = _fieldplan(tmp_path / "again", cloud=("监督系统",), old="登记系统") if (tmp_path / "again").mkdir() is None else (None, None)
+    assert again["status"] == "OK" and again["counts"] == {"entries": 1, "toWrite": 0, "alreadyEqual": 1, "refused": 0} and not again["specs"]
+
+
+@pytest.mark.parametrize("kw,why", [
+    ({"tamper": True}, "摘要"),                                              # 证据文件被改
+    ({"cloud": ("底册",)}, "不是计划旧值"),                                   # 云端已变(含人工)
+    ({"cloud": None}, "不是计划旧值"),                                         # 计划说有旧值，云端其实是空
+    ({"new": "不存在的选项"}, "选项不在合同"),
+    ({"field": "fld0000000X"}, "合同不允许"),                                 # 合同外字段默认拒写
+    ({"plan_over": {"recordId": "recOTHER0000001"}}, "没有该记录"),
+])
+def test_field_plan_refuses_what_the_contract_or_evidence_does_not_back(tmp_path, kw, why):
+    report, _ = _fieldplan(tmp_path, **kw)
+    assert report["status"] == "PARTIAL" and report["counts"]["toWrite"] == 0 and not report["specs"]
+    assert why in json.dumps(report["refused"], ensure_ascii=False)
+
+
+def test_field_plan_refuses_a_human_field_and_a_changed_plan(tmp_path):
+    report, _ = _fieldplan(tmp_path, field="fldvHLpSKI")
+    assert report["status"] == "PARTIAL" and "合同不允许" in json.dumps(report["refused"], ensure_ascii=False)
+    v3, v9, water, plan, transport = _fieldplan_setup(tmp_path / "x") if (tmp_path / "x").mkdir() is None else (None,) * 5
+    with pytest.raises(sync.SyncError, match="摘要"):
+        sync.build_field_plan_specs(plan_path=plan, plan_sha="0" * 64, waterline_path=water, contract_path=v9, contract_sha=sha(v9),
+                                    target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"}, transport=transport,
+                                    out_dir=tmp_path / "specs", log_root=tmp_path / "logs")
+
+
+def test_maintenance_builders_refuse_a_target_with_an_unaccepted_human_release_history(tmp_path):
+    v3, v9, water, plan, transport = _fieldplan_setup(tmp_path)
+    ledger_dir = tmp_path / "ledger"
+    ledger = sync.Ledger(ledger_dir, isolated_test=True)
+    ledger.initialize()
+    ledger.append(sync.Ledger.target_key(BASE, CASE, "create:" + PN_FILL), {"event": "human_release", "intentId": "i-old", "operator": "助手(历史)", "reason": "r"})
+    target = {"baseToken": BASE, "profile": "offline-fake", "identity": "user"}
+    report = sync.build_field_plan_specs(plan_path=plan, plan_sha=sha(plan), waterline_path=water, contract_path=v9, contract_sha=sha(v9), target=target,
+                                         transport=transport, out_dir=tmp_path / "specs", log_root=tmp_path / "logs", ledger_dir=ledger_dir, isolated_test_ledger=True)
+    assert report["status"] == "PARTIAL" and not report["specs"] and "human_release" in json.dumps(report["refused"], ensure_ascii=False)
+    v3d, v9d, waterd, pland, transportd = _datefix_setup(tmp_path / "d") if (tmp_path / "d").mkdir() is None else (None,) * 5
+    refused = sync.build_date_correction_specs(plan_path=pland, plan_sha=sha(pland), waterline_path=waterd, v3_path=v3d, v3_sha=sha(v3d), v9_path=v9d, v9_sha=sha(v9d),
+                                               target=target, transport=transportd, out_dir=tmp_path / "specs2", log_root=tmp_path / "logs2",
+                                               ledger_dir=ledger_dir, isolated_test_ledger=True)
+    assert refused["status"] == "PARTIAL" and not refused["specs"] and "human_release" in json.dumps(refused["refused"], ensure_ascii=False)
+    ok = sync.build_field_plan_specs(plan_path=plan, plan_sha=sha(plan), waterline_path=water, contract_path=v9, contract_sha=sha(v9), target=target, transport=transport,
+                                     out_dir=tmp_path / "specs3", log_root=tmp_path / "logs3", ledger_dir=None)
+    assert ok["status"] == "OK" and ok["counts"]["toWrite"] == 1

@@ -163,3 +163,9 @@ python scripts/registry_cli.py feishu-source-build --capture 采集批次.json -
 - **有据日期更正** `feishu-date-correct-build --plan 计划.json --plan-sha …`（只读云）：计划逐项给出 `projectNo / recordId / expectedOld / newDate`（可选成对的 `sourceOld/sourceNew` 同步更正“初查日期来源”）。生成前逐项核对：新日等于本案已核验清单日、不早于范围起点、fresh 云端键唯一命中该 recordId 且当前值正是 expectedOld；任一不符整条拒绝（含人工改动）。输出 V2 说明（allowlist 只含日期/来源字段），执行仍由 `feishu-source-sync --execute` 走 P18 账、写前旧值核对与写后读回。
 - **水上大队等不在八队名录的管辖**：路由文件可加 `{"sourceJurisdictionExact": …, "adminOnly": true, "sourceOptionExact": "大队来源选项原文"}`。创建时不写所属大队/归属大队（留空，仅管理员可见，与既有水上案同一做法）；“大队来源”仅在最新合同允许创建且选项存在时才写，合同把它列为只读时留空，不为此改合同。八队路由的“所属大队+归属大队同队”规则不放宽。
 
+
+## 未决写入的严格技术恢复与字段计划（2026-11-12）
+
+- **UNKNOWN 更新意图的技术恢复**：`feishu-source-sync --reconcile` 的 V2 reconcile spec 可带 `"technicalRecovery": {"kind": "history-quiet-readback", "intentId": "<精确意图>", "minQuietSeconds": ≥3600}`（不得与 `humanRelease` 同用）。只有同时满足才在账本追加 `reconciled / NOT_APPLIED_PROVEN` 并解封：该意图恰有一条 `UNKNOWN` 终态（进程已结束并记账；无终态的 PENDING 不可恢复）；身份核对后的读回仍是全部旧值；服务端 `+record-history-list` 在意图时间之后没有涉及该意图字段（或字段不明）的修订；距终态已过静默期。证据不足记 `RECOVERY_REFUSED` 并保持封锁。原 `UNKNOWN` 终态与历史对账事件原样保留，不伪造 humanRelease，不改账本旧事件。恢复后的更正仍走普通 `execute`（旧值门禁、写后读回）。
+- **无回执日志的未决创建**：V3 `reconcile` 的 `requestTerminalProof` 可用 `{"kind": "record-history-creation", "intentId": …}`：唯一稳定键匹配、字段与意图逐项相等，且该行**首个服务端修订**创建于原意图时间窗内（意图前 5 秒～终态后 120 秒），窗内无同键的其他创建意图；证明由工具读服务端历史得出，不接受自报时间。通过记 `APPLIED`。
+- **字段计划** `feishu-field-plan-build --plan FeishuFieldPlanV1 …`（只读云）：计划逐条给出 `table/recordId/stableKey` 与每个字段的 `new/expectedOld/basisRef/observedAt/evidence[{path,sha256}]`。生成前重算证据文件摘要、核对合同类别/类型/选项、fresh 稳定键与旧值；`--ledger-dir` 时账本仍未决的目标、以及历史上有未获用户接受的 `human_release` 的目标（更新目标或其创建目标）整条拒绝。输出带旧值门禁的 V2 说明，执行仍由 `feishu-source-sync --execute`。`feishu-date-correct-build` 同样接受 `--ledger-dir` 做 human_release 门禁。
