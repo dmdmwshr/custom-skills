@@ -41,6 +41,7 @@ metadata:
 | PNG/JPEG 原图需要进入规范成果 | `normalize-images --work-dir <工作区> --relative-path <图片>` |
 | Word(.docx/.doc) 原件需要进入规范成果 | 操作者先用本机 Office 引擎转 PDF 并逐页目视核对，再 `normalize-office --work-dir <工作区> --relative-path <Word 原件> --converted-pdf <工作区外的 PDF> --converter-name <名称> --converter-version <版本> --rendering-check <核对说明>` |
 | 分类证据文件丢失 | source rebind-evidence（用本案真实手动交件新绑定，不改旧摘要） |
+| 分类证据文件被后续采集追加改写（摘要变） | source rebind-retained-observation（凭保留的早期观察与变更轨迹新绑定，不改旧摘要） |
 
 ## 每轮执行
 

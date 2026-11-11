@@ -55,6 +55,8 @@
 
 总账 `source.classification.evidenceSha256` 指向的证据文件已丢失（或摘要不符）时，既有归档会在重定位阶段拒绝。若本案存在已逐图核清的真实手动交件（同一 ZIP 摘要、截图摘要仍匹配），可用 `source rebind-evidence --project <项目> --intake-id <接件标识> --reason <原因> --work-root <业务根>`：旧路径与旧摘要原样保留，状态记为 MISSING/DIGEST_MISMATCH，新增 `classification.evidenceReplacement`（指向手动交件回执及其摘要）。入口不重建旧 JSON、不改旧摘要、不改分类结果；原证据完整时拒绝。新绑定前还核对：回执 `schemaVersion=ManualCaseIntakeReceiptV1` 且 `fields.projectNo`、`projectNo` 均为本案；截图必须能完整解码为 PNG（含像素数据和尺寸，纯文本伪图、截断或 IDAT 损坏一律拒绝），且尺寸与回执记录一致。之后归档按替代证据重定位，旧摘要缺失作为事实保留。
 
+同一案的证据文件被后续采集追加改写（早期观察进入 `previousObservations`，当前观察替换原记录，整文件摘要随之变化）时，用 `source rebind-retained-observation --project <项目> --reason <原因> --work-root <业务根>`。放行条件：证据文件仍是本案、含总账登记的 RWID，当前记录的案卷包摘要与总账一致；恰有一条早期观察的取得时点等于分类的 `observedAt`，且由它重新推导的初查结果/初查日/统计年/待复检与总账记录逐项相等。旧摘要原样保留，状态记为 `DIGEST_MISMATCH`，同时写入当前观察（含阶段、标签等变化）；缺任一环即拒绝，当前观察与旧结论是否相符不做推定。归档后替代件随案卷重定位并复核其摘要。
+
 ### 图片转 PDF 与水上大队来源的核验边界
 
 - `normalize-images` 及 local-verify 对 PNG 校验：CRC、IDAT 能被 zlib 完整解压且无多余数据、扫描行数与长度等于“高×(行宽+1)”、滤波字节合法、尺寸/色彩类型/位深一致；pHYs 横纵密度不等、JPEG(JFIF) 横纵密度不等、CMYK/YCCK JPEG、隔行 PNG、tRNS 透明表均拒绝（不支持，不做重绘或猜测）。JPEG 在生成（normalize-images）与校验（compose/local-verify 重新核对）两侧共用同一检查：逐扫描完整读取霍夫曼熵编码（不做 IDCT），要求霍夫曼表/量化表已定义、MCU 数与帧尺寸及采样因子一致、重启标记顺序与段数一致、位数不足（截断）或多余（≥2 字节）、无效编码、系数越界均拒绝，且每个分量都被扫描覆盖。只支持 8 位顺序（baseline/extended sequential）霍夫曼 JPEG；渐进式、无损、算术、分层 JPEG 因本地无法完整验证而明确拒绝。该检查为纯 Python 实现，不依赖 Pillow 或系统解码器，因此各平台行为一致；它证明熵数据可完整解码，不替代渲染目视核对。

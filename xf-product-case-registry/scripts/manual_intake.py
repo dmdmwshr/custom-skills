@@ -23,6 +23,10 @@ else:
     import workspace_state as ws
 
 
+RETAINED_OBSERVATION = "SUPERSEDED_OBSERVATION_RETAINED"  # classification_rebind.STATUS
+_REPLACEMENT_STATUSES = ("REPLACED_BY_MANUAL_INTAKE", RETAINED_OBSERVATION)
+
+
 def _digest(value: Any) -> str:
     return (
         "sha256:"
@@ -625,9 +629,10 @@ def relocated_original_bindings(
                 **classification,
                 "evidencePath": new_path.relative_to(layout.root).as_posix(),
             }
-        elif replacement and replacement.get("status") == "REPLACED_BY_MANUAL_INTAKE":
-            # The original evidence file never existed in the archived folder: keep the recorded
-            # old digest as a fact and relocate the real replacement instead of failing.
+        elif replacement and replacement.get("status") in _REPLACEMENT_STATUSES:
+            # The original evidence file never existed in the archived folder (or was extended by a
+            # later capture): keep the recorded old digest as a fact and relocate the real
+            # replacement instead of failing.
             rebound = dict(replacement)
             old_replacement = _recorded(layout, replacement["evidencePath"])
             if old_replacement.is_relative_to(previous):
@@ -635,7 +640,10 @@ def relocated_original_bindings(
                 if not moved.is_file() or source._sha256(moved) != replacement["evidenceSha256"]:
                     raise ws.WorkspaceStateError("归档后的替代来源证据摘要不一致")
                 rebound["evidencePath"] = moved.relative_to(layout.root).as_posix()
-            changes["classification"] = {**classification, "evidenceReplacement": rebound}
+            relocated = {**classification, "evidenceReplacement": rebound}
+            if replacement["status"] == RETAINED_OBSERVATION and new_path.is_file():
+                relocated["evidencePath"] = new_path.relative_to(layout.root).as_posix()
+            changes["classification"] = relocated
         else:
             raise ws.WorkspaceStateError("归档后的分类证据摘要不一致")
     return changes

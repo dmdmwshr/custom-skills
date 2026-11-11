@@ -1905,6 +1905,10 @@ def source_rebind_evidence_command(args: argparse.Namespace) -> None:
     )
 
 
+def source_rebind_retained_command(args: argparse.Namespace) -> None:
+    _run_source_module(args, "classification_rebind", "rebind", args.project, args.reason)
+
+
 def source_snapshot_downloads_command(args: argparse.Namespace) -> None:
     source = source_intake_api()
     workspace = workspace_api()
@@ -2320,6 +2324,15 @@ def build_parser() -> argparse.ArgumentParser:
     rebind_evidence.add_argument("--intake-id", required=True)
     rebind_evidence.add_argument("--reason", required=True)
     rebind_evidence.set_defaults(func=source_rebind_evidence_command)
+
+    rebind_retained = source_sub.add_parser(
+        "rebind-retained-observation",
+        help="分类证据文件被同案后续采集追加改写（摘要变化）时，凭保留的早期观察与变更轨迹显式新绑定；不改旧摘要",
+    )
+    add_workspace_resolution_options(rebind_retained)
+    rebind_retained.add_argument("--project", required=True)
+    rebind_retained.add_argument("--reason", required=True)
+    rebind_retained.set_defaults(func=source_rebind_retained_command)
 
     source_snapshot = source_sub.add_parser(
         "snapshot-downloads",
