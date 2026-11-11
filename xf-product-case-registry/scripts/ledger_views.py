@@ -751,6 +751,14 @@ def source_intake_brigade(fields: Any) -> str | None:
     return source_intake.detail_brigade(fields)
 
 
+def source_intake_manual_baseline(layout: Any, project: str, source: dict[str, Any]) -> dict[str, Any] | None:
+    if __package__:
+        from . import source_intake
+    else:
+        import source_intake
+    return source_intake.manual_intake_baseline(layout, project, source)
+
+
 def _bound_detail_brigade(layout: Any, entry: dict[str, Any]) -> str | None:
     """Fire jurisdiction of the bound detail the follow-up was registered against (None when it cannot be read)."""
 
@@ -794,7 +802,7 @@ def _followup_observations(
             refused.append(f"{observation_id}:{reason}")
 
         try:
-            path = layout.root / str(entry["evidencePath"])
+            path = layout.root / str(entry["evidencePath"]).replace("\\", "/")  # 台账可能存 Windows 分隔符，Linux 读 D 根时同样要能解析
             evidence = _read(path, layout.root)
             digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
         except (OSError, KeyError, ValueError, ws.WorkspaceStateError):
@@ -832,8 +840,8 @@ def _followup_observations(
             shots = evidence.get("screenshots") or []
             try:
                 shots_ok = bool(shots) and all(
-                    (layout.root / str(item["relativePath"])).is_file()
-                    and "sha256:" + hashlib.sha256((layout.root / str(item["relativePath"])).read_bytes()).hexdigest() == item.get("sha256")
+                    (layout.root / str(item["relativePath"]).replace("\\", "/")).is_file()
+                    and "sha256:" + hashlib.sha256((layout.root / str(item["relativePath"]).replace("\\", "/")).read_bytes()).hexdigest() == item.get("sha256")
                     for item in shots
                 )
             except (OSError, KeyError):
@@ -1071,6 +1079,10 @@ def describe(layout: Any, project: str, record: dict[str, Any], *, today: date |
     base_brigade = [source_intake_brigade(lifecycle_evidence[0]) if lifecycle_evidence else None]
     if base_brigade == [None]:
         base_brigade = [record.get("brigadeName")]
+    if base_brigade == [None]:
+        manual = source_intake_manual_baseline(layout, project, source)
+        if manual is not None:
+            base_brigade = [manual["brigade"]]
     followups, refused_followups = _followup_observations(layout, project, source, base_brigade)
     issues.extend(f"FOLLOWUP_OBSERVATION_UNTRUSTED:{reason}" for reason in refused_followups)
     if followups:

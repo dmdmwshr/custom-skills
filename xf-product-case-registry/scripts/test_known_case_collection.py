@@ -1518,6 +1518,94 @@ def test_r52_followup_of_a_verified_completed_case_does_not_need_a_collection_re
     assert len(result["records"][RWID]["followupObservations"]) == 1
 
 
+def _manual_completed_case(case, monkeypatch, *, brigade="合成甲大队", receipt_patch=None, ledger_patch=None):
+    """手动交件、已归档完成、批次内没有整包详情的案卷：基线只有用户目检的手动交件回执。"""
+    root = case.layout.root
+    package_path = root / "manual" / "pkg.zip"
+    package_path.parent.mkdir(parents=True)
+    with zipfile.ZipFile(package_path, "w") as archive:
+        archive.writestr("synthetic.txt", "合成手动文书")
+    package_sha = source._sha256(package_path)
+    receipt = {
+        "schemaVersion": "ManualCaseIntakeReceiptV1", "projectNo": PROJECT, "intakeId": "manual1",
+        "intakeMode": "MANUAL_PROVIDED", "receivedAt": "2026-10-02T09:00:00Z",
+        "package": {"sha256": package_sha},
+        "screenshotReview": {"readable": True, "brigade": brigade, "productResults": "合成：初查合格",
+                             "caseStatusVisible": "已结案"},
+        **(receipt_patch or {}),
+    }
+    receipt_path = root / "manual" / "manual-intake.json"
+    receipt_path.write_text(json.dumps(receipt, ensure_ascii=False), encoding="utf-8")
+    ws.upsert_case(case.layout, PROJECT, state="COMPLETED", source={
+        "rwid": RWID, "intakeMode": "MANUAL_PROVIDED", "packageSha256": package_sha,
+        "packageRelativePath": "manual/pkg.zip",
+        "manualIntakes": {"manual1": {"evidencePath": "manual/manual-intake.json",
+                                      "evidenceSha256": source._sha256(receipt_path),
+                                      "packageSha256": package_sha, "screenshotSha256": "sha256:" + "5" * 64,
+                                      "status": "ARCHIVED_PRIMARY"}},
+        **(ledger_patch or {}),
+    })
+    monkeypatch.setattr(source, "_verified_completed_waterline", lambda *_a, **_kw: {"state": "COMPLETED"})
+    return receipt_path
+
+
+def test_r53_manual_intake_case_followup_uses_the_reviewed_receipt_as_its_only_baseline(case, monkeypatch):
+    _manual_completed_case(case, monkeypatch)
+    state = _followup(case, "manual-ok", observed_at="2026-11-09T15:39:25-08:00")
+    assert "package" not in state["records"][RWID] and "collectionDetail" not in state["records"][RWID]  # 批次记录未被改写
+    entry = state["records"][RWID]["followupObservations"][0]
+    evidence = json.loads((case.layout.root / entry["evidencePath"]).read_text(encoding="utf-8"))
+    assert evidence["changeReason"] == "MANUAL_INTAKE_COMPLETED_CASE_SOURCE_DETAIL_OBSERVED"
+    assert evidence["priorBoundDetail"]["basis"] == "MANUAL_INTAKE_RECEIPT"
+    assert evidence["priorBoundDetail"]["manualIntake"]["brigade"] == "合成甲大队"
+    assert evidence["registeredPackage"]["basis"] == "MANUAL_INTAKE_REGISTERED_PACKAGE"
+    ledger_source = ws.load_waterline(case.layout)["cases"][PROJECT]["source"]
+    trusted, refused = views._followup_observations(case.layout, PROJECT, ledger_source, ["合成甲大队"])
+    assert len(trusted) == 1 and refused == []
+    # 消费者没有其他基线时，改用同一份已核验回执的大队，而不是把观察自己的大队当基线
+    assert views.source_intake_manual_baseline(case.layout, PROJECT, ledger_source)["brigade"] == "合成甲大队"
+
+
+@pytest.mark.parametrize("fault", ["receipt-tampered", "brigade-differs", "not-manual", "package-differs", "earlier-than-receipt", "not-completed"])
+def test_r53_manual_intake_followup_refusals_write_nothing(case, monkeypatch, fault):
+    receipt_patch = ledger_patch = None
+    if fault == "not-manual":
+        ledger_patch = {"intakeMode": "BROWSER"}
+    receipt_path = _manual_completed_case(case, monkeypatch, brigade="合成乙大队" if fault == "brigade-differs" else "合成甲大队",
+                                          receipt_patch=receipt_patch, ledger_patch=ledger_patch)
+    observed_at = "2026-11-09T15:39:25-08:00"
+    if fault == "receipt-tampered":
+        receipt_path.write_text(receipt_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    elif fault == "package-differs":
+        ws.upsert_case(case.layout, PROJECT, source={"packageSha256": "sha256:" + "9" * 64})
+    elif fault == "earlier-than-receipt":
+        observed_at = "2026-10-01T00:00:00+08:00"
+    elif fault == "not-completed":
+        monkeypatch.setattr(source, "_verified_completed_waterline", lambda *_a, **_kw: None)
+    path, _ = source._load_capture(case.layout, BATCH)
+    before = path.read_bytes()
+    with pytest.raises(source.SourceIntakeError):
+        _followup(case, "manual-" + fault, observed_at=observed_at)
+    assert path.read_bytes() == before
+    assert "followupObservations" not in ws.load_waterline(case.layout)["cases"][PROJECT]["source"]
+
+
+def test_r53_cloud_builder_takes_the_initial_result_from_a_trusted_followup_only_when_the_ledger_cannot_prove_it(case):
+    from scripts import feishu_source_sync as sync
+    bound_case(case)
+    row = {"产品名称（规格型号）": "合成灭火器", "产品质量现场检查情况": "不合格", "市场准入检查情况": "未发现不合格现象",
+           "检查结果": "", "检查结果标记": ["el-icon-error"]}
+    detail = {**followup_fields("不合格行"), "检查产品信息": [row]}
+    _followup(case, "不合格行", observed_at="2026-11-09T15:39:25-08:00", detail=detail)
+    ledger_case = ws.load_waterline(case.layout)["cases"][PROJECT]
+    got = sync._followup_initial_result(case.layout.root, PROJECT, ledger_case, None, "合成甲大队")
+    assert got["label"] == "不合格" and "followup-observations" in got["ref"] and got["observedAt"].startswith("2026-11-09")
+    # 大队不一致、已有可信分类、或只给出待结果/待核实：都不采纳
+    assert sync._followup_initial_result(case.layout.root, PROJECT, ledger_case, None, "合成乙大队") is None
+    assert sync._followup_initial_result(case.layout.root, PROJECT, ledger_case, {"initialResult": "QUALIFIED"}, "合成甲大队") is None
+    assert sync._followup_initial_result(case.layout.root, PROJECT, {"source": {}}, None, "合成甲大队") is None
+
+
 def test_r43_followup_observation_releases_only_its_exact_conflict(case):
     bound_case(case)
     path, state = source._load_capture(case.layout, BATCH)

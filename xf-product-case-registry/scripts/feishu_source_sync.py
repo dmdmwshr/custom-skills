@@ -51,9 +51,13 @@ from typing import Any, Protocol
 if __package__:
     from . import case_lifecycle
     from . import field_validation as fv
+    from . import ledger_views as _views
+    from . import workspace_state as _ws
 else:
     import case_lifecycle
     import field_validation as fv
+    import ledger_views as _views
+    import workspace_state as _ws
 
 SPEC_SCHEMA = "FeishuSourceSyncSpecV2"
 REPORT_SCHEMA = "FeishuSourceSyncReportV2"
@@ -1658,12 +1662,43 @@ def _proven_classification(waterline_case: Any, root: Path) -> dict[str, Any] | 
     return cls
 
 
+def _followup_initial_result(root: Path, project: str, waterline_case: Any, classification: dict[str, Any] | None,
+                             jurisdiction: str) -> dict[str, str] | None:
+    """初查结果只在总账分类证据不能证明时，才取已归档案卷的最新可信后续观察(source_intake.add_followup_observation)。
+
+    观察须经消费者同样的校验(证据摘要、同案、[产]根、目录覆盖、截图、同一大队)，且比分类证据更新；只采纳页面产品行明确给出的
+    合格/不合格，其余不改写。返回外显标签与可回溯依据(证据文件、摘要、观察时点)。
+    """
+    source = waterline_case.get("source") if isinstance(waterline_case, dict) else None
+    if not isinstance(source, dict) or not source.get("followupObservations"):
+        return None
+    if isinstance(classification, dict) and classification.get("initialResult") in case_lifecycle._RESULT_FROM_ENUM:
+        return None
+    try:
+        layout = _ws.BusinessLayout.from_root(root)
+        trusted, _ = _views._followup_observations(layout, project, source, [jurisdiction])
+    except Exception:  # noqa: BLE001 - 无法读取/校验就不采纳，不猜
+        return None
+    if not trusted:
+        return None
+    _, fields, _, observed_text = trusted[0]
+    label = case_lifecycle.evidence_initial_result(fields)
+    if label not in {"合格", "不合格"}:  # 待结果/待核实互转没有信息增量，不制造差异
+        return None
+    entry = next((item for item in source["followupObservations"].values() if item.get("observedAt") == observed_text), None)
+    if not entry:
+        return None
+    ref = (f"{entry['evidencePath']}#fields.检查产品信息 | 后续观察 {entry['observationId']} | "
+           f"evidenceSha256={entry['evidenceSha256']} | projectNo={project}")
+    return {"label": label, "ref": ref, "observedAt": observed_text}
+
+
 def _lifecycle_values(index_case: dict[str, dict[str, Any]], candidates: set[str], classification: dict[str, Any] | None,
-                      resolved: dict[str, Any], *, create: bool) -> tuple[dict[str, str], list[str]]:
+                      resolved: dict[str, Any], *, create: bool, result_override: str | None = None) -> tuple[dict[str, str], list[str]]:
     """New-cell values for 初查结果 / 初查日期来源, limited to what the latest contract exposes and its option lists."""
     values: dict[str, str] = {}
     skipped: list[str] = []
-    wanted = {LIFECYCLE_FIELDS["result"]: case_lifecycle.initial_result_label(classification)}
+    wanted = {LIFECYCLE_FIELDS["result"]: result_override or case_lifecycle.initial_result_label(classification)}
     if resolved.get("value"):
         wanted[LIFECYCLE_FIELDS["date_source"]] = resolved["externalSource"]
     for field_id, value in wanted.items():
@@ -1776,7 +1811,9 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
         elif date is not None and resolved.get("conflict"):
             date_conflicts.append({"projectNo": project, "rwid": rwid, "electronic": resolved["value"], "acceptance": resolved["acceptanceDate"], "handling": "以电子监督检查记录为准，保留差异"})
         classification = _proven_classification(waterline.get(project), waterline_path.parent)
+        followup = _followup_initial_result(waterline_path.parent, project, waterline.get(project), classification, evidence["jurisdiction"])
         basis_ref = evidence["ref"]("检查产品信息") + (" | 总账分类证据已核" if classification else " | 缺可核的分类证据，初查结果按待核实")
+        result_ref, result_at = (followup["ref"], followup["observedAt"]) if followup else (basis_ref, None)
         if not ids:
             route = live_routes.get(evidence["jurisdiction"])
             if route is None:
@@ -1793,8 +1830,12 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
                 fields[BASIC_FIELDS["addr"]] = {"new": evidence["address"], "basis": _record_basis(evidence["ref"]("单位地址"), observed)}
             if date:
                 fields[BASIC_FIELDS["date"]] = {"new": date[0], "basis": _record_basis(date[1], date[2])}
-            values, skipped = _lifecycle_values(index[case_table], candidate_ids, classification, fv.resolve_initial_date(date[0] if date else None, ""), create=True)
+            values, skipped = _lifecycle_values(index[case_table], candidate_ids, classification, fv.resolve_initial_date(date[0] if date else None, ""), create=True,
+                                                result_override=followup["label"] if followup else None)
             for fid, value in values.items():
+                if fid == LIFECYCLE_FIELDS["result"] and followup:
+                    fields[fid] = {"new": value, "basis": _record_basis(result_ref, result_at)}
+                    continue
                 fields[fid] = {"new": value, "basis": _record_basis(date[1] if fid == LIFECYCLE_FIELDS["date_source"] and date else basis_ref, date[2] if fid == LIFECYCLE_FIELDS["date_source"] and date else observed)}
             if skipped:
                 lifecycle_skipped.append({"projectNo": project, "fields": skipped, "stage": "create"})
@@ -1814,11 +1855,14 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
                 update_fields[fid] = {"new": new, "expectedOld": None, "basis": basis}
             else:
                 differing.append({"projectNo": project, "field": name, "cloud": stored, "source": new, "handling": "云端非空且不同：不覆盖，报告交人工/来源裁决"})
-        values, skipped = _lifecycle_values(index[case_table], candidate_ids, classification, fv.resolve_initial_date(date[0] if date else None, ""), create=False)
+        values, skipped = _lifecycle_values(index[case_table], candidate_ids, classification, fv.resolve_initial_date(date[0] if date else None, ""), create=False,
+                                            result_override=followup["label"] if followup else None)
         for fid, value in values.items():
             stored, ftype = row.get(fid), index[case_table][fid]["type"]
             ref = date[1] if fid == LIFECYCLE_FIELDS["date_source"] and date else basis_ref
             at = date[2] if fid == LIFECYCLE_FIELDS["date_source"] and date else evidence["capturedAt"]
+            if fid == LIFECYCLE_FIELDS["result"] and followup:
+                ref, at = result_ref, result_at
             if cell_is_empty(stored):
                 update_fields[fid] = {"new": value, "expectedOld": None, "basis": _record_basis(ref, at)}
             elif cell_equals(ftype, stored, value):

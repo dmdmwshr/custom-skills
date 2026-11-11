@@ -3546,6 +3546,64 @@ def _normalized_sha(value: Any) -> str | None:
     return text if text.startswith("sha256:") else "sha256:" + text
 
 
+def manual_intake_baseline(layout: Any, project_no: str, source: dict[str, Any]) -> dict[str, Any] | None:
+    """The user-reviewed manual intake receipt that is the only detail baseline of a manually received case.
+
+    A manually delivered case has no structured whole-package detail in any capture batch: its baseline is the receipt
+    (``ManualCaseIntakeReceiptV1``) written when the original ZIP and the user's detail screenshot were accepted. It is
+    returned only when the ledger records that receipt as the archived primary intake, the receipt file's digest equals
+    the ledger entry, it names this case, its package digest equals the one the ledger holds for the case, and the
+    screenshot review was readable and stated the fire jurisdiction. Anything else returns None (never guessed).
+    """
+
+    if (source or {}).get("intakeMode") != "MANUAL_PROVIDED":
+        return None
+    package_sha = _normalized_sha(source.get("packageSha256"))
+    best: dict[str, Any] | None = None
+    for intake_id, entry in (source.get("manualIntakes") or {}).items():
+        if not isinstance(entry, dict) or entry.get("status") != "ARCHIVED_PRIMARY":
+            continue
+        if _normalized_sha(entry.get("packageSha256")) != package_sha or not package_sha:
+            continue
+        try:
+            path = (Path(layout.root) / str(entry["evidencePath"])).resolve()
+            if Path(layout.root).resolve() not in path.parents or not path.is_file():
+                continue
+            if _sha256(path) != _normalized_sha(entry.get("evidenceSha256")):
+                continue
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, KeyError, ValueError):
+            continue
+        review = receipt.get("screenshotReview") or {}
+        brigade = re.sub(r"\s+", "", str(review.get("brigade") or ""))
+        received = receipt.get("receivedAt")
+        if (
+            receipt.get("schemaVersion") != "ManualCaseIntakeReceiptV1"
+            or receipt.get("projectNo") != project_no
+            or receipt.get("intakeId") != intake_id
+            or _normalized_sha((receipt.get("package") or {}).get("sha256")) != package_sha
+            or review.get("readable") is not True
+            or not brigade
+            or not received
+        ):
+            continue
+        candidate = {
+            "basis": "MANUAL_INTAKE_RECEIPT",
+            "intakeId": intake_id,
+            "receivedAt": received,
+            "brigade": brigade,
+            "evidencePath": str(entry["evidencePath"]),
+            "evidenceSha256": _normalized_sha(entry.get("evidenceSha256")),
+            "screenshotSha256": _normalized_sha(entry.get("screenshotSha256")),
+            "packageSha256": package_sha,
+            "reviewedProductResults": review.get("productResults"),
+            "reviewedCaseStatus": review.get("caseStatusVisible"),
+        }
+        if best is None or str(candidate["receivedAt"]) > str(best["receivedAt"]):
+            best = candidate
+    return best
+
+
 def _registered_package_proof(layout: Any, project_no: str, record_key: str) -> dict[str, Any] | None:
     """A package the case ledger already registered for this RWID, proven on disk (None when the ledger holds none).
 
@@ -3567,8 +3625,11 @@ def _registered_package_proof(layout: Any, project_no: str, record_key: str) -> 
     if record_key not in known:
         raise SourceIntakeError("台账已登记的案卷包与该 RWID 的身份不一致，拒绝后续观察")
     generation = source.get("packageGeneration")
+    basis = "LEDGER_REGISTERED_PACKAGE"
     if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
-        raise SourceIntakeError("台账已登记案卷包的代际无法证明，拒绝后续观察")
+        if manual_intake_baseline(layout, project_no, source) is None:
+            raise SourceIntakeError("台账已登记案卷包的代际无法证明，拒绝后续观察")
+        generation, basis = 1, "MANUAL_INTAKE_REGISTERED_PACKAGE"  # 手动交件的唯一原包，无后续代际
     root = Path(layout.root).resolve()
     package = (root / str(relative)).resolve()
     if root not in package.parents or not package.is_file():
@@ -3581,7 +3642,7 @@ def _registered_package_proof(layout: Any, project_no: str, record_key: str) -> 
         "relativePath": str(relative),
         "sizeBytes": package.stat().st_size,
         "generation": generation,
-        "basis": "LEDGER_REGISTERED_PACKAGE",
+        "basis": basis,
     }
 
 
@@ -3666,8 +3727,23 @@ def add_followup_observation(
         if package_proof is None:
             raise SourceIntakeError("该 RWID 尚未绑定案卷包，首次详情请使用 add-detail")
     existing = record.get("collectionDetail")
+    manual_baseline: dict[str, Any] | None = None
     if not isinstance(existing, dict) or not existing.get("fingerprint") or not existing.get("capturedAt"):
-        raise SourceIntakeError("已绑包记录缺少可对账的整包详情，拒绝后续观察")
+        # 整包详情的守卫不放宽：只有“已归档的手动交件主回执”可作为替代基线(无结构化整包详情的案卷)，其余仍拒绝
+        ledger_source = (
+            ((load_waterline(layout).get("cases") or {}).get(str(record.get("projectNo"))) or {}).get("source") or {}
+            if load_waterline is not None
+            else {}
+        )
+        manual_baseline = (
+            manual_intake_baseline(layout, str(record.get("projectNo")), ledger_source)
+            if _verified_completed_waterline(layout, str(record.get("projectNo") or ""))
+            and package_proof is not None
+            else None
+        )
+        if manual_baseline is None:
+            raise SourceIntakeError("已绑包记录缺少可对账的整包详情，拒绝后续观察")
+        existing = {"capturedAt": manual_baseline["receivedAt"], "fields": None, "fingerprint": None}
     # 已完成并通过完成核验的案卷不再有“采集请求”可言（材料已冻结）；后续观察不触碰已绑材料，故以完成凭证代替采集请求。
     if not _verified_completed_waterline(layout, str(record.get("projectNo") or "")) and not _material_collection_active(
         layout, state, record_key, record
@@ -3702,6 +3778,8 @@ def add_followup_observation(
     baseline_brigades = [detail_brigade(existing.get("fields"))]
     if baseline_brigades[0] is None and ledger_case:
         baseline_brigades = [(ledger_case or {}).get("brigadeName")]
+    if manual_baseline is not None:
+        baseline_brigades = [*(item for item in baseline_brigades if item), manual_baseline["brigade"]]
     if (integrity_problem := followup_integrity_problem(clean_detail, project_no)):
         raise SourceIntakeError(f"详情的本案文书目录覆盖不能证明，不能作为本案观察：{integrity_problem}")
     if (brigade_problem := followup_brigade_problem(clean_detail, baseline_brigades)):
@@ -3759,6 +3837,13 @@ def add_followup_observation(
         "screenshotSha256": (existing.get("screenshot") or {}).get("sha256"),
         "packageSha256": (record.get("package") or package_proof or {}).get("sha256"),
     }
+    if manual_baseline is not None:
+        prior["basis"] = manual_baseline["basis"]
+        prior["screenshotSha256"] = manual_baseline["screenshotSha256"]
+        prior["manualIntake"] = {
+            key: manual_baseline[key]
+            for key in ("intakeId", "receivedAt", "evidencePath", "evidenceSha256", "brigade", "reviewedProductResults", "reviewedCaseStatus")
+        }
     evidence = {
         "schemaVersion": FOLLOWUP_OBSERVATION_VERSION,
         "observationId": observation_id,
@@ -3776,6 +3861,7 @@ def add_followup_observation(
         "screenshots": shot_records,
         "priorBoundDetail": prior,
         **({"registeredPackage": package_proof} if package_proof else {}),
+        **({"changeReason": "MANUAL_INTAKE_COMPLETED_CASE_SOURCE_DETAIL_OBSERVED"} if manual_baseline is not None else {}),
     }
     if not evidence_path.exists():
         directory.mkdir(parents=True, exist_ok=True)
@@ -3800,6 +3886,7 @@ def add_followup_observation(
             conflict.get("type") == "DETAIL_CONFLICT"
             and conflict.get("rwid") == record_key
             and conflict.get("projectNo") == project_no
+            and existing.get("fingerprint")
             and conflict.get("existingFingerprint") == existing.get("fingerprint")
             and conflict.get("observedFingerprint") == fingerprint
         ):
