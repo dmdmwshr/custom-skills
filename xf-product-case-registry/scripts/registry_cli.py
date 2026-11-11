@@ -1991,6 +1991,17 @@ def explicit_refresh(
         raise RegistryError(str(error)) from error
 
 
+def source_resolve_package_conflict_command(args: argparse.Namespace) -> None:
+    source = source_intake_api()
+    workspace = workspace_api()
+    try:
+        _, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        result = source.resolve_refreshed_package_conflicts(layout, args.batch_id, args.rwid)
+    except (source.SourceIntakeError, workspace.WorkspaceStateError) as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def source_await_download_command(args: argparse.Namespace) -> None:
     source = source_intake_api()
     workspace = workspace_api()
@@ -2428,6 +2439,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="受审计的显式更新：新包作为新一代接入，旧代原件保留；须同时 --attach",
     )
     source_await.set_defaults(func=source_await_download_command)
+
+    source_resolve_conflict = source_sub.add_parser(
+        "resolve-package-conflict",
+        help="显式更新成功后，把该 RWID 此前的 PACKAGE_CONFLICT 标为已过期（须当前包带 supersedes）",
+    )
+    add_workspace_resolution_options(source_resolve_conflict)
+    source_resolve_conflict.add_argument("--batch-id", required=True)
+    source_resolve_conflict.add_argument("--rwid", "--record-key", dest="rwid", required=True)
+    source_resolve_conflict.set_defaults(func=source_resolve_package_conflict_command)
 
     source_package = source_sub.add_parser("attach-package", help="校验、规范命名并绑定已下载 ZIP")
     add_workspace_resolution_options(source_package)

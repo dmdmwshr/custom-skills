@@ -887,6 +887,40 @@ def test_explicit_refresh_in_the_batch_holding_the_current_package(case):
     assert evidence["records"][RWID]["previousPackages"][0]["sha256"] == old["sha256"]
 
 
+def test_refresh_resolves_the_package_conflict_it_supersedes(case):
+    promote_and_capture(case)
+    first = _attach(case, BATCH, "a.zip", "第一代")
+    old = first["records"][RWID]["package"]
+    with pytest.raises(source.SourceIntakeError, match="已绑定不同案卷包"):
+        _attach(case, BATCH, "b0.zip", "第二代")
+    _, stale = source._load_capture(case.layout, BATCH)
+    assert [c["type"] for c in stale["conflicts"]] == ["PACKAGE_CONFLICT"]
+    with pytest.raises(source.SourceIntakeError, match="无法确认冲突已过期"):   # 当前包不是新一代
+        source.resolve_refreshed_package_conflicts(case.layout, BATCH, RWID)
+    second = _attach(case, BATCH, "b.zip", "第二代", refresh_of_sha=old["sha256"],
+                     refresh_reason="SPECIAL_ISSUE")
+    assert second["conflicts"] == []
+    assert [c["type"] for c in second["resolvedConflicts"]] == ["PACKAGE_CONFLICT"]
+
+
+def test_stale_package_conflict_is_resolved_only_for_a_refreshed_generation(case):
+    promote_and_capture(case)
+    first = _attach(case, BATCH, "a.zip", "第一代")
+    old = first["records"][RWID]["package"]
+    with pytest.raises(source.SourceIntakeError, match="已绑定不同案卷包"):
+        _attach(case, BATCH, "b0.zip", "第二代")
+    _attach(case, BATCH, "b.zip", "第二代", refresh_of_sha=old["sha256"], refresh_reason="SPECIAL_ISSUE")
+    path, state = source._load_capture(case.layout, BATCH)
+    state["conflicts"] = [{"type": "PACKAGE_CONFLICT", "rwid": RWID, "projectNo": PROJECT}]
+    source._write_json(path, state)
+    result = source.resolve_refreshed_package_conflicts(case.layout, BATCH, RWID)
+    assert result["status"] == "RESOLVED" and result["resolved"] == 1
+    _, after = source._load_capture(case.layout, BATCH)
+    assert after["conflicts"] == []
+    assert after["resolvedConflicts"][-1]["resolvedBy"] == "REFRESHED_PACKAGE_SUPERSEDES"
+    assert source.resolve_refreshed_package_conflicts(case.layout, BATCH, RWID)["status"] == "REUSED"
+
+
 def test_two_unrelated_packages_stay_a_conflict_and_never_pick_the_newest(case):
     promote_and_capture(case)
     first = _attach(case, BATCH, "a.zip", "第一代")

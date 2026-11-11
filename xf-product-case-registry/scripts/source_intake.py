@@ -4158,7 +4158,10 @@ def _sync_attached_package(
     remaining_conflicts = []
     resolved_conflicts = state.setdefault("resolvedConflicts", [])
     for conflict in state.get("conflicts") or []:
-        if conflict.get("type") == "PACKAGE_REJECTED" and conflict.get("rwid") == record_key:
+        if conflict.get("rwid") == record_key and (
+            conflict.get("type") == "PACKAGE_REJECTED"
+            or (conflict.get("type") == "PACKAGE_CONFLICT" and package.get("supersedes"))
+        ):
             resolution = {**conflict, "resolvedAt": package["attachedAt"]}
             if resolution not in resolved_conflicts:
                 resolved_conflicts.append(resolution)
@@ -4391,6 +4394,36 @@ def attach_package(
         source,
         stored,
     )
+
+
+def resolve_refreshed_package_conflicts(workspace: Any, batch_id: str, rwid: str) -> dict[str, Any]:
+    """A PACKAGE_CONFLICT raised before an audited refresh is stale once the record holds the superseding generation."""
+
+    layout = _layout(workspace)
+    capture_path, state = _load_capture(layout, batch_id)
+    record_key = _require_rwid(rwid)
+    record = (state.get("records") or {}).get(record_key) or {}
+    package = record.get("package") or {}
+    if not package.get("supersedes"):
+        raise SourceIntakeError("该记录当前包不是显式更新的新一代，无法确认冲突已过期")
+    pending = [
+        item
+        for item in state.get("conflicts") or []
+        if item.get("type") == "PACKAGE_CONFLICT" and item.get("rwid") == record_key
+    ]
+    if not pending:
+        return {"status": "REUSED", "batchId": batch_id, "rwid": record_key, "resolved": 0}
+    resolved_at = _timestamp()
+    state["conflicts"] = [item for item in state["conflicts"] if item not in pending]
+    resolved = state.setdefault("resolvedConflicts", [])
+    resolved += [
+        {**item, "resolvedAt": resolved_at, "resolvedBy": "REFRESHED_PACKAGE_SUPERSEDES"}
+        for item in pending
+    ]
+    _refresh_progress(state)
+    state["updatedAt"] = resolved_at
+    _write_json(capture_path, state)
+    return {"status": "RESOLVED", "batchId": batch_id, "rwid": record_key, "resolved": len(pending)}
 
 
 def await_download(
