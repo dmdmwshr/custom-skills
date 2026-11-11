@@ -146,6 +146,10 @@ class FakeService:
             raise KeyboardInterrupt
         for fid, wire in fields.items():
             kind = self.meta[table][fid]["type"]
+            if wire is None:   # null 清空单元格(官方 CLI：允许清空时 null 清除)
+                if self.b.get("ignore_writes_for") != record:
+                    self.rows[(table, record)][fid] = None
+                continue
             if kind == "select":
                 assert isinstance(wire, list) and wire and all(isinstance(x, str) for x in wire), f"select 需要数组：{wire!r}"
             elif kind == "text":
@@ -800,7 +804,11 @@ def test_human_release_is_recorded_with_evidence_and_the_original_intent(tmp_pat
     event = ledger_events(tmp_path)[-1]
     assert event["event"] == "human_release" and event["evidence"] == RELEASE["evidence"] and event["operator"] == "测试人"
     assert event["originalIntent"]["fields"][UNIT]["wire"] == "新单位" and event["priorState"] == "UNKNOWN"
-    assert run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-after")), service(meta), name="a.json")["status"] == "OK"
+    # 未获用户风险接受的人工放行不解除保护：新的业务赋值在任何外部调用前被拒绝
+    after = service(meta)
+    with pytest.raises(sync.SyncError, match="HUMAN_RELEASE_UNACCEPTED"):
+        run(tmp_path, make_spec(tmp_path, logDir=str(tmp_path / "log-after")), after, name="a.json")
+    assert after.calls == []
 
 
 def test_update_reconcile_releases_only_the_exact_intent_and_never_a_whole_target_in_bulk(tmp_path, meta):
@@ -2695,3 +2703,125 @@ def test_maintenance_builders_refuse_a_target_with_an_unaccepted_human_release_h
     ok = sync.build_field_plan_specs(plan_path=plan, plan_sha=sha(plan), waterline_path=water, contract_path=v9, contract_sha=sha(v9), target=target, transport=transport,
                                      out_dir=tmp_path / "specs3", log_root=tmp_path / "logs3", ledger_dir=None)
     assert ok["status"] == "OK" and ok["counts"]["toWrite"] == 1
+
+
+# ------------------------------------------------------------------ 精确逆操作(restore)与写前人工放行闸门
+
+
+def _mis_write(tmp_path, meta):
+    """早先在一个原本为空的字段写入了误写值：先造空字段，再按正常路径写入，得到该意图的 OK 终态。"""
+    svc = service(meta)
+    svc.rows[(CASE, REC)][RESULT] = None
+    spec = make_spec(tmp_path)
+    spec["updates"][0]["fields"] = {RESULT: {"new": "不合格", "expectedOld": None, "basis": basis()}}
+    run(tmp_path, spec, svc)
+    return svc, [e for e in ledger_events(tmp_path) if e["event"] == "intent"][0]["intentId"]
+
+
+def _restore_spec(tmp_path, intent_id, old="不合格", **override):
+    spec = make_spec(tmp_path, logDir=str(tmp_path / "log-restore"))
+    spec["updates"][0]["fields"] = {RESULT: {"new": None, "expectedOld": old, "restore": {"intentId": intent_id}, "basis": basis("恢复误写")}}
+    spec.update(override)
+    return spec
+
+
+def _release_create_target(tmp_path):
+    ledger = sync.Ledger(tmp_path / "ledger")
+    ledger.append(sync.Ledger.target_key(BASE, CASE, "create:" + STABLE), {"event": "human_release", "intentId": "1" * 64, "reason": "历史放行"})
+
+
+def test_restore_clears_only_the_mis_written_field_and_keeps_history(tmp_path, meta):
+    svc, intent_id = _mis_write(tmp_path, meta)
+    _release_create_target(tmp_path)   # 该案历史上有未获用户接受的人工放行，业务赋值被拒绝，但精确逆操作可恢复
+    with pytest.raises(sync.SyncError, match="HUMAN_RELEASE_UNACCEPTED"):
+        spec = make_spec(tmp_path, logDir=str(tmp_path / "log-biz"))
+        spec["updates"][0]["fields"] = {HANDLER: {"new": "新承办人", "expectedOld": "旧承办人", "basis": basis()}}
+        run(tmp_path, spec, svc)
+    before_events = len(ledger_events(tmp_path))
+    other = {k: v for k, v in svc.rows[(CASE, REC)].items() if k != RESULT}
+    report = run(tmp_path, _restore_spec(tmp_path, intent_id), svc, name="restore.json")
+    assert report["status"] == "OK"
+    assert svc.rows[(CASE, REC)][RESULT] is None and {k: v for k, v in svc.rows[(CASE, REC)].items() if k != RESULT} == other
+    assert svc.upserts[-1][2] == {RESULT: None}
+    events = ledger_events(tmp_path)
+    assert len(events) == before_events + 2 and events[0]["event"] == "intent" and events[-2]["event"] == "intent" and events[-1]["status"] == "OK"
+
+
+@pytest.mark.parametrize("old,match", [("合格", "不等于被恢复的误写值|旧值与 expectedOld 不符|不是对该误写的逆操作")])
+def test_restore_refuses_when_the_value_is_not_the_mis_written_one(tmp_path, meta, old, match):
+    svc, intent_id = _mis_write(tmp_path, meta)
+    svc.rows[(CASE, REC)][RESULT] = ["合格"]   # 他人此后改过
+    with pytest.raises(sync.SyncError, match="RESTORE_NOT_PROVEN|expectedOld"):
+        run(tmp_path, _restore_spec(tmp_path, intent_id, old="合格"), svc, name="restore.json")
+
+
+def test_restore_refuses_unknown_intent_changed_value_and_later_writers(tmp_path, meta):
+    svc, intent_id = _mis_write(tmp_path, meta)
+    calls = len(svc.calls)
+    with pytest.raises(sync.SyncError, match="RESTORE_NOT_PROVEN"):
+        run(tmp_path, _restore_spec(tmp_path, "0" * 64), svc, name="r1.json")
+    spec = _restore_spec(tmp_path, intent_id, logDir=str(tmp_path / "log-r2"))
+    spec["updates"][0]["fields"][RESULT]["expectedOld"] = "合格"
+    with pytest.raises(sync.SyncError, match="RESTORE_NOT_PROVEN"):
+        run(tmp_path, spec, svc, name="r2.json")
+    later = make_spec(tmp_path, logDir=str(tmp_path / "log-later"))
+    later["updates"][0]["fields"] = {HANDLER: {"new": "后续写者", "expectedOld": "旧承办人", "basis": basis()}}
+    run(tmp_path, later, svc, name="later.json")
+    with pytest.raises(sync.SyncError, match="RESTORE_NOT_PROVEN"):
+        run(tmp_path, _restore_spec(tmp_path, intent_id, logDir=str(tmp_path / "log-r3")), svc, name="r3.json")
+    assert all(call[2] != "+record-upsert" or len(svc.upserts) == 2 for call in svc.calls[calls:])
+
+
+def test_restore_requires_the_original_old_value_to_have_been_empty(tmp_path, meta):
+    svc = service(meta)   # RESULT 原值 ["合格"]：覆盖写入不是“空值被误写”，不能当逆操作
+    spec = make_spec(tmp_path)
+    spec["updates"][0]["fields"] = {RESULT: {"new": "不合格", "expectedOld": "合格", "basis": basis()}}
+    run(tmp_path, spec, svc)
+    intent_id = [e for e in ledger_events(tmp_path) if e["event"] == "intent"][0]["intentId"]
+    with pytest.raises(sync.SyncError, match="RESTORE_NOT_PROVEN"):
+        run(tmp_path, _restore_spec(tmp_path, intent_id), svc, name="restore.json")
+    assert svc.rows[(CASE, REC)][RESULT] == ["不合格"]
+
+
+def _restore_plan_setup(tmp_path, cloud=("监督系统",)):
+    v3, v9, water, plan, transport = _fieldplan_setup(tmp_path, cloud=cloud, new=None, old="监督系统",
+                                                      plan_over=None)
+    data = json.loads(plan.read_text(encoding="utf-8"))
+    data["entries"][0]["fields"][DATE_SRC_F]["restore"] = {"intentId": "i-mis"}
+    plan.write_text(json.dumps(data), encoding="utf-8")
+    return v3, v9, water, plan, transport
+
+
+def _build_restore(tmp_path, ledger_dir, v9, water, plan, transport):
+    return sync.build_field_plan_specs(plan_path=plan, plan_sha=sha(plan), waterline_path=water, contract_path=v9, contract_sha=sha(v9),
+                                       target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"}, transport=transport,
+                                       out_dir=tmp_path / "specs", log_root=tmp_path / "logs", ledger_dir=ledger_dir, isolated_test_ledger=True)
+
+
+def test_field_plan_restore_entry_is_built_even_for_a_target_with_an_unaccepted_release_but_only_with_a_ledger(tmp_path):
+    v3, v9, water, plan, transport = _restore_plan_setup(tmp_path)
+    ledger_dir = tmp_path / "ledger"
+    ledger = sync.Ledger(ledger_dir, isolated_test=True)
+    ledger.initialize()
+    ledger.append(sync.Ledger.target_key(BASE, CASE, "create:" + PN_FILL), {"event": "human_release", "intentId": "i-old", "operator": "助手(历史)", "reason": "r"})
+    report = _build_restore(tmp_path, ledger_dir, v9, water, plan, transport)
+    assert report["status"] == "OK" and report["counts"]["toWrite"] == 1
+    item = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))["updates"][0]["fields"][DATE_SRC_F]
+    assert item["new"] is None and item["expectedOld"] == "监督系统" and item["restore"] == {"intentId": "i-mis"}
+    no_ledger = sync.build_field_plan_specs(plan_path=plan, plan_sha=sha(plan), waterline_path=water, contract_path=v9, contract_sha=sha(v9),
+                                            target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"}, transport=transport,
+                                            out_dir=tmp_path / "specs2", log_root=tmp_path / "logs2")
+    assert no_ledger["status"] == "PARTIAL" and "--ledger-dir" in json.dumps(no_ledger["refused"], ensure_ascii=False)
+
+
+def test_field_plan_restore_entry_refuses_a_value_changed_by_someone_else_and_skips_an_already_empty_cell(tmp_path):
+    v3, v9, water, plan, transport = _restore_plan_setup(tmp_path, cloud=("人工改的值",))
+    ledger_dir = tmp_path / "ledger"
+    sync.Ledger(ledger_dir, isolated_test=True).initialize()
+    changed = _build_restore(tmp_path, ledger_dir, v9, water, plan, transport)
+    assert changed["status"] == "PARTIAL" and "不等于被恢复的误写值" in json.dumps(changed["refused"], ensure_ascii=False) and not changed["specs"]
+    sub = tmp_path / "empty"
+    sub.mkdir()
+    v3, v9, water, plan, transport = _restore_plan_setup(sub, cloud=None)
+    empty = _build_restore(sub, ledger_dir, v9, water, plan, transport)
+    assert empty["status"] == "OK" and empty["counts"]["toWrite"] == 0 and not empty["specs"]

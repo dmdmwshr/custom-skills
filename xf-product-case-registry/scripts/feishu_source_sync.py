@@ -354,6 +354,15 @@ def validate_spec(spec: Any, contract: dict[str, Any]) -> dict[str, Any]:
             _require(field_id != stable, "稳定键字段不得作为更新目标")
             _require(isinstance(item, dict), "每个字段需 {new, basis}")
             basis = item.get("basis")
+            if item.get("restore") is not None:   # 精确逆操作：只恢复本助手早先写入的误写值，条件在 execute 中对账本逐项核验
+                restore = item["restore"]
+                _require(isinstance(restore, dict) and _text(restore.get("intentId")) and "new" in item and item["new"] is None
+                         and _text(item.get("expectedOld")), "restore 需要 intentId、new 显式为 null、expectedOld 为被恢复的误写值")
+                _require(isinstance(basis, dict) and basis.get("kind") == "source-observed" and basis.get("valueState") == "observed"
+                         and _text(basis.get("sourceRef")) and _text(basis.get("observedAt")), "restore 需要 observed 的 basis 与 sourceRef")
+                writes[field_id] = {"name": index[table_id][field_id]["name"], "type": index[table_id][field_id]["type"], "new": None, "wire": None,
+                                    "basis": basis, "expectedOld": item["expectedOld"], "restore": restore}
+                continue
             _require(
                 isinstance(basis, dict)
                 and basis.get("kind") == "source-observed"
@@ -782,8 +791,55 @@ def _creation_blocks(ledger: Ledger, spec: dict[str, Any], checked: dict[str, An
     return blocks
 
 
-def _all_blocks(ledger: Ledger, spec: dict[str, Any], checked: dict[str, Any]) -> list[dict[str, Any]]:
-    return [*_ledger_blocks(ledger, _target_keys(spec, checked)), *_creation_blocks(ledger, spec, checked)]
+def _release_blocks(ledger: Ledger, spec: dict[str, Any], checked: dict[str, Any], accepted: frozenset[str]) -> list[dict[str, Any]]:
+    """历史上有未获用户风险接受的 human_release 的目标：保持其保护，任何新的业务赋值都在写前被拒绝(含手写说明)；
+    只有对本助手早先写入的精确逆操作(restore)不受此限。"""
+    base, blocks = spec["target"]["baseToken"], []
+    for item in checked["plan"]:
+        if item["writes"] and all(w.get("restore") is not None for w in item["writes"].values()):
+            continue
+        keys = (Ledger.target_key(base, item["tableId"], item["recordId"]), Ledger.target_key(base, item["tableId"], "create:" + item["stableKey"]["value"]))
+        pending = sorted({str(e.get("intentId")) for key in keys for e in ledger.events(key)
+                          if e.get("event") == "human_release" and not e.get("userAcceptance") and e.get("intentId") not in accepted})
+        if pending:
+            blocks.append({"tableId": item["tableId"], "recordId": item["recordId"], "stableKey": item["stableKey"]["value"], "kind": "HUMAN_RELEASE_UNACCEPTED",
+                           "reason": "历史 human_release 未获用户风险接受，保护继续，新的业务赋值被拒绝", "intentIds": pending})
+    return blocks
+
+
+def _restore_blocks(ledger: Ledger, spec: dict[str, Any], checked: dict[str, Any]) -> list[dict[str, Any]]:
+    """restore 的因果证据：账本里存在该精确意图(同目标、同稳定键、字段旧值为空且新值等于 expectedOld)，其终态 OK，其后没有别的意图。"""
+    base, blocks = spec["target"]["baseToken"], []
+    for item in checked["plan"]:
+        for fid, write in item["writes"].items():
+            if write.get("restore") is None:
+                continue
+            events = ledger.events(Ledger.target_key(base, item["tableId"], item["recordId"]))
+            intent_id = write["restore"]["intentId"]
+            positions = [n for n, e in enumerate(events) if e.get("event") == "intent" and e.get("intentId") == intent_id]
+            problems: list[str] = []
+            if len(positions) != 1:
+                problems.append("账本没有该精确意图")
+            else:
+                intent = events[positions[0]]
+                field = (intent.get("fields") or {}).get(fid)
+                if intent.get("stableKey") != item["stableKey"] or (intent.get("target") or {}).get("record") != item["recordId"]:
+                    problems.append("意图的目标/稳定键与计划不一致")
+                if field is None or not cell_is_empty(field.get("old")) or not cell_equals(field["type"], field.get("wire"), wire_value(field["type"], write["expectedOld"])):
+                    problems.append("意图的旧值不为空或其新值不等于 expectedOld：不是对该误写的逆操作")
+                finals = [e for e in events[positions[0] + 1:] if e.get("event") == "final" and e.get("intentId") == intent_id]
+                if len(finals) != 1 or finals[0].get("status") != "OK":
+                    problems.append("该意图没有唯一的 OK 终态")
+                if any(e.get("event") == "intent" for e in events[positions[0] + 1:]):
+                    problems.append("该意图之后账本上还有别的写入意图(值可能被后续写者改过)")
+            if problems:
+                blocks.append({"tableId": item["tableId"], "recordId": item["recordId"], "field": fid, "kind": "RESTORE_NOT_PROVEN", "reasons": problems})
+    return blocks
+
+
+def _all_blocks(ledger: Ledger, spec: dict[str, Any], checked: dict[str, Any], accepted: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+    return [*_ledger_blocks(ledger, _target_keys(spec, checked)), *_creation_blocks(ledger, spec, checked),
+            *_release_blocks(ledger, spec, checked, accepted), *_restore_blocks(ledger, spec, checked)]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -791,16 +847,16 @@ def _all_blocks(ledger: Ledger, spec: dict[str, Any], checked: dict[str, Any]) -
 # ---------------------------------------------------------------------------------------------
 
 
-def execute(spec: dict[str, Any], checked: dict[str, Any], transport: Transport, ledger: Ledger) -> dict[str, Any]:
+def execute(spec: dict[str, Any], checked: dict[str, Any], transport: Transport, ledger: Ledger, accepted: frozenset[str] = frozenset()) -> dict[str, Any]:
     index, base = checked["index"], spec["target"]["baseToken"]
     keys = _target_keys(spec, checked)
-    blocks = _all_blocks(ledger, spec, checked)
+    blocks = _all_blocks(ledger, spec, checked, accepted)
     if blocks:
         raise SyncError("目标存在未对账的早先写入或同案稳定键的未决创建，已拒绝(未发起任何外部调用)；先 reconcile 或经用户接受后人工放行：" + json.dumps(blocks, ensure_ascii=False))
     log_dir = _fresh_log_dir(spec)
     run_id = uuid.uuid4().hex
     with ledger.locks(list(keys.values()), run_id):
-        blocks = _all_blocks(ledger, spec, checked)  # re-check inside the lock: a concurrent run may have just finished
+        blocks = _all_blocks(ledger, spec, checked, accepted)  # re-check inside the lock: a concurrent run may have just finished
         if blocks:
             raise SyncError("目标在加锁后出现未对账记录，已拒绝：" + json.dumps(blocks, ensure_ascii=False))
         return _execute_locked(spec, checked, transport, ledger, keys, log_dir, run_id, index, base)
@@ -2401,7 +2457,11 @@ def build_field_plan_specs(*, plan_path: Path, plan_sha: str, waterline_path: Pa
             if "new" not in item or "expectedOld" not in item:
                 problems.append(f"字段 {meta['name']} 缺 new 或 expectedOld")
                 continue
-            if meta["type"] == "select" and meta["options"] is not None and item["new"] not in meta["options"]:
+            if isinstance(item.get("restore"), dict):   # 精确逆操作条目：new 必须为 null，expectedOld 为被恢复的误写值，因果证据由执行器对账本核验
+                if item["new"] is not None or not _text(item["expectedOld"]) or not _text(item["restore"].get("intentId")) or ledger is None:
+                    problems.append(f"字段 {meta['name']} restore 需要 new=null、expectedOld=误写值、restore.intentId，且构建必须带 --ledger-dir")
+                    continue
+            elif meta["type"] == "select" and meta["options"] is not None and item["new"] not in meta["options"]:
                 problems.append(f"选项不在合同中：{meta['name']}={item['new']!r}")
                 continue
             refs = []
@@ -2418,7 +2478,8 @@ def build_field_plan_specs(*, plan_path: Path, plan_sha: str, waterline_path: Pa
             problems.append("该目标账本仍未决(BLOCKED)，先对账")
         if table_id is not None and RECORD_ID.match(record_id):
             release = _pending_human_release(ledger, target["baseToken"], table_id, record_id, _text(entry.get("projectNo")))
-            if release:
+            restore_only = all(isinstance(f, dict) and isinstance(f.get("restore"), dict) for f in (fields_in or {}).values())
+            if release and not restore_only:
                 problems.append(f"历史上存在未获用户风险接受的 human_release({release})：保持阻断，不生成说明")
         if problems:
             refused.append({"projectNo": _text(entry.get("projectNo")), "table": table_name, "recordId": record_id, "problems": problems})
@@ -2452,6 +2513,17 @@ def build_field_plan_specs(*, plan_path: Path, plan_sha: str, waterline_path: Pa
                     break
                 meta, item = pf["meta"], pf["item"]
                 stored = row.get(fid, "__absent__")
+                restore = item.get("restore") if isinstance(item.get("restore"), dict) else None
+                if restore is not None:
+                    if stored != "__absent__" and cell_is_empty(stored):
+                        same += 1   # 已是空值：不写
+                        continue
+                    if stored == "__absent__" or not cell_equals(meta["type"], stored, wire_value(meta["type"], item["expectedOld"])):
+                        problems.append(f"{meta['name']} 当前 {stored!r} 不等于被恢复的误写值 {item['expectedOld']!r}（可能已被他人改动，保留）")
+                        break
+                    writes[fid] = {"new": None, "expectedOld": item["expectedOld"], "restore": {"intentId": restore["intentId"]},
+                                   "basis": _record_basis(f"{_text(item['basisRef'])} | 证据 " + "; ".join(pf["refs"]) + f" | 计划={plan_path.name}", _text(item["observedAt"]))}
+                    continue
                 if stored != "__absent__" and not cell_is_empty(stored) and cell_equals(meta["type"], stored, wire_value(meta["type"], item["new"])):
                     same += 1   # 已是目标值：不写
                     continue
