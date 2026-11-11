@@ -250,7 +250,15 @@ def inventory_command(args: argparse.Namespace) -> None:
             "mimeType": mime,
         }
         if mime == "application/pdf":
-            record["pageCount"] = pdf_info(path)[1]
+            try:
+                record["pageCount"] = pdf_info(path)[1]
+            except RegistryError:
+                # a %PDF- file the reader cannot parse is kept as a flagged member: it can only be
+                # used through normalize-office (verified external rendering); compose refuses it
+                # otherwise. Zero-page or non-PDF files still stop the inventory.
+                if not office_normalized.is_unparseable_pdf(path.read_bytes()):
+                    raise
+                record["unparseablePdf"] = True
         files.append(record)
     if container == "DIRECTORY":
         package_sha = directory_hash(files)
@@ -653,7 +661,7 @@ def normalize_office_command(args: argparse.Namespace) -> None:
     relative = safe_relative(args.relative_path)
     entry = sources.get(relative)
     if not entry:
-        raise RegistryError(f"只能转换 inventory 中的 Word 原件：{relative}")
+        raise RegistryError(f"只能转换 inventory 中的 Word 或无法解析的 PDF 原件：{relative}")
     path = Path(entry["absolutePath"]).resolve()
     if not inside(path, Path(inventory["sourceRoot"]).resolve()):
         raise RegistryError("Word 原件路径越界")
@@ -1279,6 +1287,17 @@ def compose_command(args: argparse.Namespace) -> None:
             "pageCount": item["outputPageCount"],
             "sourceKind": "OFFICE_NORMALIZED",
         }
+    bound_sources = {item["sourceRelativePath"] for item in office_items.values()}
+    loose = sorted(
+        relative
+        for relative, entry in sources.items()
+        if entry.get("unparseablePdf") and relative not in bound_sources
+    )
+    if loose:
+        raise RegistryError(
+            "来源 PDF 无法解析且未经 normalize-office 绑定规范 PDF，不能组装："
+            + "、".join(loose)
+        )
     manifest = {key: value for key, value in data.items() if key != "packageSha256"}
     manifest.update(
         {
@@ -2074,7 +2093,7 @@ def build_parser() -> argparse.ArgumentParser:
     normalize.set_defaults(func=normalize_images_command, workspace_required=True)
     normalize_office = sub.add_parser(
         "normalize-office",
-        help="把操作者转换并目视核对的 Word(.docx/.doc) PDF 绑定为规范 PDF 并保存转换记录",
+        help="绑定操作者转换并目视核对的规范 PDF（来源为 Word 或无法结构解析的 PDF）",
     )
     normalize_office.add_argument("--work-dir", required=True)
     normalize_office.add_argument("--relative-path", required=True)

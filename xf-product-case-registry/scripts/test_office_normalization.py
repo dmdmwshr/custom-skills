@@ -215,3 +215,95 @@ def test_normalize_office_cli_binds_and_verification_rejects_swaps(
     archived_pdf = next(Path(done["archive"]["archivedWorkspace"]).glob("normalized/office_*.pdf"))
     archived_pdf.write_bytes(render(1))
     assert case.run("local-verify", "--project", PROJECT, "--check-only") == 2
+
+
+BROKEN_PDF = (
+    b"%PDF-1.4\n1 0 obj\n<< /Info 1 0 R /Info 2 0 R >>\nendobj\ntrailer\n<< /Info 1 0 R >>\n%%EOF\n"
+)
+
+
+def test_unparseable_pdf_is_recorded_normalized_and_never_left_loose(
+    tmp_path: Path, case: Case, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert office.is_unparseable_pdf(BROKEN_PDF) and not office.is_unparseable_pdf(render())
+    with zipfile.ZipFile(case.zip, "a") as archive:
+        archive.writestr("营业执照.pdf", BROKEN_PDF)
+    new_sha = "sha256:" + hashlib.sha256(case.zip.read_bytes()).hexdigest()
+    ws.upsert_case(case.layout, PROJECT, source={"packageSha256": new_sha})
+    assert case.run("inventory", str(case.zip), "--work-dir", str(case.work)) == 0
+    capsys.readouterr()
+    inventory = json.loads((case.work / "inventory.json").read_text(encoding="utf-8"))
+    flagged = {f["relativePath"]: f for f in inventory["files"]}["营业执照.pdf"]
+    assert flagged["unparseablePdf"] is True and "pageCount" not in flagged
+    assert "unparseablePdf" not in {f["relativePath"]: f for f in inventory["files"]}["通知书.pdf"]
+
+    data = {
+        "schemaVersion": "CaseImportManifestV2",
+        "createdAt": "2026-11-03T00:00:00Z",
+        "extractor": {"name": "fixture", "version": "1"},
+        "case": {"projectNo": PROJECT, "brigadeCode": "XISHAN", "unitName": "合成单位"},
+        "initialInspection": {
+            "clientRef": "initial",
+            "stage": "INITIAL_CHECK",
+            "inspectionDate": "2026-10-01",
+            "products": [],
+        },
+        "files": [],
+        "documentSlots": [],
+        "otherAttachments": [],
+    }
+    data_path = case.work / "case-data.json"
+    data_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    # loose: composing without binding the flagged member is refused
+    assert case.run("compose", "--work-dir", str(case.work), "--case-data", str(data_path)) == 2
+    assert "无法解析" in capsys.readouterr().err
+
+    rendered = tmp_path / "render" / "营业执照.pdf"
+    rendered.parent.mkdir()
+    rendered.write_bytes(render())
+    base = (
+        "normalize-office",
+        "--work-dir",
+        str(case.work),
+        "--relative-path",
+        "营业执照.pdf",
+        "--converted-pdf",
+        str(rendered),
+        "--converter-name",
+        "pdfium",
+        "--converter-version",
+        "test",
+        "--rendering-check",
+        "逐页目视核对完毕：1页，执照内容完整可读",
+    )
+    # a readable PDF must not use this route
+    readable = case.work / "source" / "通知书.pdf"
+    assert readable.is_file()
+    assert case.run(*base[:4], "通知书.pdf", *base[5:]) == 2
+    assert "仍可被结构解析" in capsys.readouterr().err
+    assert case.run(*base) == 0
+    produced = json.loads(capsys.readouterr().out.strip().splitlines()[-1])["items"][0]
+    assert produced["status"] == "CREATED"
+    index = json.loads((case.work / "office-normalization.json").read_text(encoding="utf-8"))
+    assert index["items"][0]["sourceFormat"] == "PDF_UNPARSEABLE"
+    data["files"] = [
+        {
+            "clientRef": "file:license",
+            "sourceRelativePath": produced["output"],
+            "relativePath": "normalized/license.pdf",
+        }
+    ]
+    data["documentSlots"] = [
+        {
+            "clientRef": "slot:license",
+            "slotCode": "BUSINESS_LICENSE",
+            "versions": [{"kind": "SCANNED", "fileRef": "file:license"}],
+        }
+    ]
+    data_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    assert case.run("compose", "--work-dir", str(case.work), "--case-data", str(data_path)) == 0
+    capsys.readouterr()
+    assert case.run("local-verify", "--project", PROJECT, "--check-only") == 0
+    # swapping the broken original after composing is caught by local-verify
+    (case.work / "source" / "营业执照.pdf").write_bytes(BROKEN_PDF + b"\n%changed")
+    assert case.run("local-verify", "--project", PROJECT, "--check-only") == 2

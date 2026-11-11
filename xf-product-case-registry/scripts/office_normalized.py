@@ -31,7 +31,8 @@ SCHEMA_VERSION = "OfficeNormalizationV1"
 MODE = "EXTERNAL_RENDER_RECORDED"
 MAX_SOURCE_BYTES = 256 * 1024 * 1024
 OLE_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")
-FORMATS = {".docx": "DOCX", ".doc": "DOC"}
+PDF_UNPARSEABLE = "PDF_UNPARSEABLE"
+FORMATS = {".docx": "DOCX", ".doc": "DOC", ".pdf": PDF_UNPARSEABLE}
 # DOC 的 VBA/宏存储名（UTF-16LE 存放在 OLE 目录里）
 _MACRO_MARKERS = tuple(name.encode("utf-16le") for name in ("_VBA_PROJECT", "VBA", "Macros"))
 _PDF_ACTIVE = re.compile(
@@ -51,21 +52,37 @@ def sha256(data: bytes) -> str:
 def source_format(name: str) -> str:
     suffix = Path(name).suffix.lower()
     if suffix not in FORMATS:
-        raise OfficeNormalizationError(f"只支持 .docx/.doc 原件：{name}")
+        raise OfficeNormalizationError(f"只支持 .docx/.doc 或无法解析的 .pdf 原件：{name}")
     return FORMATS[suffix]
 
 
+def is_unparseable_pdf(data: bytes) -> bool:
+    """True for a ``%PDF-`` file the structural reader rejects (e.g. duplicated trailer keys)."""
+    if not data.startswith(b"%PDF-"):
+        return False
+    try:
+        len(PdfReader(io.BytesIO(data), strict=False).pages)
+    except Exception:  # pypdf raises many types for broken files
+        return True
+    return False
+
+
 def inspect_source(data: bytes, name: str) -> dict[str, Any]:
-    """Return the recorded facts of a safe Word original; raise otherwise."""
+    """Return the recorded facts of a safe Word (or unparseable PDF) original; raise otherwise."""
     kind = source_format(name)
     if not data or len(data) > MAX_SOURCE_BYTES:
-        raise OfficeNormalizationError("Word 原件为空或超过大小上限")
-    if kind == "DOCX":
+        raise OfficeNormalizationError("原件为空或超过大小上限")
+    if kind == PDF_UNPARSEABLE:
+        if not is_unparseable_pdf(data):
+            raise OfficeNormalizationError("PDF 仍可被结构解析，按普通 PDF 使用，不走转换绑定")
+        if _PDF_ACTIVE.search(_STREAM_BODY.sub(b"stream\nendstream", data)):
+            raise OfficeNormalizationError("无法解析的 PDF 含脚本/启动/内嵌文件动作，不做转换")
+    elif kind == "DOCX":
         if not is_safe_docx_package(io.BytesIO(data), filename=Path(name).name):
             raise OfficeNormalizationError(
                 "DOCX 不是可识别的非宏 Word 包（含宏/嵌入对象/外部加载或结构不符）"
             )
-    else:
+    else:  # DOC
         if not data.startswith(OLE_MAGIC):
             raise OfficeNormalizationError("DOC 不是 OLE2 容器")
         if any(marker in data for marker in _MACRO_MARKERS):
