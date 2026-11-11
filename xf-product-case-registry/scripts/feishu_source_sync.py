@@ -1535,12 +1535,33 @@ def _record_basis(ref: str, observed_at: str) -> dict[str, Any]:
     return {"kind": "source-observed", "valueState": "observed", "sourceRef": ref, "observedAt": observed_at}
 
 
-def _entity_evidence(rwid: str, record: Any, capture_name: str, capture_sha: str) -> tuple[dict[str, Any] | None, list[str]]:
+def _followup_detail(root: Path, project: str, waterline_case: Any, listed_org: str) -> dict[str, Any] | None:
+    """手动交件案卷没有整包详情时，退而用其最新可信后续观察(同一套消费者校验，且大队须等于清单大队)作为已存详情。"""
+    source = waterline_case.get("source") if isinstance(waterline_case, dict) else None
+    if not isinstance(source, dict) or not source.get("followupObservations") or not listed_org:
+        return None
+    try:
+        layout = _ws.BusinessLayout.from_root(root)
+        trusted, _ = _views._followup_observations(layout, project, source, [listed_org])
+        if not trusted:
+            return None
+        _, fields, _, observed_text = trusted[0]
+        entry = next(item for item in source["followupObservations"].values() if item.get("observedAt") == observed_text)
+        stored = json.loads((root / str(entry["evidencePath"]).replace("\\", "/")).read_text(encoding="utf-8-sig"))
+    except Exception:  # noqa: BLE001 - 读不到/校验不过就不采纳
+        return None
+    return {"fields": fields, "sourceUrl": stored.get("sourceUrl"), "capturedAt": observed_text, "projectNo": project,
+            "_refBase": f"{entry['evidencePath']} | 后续观察 {entry['observationId']} | evidenceSha256={entry['evidenceSha256']}"}
+
+
+def _entity_evidence(rwid: str, record: Any, capture_name: str, capture_sha: str,
+                     fallback_detail: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, list[str]]:
     """Read one stored detail; every value is tied to the same case (project no / RWID / URL / unit / jurisdiction)."""
     problems: list[str] = []
-    if not isinstance(record, dict) or not isinstance(record.get("collectionDetail"), dict):
+    if not isinstance(record, dict) or not (isinstance(record.get("collectionDetail"), dict) or fallback_detail):
         return None, ["缺少已存详情(collectionDetail)"]
-    detail, listed = record["collectionDetail"], record.get("fields") if isinstance(record.get("fields"), dict) else {}
+    detail = record["collectionDetail"] if isinstance(record.get("collectionDetail"), dict) else fallback_detail
+    listed = record.get("fields") if isinstance(record.get("fields"), dict) else {}
     fields = detail.get("fields") if isinstance(detail.get("fields"), dict) else {}
     project = _text(record.get("projectNo"))
     url = _text(detail.get("sourceUrl"))
@@ -1557,7 +1578,7 @@ def _entity_evidence(rwid: str, record: Any, capture_name: str, capture_sha: str
     unit, jurisdiction, address = _text(fields.get("单位名称")), _text(fields.get("消防管辖")), _text(fields.get("单位地址"))
     if not unit:
         problems.append("详情缺少单位名称")
-    elif _text(listed.get("unitName")) not in {"", unit}:
+    elif " ".join(_text(listed.get("unitName")).split()) not in {"", " ".join(unit.split())}:
         problems.append("详情单位与列表单位不一致")
     if not jurisdiction:
         problems.append("详情缺少消防管辖")
@@ -1572,6 +1593,8 @@ def _entity_evidence(rwid: str, record: Any, capture_name: str, capture_sha: str
         return None, problems
 
     def ref(field: str) -> str:
+        if detail.get("_refBase"):
+            return f"{detail['_refBase']}#fields.{field} | url={url} | projectNo={project}"
         return f"{capture_name}#records.{rwid}.collectionDetail.fields.{field} | batchSha256={capture_sha} | url={url} | projectNo={project}"
 
     return {"projectNo": project, "rwid": rwid, "unit": unit, "address": address, "jurisdiction": jurisdiction,
@@ -1781,7 +1804,10 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
         year_match = re.match(r"^\d{8}C(\d{4})\d{5}$", project)
         if year_match is None or int(year_match.group(1)) < 2026:
             continue  # 默认只从 2026 年起(含之后年份)、只消防产品监督案(C)；2025 及更早不新采不重算
-        evidence, problems = _entity_evidence(rwid, record, capture_path.name, capture_sha)
+        fallback = None
+        if isinstance(record, dict) and not isinstance(record.get("collectionDetail"), dict):
+            fallback = _followup_detail(waterline_path.parent, project, waterline.get(project), _text((record.get("fields") or {}).get("sourceOrganization")))
+        evidence, problems = _entity_evidence(rwid, record, capture_path.name, capture_sha, fallback)
         if evidence is None:
             blocked.append({"projectNo": project, "rwid": rwid, "reasons": problems})
             continue

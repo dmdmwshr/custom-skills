@@ -3,6 +3,7 @@ import copy
 
 import hashlib
 import json
+import re
 import subprocess
 import zipfile
 from copy import deepcopy
@@ -1604,6 +1605,30 @@ def test_r53_cloud_builder_takes_the_initial_result_from_a_trusted_followup_only
     assert sync._followup_initial_result(case.layout.root, PROJECT, ledger_case, None, "合成乙大队") is None
     assert sync._followup_initial_result(case.layout.root, PROJECT, ledger_case, {"initialResult": "QUALIFIED"}, "合成甲大队") is None
     assert sync._followup_initial_result(case.layout.root, PROJECT, {"source": {}}, None, "合成甲大队") is None
+
+
+def test_r53_cloud_entity_evidence_falls_back_to_a_trusted_followup_when_no_stored_detail(case, monkeypatch):
+    from scripts import feishu_source_sync as sync
+    monkeypatch.setattr(sync, "PROJECT_NO", re.compile(r"\d{8}[CT]\d{9}"))   # 合成项目号用 T，云端正则只认 C
+    monkeypatch.setattr(sync, "PRODUCT_ROOT", re.compile(r"\[产\]\S*?-(\d{8}[CT]\d{9})-"))
+    bound_case(case)
+    detail = {**followup_fields("回退详情"), "检查产品信息": []}
+    _followup(case, "回退详情", observed_at="2026-11-09T15:39:25-08:00", detail=detail)
+    ledger_case = ws.load_waterline(case.layout)["cases"][PROJECT]
+    fallback = sync._followup_detail(case.layout.root, PROJECT, ledger_case, "合成甲大队")
+    assert fallback and fallback["projectNo"] == PROJECT and "后续观察" in fallback["_refBase"]
+    assert sync._followup_detail(case.layout.root, PROJECT, ledger_case, "合成乙大队") is None
+    assert sync._followup_detail(case.layout.root, PROJECT, {"source": {}}, "合成甲大队") is None
+    record = {"projectNo": PROJECT, "rwid": RWID, "fields": {"unitName": fallback["fields"]["单位名称"]}}
+    evidence, problems = sync._entity_evidence(RWID, record, "batch", "sha256:x", fallback)
+    assert evidence is not None and not problems, problems
+    # 列表单位只差空白折叠仍视为同一单位；不同单位仍拒绝；没有回退也没有已存详情仍拒绝
+    one_space = {**fallback, "fields": {**fallback["fields"], "单位名称": "合成 甲单位"}}
+    spaced = {**record, "fields": {"unitName": "合成  甲单位"}}
+    assert sync._entity_evidence(RWID, spaced, "batch", "sha256:x", one_space)[1] == []
+    other = {**record, "fields": {"unitName": "另一家单位"}}
+    assert "详情单位与列表单位不一致" in sync._entity_evidence(RWID, other, "batch", "sha256:x", fallback)[1]
+    assert sync._entity_evidence(RWID, record, "batch", "sha256:x", None)[1] == ["缺少已存详情(collectionDetail)"]
 
 
 def test_r43_followup_observation_releases_only_its_exact_conflict(case):
