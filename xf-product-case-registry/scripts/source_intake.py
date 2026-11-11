@@ -3760,25 +3760,30 @@ def _followup_coverage(index_path: Path, rwid: str, project: str, shot_shas: lis
         raise SourceIntakeError("分段覆盖索引必须是 JSON 对象")
     segments = _checked_segment_set(index, rwid, project, index_path.parent)
     margin = index.get("tailMarginCss")
+    last_bottom = index.get("lastRowBottomCss")
+    image_height = index.get("lastSegmentImageHeight")
+    numbers = (margin, last_bottom, image_height)
     if (
         index.get("complete") is not True
         or index.get("reachedBottom") is not True
         or index.get("overlapOk") is not True
         or index.get("gaps")
         or index.get("horizontalOverflow")
-        or not isinstance(margin, (int, float))
-        or isinstance(margin, bool)
+        or not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in numbers)
         or margin < FOLLOWUP_TAIL_MARGIN_CSS
-        or not str(index.get("lastRowText") or "").strip()
     ):
         raise SourceIntakeError("分段覆盖索引没有证明末行完整可见且其下有余白，不能作为完整详情截图")
+    # 余白必须能由末行实测下沿与末段 PNG 实际高度复算(末行文本可因渲染为空，下沿几何不能缺)
+    if image_height != segments[-1]["height"] or abs((image_height - last_bottom) - margin) > 1:
+        raise SourceIntakeError("分段覆盖索引的末行下沿、末段图高与余白不能互相印证")
     if sorted({item["sha256"] for item in segments}) != shot_shas or len(segments) != len({item["sha256"] for item in segments}):
         raise SourceIntakeError("提交的截图必须恰是覆盖索引的全部分段(不多不少)")
     return raw, {
         "indexSha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
         "scrollHeight": segments[0]["scrollHeight"],
         "tailMarginCss": margin,
-        "lastRowText": str(index["lastRowText"]).strip(),
+        "lastRowBottomCss": last_bottom,
+        "lastRowText": str(index.get("lastRowText") or "").strip(),
         "segments": [
             {"index": item["index"], "sha256": item["sha256"], "coverFrom": item["coverFrom"], "coverTo": item["coverTo"],
              "width": item["width"], "height": item["height"]}

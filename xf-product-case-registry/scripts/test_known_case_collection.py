@@ -2230,10 +2230,21 @@ def _coverage_fixture(case, label="cov", *, complete=True, margin=27.5, last_row
                  "png": str(f), "width": 1200, "height": 364, "sha256": source._sha256(f).removeprefix("sha256:")}
                 for n, (c, f) in enumerate(zip(covers, files, strict=True))]
     index = {"projectNo": PROJECT, "rwid": RWID, "sourceUrl": DETAIL_URL, "segments": segments, "gaps": [], "reachedBottom": True,
-             "overlapOk": not gaps, "horizontalOverflow": False, "tailMarginCss": margin, "lastRowText": last_row, "complete": complete}
+             "overlapOk": not gaps, "horizontalOverflow": False, "tailMarginCss": margin, "lastRowText": last_row, "complete": complete,
+             "lastRowBottomCss": 364 - margin, "lastSegmentImageHeight": 364}
     path = case.layout.root / f"{label}-index.json"
     path.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
     return path, files
+
+
+def test_r55_followup_coverage_accepts_blank_last_row_text_when_geometry_proves_the_tail(case):
+    bound_case(case)
+    index_path, files = _coverage_fixture(case, last_row=" ")
+    source.add_followup_observation(case.layout, BATCH, RWID, followup_fields("空末行文本"), source_url=DETAIL_URL,
+                                    screenshot=files, observed_at="2026-11-10T09:00:00+08:00", coverage_index=index_path)
+    entry, = ws.load_waterline(case.layout)["cases"][PROJECT]["source"]["followupObservations"].values()
+    evidence = json.loads((case.layout.root / entry["evidencePath"]).read_text(encoding="utf-8"))
+    assert evidence["coverage"]["lastRowText"] == "" and evidence["coverage"]["lastRowBottomCss"] == 364 - 27.5
 
 
 def test_r54_followup_with_coverage_index_keeps_the_index_and_only_trusted_while_it_is_intact(case):
@@ -2262,19 +2273,24 @@ def test_r54_followup_with_coverage_index_keeps_the_index_and_only_trusted_while
     assert not trusted and refused and "COVERAGE_INDEX_MISSING_OR_CHANGED" in refused[0]
 
 
-@pytest.mark.parametrize("fault", ["incomplete", "thin-margin", "no-last-row", "gap", "extra-shot", "missing-shot", "other-case"])
+@pytest.mark.parametrize("fault", ["incomplete", "thin-margin", "no-last-row-geometry", "margin-not-matching-image", "gap", "extra-shot", "missing-shot", "other-case"])
 def test_r54_followup_coverage_refusals_write_nothing(case, fault):
     bound_case(case)
-    options = {"incomplete": {"complete": False}, "thin-margin": {"margin": 3.0}, "no-last-row": {"last_row": ""}, "gap": {"gaps": True}}
+    options = {"incomplete": {"complete": False}, "thin-margin": {"margin": 3.0}, "gap": {"gaps": True}}
     index_path, files = _coverage_fixture(case, **options.get(fault, {}))
     shots = list(files)
     if fault == "extra-shot":
         shots.append(new_screenshot(case, "extra"))
     elif fault == "missing-shot":
         shots = shots[:1]
-    elif fault == "other-case":
+    elif fault in {"other-case", "no-last-row-geometry", "margin-not-matching-image"}:
         index = json.loads(index_path.read_text(encoding="utf-8"))
-        index["rwid"] = "90000000999"
+        if fault == "other-case":
+            index["rwid"] = "90000000999"
+        elif fault == "no-last-row-geometry":
+            index.pop("lastRowBottomCss")
+        else:
+            index["lastRowBottomCss"] = 100            # 余白 27.5 与 364-100 不符
         index_path.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
     before = capture_bytes(case, BATCH)
     ledger_before = json.dumps(ws.load_waterline(case.layout), sort_keys=True, ensure_ascii=False)
