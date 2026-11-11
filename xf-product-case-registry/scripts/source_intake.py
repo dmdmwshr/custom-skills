@@ -1509,6 +1509,46 @@ def _admission_basis(observation: dict[str, Any], evidence_sha: str) -> dict[str
     }
 
 
+def admission_evidence_path(layout: Any, batch_id: str, project: str, rwid: str, evidence_sha: str) -> Path:
+    """准入读取文件的永久副本位置：由登记摘要唯一决定，之后任何人都能按登记值找到并复算。"""
+
+    return layout.batch_dir(batch_id) / "admission-evidence" / f"{project}-{rwid}-{evidence_sha.removeprefix('sha256:')[:12]}.json"
+
+
+def _keep_admission_evidence(layout: Any, batch_id: str, project: str, rwid: str, evidence_sha: str, raw: bytes) -> None:
+    """准入时把读取文件的原始字节按摘要留存(只增不改)；已存在时必须字节相同。
+
+    登记的 evidenceSha256 是传入读取文件原始字节的摘要，而读取文件常按案卷固定路径重读覆盖；不留存就无法再复算该摘要。
+    """
+
+    if "sha256:" + hashlib.sha256(raw).hexdigest() != evidence_sha:
+        raise SourceIntakeError("准入证据字节与登记摘要不一致，拒绝留存")
+    target = admission_evidence_path(layout, batch_id, project, rwid, evidence_sha)
+    if target.exists():
+        if not target.is_file() or _sha256(target) != evidence_sha:
+            raise SourceIntakeError("已留存的准入证据与登记摘要不一致，拒绝覆盖")
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(target.name + ".tmp")
+    try:
+        with temporary.open("xb") as outgoing:
+            outgoing.write(raw)
+            outgoing.flush()
+            os.fsync(outgoing.fileno())
+        os.rename(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def admission_evidence_problem(layout: Any, batch_id: str, project: str, rwid: str, evidence_sha: str) -> str | None:
+    """只读：登记的准入摘要能否由留存字节复算；None=可复算。"""
+
+    target = admission_evidence_path(layout, batch_id, project, rwid, evidence_sha)
+    if not target.is_file():
+        return "ADMISSION_EVIDENCE_NOT_KEPT"
+    return None if _sha256(target) == evidence_sha else "ADMISSION_EVIDENCE_CHANGED"
+
+
 def admit_observed_material_case(
     workspace: Any,
     batch_id: str,
@@ -1551,6 +1591,7 @@ def admit_observed_material_case(
         evidence_sha = "sha256:" + hashlib.sha256(raw).hexdigest()
     basis = _admission_basis(observed, evidence_sha)
     key, project = basis["rwid"], basis["projectNo"]
+    admission_bytes = raw if not isinstance(observation, dict) else None
     records = state.setdefault("records", {})
     existing = records.get(key)
     if existing is not None:
@@ -1589,6 +1630,8 @@ def admit_observed_material_case(
                 if case.get(ledger_key) not in (None, "", basis[basis_key]):
                     raise SourceIntakeError("总账里该项目的单位或大队与现场详情不一致，保留冲突不推进")
     moment = _timestamp(admitted_at)
+    if admission_bytes is not None:
+        _keep_admission_evidence(layout, batch_id, project, key, evidence_sha, admission_bytes)
     if case is None or (source_part.get("materialAdmission") or {}).get("evidenceSha256") != evidence_sha:
         _maybe_waterline(
             layout,
@@ -3655,6 +3698,11 @@ def _verify_followup_on_disk(layout: Any, evidence_path: Path, stored: dict[str,
         target = Path(layout.root) / str(item.get("relativePath"))
         if not target.is_file() or _sha256(target) != item.get("sha256"):
             raise SourceIntakeError("已落盘的后续观察截图缺失或已变化，无法补齐，拒绝")
+    index_ref = (stored.get("coverage") or {}).get("index")
+    if index_ref:
+        target = Path(layout.root) / str(index_ref.get("relativePath"))
+        if not target.is_file() or _sha256(target) != index_ref.get("sha256"):
+            raise SourceIntakeError("已落盘的覆盖索引缺失或已变化，无法补齐，拒绝")
 
 
 def _followup_ledger_registered(layout: Any, project_no: str, observation_id: str, entry: dict[str, Any]) -> bool:
@@ -3680,6 +3728,66 @@ def _register_followup_in_ledger(
     _maybe_waterline(layout, project_no, source=ledger_source)
 
 
+def _keep_bytes_immutable(target: Path, raw: bytes) -> None:
+    if target.exists():
+        if not target.is_file() or "sha256:" + hashlib.sha256(raw).hexdigest() != _sha256(target):
+            raise SourceIntakeError(f"目标证据已存在且内容不同：{target.name}")
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(target.name + ".tmp")
+    try:
+        with temporary.open("xb") as outgoing:
+            outgoing.write(raw)
+            outgoing.flush()
+            os.fsync(outgoing.fileno())
+        os.rename(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+FOLLOWUP_TAIL_MARGIN_CSS = 24
+
+
+def _followup_coverage(index_path: Path, rwid: str, project: str, shot_shas: list[str]) -> tuple[bytes, dict[str, Any]]:
+    """长页观察的分段覆盖证明：同案、连续覆盖到页面末端、无空隙、末行完整可见且其下有余白，且截图恰是这些分段。"""
+
+    try:
+        raw = index_path.read_bytes()
+        index = json.loads(raw.decode("utf-8-sig"))
+    except (OSError, ValueError) as error:
+        raise SourceIntakeError(f"无法读取分段覆盖索引：{error}") from error
+    if not isinstance(index, dict):
+        raise SourceIntakeError("分段覆盖索引必须是 JSON 对象")
+    segments = _checked_segment_set(index, rwid, project, index_path.parent)
+    margin = index.get("tailMarginCss")
+    if (
+        index.get("complete") is not True
+        or index.get("reachedBottom") is not True
+        or index.get("overlapOk") is not True
+        or index.get("gaps")
+        or index.get("horizontalOverflow")
+        or not isinstance(margin, (int, float))
+        or isinstance(margin, bool)
+        or margin < FOLLOWUP_TAIL_MARGIN_CSS
+        or not str(index.get("lastRowText") or "").strip()
+    ):
+        raise SourceIntakeError("分段覆盖索引没有证明末行完整可见且其下有余白，不能作为完整详情截图")
+    if sorted({item["sha256"] for item in segments}) != shot_shas or len(segments) != len({item["sha256"] for item in segments}):
+        raise SourceIntakeError("提交的截图必须恰是覆盖索引的全部分段(不多不少)")
+    return raw, {
+        "indexSha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+        "scrollHeight": segments[0]["scrollHeight"],
+        "tailMarginCss": margin,
+        "lastRowText": str(index["lastRowText"]).strip(),
+        "segments": [
+            {"index": item["index"], "sha256": item["sha256"], "coverFrom": item["coverFrom"], "coverTo": item["coverTo"],
+             "width": item["width"], "height": item["height"]}
+            for item in segments
+        ],
+        "proof": "CONTIGUOUS_TOP_TO_END_WITH_VISIBLE_TAIL",
+    }
+
+
 def add_followup_observation(
     workspace: Any,
     batch_id: str,
@@ -3689,6 +3797,7 @@ def add_followup_observation(
     screenshot: str | Path | list[str | Path] | tuple[str | Path, ...] | None = None,
     *,
     observed_at: str,
+    coverage_index: str | Path | None = None,
 ) -> dict[str, Any]:
     """Save a new real, same-case observation of a case whose package is already bound, without touching the bound material.
 
@@ -3703,6 +3812,10 @@ def add_followup_observation(
     name) but any mismatch raises without writing anything. The same observation (same RWID, instant and content)
     is idempotent; a later revisit with identical facts is a new observation with its own time. A conflict is released
     only when its recorded old and observed fingerprints are exactly this record's detail and this observation.
+
+    ``coverage_index`` (optional) is the segment coverage index of a long page. It is accepted only when the screenshots
+    are exactly its segments and it proves same case/RWID, contiguous top-to-end coverage, a complete result, overlap
+    with no gap and a visible bottom margin below the last row. The index bytes are kept next to the screenshots.
     """
 
     layout = _layout(workspace)
@@ -3792,6 +3905,10 @@ def add_followup_observation(
         if not path.is_file():
             raise SourceIntakeError("详情截图不存在")
     shot_shas = sorted({_sha256(path) for path in shot_paths})
+    coverage_raw: bytes | None = None
+    coverage_proof: dict[str, Any] | None = None
+    if coverage_index is not None:
+        coverage_raw, coverage_proof = _followup_coverage(Path(coverage_index), record_key, project_no, shot_shas)
     fingerprint = _fingerprint(clean_detail)
     observed_shanghai = _timestamp(observed.astimezone(SHANGHAI))
     observation_id = "obs:" + hashlib.sha256(
@@ -3814,6 +3931,7 @@ def add_followup_observation(
             or stored.get("observationId") != observation_id
             or stored.get("fingerprint") != fingerprint
             or stored_shas != shot_shas
+            or (coverage_proof is not None and (stored.get("coverage") or {}).get("indexSha256") != coverage_proof["indexSha256"])
         ):
             raise SourceIntakeError("同一观察已登记但证据不一致，拒绝覆盖")
         if existing_entries:
@@ -3830,6 +3948,11 @@ def add_followup_observation(
         _copy_immutable(path, target)
         shot_records.append({**_evidence_file(target, Path(layout.root))})
     shot_records = list({item["sha256"]: item for item in shot_records}.values())
+    coverage_record: dict[str, Any] | None = None
+    if coverage_raw is not None and coverage_proof is not None:
+        index_target = directory / f"{record_key}-{observation_id[4:20]}-覆盖索引_{coverage_proof['indexSha256'].removeprefix('sha256:')[:12]}.json"
+        _keep_bytes_immutable(index_target, coverage_raw)
+        coverage_record = {**coverage_proof, "index": _evidence_file(index_target, Path(layout.root))}
     prior = {
         "fingerprint": existing.get("fingerprint"),
         "businessFingerprint": existing.get("businessFingerprint"),
@@ -3859,6 +3982,7 @@ def add_followup_observation(
         "fingerprint": fingerprint,
         "businessFingerprint": _business_detail_fingerprint(clean_detail),
         "screenshots": shot_records,
+        **({"coverage": coverage_record} if coverage_record else {}),
         "priorBoundDetail": prior,
         **({"registeredPackage": package_proof} if package_proof else {}),
         **({"changeReason": "MANUAL_INTAKE_COMPLETED_CASE_SOURCE_DETAIL_OBSERVED"} if manual_baseline is not None else {}),

@@ -846,8 +846,25 @@ def _followup_observations(
                 )
             except (OSError, KeyError):
                 shots_ok = False
+            coverage = evidence.get("coverage")
+            coverage_ok = True
+            if coverage is not None:
+                # 带覆盖索引的观察：索引副本须仍在且摘要不变，且其分段恰是已保存的全部截图
+                try:
+                    index_ref = coverage["index"]
+                    index_file = layout.root / str(index_ref["relativePath"]).replace("\\", "/")
+                    coverage_ok = (
+                        index_file.is_file()
+                        and "sha256:" + hashlib.sha256(index_file.read_bytes()).hexdigest() == index_ref.get("sha256")
+                        and index_ref.get("sha256") == coverage.get("indexSha256")
+                        and sorted(item["sha256"] for item in coverage["segments"]) == sorted(item.get("sha256") for item in shots)
+                    )
+                except (OSError, KeyError, TypeError):
+                    coverage_ok = False
             if not shots_ok:
                 refuse("SCREENSHOT_MISSING_OR_CHANGED")
+            elif not coverage_ok:
+                refuse("COVERAGE_INDEX_MISSING_OR_CHANGED")
             else:
                 trusted.append((observed, fields, observation_day(evidence["observedAt"]), str(evidence["observedAt"])))
     trusted.sort(key=lambda item: item[0], reverse=True)

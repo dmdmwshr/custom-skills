@@ -1826,6 +1826,7 @@ def source_add_observation_command(args: argparse.Namespace) -> None:
         source_url=args.source_url,
         screenshot=[Path(item) for item in args.screenshot],
         observed_at=args.observed_at,
+        coverage_index=Path(args.coverage_index) if getattr(args, "coverage_index", None) else None,
     )
 
 
@@ -2280,6 +2281,10 @@ def build_parser() -> argparse.ArgumentParser:
     source_observation.add_argument("--source-url", required=True)
     source_observation.add_argument(
         "--screenshot", action="append", required=True, help="完整详情截图；长页分段时重复传入同一次观察的全部分段"
+    )
+    source_observation.add_argument(
+        "--coverage-index",
+        help="长页分段覆盖索引(可选)：须证明同案连续覆盖到页面末端且末行完整可见、其下有余白，截图恰为其全部分段",
     )
     source_observation.add_argument(
         "--observed-at", required=True, help="真实回源观察时间(ISO 8601，必须带时区偏移，原值保留；业务观察日按上海时区解释)"

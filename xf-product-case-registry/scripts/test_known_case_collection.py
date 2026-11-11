@@ -2191,3 +2191,96 @@ def test_r48_cli_persistence_calls_are_counted_per_phase(case, monkeypatch, tmp_
     assert phases["exact-repeat"]["exit"] == 0 and phases["exact-repeat"]["capture"] == 0 and phases["exact-repeat"]["ledger"] == 0
     assert len(_ledger_followups(case)) == 1
     capsys.readouterr()
+
+
+# ---------------------------------------------------------------------------------------------
+# r54：准入读取文件留存(可复算登记摘要) + 后续观察的分段覆盖索引
+# ---------------------------------------------------------------------------------------------
+
+def test_r54_admission_keeps_the_exact_bytes_so_the_registered_digest_stays_recomputable(case):
+    derived = derived_for_admission(case)
+    reading = case.layout.root / "admission-read.json"
+    reading.write_bytes(json.dumps(admission_observation(), ensure_ascii=False, indent=1).encode("utf-8"))
+    registered = source._sha256(reading)
+    state = source.admit_observed_material_case(case.layout, derived, reading, admitted_at=NOW)
+    assert state["records"][ADM_RWID]["materialAdmission"]["evidenceSha256"] == registered
+    assert source.admission_evidence_problem(case.layout, derived, ADM_PROJECT, ADM_RWID, registered) is None
+    kept = source.admission_evidence_path(case.layout, derived, ADM_PROJECT, ADM_RWID, registered)
+    assert kept.read_bytes() == reading.read_bytes()
+    # 读取文件按固定路径被重读覆盖：留存副本不变，登记摘要仍可复算
+    reading.write_bytes(json.dumps({**admission_observation(), "observedAt": "2026-11-09T10:00:00+08:00"}, ensure_ascii=False, indent=1).encode("utf-8"))
+    assert source._sha256(reading) != registered
+    assert source.admission_evidence_problem(case.layout, derived, ADM_PROJECT, ADM_RWID, registered) is None
+    # 同证据重放不改任何东西；留存副本被改动则报告，不静默接受
+    kept.write_bytes(kept.read_bytes() + b" ")
+    assert source.admission_evidence_problem(case.layout, derived, ADM_PROJECT, ADM_RWID, registered) == "ADMISSION_EVIDENCE_CHANGED"
+    kept.unlink()
+    assert source.admission_evidence_problem(case.layout, derived, ADM_PROJECT, ADM_RWID, registered) == "ADMISSION_EVIDENCE_NOT_KEPT"
+
+
+def _coverage_fixture(case, label="cov", *, complete=True, margin=27.5, last_row=" 打印查看", gaps=False):
+    """同案 2 段分段截图 + 覆盖索引；返回 (索引路径, 分段文件)。"""
+    files = []
+    for number in range(2):
+        shot = case.layout.root / f"{label}-seg{number}.png"
+        shot.write_bytes(_fake_png(f"{label}{number}", 1200, 364))
+        files.append(shot)
+    covers = ((0, 300), (200, 500)) if not gaps else ((0, 300), (400, 700))
+    segments = [{"index": n, "scrollTop": c[0], "clientHeight": 300, "scrollHeight": covers[-1][1], "coverFrom": c[0], "coverTo": c[1],
+                 "png": str(f), "width": 1200, "height": 364, "sha256": source._sha256(f).removeprefix("sha256:")}
+                for n, (c, f) in enumerate(zip(covers, files, strict=True))]
+    index = {"projectNo": PROJECT, "rwid": RWID, "sourceUrl": DETAIL_URL, "segments": segments, "gaps": [], "reachedBottom": True,
+             "overlapOk": not gaps, "horizontalOverflow": False, "tailMarginCss": margin, "lastRowText": last_row, "complete": complete}
+    path = case.layout.root / f"{label}-index.json"
+    path.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
+    return path, files
+
+
+def test_r54_followup_with_coverage_index_keeps_the_index_and_only_trusted_while_it_is_intact(case):
+    from scripts import ledger_views as views
+    bound_case(case)
+    index_path, files = _coverage_fixture(case)
+    source.add_followup_observation(case.layout, BATCH, RWID, followup_fields("覆盖"), source_url=DETAIL_URL,
+                                    screenshot=files, observed_at="2026-11-10T09:00:00+08:00", coverage_index=index_path)
+    ledger_source = ws.load_waterline(case.layout)["cases"][PROJECT]["source"]
+    entry, = ledger_source["followupObservations"].values()
+    evidence = json.loads((case.layout.root / entry["evidencePath"]).read_text(encoding="utf-8"))
+    coverage_record = evidence["coverage"]
+    assert coverage_record["proof"] == "CONTIGUOUS_TOP_TO_END_WITH_VISIBLE_TAIL" and len(coverage_record["segments"]) == 2
+    index_copy = case.layout.root / coverage_record["index"]["relativePath"]
+    assert index_copy.read_bytes() == index_path.read_bytes()
+    trusted, refused = views._followup_observations(case.layout, PROJECT, ledger_source, ["合成甲大队"])
+    assert len(trusted) == 1 and not refused
+    # 重放同一观察：0 写
+    before = capture_bytes(case, BATCH)
+    source.add_followup_observation(case.layout, BATCH, RWID, followup_fields("覆盖"), source_url=DETAIL_URL,
+                                    screenshot=files, observed_at="2026-11-10T09:00:00+08:00", coverage_index=index_path)
+    assert capture_bytes(case, BATCH) == before
+    # 覆盖索引副本被改动 -> 消费者不再采信
+    index_copy.write_bytes(index_copy.read_bytes() + b" ")
+    trusted, refused = views._followup_observations(case.layout, PROJECT, ledger_source, ["合成甲大队"])
+    assert not trusted and refused and "COVERAGE_INDEX_MISSING_OR_CHANGED" in refused[0]
+
+
+@pytest.mark.parametrize("fault", ["incomplete", "thin-margin", "no-last-row", "gap", "extra-shot", "missing-shot", "other-case"])
+def test_r54_followup_coverage_refusals_write_nothing(case, fault):
+    bound_case(case)
+    options = {"incomplete": {"complete": False}, "thin-margin": {"margin": 3.0}, "no-last-row": {"last_row": ""}, "gap": {"gaps": True}}
+    index_path, files = _coverage_fixture(case, **options.get(fault, {}))
+    shots = list(files)
+    if fault == "extra-shot":
+        shots.append(new_screenshot(case, "extra"))
+    elif fault == "missing-shot":
+        shots = shots[:1]
+    elif fault == "other-case":
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        index["rwid"] = "90000000999"
+        index_path.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
+    before = capture_bytes(case, BATCH)
+    ledger_before = json.dumps(ws.load_waterline(case.layout), sort_keys=True, ensure_ascii=False)
+    with pytest.raises(source.SourceIntakeError):
+        source.add_followup_observation(case.layout, BATCH, RWID, followup_fields("拒绝"), source_url=DETAIL_URL,
+                                        screenshot=shots, observed_at="2026-11-10T09:00:00+08:00", coverage_index=index_path)
+    assert capture_bytes(case, BATCH) == before
+    assert json.dumps(ws.load_waterline(case.layout), sort_keys=True, ensure_ascii=False) == ledger_before
+    assert not (case.layout.batch_dir(BATCH) / "followup-observations").exists()
