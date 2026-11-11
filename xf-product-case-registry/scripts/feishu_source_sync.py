@@ -1727,6 +1727,46 @@ def _followup_initial_result(root: Path, project: str, waterline_case: Any, clas
     return {"label": label, "ref": ref, "observedAt": observed_text}
 
 
+def _detail_initial_result(root: Path, project: str, waterline_case: Any, classification: dict[str, Any] | None) -> dict[str, str] | None:
+    """初查结果在总账分类证据和后续观察都不能证明时，取该案自己保存的、可信的来源详情页(与本地视图同一读取与校验)。
+
+    只采纳页面产品行按严格规则明确给出的合格/不合格；复查行不参与；待结果/待核实互转没有信息增量，不制造差异。
+    返回外显标签与可回溯依据(已保存详情文件、其摘要、观察时点)。
+    """
+    source = waterline_case.get("source") if isinstance(waterline_case, dict) else None
+    if not isinstance(source, dict):
+        return None
+    if isinstance(classification, dict) and classification.get("initialResult") in case_lifecycle._RESULT_FROM_ENUM:
+        return None
+    try:
+        layout = _ws.BusinessLayout.from_root(root)
+        found, _ = _views._saved_detail(layout, project, source)
+    except Exception:  # noqa: BLE001 - 无法读取/校验就不采纳，不猜
+        return None
+    if not found:
+        return None
+    fields, _, captured = found
+    label = case_lifecycle.evidence_initial_result(fields)
+    if label not in {"合格", "不合格"}:
+        return None
+    candidates = [layout.pending_case_dir(project) / "source-evidence.json"]
+    completed = layout.completed_case_dir(project)
+    if completed.is_dir():
+        candidates += sorted(completed.glob("*/source-evidence.json"), reverse=True)
+    for path in candidates:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8-sig"))
+            relative = path.resolve().relative_to(root.resolve())
+        except (OSError, ValueError):
+            continue
+        records = [doc] if doc.get("projectNo") == project and doc.get("capturedAt") == captured else []
+        records += [r for r in (doc.get("records") or {}).values() if isinstance(r, dict) and r.get("projectNo") == project and r.get("capturedAt") == captured]
+        if any(r.get("fields") == fields for r in records):
+            ref = f"{relative.as_posix()}#fields.检查产品信息 | 已保存来源详情 | evidenceSha256=sha256:{file_sha(path)} | projectNo={project}"
+            return {"label": label, "ref": ref, "observedAt": captured}
+    return None
+
+
 def _lifecycle_values(index_case: dict[str, dict[str, Any]], candidates: set[str], classification: dict[str, Any] | None,
                       resolved: dict[str, Any], *, create: bool, result_override: str | None = None) -> tuple[dict[str, str], list[str]]:
     """New-cell values for 初查结果 / 初查日期来源, limited to what the latest contract exposes and its option lists."""
@@ -1853,7 +1893,8 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
         elif date is not None and resolved.get("conflict"):
             date_conflicts.append({"projectNo": project, "rwid": rwid, "electronic": resolved["value"], "acceptance": resolved["acceptanceDate"], "handling": "以电子监督检查记录为准，保留差异"})
         classification = _proven_classification(waterline.get(project), waterline_path.parent)
-        followup = _followup_initial_result(waterline_path.parent, project, waterline.get(project), classification, evidence["jurisdiction"])
+        followup = (_followup_initial_result(waterline_path.parent, project, waterline.get(project), classification, evidence["jurisdiction"])
+                    or _detail_initial_result(waterline_path.parent, project, waterline.get(project), classification))
         basis_ref = evidence["ref"]("检查产品信息") + (" | 总账分类证据已核" if classification else " | 缺可核的分类证据，初查结果按待核实")
         result_ref, result_at = (followup["ref"], followup["observedAt"]) if followup else (basis_ref, None)
         if not ids:

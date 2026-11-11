@@ -2328,3 +2328,38 @@ def test_r54_followup_coverage_refusals_write_nothing(case, fault):
     assert capture_bytes(case, BATCH) == before
     assert json.dumps(ws.load_waterline(case.layout), sort_keys=True, ensure_ascii=False) == ledger_before
     assert not (case.layout.batch_dir(BATCH) / "followup-observations").exists()
+
+
+def _page_detail(case, rows, status="已结案[合格]"):
+    source.request_case_material_collection(case.layout, BATCH, RWID, PROJECT, requested_at=NOW)
+    shot = case.layout.root / "synthetic-page-detail.png"
+    shot.write_bytes(b"synthetic page detail fixture")
+    page = {k: v for k, v in followup_fields("保存详情").items() if k != "initialInspection"}
+    page.update({"检查产品信息": rows, "检查情况": status})
+    source.add_detail(case.layout, BATCH, RWID, page, source_url=f"https://source.example/#/xfjd/projectDetail?RWID={RWID}",
+                      screenshot=shot, captured_at=NOW)
+    return ws.load_waterline(case.layout)["cases"][PROJECT]
+
+
+def test_g7_cloud_builder_takes_the_initial_result_from_the_cases_own_saved_detail(case):
+    from scripts import feishu_source_sync as sync
+    ok = {"产品名称（规格型号）": "合成灭火器", "产品质量现场检查情况": "未发现不合格现象", "市场准入检查情况": "未发现不合格现象", "检查结果": "", "检查结果标记": []}
+    ledger_case = _page_detail(case, [ok])
+    got = sync._detail_initial_result(case.layout.root, PROJECT, ledger_case, None)
+    assert got and got["label"] == "合格" and got["observedAt"] == NOW
+    assert "source-evidence.json#fields.检查产品信息" in got["ref"] and "evidenceSha256=sha256:" in got["ref"] and PROJECT in got["ref"]
+    # 总账分类已能证明、或没有可校验的保存详情：不采纳
+    assert sync._detail_initial_result(case.layout.root, PROJECT, ledger_case, {"initialResult": "QUALIFIED"}) is None
+    assert sync._detail_initial_result(case.layout.root, PROJECT, {"source": {}}, None) is None
+    assert sync._detail_initial_result(case.layout.root, PROJECT, "x", None) is None
+    # 页面保存的详情被改动(摘要不符)：不采纳，不猜
+    evidence = case.layout.pending_case_dir(PROJECT) / "source-evidence.json"
+    evidence.write_text(evidence.read_text(encoding="utf-8").replace("未发现不合格现象", "合格现象", 1), encoding="utf-8")
+    assert sync._detail_initial_result(case.layout.root, PROJECT, ledger_case, None) is None
+
+
+def test_g7_cloud_builder_detail_result_is_terminal_only(case):
+    from scripts import feishu_source_sync as sync
+    pending = {"产品名称（规格型号）": "合成灭火器", "产品质量现场检查情况": "抽样送检", "市场准入检查情况": "未发现不合格现象", "检查结果": "", "检查结果标记": []}
+    ledger_case = _page_detail(case, [pending], status="处理中")
+    assert sync._detail_initial_result(case.layout.root, PROJECT, ledger_case, None) is None   # 待结果不是终局，不制造差异
