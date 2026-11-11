@@ -4289,6 +4289,8 @@ def attach_package(
         raise
     sha = _sha256(source)
     existing = record.get("package")
+    if existing and refresh_of_sha is not None and existing.get("sha256") == refresh_of_sha != sha:
+        existing = None  # 显式更新本批记录自己的当前代包：走下方新一代接入，旧代原件与登记保留
     if existing:
         if existing.get("sha256") != sha:
             state.setdefault("conflicts", []).append(

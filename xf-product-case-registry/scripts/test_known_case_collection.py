@@ -863,6 +863,30 @@ def test_explicit_refresh_adds_a_legal_new_generation_and_keeps_the_old_one(case
     assert evidence["records"][RWID]["previousPackages"][0]["sha256"] == old["sha256"]
 
 
+def test_explicit_refresh_in_the_batch_holding_the_current_package(case):
+    promote_and_capture(case)
+    first = _attach(case, BATCH, "a.zip", "第一代")
+    old = first["records"][RWID]["package"]
+    old_path = case.layout.root / old["relativePath"]
+    old_bytes = old_path.read_bytes()
+    with pytest.raises(source.SourceIntakeError, match="已绑定不同案卷包"):       # 无显式更新仍是冲突
+        _attach(case, BATCH, "b0.zip", "第二代")
+    with pytest.raises(source.SourceIntakeError, match="已绑定不同案卷包"):       # 被更新的包必须是本批当前代
+        _attach(case, BATCH, "b1.zip", "第二代", refresh_of_sha="sha256:" + "0" * 64,
+                refresh_reason="SPECIAL_ISSUE")
+    second = _attach(case, BATCH, "b.zip", "第二代", refresh_of_sha=old["sha256"],
+                     refresh_reason="SPECIAL_ISSUE")
+    new = second["records"][RWID]["package"]
+    assert new["supersedes"] == old["sha256"] and new["generation"] == 2
+    assert new["refreshReason"] == "SPECIAL_ISSUE"
+    assert old_path.read_bytes() == old_bytes
+    head = capture.verified_package(case.layout, PROJECT)
+    assert head["package"]["sha256"] == new["sha256"]
+    evidence = json.loads((case.layout.pending_case_dir(PROJECT) / "source-evidence.json")
+                          .read_text(encoding="utf-8"))
+    assert evidence["records"][RWID]["previousPackages"][0]["sha256"] == old["sha256"]
+
+
 def test_two_unrelated_packages_stay_a_conflict_and_never_pick_the_newest(case):
     promote_and_capture(case)
     first = _attach(case, BATCH, "a.zip", "第一代")
