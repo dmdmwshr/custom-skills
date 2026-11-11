@@ -43,6 +43,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -504,19 +505,39 @@ def parse_list_response(body: Any, key_field_id: str) -> tuple[list[str], list[A
 class LarkCliTransport:
     """Official lark-cli, existing authenticated profile. No credential is read here."""
 
-    def __init__(self, cli: str, profile: str, identity: str, runner: Any = None, timeout: int = 120):
+    READ_VERBS = frozenset({"+record-get", "+record-list", "+record-history-list"})
+    READ_ATTEMPTS = 5
+
+    def __init__(self, cli: str, profile: str, identity: str, runner: Any = None, timeout: int = 120, sleep: Any = None):
         self.cli, self.profile, self.identity = cli, profile, identity
         self.runner = runner or subprocess.run
         self.timeout = timeout
+        self.sleep = sleep or time.sleep
+
+    @staticmethod
+    def _network_transport_failure(result: Any) -> bool:
+        """官方 CLI 的网络层失败：stdout 为空、stderr 是 {error:{type:"network"}}；请求没有得到服务端回执。"""
+        try:
+            error = json.loads(getattr(result, "stderr", "") or "")["error"]
+        except (ValueError, KeyError, TypeError):
+            return False
+        return isinstance(error, dict) and error.get("type") == "network" and not (getattr(result, "stdout", "") or "").strip()
 
     def _run(self, args: list[str]) -> dict[str, Any]:
         argv = [self.cli, "base", *args, "--profile", self.profile, "--as", self.identity]
-        try:
-            result = self.runner(argv, capture_output=True, text=True, timeout=self.timeout)
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeSyncError("UNKNOWN: 官方 CLI 超时；效果未知，需按 record_id 回读对账") from error
-        except OSError as error:
-            raise RuntimeSyncError(f"官方 CLI 无法启动：{error.__class__.__name__}") from error
+        # 只读调用遇到明确的网络层失败可重试(无副作用)；写调用从不重试，结果未知按 UNKNOWN 处理
+        attempts = self.READ_ATTEMPTS if args and args[0] in self.READ_VERBS else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                result = self.runner(argv, capture_output=True, text=True, timeout=self.timeout)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeSyncError("UNKNOWN: 官方 CLI 超时；效果未知，需按 record_id 回读对账") from error
+            except OSError as error:
+                raise RuntimeSyncError(f"官方 CLI 无法启动：{error.__class__.__name__}") from error
+            if attempt < attempts and self._network_transport_failure(result):
+                self.sleep(1.5 * attempt)
+                continue
+            break
         try:
             body = json.loads(result.stdout)
         except ValueError as error:
@@ -1215,6 +1236,14 @@ def validate_create_spec(spec: Any, v3: dict[str, Any]) -> dict[str, Any]:
         _require(spec["mode"] == "reconcile" and isinstance(release, dict), "humanRelease 仅限 reconcile 且为对象")
         _require(all(isinstance(release.get(k), str) and release[k].strip() for k in ("reason", "operator", "intentId")), "humanRelease 需要 reason、operator 与精确 intentId(只放行该意图)")
         _require(release.get("acknowledgesLateWriteRisk") is True and isinstance(release.get("evidence"), list) and release["evidence"], "humanRelease 需要风险确认与 evidence")
+    recovery = spec.get("technicalRecovery")
+    if recovery is not None:
+        _require(spec["mode"] == "reconcile" and isinstance(recovery, dict), "technicalRecovery 仅限 reconcile 且为对象")
+        _require(release is None, "technicalRecovery 与 humanRelease 不能同时使用")
+        _require(recovery.get("kind") == "create-quiet-zero-match", "创建对账的 technicalRecovery.kind 必须是 create-quiet-zero-match")
+        _require(isinstance(recovery.get("intentId"), str) and recovery["intentId"].strip(), "technicalRecovery 需要精确 intentId(只恢复该意图)")
+        _require(isinstance(recovery.get("minQuietSeconds"), int) and not isinstance(recovery["minQuietSeconds"], bool)
+                 and recovery["minQuietSeconds"] >= RECOVERY_MIN_QUIET_SECONDS, f"minQuietSeconds 不得小于 {RECOVERY_MIN_QUIET_SECONDS}")
     creates = spec.get("creates")
     _require(isinstance(creates, list) and creates, "creates 为空；不回落到任何全量数据")
     limits = spec.get("limits") or {}
@@ -1578,6 +1607,18 @@ def reconcile_creates(spec: dict[str, Any], checked: dict[str, Any], transport: 
                                     "evidence": release["evidence"], "acknowledgesLateWriteRisk": True, "priorState": status["reason"], "originalIntent": intent})
                 entry["outcome"] = "HUMAN_RELEASED"
                 continue
+            recovery = spec.get("technicalRecovery")
+            if recovery is not None:
+                if recovery["intentId"] != intent["intentId"]:
+                    entry["outcome"] = "RECOVERY_NOT_FOR_THIS_INTENT"   # 恢复只对其精确 intentId 有效，不批量
+                    continue
+                outcome, observed, recovery_facts = _create_recovery(index, item, intent, ledger.events(key), status, transport, base, recovery["minQuietSeconds"])
+                ledger.append(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome, "originalIntent": intent,
+                                    "observed": observed, "recovery": recovery_facts,
+                                    "detail": "严格技术恢复：创建请求已结束并记 UNKNOWN、静默期已过、全键扫描与等价行扫描均为 0 匹配，证明未生效"
+                                    if outcome == "NOT_APPLIED_PROVEN" else "技术恢复证据不足，保持封锁：" + "；".join(recovery_facts.get("reasons", []))})
+                entry["outcome"], entry["observed"], entry["recovery"] = outcome, observed, recovery_facts
+                continue
             outcome, observed = _classify_create(index, item, intent, transport, base, proof, ledger.events(key))
             ledger.append(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome, "originalIntent": intent,
                                 "observed": observed, "terminalProof": observed.get("verifiedProof", []) if outcome == "APPLIED" else [],
@@ -1586,6 +1627,51 @@ def reconcile_creates(spec: dict[str, Any], checked: dict[str, Any], transport: 
     report["finishedAt"] = now()
     _write(log_dir, "reconcile-report.json", report)
     return report
+
+
+def _create_recovery(index, item, intent, events, status, transport, base, min_quiet, now_epoch: float | None = None) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Strict, ledger-recorded recovery of an UNKNOWN create intent whose row does not exist. Never a human release; old events are never edited.
+
+    All must hold, otherwise the target stays BLOCKED (RECOVERY_REFUSED): the ledger reason is UNKNOWN with exactly one UNKNOWN ``final`` (the run ended
+    and recorded it); at least ``min_quiet`` seconds passed since that final; a fresh full-page stable-key scan has 0 matches; and no row of the table
+    carries the very same content (every intent field incl. the parent link) under any other key. A single match is never cleared here.
+    """
+    reasons: list[str] = []
+    facts: dict[str, Any] = {"kind": "create-quiet-zero-match", "minQuietSeconds": min_quiet, "reasons": reasons}
+    if status.get("reason") not in {"UNKNOWN", "ZERO_MATCH", "UNREADABLE", "RECOVERY_REFUSED"}:   # 后三者是该 UNKNOWN 意图此前的对账观察；原 UNKNOWN 终态仍须唯一
+        reasons.append(f"账本状态 {status.get('reason')} 不可技术恢复(只限 UNKNOWN 终态的创建意图)")
+    finals = [e for e in events if e.get("event") == "final" and e.get("intentId") == intent["intentId"]]
+    if len(finals) != 1 or finals[0].get("status") != "UNKNOWN":
+        reasons.append("原意图须恰有一条 UNKNOWN 终态事件(进程已结束并记账)")
+    final_epoch = _iso_epoch(finals[0].get("at")) if len(finals) == 1 else None
+    if final_epoch is None:
+        reasons.append("终态时间无法解析")
+    current = now_epoch if now_epoch is not None else _now_epoch()
+    if final_epoch is not None:
+        facts["finalAt"], facts["quietSeconds"] = finals[0].get("at"), int(current - final_epoch)
+        if current - final_epoch < min_quiet:
+            reasons.append(f"静默期不足 {min_quiet} 秒")
+    if reasons:
+        return "RECOVERY_REFUSED", {}, facts
+    outcome, observed = _classify_create(index, item, intent, transport, base, None, events)
+    facts["readbackOutcome"] = outcome
+    if outcome != "ZERO_MATCH":
+        reasons.append(f"全键扫描结果为 {outcome}，不是 0 匹配")
+        return "RECOVERY_REFUSED", observed, facts
+    key_field = intent["stableKey"]["fieldId"]
+    try:
+        rows = transport.list_rows(base, item["tableId"], list(intent["fields"]))
+    except (RuntimeSyncError, AttributeError) as error:
+        reasons.append(f"等价行扫描读取失败：{error}")
+        return "RECOVERY_REFUSED", observed, facts
+    twins = [rid for rid, row in rows.items() if all(
+        fid in row and (canon(row[fid]) == canon(f["wire"]) if f["type"] == "link" else cell_equals(f["type"], row[fid], f["wire"]))
+        for fid, f in intent["fields"].items() if fid != key_field)]
+    facts["equivalentRowScan"] = {"rows": len(rows), "equivalentUnderOtherKey": twins}
+    if twins:
+        reasons.append(f"表内已有内容完全相同的行(键不同)：{twins}")
+        return "RECOVERY_REFUSED", {**observed, "equivalentRows": twins}, facts
+    return "NOT_APPLIED_PROVEN", observed, facts
 
 
 def _classify_create(index, item, intent, transport, base, proof, events=()) -> tuple[str, dict[str, Any]]:

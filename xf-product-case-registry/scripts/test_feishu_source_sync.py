@@ -3025,3 +3025,115 @@ def test_update_spec_refuses_a_create_once_field(tmp_path):
                          "fields": {field: {"new": "合格", "basis": basis()}}}]}
     with pytest.raises(sync.SyncError, match="create-once"):
         sync.run(write_spec(tmp_path, spec), transport=BuildTransport(), ledger_dir=tmp_path / "ledger")
+
+
+# ------------------------------------------------------------------ 只读调用的网络层重试(写调用不重试)
+
+
+def _net_fail():
+    return SimpleNamespace(returncode=4, stdout="", stderr=json.dumps({"ok": False, "error": {"type": "network", "subtype": "transport", "message": "API call failed"}}))
+
+
+def test_read_calls_retry_a_network_layer_failure_but_write_calls_never_do(meta):
+    svc = service(meta)
+    fails = {"+record-get": 2}
+
+    def flaky(argv, **kw):
+        verb = argv[2]
+        if fails.get(verb, 0) > 0:
+            fails[verb] -= 1
+            return _net_fail()
+        return svc(argv, **kw)
+
+    waits = []
+    transport = sync.LarkCliTransport("/x/lark-cli", "p18-test", "user", runner=flaky, sleep=waits.append)
+    assert transport.get_records(BASE, CASE, [REC])[REC][KEY] == STABLE and len(waits) == 2
+    fails["+record-upsert"] = 1
+    with pytest.raises(sync.RuntimeSyncError, match="UNKNOWN"):
+        transport.upsert(BASE, CASE, REC, {UNIT: "x"})
+    assert [c[2] for c in svc.calls].count("+record-upsert") == 0 and waits == [1.5, 3.0]          # 写调用没有第二次尝试
+
+
+def test_read_retry_gives_up_after_a_bounded_number_of_attempts_and_ignores_non_network_errors(meta):
+    calls = []
+
+    def always_down(argv, **kw):
+        calls.append(argv[2])
+        return _net_fail()
+
+    transport = sync.LarkCliTransport("/x/lark-cli", "p18-test", "user", runner=always_down, sleep=lambda _s: None)
+    with pytest.raises(sync.RuntimeSyncError, match="不是 JSON"):
+        transport.get_records(BASE, CASE, [REC])
+    assert len(calls) == sync.LarkCliTransport.READ_ATTEMPTS
+    other = []
+
+    def auth_error(argv, **kw):
+        other.append(1)
+        return SimpleNamespace(returncode=3, stdout="", stderr=json.dumps({"error": {"type": "auth"}}))
+
+    with pytest.raises(sync.RuntimeSyncError):
+        sync.LarkCliTransport("/x/lark-cli", "p18-test", "user", runner=auth_error, sleep=lambda _s: None).get_records(BASE, CASE, [REC])
+    assert len(other) == 1
+
+
+# ------------------------------------------------------------------ 创建意图 UNKNOWN 且 0 匹配的严格技术恢复
+
+
+def _lost_create(tmp_path, **behaviour):
+    contract, ledger = make_v3_contract(tmp_path), tmp_path / "ledger"
+    transport = BuildTransport(**{"timeout_lost": True, **behaviour})
+    with pytest.raises(sync.RuntimeSyncError):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case()]), transport, ledger, execute=True)
+    key = sync.Ledger.target_key(BASE, CASE, "create:32002299C202600001")
+    return contract, ledger, transport, key, sync.Ledger(ledger).state(key)["lastIntent"]["intentId"]
+
+
+def _recover(tmp_path, contract, ledger, transport, log, intent_id, **over):
+    recovery = {"kind": "create-quiet-zero-match", "intentId": intent_id, "minQuietSeconds": sync.RECOVERY_MIN_QUIET_SECONDS, **over}
+    return _run_v3(v3_spec(tmp_path, contract, [_wire_case()], mode="reconcile", log=log, technicalRecovery=recovery), transport, ledger, reconcile=True)["targets"][0]
+
+
+def test_create_zero_match_recovers_only_after_the_quiet_period_and_then_allows_exactly_one_new_create(tmp_path, monkeypatch):
+    contract, ledger, transport, key, intent_id = _lost_create(tmp_path)
+    early = _recover(tmp_path, contract, ledger, transport, "r0", intent_id)
+    assert early["outcome"] == "RECOVERY_REFUSED" and "静默期不足" in "".join(early["recovery"]["reasons"]) and sync.Ledger(ledger).state(key)["state"] == "BLOCKED"
+    monkeypatch.setattr(sync, "_now_epoch", lambda: sync.datetime.now(sync.UTC).timestamp() + 2 * 3600)
+    target = _recover(tmp_path, contract, ledger, transport, "r1", intent_id)
+    assert target["outcome"] == "NOT_APPLIED_PROVEN" and target["recovery"]["equivalentRowScan"]["equivalentUnderOtherKey"] == []
+    assert sync.Ledger(ledger).state(key)["state"] == "CLEAR" and len(transport.creates) == 1
+    events = sync.Ledger(ledger).events(key)
+    assert [e["event"] for e in events].count("intent") == 1 and events[0]["event"] == "intent" and events[1]["status"] == "UNKNOWN"   # 原事件保留，没有人工放行
+    assert not [e for e in events if e["event"] == "human_release"]
+    transport.b.pop("timeout_lost")
+    report = _run_v3(v3_spec(tmp_path, contract, [_wire_case()], log="again"), transport, ledger, execute=True)
+    assert report["records"][0]["status"] == "CREATED_VERIFIED" and len(transport.creates) == 2
+
+
+def test_create_recovery_is_refused_when_a_row_or_an_equivalent_twin_exists_or_the_intent_differs(tmp_path, monkeypatch):
+    monkeypatch.setattr(sync, "_now_epoch", lambda: sync.datetime.now(sync.UTC).timestamp() + 2 * 3600)
+    contract, ledger, transport, key, intent_id = _lost_create(tmp_path)
+    twin = dict(transport.creates[0][1])
+    twin[KEY] = "32002299C202600999"                                                    # 内容完全相同、键不同的行
+    transport.rows[(CASE, "recTWIN0000001")] = twin
+    refused = _recover(tmp_path, contract, ledger, transport, "t1", intent_id)
+    assert refused["outcome"] == "RECOVERY_REFUSED" and refused["recovery"]["equivalentRowScan"]["equivalentUnderOtherKey"] == ["recTWIN0000001"]
+    assert sync.Ledger(ledger).state(key)["state"] == "BLOCKED"
+    other = _recover(tmp_path, contract, ledger, transport, "t2", "0" * 64)
+    assert other["outcome"] == "RECOVERY_NOT_FOR_THIS_INTENT"
+    sub = tmp_path / "late"
+    sub.mkdir()
+    contract, ledger, transport, key, intent_id = _lost_create(sub, timeout_late=True, timeout_lost=False)    # 请求其实生效了：有 1 匹配，不能当作未生效
+    late = _recover(sub, contract, ledger, transport, "t3", intent_id)
+    assert late["outcome"] == "RECOVERY_REFUSED" and late["recovery"]["readbackOutcome"] == "ONE_MATCH_NEEDS_TERMINAL_PROOF" and sync.Ledger(ledger).state(key)["state"] == "BLOCKED"
+
+
+def test_create_recovery_spec_is_validated(tmp_path):
+    contract, ledger = make_v3_contract(tmp_path), tmp_path / "ledger"
+    transport = BuildTransport()
+    base = {"kind": "create-quiet-zero-match", "intentId": "a" * 64, "minQuietSeconds": 3600}
+    for bad, match in (({"minQuietSeconds": 60}, "minQuietSeconds"), ({"kind": "history-quiet-readback"}, "kind"), ({"intentId": ""}, "intentId")):
+        with pytest.raises(sync.SyncError, match=match):
+            _run_v3(v3_spec(tmp_path, contract, [_wire_case()], mode="reconcile", log="v" + match, technicalRecovery={**base, **bad}), transport, ledger, reconcile=True)
+    with pytest.raises(sync.SyncError, match="不能同时使用"):
+        _run_v3(v3_spec(tmp_path, contract, [_wire_case()], mode="reconcile", log="both", technicalRecovery=base,
+                        humanRelease={**RELEASE, "intentId": "a" * 64}), transport, ledger, reconcile=True)
