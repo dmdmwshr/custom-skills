@@ -651,6 +651,26 @@ def test_source_tail_cursor_and_await_download_parsers() -> None:
     assert waiting.attach is True
 
 
+def test_await_download_explicit_refresh_needs_a_legal_reason_and_attach(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    base = [
+        "source",
+        "await-download",
+        "--batch-id",
+        "batch-1",
+        "--rwid",
+        "fixture-rwid",
+        "--download-baseline",
+        "baseline.json",
+    ]
+    parsed = cli.build_parser().parse_args([*base, "--attach", "--refresh-reason", "SPECIAL_ISSUE"])
+    assert parsed.refresh_reason == "SPECIAL_ISSUE" and parsed.attach is True
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args([*base, "--attach", "--refresh-reason", "WHATEVER"])
+    assert cli.build_parser().parse_args(base).refresh_reason is None
+
+
 def test_source_attach_package_parser_requires_per_case_download_baseline() -> None:
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(

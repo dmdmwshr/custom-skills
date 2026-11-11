@@ -1973,11 +1973,34 @@ def source_tail_cursor_command(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False))
 
 
+def explicit_refresh(
+    source: Any, layout: Any, batch_id: str, rwid: str, reason: str
+) -> dict[str, Any]:
+    """Explicit audited refresh of the current package: same gate as the packaging adapter."""
+
+    module_name = f"{__package__}.package_source_case" if __package__ else "package_source_case"
+    packager = importlib.import_module(module_name)
+    _, state = source._load_capture(layout, batch_id)
+    record = (state.get("records") or {}).get(str(rwid)) or {}
+    project = record.get("projectNo") or (record.get("detail") or {}).get("projectNo")
+    if not project:
+        raise RegistryError("显式更新找不到该 RWID 在批次内的项目编号")
+    try:
+        return packager._validated_refresh(layout, str(project).strip().upper(), reason, None)
+    except source.SourceIntakeError as error:
+        raise RegistryError(str(error)) from error
+
+
 def source_await_download_command(args: argparse.Namespace) -> None:
     source = source_intake_api()
     workspace = workspace_api()
     try:
         config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        refresh: dict[str, Any] = {}
+        if args.refresh_reason:
+            if not args.attach:
+                raise RegistryError("显式更新必须同时使用 --attach")
+            refresh = explicit_refresh(source, layout, args.batch_id, args.rwid, args.refresh_reason)
         result = source.await_download(
             layout,
             batch_id=args.batch_id,
@@ -1989,6 +2012,8 @@ def source_await_download_command(args: argparse.Namespace) -> None:
             poll_seconds=args.poll_seconds,
             stalled_after_seconds=args.stalled_after_seconds,
             attach=args.attach,
+            refresh_of_sha=refresh.get("ofSha"),
+            refresh_reason=refresh.get("reason"),
         )
     except (source.SourceIntakeError, workspace.WorkspaceStateError) as error:
         raise RegistryError(str(error)) from error
@@ -2396,6 +2421,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--attach",
         action="store_true",
         help="唯一完整 ZIP 稳定并通过检查后自动绑定到当前案卷",
+    )
+    source_await.add_argument(
+        "--refresh-reason",
+        choices=("RECENT_UNQUALIFIED", "BAD_LOCAL", "SPECIAL_ISSUE", "USER_REQUEST"),
+        help="受审计的显式更新：新包作为新一代接入，旧代原件保留；须同时 --attach",
     )
     source_await.set_defaults(func=source_await_download_command)
 
