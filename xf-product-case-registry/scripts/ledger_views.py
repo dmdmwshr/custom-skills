@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 if __package__:
     from . import case_lifecycle
+    from . import initial_scope
     from . import local_validity
     from . import product_links
     from . import source_coverage as coverage_api
@@ -21,6 +22,7 @@ if __package__:
     from . import workspace_state as ws
 else:
     import case_lifecycle
+    import initial_scope
     import local_validity
     import product_links
     import source_coverage as coverage_api
@@ -1265,25 +1267,57 @@ def ledger_view(
     }
 
 
-_PRODUCT_CASE = re.compile(r"^\d{8}C(\d{4})\d{5}$")
+_PRODUCT_CASE = re.compile(r"^\d{8}C\d{9}$")
 
 
-def lifecycle_view(layout: Any, *, from_year: int = 2026, today: date | None = None) -> dict[str, Any]:
-    """Read-only classification of every known 2026+ product case by what it still needs.
+def lifecycle_view(
+    layout: Any,
+    *,
+    from_year: int | None = None,
+    from_date: date | None = None,
+    today: date | None = None,
+) -> dict[str, Any]:
+    """Read-only classification of every known in-scope product case by what it still needs.
+
+    Scope is the real initial inspection date (``initial_scope.SCOPE_FROM`` = 2026-01-01, later years included); the
+    project-number year decides nothing (``from_year`` is accepted only for old callers and is ignored). A case whose
+    initial date is proven earlier is listed under ``outOfScope`` and not classified; an unknown or boundary-fallback
+    date keeps the case in the view and is reported under ``scopeUnproven`` so it is verified, not guessed away.
 
     REUSE_DIRECT: stable (identity complete, initial result final, recheck branch terminal, no change evidence)
     or waiting for a known due day. LOCAL_SUPPLEMENT: the gap can be closed from materials already held locally.
     NEEDS_SOURCE: a concrete cause justifies a source revisit. Counts are processed/undecided facts of this
     ledger, not a statistic of the whole source year.
     """
+
+    scope_from = from_date or initial_scope.SCOPE_FROM
     ledger = ws.load_waterline(layout)
     rows = []
+    out_of_scope = []
+    scope_unproven = []
     for project, record in sorted(ledger["cases"].items()):
-        match = _PRODUCT_CASE.match(project)
-        if not match or int(match.group(1)) < from_year:
+        if not _PRODUCT_CASE.match(project):
             continue
         row = describe(layout, project, record, today=today)
         life = row["lifecycle"]
+        initial = life["required"].get("initialDate") or {}
+        verdict = initial_scope.date_basis_proves_scope(
+            initial.get("value") if initial.get("state") == "present" else None,
+            fallback=bool(initial.get("fallback")),
+            scope_from=scope_from,
+        )
+        if verdict == "OUT":
+            out_of_scope.append({"projectNo": project, "unitName": row["unitName"], "initialDate": initial.get("value")})
+            continue
+        if verdict == "UNPROVEN":
+            scope_unproven.append(
+                {
+                    "projectNo": project,
+                    "unitName": row["unitName"],
+                    "initialDate": initial.get("value"),
+                    "fallback": bool(initial.get("fallback")),
+                }
+            )
         rows.append(
             {
                 "projectNo": project,
@@ -1307,9 +1341,9 @@ def lifecycle_view(layout: Any, *, from_year: int = 2026, today: date | None = N
     return {
         "schemaVersion": "CaseLifecycleViewV1",
         "generatedAt": ws._utc_now(),
-        "fromYear": from_year,
+        "scopeFromDate": scope_from.isoformat(),
         "identityKey": "projectNo",
-        "note": "仅已知总账里的 2026+ 产品案；总账成员数不是年度分母",
+        "note": "仅已知总账里初查日期不早于范围起始日的产品案；项目编号年份不决定范围；总账成员数不是年度分母",
         "counts": {
             "cases": len(rows),
             "byCategory": dict(Counter(r["category"] for r in rows)),
@@ -1320,7 +1354,11 @@ def lifecycle_view(layout: Any, *, from_year: int = 2026, today: date | None = N
             "packageReceived": sum(r["packageReceived"] for r in rows),
             # 复查产品未经 initialProductRef 对应到同一初查产品：这些链保持待核实，可由本地文书核对补引用后再收口(不触发重采)
             "recheckLinkUnproven": sum("RECHECK_PRODUCT_LINK_UNPROVEN" in r["localCauses"] for r in rows),
+            "outOfScope": len(out_of_scope),
+            "scopeUnproven": len(scope_unproven),
         },
+        "outOfScope": out_of_scope,
+        "scopeUnproven": scope_unproven,
         "cases": rows,
     }
 

@@ -51,11 +51,13 @@ from typing import Any, Protocol
 if __package__:
     from . import case_lifecycle
     from . import field_validation as fv
+    from . import initial_scope
     from . import ledger_views as _views
     from . import workspace_state as _ws
 else:
     import case_lifecycle
     import field_validation as fv
+    import initial_scope
     import ledger_views as _views
     import workspace_state as _ws
 
@@ -551,6 +553,15 @@ class LarkCliTransport:
             if len(ids) < limit:
                 return result
             offset += limit
+
+    def delete_records(self, base: str, table: str, record_ids: list[str]) -> dict[str, Any]:
+        """``+record-delete`` for exactly these ids (high-risk write: only ``feishu_scope_retire`` calls it, after its checks)."""
+        if not record_ids or len(set(record_ids)) != len(record_ids) or any(not str(r).startswith("rec") for r in record_ids):
+            raise RuntimeSyncError("删除请求的 record_id 为空、重复或格式不对，拒绝")
+        args = ["+record-delete", "--base-token", base, "--table-id", table]
+        for record_id in record_ids:
+            args += ["--record-id", record_id]
+        return self._run([*args, "--yes"])
 
     def create_record(self, base: str, table: str, fields: dict[str, Any]) -> dict[str, Any]:
         """``+record-upsert`` without --record-id creates a record (official help); no business-key upsert."""
@@ -1792,6 +1803,7 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
     accepted_intents: set[str] = set()
     if user_accepted_releases is not None:
         accepted_intents = {a["intentId"] for a in load_user_release_acceptances(user_accepted_releases)}
+    excluded_by_scope = initial_scope.excluded_projects_in_root(waterline_path.parent)
     # 2) per-entity evidence
     creates: list[dict[str, Any]] = []
     fills: list[dict[str, Any]] = []
@@ -1802,8 +1814,12 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
     for rwid, record in sorted((capture.get("records") or {}).items(), key=lambda kv: str((kv[1] or {}).get("projectNo"))):
         project = _text((record or {}).get("projectNo"))
         year_match = re.match(r"^\d{8}C(\d{4})\d{5}$", project)
-        if year_match is None or int(year_match.group(1)) < 2026:
-            continue  # 默认只从 2026 年起(含之后年份)、只消防产品监督案(C)；2025 及更早不新采不重算
+        if year_match is None or project in excluded_by_scope:
+            continue  # 只消防产品监督案(C)；已按初查日期剔除的案卷不再建行
+        if int(year_match.group(1)) < 2026 and waterline.get(project) is None:
+            # 范围按真实初查日期(>=2026-01-01)而不是项目编号年份：旧号段案可能初查在 2026，但没有“检查日期”来源证据就不新建
+            blocked.append({"projectNo": project, "rwid": rwid, "reasons": ["项目编号年份早于2026，总账没有该案：先取得“检查日期”来源清单与详情证据证明初查日期不早于2026-01-01，再按新案准入"]})
+            continue
         fallback = None
         if isinstance(record, dict) and not isinstance(record.get("collectionDetail"), dict):
             fallback = _followup_detail(waterline_path.parent, project, waterline.get(project), _text((record.get("fields") or {}).get("sourceOrganization")))

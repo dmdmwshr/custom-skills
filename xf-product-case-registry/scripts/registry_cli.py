@@ -17,11 +17,12 @@ from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
 if __package__:
-    from . import image_pdf, ledger_views, normalized_sources, office_normalized
+    from . import image_pdf, initial_scope, ledger_views, normalized_sources, office_normalized
     from .ocr_runtime import OcrError, adopt_existing_results, run_ocr
     from .workflow_reporting import ReportingError, record_timing, render_report, write_report
 else:
     import image_pdf
+    import initial_scope
     import ledger_views
     import normalized_sources
     import office_normalized
@@ -1630,8 +1631,50 @@ def ledger_lifecycle_command(args: argparse.Namespace) -> None:
         _config, layout = workspace.resolve_workspace(
             **workspace_kwargs(args), create_layout=False, require_download_dir=False
         )
-        result = ledger_views.lifecycle_view(layout, from_year=args.from_year, today=today)
+        from_date = None
+        if args.from_date:
+            try:
+                from_date = date.fromisoformat(args.from_date)
+            except ValueError as error:
+                raise RegistryError("--from-date 必须是 YYYY-MM-DD") from error
+        result = ledger_views.lifecycle_view(layout, from_date=from_date, today=today)
     except workspace.WorkspaceStateError as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def ledger_scope_reconcile_command(args: argparse.Namespace) -> None:
+    workspace = workspace_api()
+    try:
+        _config, layout = workspace.resolve_workspace(
+            **workspace_kwargs(args), create_layout=False, require_download_dir=False
+        )
+        result = initial_scope.reconcile_listing(layout, initial_scope.load_listing(args.listing))
+    except (workspace.WorkspaceStateError, initial_scope.ScopeError) as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def ledger_scope_exclude_command(args: argparse.Namespace) -> None:
+    workspace = workspace_api()
+    try:
+        _config, layout = workspace.resolve_workspace(
+            **workspace_kwargs(args), create_layout=False, require_download_dir=False
+        )
+        result = initial_scope.exclude_out_of_scope(layout, args.plan, apply=args.apply)
+    except (workspace.WorkspaceStateError, initial_scope.ScopeError) as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def ledger_scope_restore_command(args: argparse.Namespace) -> None:
+    workspace = workspace_api()
+    try:
+        _config, layout = workspace.resolve_workspace(
+            **workspace_kwargs(args), create_layout=False, require_download_dir=False
+        )
+        result = initial_scope.restore_excluded(layout, args.plan_id, args.project)
+    except (workspace.WorkspaceStateError, initial_scope.ScopeError) as error:
         raise RegistryError(str(error)) from error
     print(json.dumps(result, ensure_ascii=False))
 
@@ -2500,9 +2543,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="只读：2026+ 产品案按生命周期规则分为可直接复用/仅本地可补/必须核源，并列出具体原因",
     )
     add_workspace_resolution_options(ledger_lifecycle)
-    ledger_lifecycle.add_argument("--from-year", type=int, default=2026)
+    ledger_lifecycle.add_argument(
+        "--from-date", help="范围起始日（YYYY-MM-DD）；默认 2026-01-01，按真实初查日期而非项目编号年份"
+    )
     ledger_lifecycle.add_argument("--today", help="固定判断日（YYYY-MM-DD，上海日历日）；默认今天")
     ledger_lifecycle.set_defaults(func=ledger_lifecycle_command)
+    ledger_scope_reconcile = ledger_sub.add_parser(
+        "scope-reconcile",
+        help="只读：用“检查日期”筛选保存的来源清单与总账按单位和数量对账，列出范围外候选与新增来源任务",
+    )
+    add_workspace_resolution_options(ledger_scope_reconcile)
+    ledger_scope_reconcile.add_argument("--listing", required=True, help="InitialDateScopeListingV1 JSON")
+    ledger_scope_reconcile.set_defaults(func=ledger_scope_reconcile_command)
+    ledger_scope_exclude = ledger_sub.add_parser(
+        "scope-exclude",
+        help="把已逐案证实初查日期早于范围起始日的案卷移出活动集合(字节级可恢复)；默认只校验，--apply 才执行",
+    )
+    add_workspace_resolution_options(ledger_scope_exclude)
+    ledger_scope_exclude.add_argument("--plan", required=True, help="InitialDateScopeExclusionPlanV1 JSON")
+    ledger_scope_exclude.add_argument("--apply", action="store_true")
+    ledger_scope_exclude.set_defaults(func=ledger_scope_exclude_command)
+    ledger_scope_restore = ledger_sub.add_parser(
+        "scope-restore", help="把一个已剔除案卷的文件与总账记录原样恢复"
+    )
+    add_workspace_resolution_options(ledger_scope_restore)
+    ledger_scope_restore.add_argument("--plan-id", required=True)
+    ledger_scope_restore.add_argument("--project", required=True)
+    ledger_scope_restore.set_defaults(func=ledger_scope_restore_command)
     ledger_index = ledger_sub.add_parser(
         "index-history", help="复用本地正式批次清单补充总账索引，不扫描来源网页"
     )
@@ -2568,6 +2635,16 @@ def build_parser() -> argparse.ArgumentParser:
     feishu_build.add_argument("--batch-size", type=int, default=20)
     feishu_build.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     feishu_build.set_defaults(func=feishu_source_build_command)
+    feishu_retire = sub.add_parser(
+        "feishu-scope-retire",
+        help="删除云端范围外案卷及其自有检查/产品子行（先子后主）；计划绑定全字段快照，缺省只核对不删，--execute 才删，落账读回",
+    )
+    feishu_retire.add_argument("--plan", required=True, help="FeishuScopeRetirePlanV1 JSON")
+    feishu_retire.add_argument("--execute", action="store_true", help="真实云删除；缺省只做 fresh 全页核对")
+    feishu_retire.add_argument("--ledger-dir", help="唯一正式 P18 账本；execute 必填")
+    feishu_retire.add_argument("--log-dir", help="新建日志目录：before/requests/after/report")
+    feishu_retire.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    feishu_retire.set_defaults(func=feishu_scope_retire_command)
 
     local_verify = sub.add_parser(
         "local-verify",
@@ -2714,6 +2791,29 @@ def feishu_source_sync_command(args: argparse.Namespace) -> None:
     if isinstance(report, dict) and report.get("status") == "PARTIAL":
         print("WARNING: 同步结果为 PARTIAL，存在被挡实体(见 blockedEntities)，退出码 4，不代表整体完成", file=sys.stderr)
         raise SystemExit(4)
+
+
+def feishu_scope_retire_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(
+        f"{__package__}.feishu_scope_retire" if __package__ else "feishu_scope_retire"
+    )
+    sync = importlib.import_module(
+        f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync"
+    )
+    try:
+        report = module.retire(
+            Path(args.plan),
+            execute_flag=args.execute,
+            cli=args.cli or sync.DEFAULT_CLI,
+            ledger_dir=Path(args.ledger_dir) if args.ledger_dir else None,
+            log_dir=Path(args.log_dir) if args.log_dir else None,
+        )
+    except sync.SyncError as error:
+        raise RegistryError(f"飞书范围剔除已拒绝（未做任何删除）：{error}") from error
+    except sync.RuntimeSyncError as error:
+        print(f"ERROR: 飞书范围剔除失败或结果未知，已落账封锁，未重试：{error}", file=sys.stderr)
+        raise SystemExit(3) from error
+    print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
 def feishu_source_build_command(args: argparse.Namespace) -> None:

@@ -1461,7 +1461,7 @@ def request_case_material_collection(
 
 
 OBSERVED_ADMISSION_VERSION = "ObservedMaterialAdmissionV1"
-_ADMITTED_PROJECT = re.compile(r"^\d{8}C2026\d{5}$")
+_ADMITTED_PROJECT = re.compile(r"^\d{8}C(\d{4})\d{5}$")
 _PRODUCT_ROOT = re.compile(r"\[产\]\S*?-(\d{8}C\d{9})-")
 _PRODUCT_BLOCK = re.compile(r"检查产品信息\s*[(（](\d+)[)）]")
 
@@ -1471,8 +1471,17 @@ def _admission_basis(observation: dict[str, Any], evidence_sha: str) -> dict[str
 
     body = str(observation.get("body") or "")
     project = _require_project_no(str(observation.get("projectNo") or "").strip().upper())
-    if not _ADMITTED_PROJECT.fullmatch(project):
-        raise SourceIntakeError("准入只接受 2026 年消防产品监督案卷项目编号")
+    number = _ADMITTED_PROJECT.fullmatch(project)
+    if not number:
+        raise SourceIntakeError("准入只接受消防产品监督案卷项目编号(C)")
+    inspection_day = str(observation.get("taskInspectionDate") or "").strip()
+    if inspection_day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", inspection_day):
+        raise SourceIntakeError("来源任务检查日期必须是 YYYY-MM-DD")
+    if inspection_day and inspection_day < "2026-01-01":
+        raise SourceIntakeError("来源任务检查日期早于 2026-01-01，不属于本范围")
+    if int(number.group(1)) < 2026 and not inspection_day:
+        # 范围按真实初查日期而不是项目编号年份：旧号段案须带来源任务“检查日期”(>= 2026-01-01)才准入
+        raise SourceIntakeError("项目编号年份早于2026：准入须带来源任务检查日期且不早于2026-01-01")
     safe_url = sanitize_source_url(str(observation.get("url") or ""))
     url_rwid = _source_url_rwid(safe_url)
     rwid = _require_rwid(url_rwid)
@@ -1506,6 +1515,7 @@ def _admission_basis(observation: dict[str, Any], evidence_sha: str) -> dict[str
         "evidenceSha256": evidence_sha,
         "productItems": product_items,
         "productRoot": project,
+        **({"taskInspectionDate": inspection_day} if inspection_day else {}),
     }
 
 

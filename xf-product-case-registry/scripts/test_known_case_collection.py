@@ -1137,6 +1137,34 @@ def test_admission_rejects_unproven_identity_or_product_root_and_writes_nothing(
     assert snapshot_state(case, derived) == before
 
 
+def test_admission_scope_is_the_task_inspection_date_not_the_project_number_year(case):
+    old_project = "99999999C202500711"
+    old_body = lambda o: o["body"].replace(ADM_PROJECT, old_project)
+    # 旧号段 + 来源任务检查日期 >= 2026-01-01：准入
+    derived = derived_for_admission(case)
+    ok = admission_observation(project=old_project, taskInspectionDate="2026-01-05")
+    ok["body"] = old_body(ok)
+    state = source.admit_observed_material_case(case.layout, derived, ok, admitted_at=NOW)
+    assert state["records"][ADM_RWID]["materialAdmission"]["taskInspectionDate"] == "2026-01-05"
+    # 其余组合一律拒绝且不写
+    for changes in (
+        {"taskInspectionDate": "2025-12-31"},          # 旧号段 + 早于 2026
+        {},                                            # 旧号段没有任何日期证据
+        {"taskInspectionDate": "2026/01/05"},          # 日期格式
+    ):
+        derived2 = derived_for_admission(case, name=f"fixture-admission-{len(changes)}-{changes.get('taskInspectionDate', 'none')[:4]}")
+        bad = admission_observation(project=old_project, **changes)
+        bad["body"] = old_body(bad)
+        before = snapshot_state(case, derived2)
+        with pytest.raises(source.SourceIntakeError):
+            source.admit_observed_material_case(case.layout, derived2, bad, admitted_at=NOW)
+        assert snapshot_state(case, derived2) == before
+    derived3 = derived_for_admission(case, name="fixture-admission-new-number-early")
+    early = admission_observation(taskInspectionDate="2025-12-31")                             # 2026 号段但初查在 2025
+    with pytest.raises(source.SourceIntakeError):
+        source.admit_observed_material_case(case.layout, derived3, early, admitted_at=NOW)
+
+
 def test_admission_refuses_conflicting_rwid_project_or_non_material_batch(case):
     derived = derived_for_admission(case)
     source.admit_observed_material_case(case.layout, derived, admission_observation(), admitted_at=NOW)

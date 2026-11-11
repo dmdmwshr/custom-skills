@@ -1199,11 +1199,39 @@ def test_r35_d4_lifecycle_view_counts_processed_and_undecided_and_is_read_only(l
     _save_detail(layout, L2, _detail_fields(status="处理中[抽样送检]", quality="抽样送检"))
     ws.upsert_case(layout, B, unitName="旧案")        # not a 2099 C-case: outside the product-case scope
     before = layout.waterline_json.read_bytes()
-    view = views.lifecycle_view(layout, from_year=2099, today=_dt.date(2099, 2, 20))
+    view = views.lifecycle_view(layout, today=_dt.date(2099, 2, 20))
     assert layout.waterline_json.read_bytes() == before
     assert view["counts"]["cases"] == 2 and view["counts"]["byCategory"] == {"REUSE_DIRECT": 1, "NEEDS_SOURCE": 1}
     assert view["counts"]["byCause"] == {"INITIAL_RESULT_PENDING": 1}
-    assert "年度分母" in view["note"]
+    assert "年度分母" in view["note"] and view["scopeFromDate"] == "2026-01-01"
+    assert view["counts"]["outOfScope"] == 0
+
+
+def _electronic_rows(day):
+    return [{"产品质量现场检查情况": "未发现不合格现象", "市场准入检查情况": "未发现不合格现象",
+             "页面记录": {"JCRQ": f"{day} 10:00:00", "SFCPFC": "0", "SFHG": "0"}}]
+
+
+def test_lifecycle_scope_is_the_real_initial_date_not_the_project_number_year(layout):
+    old_number_in_scope = "99999999C202500001"      # 旧号段，但电子检查记录证明初查在 2026
+    new_number_out_of_scope = "99999999C202600001"  # 2026 号段，但电子检查记录证明初查在 2025-12-31
+    _save_detail(layout, old_number_in_scope, _detail_fields(rows=_electronic_rows("2026-01-05")))
+    _save_detail(layout, new_number_out_of_scope, _detail_fields(rows=_electronic_rows("2025-12-31")))
+    view = views.lifecycle_view(layout, today=_dt.date(2026, 11, 11))
+    assert [r["projectNo"] for r in view["cases"]] == [old_number_in_scope]
+    assert [r["projectNo"] for r in view["outOfScope"]] == [new_number_out_of_scope]
+    assert view["counts"]["cases"] == 1 and view["counts"]["outOfScope"] == 1 and view["counts"]["scopeUnproven"] == 0
+
+
+def test_lifecycle_scope_never_drops_a_case_on_a_boundary_acceptance_date_fallback(layout):
+    boundary = "99999999C202500002"
+    far_fallback = "99999999C202500003"
+    _save_detail(layout, boundary, _detail_fields(accept="2025年12月24日"))     # 只有受理日(后备)，离边界不足 31 天：不证明
+    _save_detail(layout, far_fallback, _detail_fields(accept="2025年08月27日"))  # 后备日离边界很远：2025 年
+    view = views.lifecycle_view(layout, today=_dt.date(2026, 11, 11))
+    assert [r["projectNo"] for r in view["cases"]] == [boundary]
+    assert [r["projectNo"] for r in view["scopeUnproven"]] == [boundary] and view["scopeUnproven"][0]["fallback"] is True
+    assert [r["projectNo"] for r in view["outOfScope"]] == [far_fallback]
 
 
 def _queue_state(layout, project, fields, *, appearances=None, stages=None):

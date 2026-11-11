@@ -1031,3 +1031,41 @@ def test_r43_source_add_observation_requires_time_screenshot_and_detail_url() ->
         del trimmed[index:index + 2]
         with pytest.raises(SystemExit):
             cli.build_parser().parse_args(trimmed)
+
+
+def test_scope_commands_run_through_the_normal_entry_and_default_to_validation_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import hashlib
+
+    root, downloads, config_path = tmp_path / "business", tmp_path / "downloads", tmp_path / "workspace.toml"
+    downloads.mkdir()
+    config = workspace.configure_workspace(work_root=root, download_dir=downloads, config_path=config_path)
+    layout = workspace.BusinessLayout.from_root(config.work_root)
+    out, keep = "99999999C202500001", "99999999C202600003"
+    workspace.upsert_case(layout, out, unitName="范围外酒店", source={"rwid": "11"})
+    workspace.upsert_case(layout, keep, unitName="范围内单位", source={"rwid": "22"})
+    evidence = tmp_path / "ev.json"
+    evidence.write_text(json.dumps({
+        "url": "http://s.invalid/#/x?RWID=11&p=1", "text": f"项目编号：{out}",
+        "listRow": ["范围外酒店", "2025-12-29", "2026-01-13", "2025-12-31"]}, ensure_ascii=False), encoding="utf-8")
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "schemaVersion": "InitialDateScopeExclusionPlanV1", "planId": "20261111-cli-smoke", "scopeFromDate": "2026-01-01",
+        "items": [{"projectNo": out, "rwid": "11", "unitName": "范围外酒店", "initialInspectionDate": "2025-12-31",
+                   "evidence": [{"kind": "SOURCE_DETAIL_WITH_TASK_ROW", "path": str(evidence),
+                                 "sha256": "sha256:" + hashlib.sha256(evidence.read_bytes()).hexdigest()}]}],
+    }, ensure_ascii=False), encoding="utf-8")
+    common = ["--workspace-config", str(config_path)]
+    assert cli.main(["ledger", "scope-exclude", "--plan", str(plan), *common]) == 0
+    dry = json.loads(capsys.readouterr().out)
+    assert dry["applied"] is False and out in workspace.load_waterline(layout)["cases"]
+    assert cli.main(["ledger", "scope-exclude", "--plan", str(plan), "--apply", *common]) == 0
+    assert json.loads(capsys.readouterr().out)["applied"] is True
+    assert out not in workspace.load_waterline(layout)["cases"] and keep in workspace.load_waterline(layout)["cases"]
+    assert cli.main(["ledger", "scope-restore", "--plan-id", "20261111-cli-smoke", "--project", out, *common]) == 0
+    capsys.readouterr()
+    assert out in workspace.load_waterline(layout)["cases"]
+    assert cli.main(["ledger", "lifecycle", "--from-date", "2026-01-01", *common]) == 0
+    assert json.loads(capsys.readouterr().out)["scopeFromDate"] == "2026-01-01"
+    assert cli.main(["ledger", "lifecycle", "--from-date", "not-a-date", *common]) == 2

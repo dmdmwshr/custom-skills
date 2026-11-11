@@ -1617,10 +1617,32 @@ def test_build_refuses_a_capture_whose_digest_is_not_the_pinned_one(tmp_path):
         run_build(tmp_path, {"1001": _detail(PN_NEW, "1001")}, capture_sha="0" * 64)
 
 
-def test_build_skips_independent_non_2026_and_non_c_cases(tmp_path):
+def test_build_skips_non_c_cases_and_blocks_an_old_number_case_that_has_no_scope_evidence(tmp_path):
+    # 范围按真实初查日期(>=2026-01-01)而不是项目编号年份：旧号段案无总账、无“检查日期”证据时不新建也不静默丢弃
     records = {"1": _detail("32002299C202500001", "1"), "2": _detail("32002299J202600001", "2"), "3": _detail(PN_NEW, "3")}
     report, _, _ = run_build(tmp_path, records)
+    assert report["counts"]["toCreate"] == 1 and report["counts"]["blockedEntities"] == 1
+    assert report["blockedEntities"][0]["projectNo"] == "32002299C202500001"
+    assert "项目编号年份早于2026" in json.dumps(report["blockedEntities"], ensure_ascii=False)
+
+
+def test_build_creates_an_old_number_case_that_is_in_the_ledger_because_its_initial_date_is_in_scope(tmp_path):
+    old = "32002299C202500002"
+    records = {"1": _detail(old, "1"), "3": _detail(PN_NEW, "3")}
+    report, _, _ = run_build(tmp_path, records, waterline={old: {"projectNo": old, "state": "COMPLETED"}})
+    assert report["counts"]["toCreate"] == 2 and report["counts"]["blockedEntities"] == 0
+
+
+def test_build_never_recreates_a_case_excluded_by_the_initial_date_scope(tmp_path):
+    excluded = "32002299C202600003"
+    register = tmp_path / "范围外保留" / "plan-20261111-test" / "exclusion-register.json"
+    register.parent.mkdir(parents=True)
+    register.write_text(json.dumps({"entries": [{"projectNo": excluded, "status": "EXCLUDED"}]}), encoding="utf-8")
+    records = {"1": _detail(excluded, "1"), "3": _detail(PN_NEW, "3")}
+    report, _, _ = run_build(tmp_path, records)
     assert report["counts"]["toCreate"] == 1 and report["counts"]["blockedEntities"] == 0
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    assert [c["stableKey"]["value"] for c in spec["creates"]] == [PN_NEW]
 
 
 def test_build_scopes_by_fresh_cloud_keys_and_fills_only_empty_cells_without_overwriting_values(tmp_path):
