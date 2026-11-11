@@ -41,6 +41,7 @@ metadata:
 | PNG/JPEG 原图需要进入规范成果 | `normalize-images --work-dir <工作区> --relative-path <图片>` |
 | Word(.docx/.doc) 原件需要进入规范成果 | 操作者先用本机 Office 引擎转 PDF 并逐页目视核对，再 `normalize-office --work-dir <工作区> --relative-path <Word 原件> --converted-pdf <工作区外的 PDF> --converter-name <名称> --converter-version <版本> --rendering-check <核对说明>` |
 | 来源 PDF 无法结构解析（inventory 标记 `unparseablePdf`，如重复 /Info） | 用 PDFium 等引擎能打开且逐页目视核对后，同样走 `normalize-office`（来源格式 PDF_UNPARSEABLE）；未绑定的此类成员 compose 拒绝，仍可解析的 PDF 不得走该路径 |
+| JPEG 在结束标记后另有不小于主图的第二幅图（normalize-images 拒绝） | 两幅图都目视核对后，用外部渲染的多页 PDF 走 `normalize-office`（来源格式 JPEG_APPENDED_IMAGE）；能被 normalize-images 忠实转换的 JPEG 不得走该路径 |
 | 分类证据文件丢失 | source rebind-evidence（用本案真实手动交件新绑定，不改旧摘要） |
 | 分类证据文件被后续采集追加改写（摘要变） | source rebind-retained-observation（凭保留的早期观察与变更轨迹新绑定，不改旧摘要） |
 

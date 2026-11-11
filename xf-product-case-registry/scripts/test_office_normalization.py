@@ -12,7 +12,7 @@ import pytest
 import scripts.image_pdf as image_pdf
 import scripts.office_normalized as office
 import scripts.workspace_state as ws
-from scripts.test_local_amendment import PROJECT, Case, make_png, out
+from scripts.test_local_amendment import PROJECT, Case, make_jpeg, make_png, out
 from scripts.test_office_package_guard import _archive, _parts
 
 OLE = bytes.fromhex("D0CF11E0A1B11AE1") + b"\x00" * 600
@@ -307,3 +307,28 @@ def test_unparseable_pdf_is_recorded_normalized_and_never_left_loose(
     # swapping the broken original after composing is caught by local-verify
     (case.work / "source" / "营业执照.pdf").write_bytes(BROKEN_PDF + b"\n%changed")
     assert case.run("local-verify", "--project", PROJECT, "--check-only") == 2
+
+
+def test_jpeg_with_second_equal_or_larger_picture_uses_only_the_recorded_render_route() -> None:
+    main, extra = make_jpeg(17, 13), make_jpeg(34, 26, seed=2)
+    pair = main + extra
+    with pytest.raises(image_pdf.ImageNormalizationError, match="不小于主图"):
+        image_pdf.inspect_jpeg(pair)
+    facts = office.inspect_source(pair, "营业执照.jpg")
+    assert facts["sourceFormat"] == "JPEG_APPENDED_IMAGE"
+    # a plain JPEG, a JPEG with a smaller preview and a truncated one are not eligible
+    for data in (main, main + make_jpeg(8, 8, seed=3), pair[: len(main) - 40]):
+        with pytest.raises(office.OfficeNormalizationError):
+            office.inspect_source(data, "营业执照.jpg")
+    mapping = office.build_mapping(
+        pair,
+        "营业执照.jpg",
+        render(),
+        converter_name="PIL",
+        converter_version="test",
+        rendering_check="逐页目视核对完毕：两幅图均完整可读",
+    )
+    assert (
+        office.verify_pdf(render(), pair, {**mapping, "sourceRelativePath": "营业执照.jpg"}) == []
+    )
+    assert office.verify_pdf(render(), main, {**mapping, "sourceRelativePath": "营业执照.jpg"})

@@ -22,8 +22,10 @@ from typing import Any
 from pypdf import PdfReader
 
 if __package__:
+    from . import image_pdf
     from .office_package_guard import is_safe_docx_package
 else:
+    import image_pdf
     from office_package_guard import is_safe_docx_package
 
 INDEX_NAME = "office-normalization.json"
@@ -32,7 +34,15 @@ MODE = "EXTERNAL_RENDER_RECORDED"
 MAX_SOURCE_BYTES = 256 * 1024 * 1024
 OLE_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")
 PDF_UNPARSEABLE = "PDF_UNPARSEABLE"
-FORMATS = {".docx": "DOCX", ".doc": "DOC", ".pdf": PDF_UNPARSEABLE}
+JPEG_APPENDED = "JPEG_APPENDED_IMAGE"
+FORMATS = {
+    ".docx": "DOCX",
+    ".doc": "DOC",
+    ".pdf": PDF_UNPARSEABLE,
+    ".jpg": JPEG_APPENDED,
+    ".jpeg": JPEG_APPENDED,
+}
+_APPENDED_REFUSAL = "不小于主图"  # image_pdf.inspect_jpeg: a second picture as large as the first
 # DOC 的 VBA/宏存储名（UTF-16LE 存放在 OLE 目录里）
 _MACRO_MARKERS = tuple(name.encode("utf-16le") for name in ("_VBA_PROJECT", "VBA", "Macros"))
 _PDF_ACTIVE = re.compile(
@@ -52,7 +62,9 @@ def sha256(data: bytes) -> str:
 def source_format(name: str) -> str:
     suffix = Path(name).suffix.lower()
     if suffix not in FORMATS:
-        raise OfficeNormalizationError(f"只支持 .docx/.doc 或无法解析的 .pdf 原件：{name}")
+        raise OfficeNormalizationError(
+            f"只支持 .docx/.doc、无法解析的 .pdf 或含并列第二幅图的 .jpg 原件：{name}"
+        )
     return FORMATS[suffix]
 
 
@@ -77,6 +89,16 @@ def inspect_source(data: bytes, name: str) -> dict[str, Any]:
             raise OfficeNormalizationError("PDF 仍可被结构解析，按普通 PDF 使用，不走转换绑定")
         if _PDF_ACTIVE.search(_STREAM_BODY.sub(b"stream\nendstream", data)):
             raise OfficeNormalizationError("无法解析的 PDF 含脚本/启动/内嵌文件动作，不做转换")
+    elif kind == JPEG_APPENDED:
+        # only a JPEG that the faithful image converter refuses because of a second, not smaller
+        # picture after the end marker; every other refusal stays a refusal
+        try:
+            image_pdf.inspect_jpeg(data)
+        except image_pdf.ImageNormalizationError as error:
+            if _APPENDED_REFUSAL not in str(error):
+                raise OfficeNormalizationError(f"JPEG 不能走转换绑定：{error}") from error
+        else:
+            raise OfficeNormalizationError("JPEG 可由 normalize-images 忠实转换，不走本路径")
     elif kind == "DOCX":
         if not is_safe_docx_package(io.BytesIO(data), filename=Path(name).name):
             raise OfficeNormalizationError(
