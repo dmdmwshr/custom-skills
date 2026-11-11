@@ -253,6 +253,15 @@ def test_exclusion_refuses_when_the_task_row_date_in_the_evidence_differs_from_t
         scope.exclude_out_of_scope(layout, plan, apply=True)
 
 
+def test_a_manual_intake_case_without_a_ledger_rwid_is_excluded_on_the_detail_page_identity(tmp_path, layout):
+    _case(layout, P_OUT, UNIT_OUT, "")
+    _case(layout, P_IN, UNIT_IN, "32100999999")
+    _files(layout, P_OUT)
+    plan = _plan(tmp_path, layout)
+    assert scope.exclude_out_of_scope(layout, plan, apply=True)["applied"] is True
+    assert P_OUT not in ws.load_waterline(layout)["cases"]
+
+
 def test_a_case_with_an_open_amendment_or_active_collection_is_never_excluded(tmp_path, layout):
     plan = _setup(tmp_path, layout)
     ws.upsert_case(layout, P_OUT, amendment={"status": "OPEN"})

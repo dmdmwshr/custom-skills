@@ -358,7 +358,9 @@ def exclude_out_of_scope(
                 raise ScopeError(f"{project} 不在总账，也没有本计划的排除登记")
             record = ledger["cases"][project]
             source = record.get("source") or {}
-            if str(source.get("rwid") or "") != str(item.get("rwid") or ""):
+            ledger_rwid = str(source.get("rwid") or "")
+            # 手动交件的案卷总账可能没有 RWID：此时身份由详情证据(项目编号<->RWID 同页)证明；总账有 RWID 则必须相等
+            if ledger_rwid and ledger_rwid != str(item.get("rwid") or ""):
                 raise ScopeError(f"{project} 的 RWID 与总账不一致")
             if normalize_unit(record.get("unitName")) != normalize_unit(item.get("unitName")):
                 raise ScopeError(f"{project} 的单位名称与总账不一致")
