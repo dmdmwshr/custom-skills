@@ -1503,6 +1503,21 @@ def test_r43_followup_observation_keeps_bound_material_and_is_idempotent(case):
     assert again["records"][RWID]["package"] == before["package"]
 
 
+def test_r52_followup_of_a_verified_completed_case_does_not_need_a_collection_request(case, monkeypatch):
+    """已归档(完成核验)案卷的整包采集请求按设计已关闭：后续观察不触碰已绑材料，以完成凭证代替采集请求。"""
+    bound_case(case)
+
+    def closed(*_a, **_kw):
+        raise source.SourceIntakeError("该项目已完成并通过完成核验，沿用原断点，不重新采集")
+
+    monkeypatch.setattr(source, "_material_collection_active", closed)
+    with pytest.raises(source.SourceIntakeError, match="已完成并通过完成核验"):
+        _followup(case, "closed", observed_at="2026-11-09T15:39:25-08:00")
+    monkeypatch.setattr(source, "_verified_completed_waterline", lambda *_a, **_kw: {"state": "COMPLETED"})
+    result = _followup(case, "completed", observed_at="2026-11-09T15:39:25-08:00")
+    assert len(result["records"][RWID]["followupObservations"]) == 1
+
+
 def test_r43_followup_observation_releases_only_its_exact_conflict(case):
     bound_case(case)
     path, state = source._load_capture(case.layout, BATCH)

@@ -3668,7 +3668,10 @@ def add_followup_observation(
     existing = record.get("collectionDetail")
     if not isinstance(existing, dict) or not existing.get("fingerprint") or not existing.get("capturedAt"):
         raise SourceIntakeError("已绑包记录缺少可对账的整包详情，拒绝后续观察")
-    if not _material_collection_active(layout, state, record_key, record):
+    # 已完成并通过完成核验的案卷不再有“采集请求”可言（材料已冻结）；后续观察不触碰已绑材料，故以完成凭证代替采集请求。
+    if not _verified_completed_waterline(layout, str(record.get("projectNo") or "")) and not _material_collection_active(
+        layout, state, record_key, record
+    ):
         raise SourceIntakeError("该案没有有效的整包采集请求，拒绝后续观察")
     observed = _parse_observed_at(observed_at)
     if observed.timestamp() < datetime.fromisoformat(str(existing["capturedAt"])).timestamp():
