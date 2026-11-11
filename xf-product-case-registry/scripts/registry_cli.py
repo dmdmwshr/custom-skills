@@ -2658,6 +2658,17 @@ def build_parser() -> argparse.ArgumentParser:
     field_plan.add_argument("--batch-size", type=int, default=20)
     field_plan.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     field_plan.set_defaults(func=feishu_field_plan_build_command)
+    child_build = sub.add_parser(
+        "feishu-child-build",
+        help="由本案已核验清单生成检查明细/产品明细的 V3 创建说明(先检查后产品，同案同份)；只读云，不写；已有任一同案子行的案卷不动",
+    )
+    for flag in ("--waterline", "--contract-v3", "--contract-v3-sha", "--base-token", "--profile", "--out-dir", "--log-root", "--ledger-dir"):
+        child_build.add_argument(flag, required=True)
+    child_build.add_argument("--identity", default="user", choices=["user", "bot"])
+    child_build.add_argument("--batch-size", type=int, default=20)
+    child_build.add_argument("--only-project", action="append", help="只处理这些项目编号(可重复；用于小批试跑)")
+    child_build.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    child_build.set_defaults(func=feishu_child_build_command)
     feishu_retire = sub.add_parser(
         "feishu-scope-retire",
         help="删除云端范围外案卷及其自有检查/产品子行（先子后主）；计划绑定全字段快照，缺省只核对不删，--execute 才删，落账读回",
@@ -2912,6 +2923,29 @@ def feishu_field_plan_build_command(args: argparse.Namespace) -> None:
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["status"] != "OK":
         print("WARNING: 有条目被拒(PARTIAL)，其余说明已生成；退出码 4", file=sys.stderr)
+        raise SystemExit(4)
+
+
+def feishu_child_build_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(
+        f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync"
+    )
+    target = {"baseToken": args.base_token, "profile": args.profile, "identity": args.identity}
+    try:
+        transport = module.LarkCliTransport(args.cli or module.DEFAULT_CLI, args.profile, args.identity)
+        report = module.build_child_specs(
+            waterline_path=Path(args.waterline), v3_path=Path(args.contract_v3), v3_sha=args.contract_v3_sha, target=target, transport=transport,
+            out_dir=Path(args.out_dir), log_root=Path(args.log_root), ledger_dir=Path(args.ledger_dir) if args.ledger_dir else None,
+            batch_size=args.batch_size, only_projects=frozenset(args.only_project) if args.only_project else None,
+        )
+    except module.SyncError as error:
+        raise RegistryError(f"子行说明生成已拒绝：{error}") from error
+    except module.RuntimeSyncError as error:
+        print(f"ERROR: fresh 云读取失败，未生成说明：{error}", file=sys.stderr)
+        raise SystemExit(3) from error
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["status"] != "OK":
+        print("WARNING: 有案卷被挡(PARTIAL)，其余说明已生成；退出码 4", file=sys.stderr)
         raise SystemExit(4)
 
 

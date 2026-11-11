@@ -316,6 +316,8 @@ def validate_spec(spec: Any, contract: dict[str, Any]) -> dict[str, Any]:
             _require(meta is not None, f"字段不在保护合同中（新增字段默认拒写）：{field_id}")
             _require(meta["class"] == WHITELIST, f"字段不是 {WHITELIST}：{meta['name']}({meta['class']})")
             _require(meta["type"] in SCALAR_TYPES, f"本版只写标量源字段，拒绝 {meta['type']}：{meta['name']}")
+            _require(not str(meta.get("syncWrite") or "").lower().startswith("create-once"),
+                     f"合同把该字段限定为创建时一次写入(create-once)，不得作为更新目标：{meta['name']}")
         stable = STABLE_KEYS.get(_table_name(index, table_id))
         _require(stable in index[table_id] and index[table_id][stable]["class"] == WHITELIST, "稳定键字段未在合同中确认")
         allowed[table_id] = {"records": set(records), "fields": set(fields)}
@@ -1401,6 +1403,10 @@ def execute_creates(spec: dict[str, Any], checked: dict[str, Any], transport: Tr
                 if parent_record is None:
                     entry.update(status="BLOCKED_ENTITY", reasons=["父记录未确认(createRef 未成功)"])
                     continue
+                pending_release = _pending_human_release(ledger, base, _parent_table(index, item), parent_record, _text((parent.get("stableKey") or {}).get("value")))
+                if pending_release:  # 父案历史上有未获用户风险接受的人工放行：保持保护，不在其下新增子行(子行会改动父行的反向关联)
+                    entry.update(status="BLOCKED_ENTITY", reasons=[f"父案历史上存在未获用户风险接受的 human_release({pending_release})：保持保护，不新增子行"])
+                    continue
                 try:  # parent must exist and carry the stated stable key right now
                     parent_row = transport.get_records(base, _parent_table(index, item), [parent_record])[parent_record]
                 except RuntimeSyncError as error:
@@ -2247,34 +2253,15 @@ def _manifest_initial_date(root: Path, project: str, waterline_case: Any) -> tup
 
     清单日来自本案自己的监督检查记录文书(local-verify 已核对清单、文件与原包)，不是受理日、创建日或下载日。
     """
-    if not isinstance(waterline_case, dict) or waterline_case.get("state") != "COMPLETED" or (waterline_case.get("local") or {}).get("status") != "ARCHIVED":
-        return None, "案卷未完成本地核验归档"
-    completions = ((waterline_case.get("history") or {}).get("completions")) or []
-    if not completions:
-        return None, "总账没有完成记录"
-    last = completions[-1]
-    generation, recorded = _text(last.get("generation")), _text(last.get("manifestSha256"))
-    relative = Path("工作区") / "历史工作区" / f"{project}-{generation}" / "manifest.json"
-    path = root / relative
-    try:
-        path.resolve().relative_to(root.resolve())
-    except (ValueError, OSError):
-        return None, "清单路径越出业务根"
-    if not generation or not path.is_file():
-        return None, "清单文件不存在"
-    if "sha256:" + file_sha(path) != recorded:
-        return None, "清单摘要与总账完成记录不符"
-    try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None, "清单无法读取"
-    if (manifest.get("case") or {}).get("projectNo") != project:
-        return None, "清单不是本案"
+    found, why = _verified_manifest(root, project, waterline_case)
+    if found is None:
+        return None, why
+    manifest, relative, recorded, verified_at = found
     day = _text(((manifest.get("initialInspection") or {}).get("inspectionDate")))
     if ISO_DAY.match(day) is None:
         return None, "清单没有有效的初查日"
-    ref = f"{relative.as_posix()}#initialInspection.inspectionDate | 本地核验清单 manifestSha256={recorded} | projectNo={project}"
-    return (day, ref, _text(last.get("verifiedAt")) or now()), None
+    ref = f"{relative}#initialInspection.inspectionDate | 本地核验清单 manifestSha256={recorded} | projectNo={project}"
+    return (day, ref, verified_at), None
 
 
 def _pending_human_release(ledger: Ledger | None, base: str, table_id: str, record_id: str, project: str, accepted: frozenset[str] = frozenset()) -> list[str]:
@@ -2558,6 +2545,316 @@ def build_field_plan_specs(*, plan_path: Path, plan_sha: str, waterline_path: Pa
     report = {"schema": "FeishuFieldPlanBuildReportV1", "builtAt": now(), "externalCalls": "read-only fresh read", "target": dict(target),
               "plan": {"path": str(plan_path), "sha256": plan_sha}, "counts": {"entries": len(entries), "toWrite": sum(len(v) for v in updates.values()), "alreadyEqual": unchanged, "refused": len(refused)},
               "specs": specs, "refused": refused, "status": "OK" if not refused else "PARTIAL"}
+    (out_dir / "build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return report
+
+
+# ---------------------------------------------------------------------------------------------
+# 检查明细/产品明细：由本案已核验清单生成的 V3 子行创建说明
+# ---------------------------------------------------------------------------------------------
+
+CHILD_BUILD_SCHEMA = "FeishuChildDetailBuildReportV1"
+INSPECT_F = {"key": "fld5ujrPv4", "case": "fld1kH9BIS", "stage": "fld7vkbzoW", "date": "fld70b2uKG", "month": "fld2QLZcf9", "team": "fldNs0IQEj",
+             "result": "fld1RPp2yY", "count": "fld1jdSi33", "bad": "fld3LlgGvX", "method": "fld2TGEbpj", "source": "fld5l8RUfn",
+             "date_source": "fld3eCB2bR", "round": "fldf4Udwp1", "in_scope": "fld2zAtOpF"}
+PRODUCT_F = {"key": "fldqlwHjUW", "inspection": "fldD2pT8R7", "seq": "fld53DA0lX", "name": "fld6QPrwZD", "model": "fld1ah1DAy",
+             "producer": "fld1JERqCE", "location": "fld4leGJ9P", "method": "fld4gYH0cP", "result": "fldJUpLw89", "access": "fld532RUHS",
+             "problem": "fld2GmMG7w", "source": "fldLCZvMp4", "cert": "fldAN4wz5l"}
+BRIGADE_NAMES = {"LIANGXI": "梁溪大队", "BINHU": "滨湖大队", "XINWU": "新吴大队", "XISHAN": "锡山大队", "HUISHAN": "惠山大队", "JIANGYIN": "江阴大队",
+                 "YIXING": "宜兴大队", "JINGKAI": "经开大队"}
+PRODUCT_METHOD = {"ONSITE": "现场判定", "SAMPLING": "抽样送检"}
+PRODUCT_RESULT = {"QUALIFIED": "合格", "UNQUALIFIED": "不合格", "PENDING": "待核实"}
+CLASSIFICATION_RESULT = {"QUALIFIED": "合格", "UNQUALIFIED": "不合格"}
+CHILD_STAGES = (("initialInspection", "初查", "initial"), ("recheckInspection", "复查", "recheck"))
+NATIVE_ID_NOTE = "来源清单未提供原生检查/产品标识，原生标识留空；稳定键由本地按清单位置生成，不冒充来源原生标识"
+
+
+def _cell_text(cell: Any) -> str:
+    if isinstance(cell, list):
+        return _text(cell[0]) if cell else ""
+    return _text(cell)
+
+
+def _verified_manifest(root: Path, project: str, waterline_case: Any) -> tuple[tuple[dict[str, Any], str, str, str] | None, str | None]:
+    """本案最近一次本地核验通过的清单：只认哈希与总账完成记录相符且是本案的清单。返回 ((清单, 相对路径, 总账摘要, 核验时点), None) 或 (None, 原因)。"""
+    if not isinstance(waterline_case, dict) or waterline_case.get("state") != "COMPLETED" or (waterline_case.get("local") or {}).get("status") != "ARCHIVED":
+        return None, "案卷未完成本地核验归档"
+    completions = ((waterline_case.get("history") or {}).get("completions")) or []
+    if not completions:
+        return None, "总账没有完成记录"
+    last = completions[-1]
+    generation, recorded = _text(last.get("generation")), _text(last.get("manifestSha256"))
+    relative = Path("工作区") / "历史工作区" / f"{project}-{generation}" / "manifest.json"
+    path = root / relative
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        return None, "清单路径越出业务根"
+    if not generation or not path.is_file():
+        return None, "清单文件不存在"
+    if "sha256:" + file_sha(path) != recorded:
+        return None, "清单摘要与总账完成记录不符"
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, "清单无法读取"
+    if not isinstance(manifest, dict) or (manifest.get("case") or {}).get("projectNo") != project:
+        return None, "清单不是本案"
+    return (manifest, relative.as_posix(), recorded, _text(last.get("verifiedAt")) or now()), None
+
+
+def _child_inspection(project: str, stage_key: str, stage_name: str, stage_tag: str, inspection: Any, scope_from: str) -> tuple[dict[str, Any] | None, str | None]:
+    """清单里一次检查的事实：日、产品逐项(来源值+映射结果)。缺日期/产品/产品名称整次检查保留(不猜)。"""
+    if not isinstance(inspection, dict):
+        return None, f"{stage_name}检查缺失或格式无效"
+    day = _text(inspection.get("inspectionDate"))
+    if ISO_DAY.match(day) is None:
+        return None, f"{stage_name}检查日期无效或缺失"
+    if day < scope_from:
+        return None, f"{stage_name}检查日 {day} 早于范围起点 {scope_from}"
+    raw_products = inspection.get("products")
+    if not isinstance(raw_products, list) or not raw_products or not all(isinstance(p, dict) and _text(p.get("name")) for p in raw_products):
+        return None, f"{stage_name}检查没有产品或产品名称缺失"
+    products = []
+    for number, raw in enumerate(raw_products, start=1):
+        method, result = raw.get("method"), raw.get("result")
+        if (method is not None and method not in PRODUCT_METHOD) or (result is not None and result not in PRODUCT_RESULT):
+            return None, f"{stage_name}产品 {number} 的方式/结果取值不在已知映射内：{method!r}/{result!r}"
+        products.append({"seq": number, "key": f"{project}|{stage_name}|{number}", "clientRef": _text(raw.get("clientRef")), "raw": raw,
+                         "method": PRODUCT_METHOD.get(method), "result": PRODUCT_RESULT.get(result), "initialProductRef": _text(raw.get("initialProductRef"))})
+    return {"stageKey": stage_key, "stage": stage_name, "tag": stage_tag, "day": day, "key": f"{project}|{stage_name}", "products": products}, None
+
+
+def _inspection_result(products: list[dict[str, Any]], classification: dict[str, Any] | None, initial: bool) -> tuple[str | None, str]:
+    """检查级结果：任一产品明确不合格→不合格；全部明确合格→合格；其余(待结果/缺项)→待核实；
+    初查且产品都没有明确结果时，才取总账分类里有原件摘要的终局初查结果。"""
+    results = [p["result"] for p in products]
+    if "不合格" in results:
+        return "不合格", "产品逐项结果含不合格"
+    if all(r == "合格" for r in results):
+        return "合格", "产品逐项结果全部合格"
+    if initial and all(r is None for r in results) and classification and classification.get("initialResult") in CLASSIFICATION_RESULT:
+        return CLASSIFICATION_RESULT[classification["initialResult"]], "产品无逐项结果，取总账分类终局初查结果(带原件摘要)"
+    return "待核实", "产品结果含待结果/缺项"
+
+
+def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, target: dict[str, str], transport: Any, out_dir: Path, log_root: Path,
+                      ledger_dir: Path | None, batch_size: int = HARD_CAP_RECORDS, scope_from: str = "2026-01-01",
+                      only_projects: frozenset[str] | None = None, isolated_test_ledger: bool = False) -> dict[str, Any]:
+    """由本案已核验清单生成 检查明细/产品明细 的 V3 创建说明(先检查后产品，同一案的子行放在同一份说明里)。
+
+    只补“云端该案还没有任何子行”的案卷；已有同键子行一律不动。每个案卷要同时满足：总账完成且清单摘要相符、初查日等于云端主行初查日、
+    大队与清单管辖一致、主行无未获用户接受的历史 human_release、不在范围外保留；否则只保留该案并列出原因。
+    稳定键 `项目编号|阶段(|序号)` 由本地按清单位置生成，来源未提供原生检查/产品标识，原生标识留空并写入每个字段的 sourceRef。
+    """
+    _require(1 <= batch_size <= HARD_CAP_RECORDS, f"batch_size 必须是 1..{HARD_CAP_RECORDS}")
+    _require(ledger_dir is not None, "生成说明必须沿唯一 P18 账(--ledger-dir)：缺账会跳过历史封锁与放行核查，拒绝")
+    ledger = Ledger(ledger_dir, isolated_test=isolated_test_ledger)
+    ledger.validate_root()
+    v3 = load_contract_v3(v3_path, v3_sha)
+    _require(target.get("baseToken") == v3["base"]["baseId"], "目标 Base 与合同不一致")
+    tables = v3["base"]["tables"]
+    case_table, inspect_table, product_table = (tables[name]["tableId"] for name in ("案卷主表", "检查明细", "产品明细"))
+    index = field_index(v3["base"])
+    candidates = {c["fieldId"] for c in v3["extension"]["createFieldsCandidate"] if not str(c.get("candidateState", "")).startswith("blocked")}
+    needed = [*INSPECT_F.values(), *PRODUCT_F.values()]
+    missing = [fid for fid in needed if fid not in candidates]
+    _require(not missing, f"合同没有放行这些子行字段的创建：{missing}")
+    root = waterline_path.parent
+    waterline = json.loads(waterline_path.read_text(encoding="utf-8")).get("cases", {})
+    excluded = initial_scope.excluded_projects_in_root(root)
+    base = target["baseToken"]
+    # fresh cloud: 主行(键/大队/初查日/初查结果)、已有子行键
+    main_cols = [BASIC_FIELDS["key"], BASIC_FIELDS["team"], BASIC_FIELDS["date"], LIFECYCLE_FIELDS["result"]]
+    main_rows = transport.list_rows(base, case_table, main_cols)
+    inspect_rows = transport.list_rows(base, inspect_table, [INSPECT_F["key"]])
+    product_rows = transport.list_rows(base, product_table, [PRODUCT_F["key"]])
+    by_project: dict[str, list[str]] = {}
+    for record_id, row in main_rows.items():
+        by_project.setdefault(_cell_text(row.get(BASIC_FIELDS["key"])), []).append(record_id)
+    inspect_keys = {_cell_text(r.get(INSPECT_F["key"])) for r in inspect_rows.values()}
+    product_keys = {_cell_text(r.get(PRODUCT_F["key"])) for r in product_rows.values()}
+    date_type = index[case_table][BASIC_FIELDS["date"]]["type"]
+    blocked: list[dict[str, Any]] = []
+    notes: list[dict[str, Any]] = []
+    cases: list[dict[str, Any]] = []
+    already = 0
+    for project in sorted(p for p in by_project if p):
+        if only_projects is not None and project not in only_projects:
+            continue
+        ids = by_project[project]
+        has_children = any(k.startswith(project + "|") for k in inspect_keys | product_keys)
+        if has_children:
+            already += 1
+            continue
+        reasons: list[str] = []
+        if len(ids) != 1:
+            blocked.append({"projectNo": project, "reasons": [f"云端主行不唯一：{ids}"]})
+            continue
+        record_id, row = ids[0], main_rows[ids[0]]
+        release = _pending_human_release(ledger, base, case_table, record_id, project)
+        if release:
+            blocked.append({"projectNo": project, "recordId": record_id, "reasons": [f"历史上存在未获用户风险接受的 human_release({release})：保持保护，不新增子行"]})
+            continue
+        if project in excluded:
+            blocked.append({"projectNo": project, "recordId": record_id, "reasons": ["案卷在范围外保留"]})
+            continue
+        found, why = _verified_manifest(root, project, waterline.get(project))
+        if found is None:
+            blocked.append({"projectNo": project, "recordId": record_id, "reasons": [why or "没有可用的已核验清单"]})
+            continue
+        manifest, relative, recorded, verified_at = found
+        classification = _proven_classification(waterline.get(project), root)
+        facts = [_child_inspection(project, key, name, tag, manifest.get(key), scope_from) for key, name, tag in CHILD_STAGES if key == "initialInspection" or manifest.get(key) is not None]
+        inspections = [f for f, _ in facts if f is not None]
+        reasons += [w for f, w in facts if f is None and w]
+        if not inspections or inspections[0]["stageKey"] != "initialInspection":
+            blocked.append({"projectNo": project, "recordId": record_id, "reasons": reasons or ["清单没有可用的初查"]})
+            continue
+        initial = inspections[0]
+        stored_date = row.get(BASIC_FIELDS["date"])
+        if cell_is_empty(stored_date) or not cell_equals(date_type, stored_date, initial["day"]):
+            reasons.append(f"云端主行初查日 {stored_date!r} 不等于清单初查日 {initial['day']}")
+        code = _text((manifest.get("case") or {}).get("brigadeCode"))
+        cloud_team = _cell_text(row.get(BASIC_FIELDS["team"]))
+        team = BRIGADE_NAMES.get(code)
+        if team is None and not cloud_team:
+            team = None   # 水上等不在八队名录的管辖：主行也不写所属大队，子行同样留空
+        elif team is None or team != cloud_team:
+            reasons.append(f"清单管辖 {code!r} 与云端所属大队 {cloud_team!r} 不一致")
+        if len(inspections) > 1 and inspections[1]["day"] < initial["day"]:
+            reasons.append("复查日早于初查日")
+        if reasons:
+            blocked.append({"projectNo": project, "recordId": record_id, "reasons": reasons})
+            continue
+        cases.append({"project": project, "recordId": record_id, "manifest": manifest, "relative": relative, "recorded": recorded, "verifiedAt": verified_at,
+                      "classification": classification, "inspections": inspections, "team": team, "cloudResult": _cell_text(row.get(LIFECYCLE_FIELDS["result"]))})
+    # 生成创建项
+    creates_by_case: list[tuple[str, list[dict[str, Any]], dict[str, Any]]] = []
+    source_counts: dict[str, int] = {}
+    product_total = inspection_total = 0
+    for case in cases:
+        project, manifest, relative, recorded = case["project"], case["manifest"], case["relative"], case["recorded"]
+        items: list[dict[str, Any]] = []
+        case_info: dict[str, Any] = {"projectNo": project, "inspections": [], "products": 0}
+
+        def basis(path: str, how: str, *, negative: bool = False) -> dict[str, Any]:
+            ref = (f"{relative}#{path} | 本地核验清单 manifestSha256={recorded} | projectNo={project} | {how} | {NATIVE_ID_NOTE}")
+            value = _record_basis(ref, case["verifiedAt"])
+            if negative:
+                value["explicitNegative"] = True
+            return value
+
+        for number, inspection in enumerate(case["inspections"]):
+            products = inspection["products"]
+            stage_path = inspection["stageKey"]
+            result, why = _inspection_result(products, case["classification"], inspection["tag"] == "initial")
+            if inspection["tag"] == "initial" and case["cloudResult"] in CLASSIFICATION_RESULT.values() and result != case["cloudResult"]:
+                notes.append({"projectNo": project, "kind": "主行初查结果与清单汇总不同(主行不改，列为对象事实)", "cloud": case["cloudResult"], "children": result, "why": why})
+            methods = {p["method"] for p in products if p["method"]}
+            all_methods = all(p["method"] for p in products)
+            bad_known = all(p["result"] in ("合格", "不合格") for p in products)   # 有待结果/缺项时不断言不合格产品数
+            fields: dict[str, Any] = {
+                INSPECT_F["key"]: {"new": inspection["key"], "basis": basis(stage_path, f"检查键={inspection['key']}")},
+                INSPECT_F["case"]: {"new": case["recordId"], "basis": basis(stage_path, "父案卷为云端主行(项目编号精确匹配)")},
+                INSPECT_F["stage"]: {"new": inspection["stage"], "basis": basis(f"{stage_path}.stage", "清单检查阶段")},
+                INSPECT_F["date"]: {"new": inspection["day"], "basis": basis(f"{stage_path}.inspectionDate", "清单检查日")},
+                INSPECT_F["month"]: {"new": inspection["day"][:7], "basis": basis(f"{stage_path}.inspectionDate", "由清单检查日取年月")},
+                INSPECT_F["count"]: {"new": len(products), "basis": basis(f"{stage_path}.products", "清单产品条数")},
+                INSPECT_F["source"]: {"new": "来源详情", "basis": basis(stage_path, "来源=本案已核验清单(来源详情)")},
+                INSPECT_F["date_source"]: {"new": "监督系统" if inspection["tag"] == "initial" else "来源复查记录PDF",
+                                           "basis": basis(f"{stage_path}.inspectionDate", "初查日已由来源任务列表检查日期与本案清单印证；复查日取自本案复查检查记录")},
+                INSPECT_F["in_scope"]: {"new": "是", "basis": basis(f"{stage_path}.inspectionDate", f"检查日 {inspection['day']} 在范围起点 {scope_from} 及以后")},
+            }
+            if result is not None:
+                fields[INSPECT_F["result"]] = {"new": result, "basis": basis(f"{stage_path}.products[*].result", why)}
+            if case["team"] is not None:
+                fields[INSPECT_F["team"]] = {"new": case["team"], "basis": basis("case.brigadeCode", f"清单管辖 {_text(manifest['case'].get('brigadeCode'))} 与云端主行所属大队一致")}
+            if methods and all_methods:
+                label = "抽样送检、现场判定" if len(methods) == 2 else next(iter(methods))
+                fields[INSPECT_F["method"]] = {"new": label, "basis": basis(f"{stage_path}.products[*].method", "按产品检查方式汇总")}
+            if bad_known:
+                bad = sum(1 for p in products if p["result"] == "不合格")
+                fields[INSPECT_F["bad"]] = {"new": bad, "basis": basis(f"{stage_path}.products[*].result", "产品均有明确结果，按不合格产品计数", negative=(bad == 0))}
+            if inspection["tag"] == "recheck":
+                fields[INSPECT_F["round"]] = {"new": 1, "basis": basis(stage_path, "本案第 1 次复查")}
+            for fid in fields:
+                source_counts[fid] = source_counts.get(fid, 0) + 1
+            items.append({"tableId": inspect_table, "stableKey": {"fieldId": INSPECT_F["key"], "value": inspection["key"]}, "fields": fields,
+                          "parent": {"recordId": case["recordId"], "stableKey": {"fieldId": BASIC_FIELDS["key"], "value": project}}})
+            info = {"key": inspection["key"], "date": inspection["day"], "products": len(products), "result": result}
+            for product in products:
+                raw, path = product["raw"], f"{stage_path}.products[{product['seq'] - 1}]"
+                pfields: dict[str, Any] = {
+                    PRODUCT_F["key"]: {"new": product["key"], "basis": basis(path, f"产品键={product['key']}(按清单产品顺序编号；清单本地引用 {product['clientRef'] or '无'})")},
+                    PRODUCT_F["inspection"]: {"new": "recPLACEHOLDER1", "basis": basis(path, f"父检查为同案同阶段 {inspection['key']}")},
+                    PRODUCT_F["seq"]: {"new": product["seq"], "basis": basis(path, "清单产品顺序")},
+                    PRODUCT_F["name"]: {"new": _text(raw.get("name")), "basis": basis(f"{path}.name", "清单产品名称")},
+                    PRODUCT_F["source"]: {"new": "来源详情", "basis": basis(path, "来源=本案已核验清单(来源详情)")},
+                }
+                optional = (("model", "modelSpec", "规格型号"), ("producer", "nominalProducer", "标称生产者"), ("location", "location", "所在部位"), ("problem", "problemDescription", "问题描述"))
+                for key_name, raw_name, label in optional:
+                    if _text(raw.get(raw_name)):
+                        pfields[PRODUCT_F[key_name]] = {"new": _text(raw[raw_name]), "basis": basis(f"{path}.{raw_name}", f"清单{label}")}
+                if product["method"]:
+                    pfields[PRODUCT_F["method"]] = {"new": product["method"], "basis": basis(f"{path}.method", "清单检查方式")}
+                if product["result"]:
+                    pfields[PRODUCT_F["result"]] = {"new": product["result"], "basis": basis(f"{path}.result", "清单产品结果")}
+                cert = "；".join(x for x in (_text(raw.get("certificateNumberRaw")), _text(raw.get("qualityCheckRaw")), _text(raw.get("marketAccessRaw"))) if x)
+                if cert:
+                    pfields[PRODUCT_F["cert"]] = {"new": cert, "basis": basis(path, "清单证书编号/核查原文原样保留")}
+                for fid in pfields:
+                    source_counts[fid] = source_counts.get(fid, 0) + 1
+                items.append({"tableId": product_table, "stableKey": {"fieldId": PRODUCT_F["key"], "value": product["key"]}, "fields": pfields,
+                              "parent": {"createRef": inspection["key"], "stableKey": {"fieldId": INSPECT_F["key"], "value": inspection["key"]}}})
+                case_info["products"] += 1
+                product_total += 1
+                if inspection["tag"] == "recheck":
+                    ref = product["initialProductRef"]
+                    initial_refs = {p["clientRef"]: p["key"] for p in case["inspections"][0]["products"]}
+                    case_info.setdefault("recheckRelations", []).append(
+                        {"recheckProduct": product["key"], "initialProductRef": ref or None,
+                         "relation": "proven-by-initialProductRef" if ref and ref in initial_refs else "unproven-no-matching-initialProductRef",
+                         "initialProduct": initial_refs.get(ref)})
+            case_info["inspections"].append(info)
+            inspection_total += 1
+        creates_by_case.append((project, items, case_info))
+    # 分批：同一案的子行不拆开
+    out_dir.mkdir(parents=True, exist_ok=True)
+    specs: list[dict[str, Any]] = []
+    batch: list[dict[str, Any]] = []
+    batch_cases: list[str] = []
+
+    def flush() -> None:
+        if not batch:
+            return
+        name = f"child-{len(specs) + 1:03d}"
+        spec = {"schemaVersion": SPEC_SCHEMA_V3, "mode": "execute", "contract": {"path": str(v3_path), "sha256": v3_sha}, "target": dict(target),
+                "limits": {"maxRecords": batch_size}, "logDir": str(log_root / name), "creates": list(batch)}
+        path = out_dir / f"{name}.json"
+        path.write_text(json.dumps(spec, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        specs.append({"name": name, "path": str(path), "sha256": file_sha(path), "records": len(batch), "cases": list(batch_cases), "kind": "child-create"})
+        batch.clear()
+        batch_cases.clear()
+
+    for project, items, _info in creates_by_case:
+        if len(items) > batch_size:
+            blocked.append({"projectNo": project, "reasons": [f"该案子行 {len(items)} 条超过单份说明上限 {batch_size}"]})
+            continue
+        if len(batch) + len(items) > batch_size:
+            flush()
+        batch.extend(items)
+        batch_cases.append(project)
+    flush()
+    built = {c for s in specs for c in s["cases"]}
+    report = {"schema": CHILD_BUILD_SCHEMA, "builtAt": now(), "externalCalls": "read-only fresh scan", "target": dict(target),
+              "inputs": {"contractV3": {"path": str(v3_path), "sha256": v3_sha}, "waterline": {"path": str(waterline_path), "sha256": file_sha(waterline_path)}},
+              "fresh": {"cloudCaseRows": len(main_rows), "cloudInspectionRows": len(inspect_rows), "cloudProductRows": len(product_rows), "casesAlreadyWithChildren": already},
+              "counts": {"cases": len(built), "inspections": sum(len(i["inspections"]) for p, _, i in creates_by_case if p in built),
+                         "products": sum(i["products"] for p, _, i in creates_by_case if p in built), "specs": len(specs), "blocked": len(blocked)},
+              "nativeIdentity": NATIVE_ID_NOTE, "fieldWrites": source_counts, "notes": notes,
+              "cases": [info for p, _, info in creates_by_case if p in built], "specs": specs, "blockedEntities": blocked,
+              "status": "PARTIAL" if blocked else "OK"}
     (out_dir / "build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return report
 

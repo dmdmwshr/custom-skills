@@ -2825,3 +2825,203 @@ def test_field_plan_restore_entry_refuses_a_value_changed_by_someone_else_and_sk
     v3, v9, water, plan, transport = _restore_plan_setup(sub, cloud=None)
     empty = _build_restore(sub, ledger_dir, v9, water, plan, transport)
     assert empty["status"] == "OK" and empty["counts"]["toWrite"] == 0 and not empty["specs"]
+
+
+# ------------------------------------------------------------------ 子行(检查明细/产品明细)创建说明
+
+CP = "32002299C202600005"
+
+
+def make_child_contract(tmp_path: Path) -> Path:
+    inspect_f, product_f = sync.INSPECT_F, sync.PRODUCT_F
+    teams = [{"name": n} for n in sync.BRIGADE_NAMES.values()]
+
+    def sel(*names):
+        return [{"name": n} for n in names]
+
+    case_fields = [_f(KEY, "项目编号", "text", "source-sync-whitelist", "NEVER (stable key)"), {**_f("fld2Kdm4i2", "所属大队", "select", "admin-only"), "options": teams},
+                   {**_f(DATE, "初查日期", "datetime", "source-sync-whitelist", "allowed")}, {**_f(RESULT_F, "初查结果", "select", "source-sync-whitelist", "allowed"), "options": sel("合格", "不合格", "待核实")}]
+    sw = "create-once(v14)"
+    inspect_fields = [
+        _f(inspect_f["key"], "检查键", "text", "source-sync-whitelist", "NEVER (stable key)"), _f(inspect_f["case"], "项目编号", "link", "structural-relation"),
+        {**_f(inspect_f["stage"], "阶段", "select", "source-sync-whitelist", sw), "options": sel("初查", "复查")}, _f(inspect_f["date"], "检查日期", "datetime", "source-sync-whitelist", sw),
+        _f(inspect_f["month"], "统计月份", "text", "source-sync-whitelist", sw), {**_f(inspect_f["team"], "大队", "select", "source-sync-whitelist", sw), "options": teams},
+        {**_f(inspect_f["result"], "检查结果", "select", "source-sync-whitelist", sw), "options": sel("合格", "不合格", "待核实")},
+        _f(inspect_f["count"], "产品数", "number", "source-sync-whitelist", sw), _f(inspect_f["bad"], "不合格产品数", "number", "source-sync-whitelist", sw),
+        {**_f(inspect_f["method"], "检查方式", "select", "source-sync-whitelist", sw), "options": sel("抽样送检", "现场判定", "抽样送检、现场判定")},
+        {**_f(inspect_f["source"], "数据来源", "select", "source-sync-whitelist", sw), "options": sel("来源详情")},
+        {**_f(inspect_f["date_source"], "日期来源", "select", "source-sync-whitelist", sw), "options": sel("监督系统", "来源复查记录PDF")},
+        _f(inspect_f["round"], "检查序次", "number", "source-sync-whitelist", sw),
+        {**_f(inspect_f["in_scope"], "计入2026统计", "select", "source-sync-whitelist", sw), "options": sel("是", "否", "待核实")}]
+    product_fields = [
+        _f(product_f["key"], "产品键", "text", "source-sync-whitelist", "NEVER (stable key)"), _f(product_f["inspection"], "检查键", "link", "structural-relation"),
+        _f(product_f["seq"], "序号", "number", "source-sync-whitelist", sw), _f(product_f["name"], "产品名称", "text", "source-sync-whitelist", sw),
+        _f(product_f["model"], "规格型号", "text", "source-sync-whitelist", sw), _f(product_f["producer"], "标称生产者", "text", "source-sync-whitelist", sw),
+        _f(product_f["location"], "所在部位", "text", "source-sync-whitelist", sw),
+        {**_f(product_f["method"], "检查方式", "select", "source-sync-whitelist", sw), "options": sel("抽样送检", "现场判定")},
+        {**_f(product_f["result"], "检查结果", "select", "source-sync-whitelist", sw), "options": sel("合格", "不合格", "待核实")},
+        {**_f(product_f["access"], "市场准入", "select", "source-sync-whitelist", sw), "options": sel("CCC认证")},
+        _f(product_f["problem"], "问题描述", "text", "source-sync-whitelist", sw),
+        {**_f(product_f["source"], "数据来源", "select", "source-sync-whitelist", sw), "options": sel("来源详情")}, _f(product_f["cert"], "证书编号/核查原文", "text", "source-sync-whitelist", sw)]
+    base = {"baseId": BASE, "version": "synthetic-v14", "tables": {"案卷主表": {"tableId": CASE, "fields": case_fields}, "检查明细": {"tableId": CHECK, "fields": inspect_fields},
+                                                                    "产品明细": {"tableId": PRODUCT, "fields": product_fields}}}
+    kinds = {"text": "create-once-source-scalar"}
+    cands = []
+    for table, fields in ((CHECK, inspect_fields), (PRODUCT, product_fields)):
+        for f in fields:
+            klass = "create-once-parent-link" if f["type"] == "link" else ("create-once-identity" if f["fieldId"] in (inspect_f["key"], product_f["key"]) else kinds["text"])
+            cands.append(_cand(table, f["fieldId"], f["name"], f["type"], klass, "candidate-ready-v14",
+                               "required; block" if klass != "create-once-source-scalar" else "omit unknown/missing/unread/unconfirmed"))
+    path = tmp_path / "child-contract.json"
+    path.write_text(json.dumps({"baseContract": base, "extension": {"versionCandidate": "synthetic", "createFieldsCandidate": cands, "explicitCreatePayloadDeny": []}}, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _child_setup(tmp_path, *, initial=None, recheck=None, brigade="LIANGXI", cloud_team="梁溪大队", cloud_day="2026-06-17", state="COMPLETED", tamper=False, classification=None):
+    contract = make_child_contract(tmp_path)
+    products = initial or [{"clientRef": "p1", "name": "手提式干粉灭火器", "method": "ONSITE", "result": "QUALIFIED", "modelSpec": "MFZ/ABC4", "nominalProducer": "某厂", "location": "大厅"},
+                           {"clientRef": "p2", "name": "洒水喷头", "method": "SAMPLING", "result": "UNQUALIFIED", "problemDescription": "标志不符合"}]
+    manifest_doc = {"case": {"projectNo": CP, "brigadeCode": brigade}, "initialInspection": {"clientRef": "initial", "stage": "INITIAL_CHECK", "inspectionDate": "2026-06-17", "products": products}}
+    if recheck is not None:
+        manifest_doc["recheckInspection"] = recheck
+    manifest_dir = tmp_path / "工作区" / "历史工作区" / f"{CP}-G1"
+    manifest_dir.mkdir(parents=True)
+    manifest = manifest_dir / "manifest.json"
+    manifest.write_text(json.dumps(manifest_doc, ensure_ascii=False), encoding="utf-8")
+    recorded = "sha256:" + sha(manifest)
+    if tamper:
+        manifest.write_text(manifest.read_text(encoding="utf-8").replace("2026-06-17", "2026-06-30"), encoding="utf-8")
+    case = {"state": state, "local": {"status": "ARCHIVED"}, "history": {"completions": [{"generation": "G1", "manifestSha256": recorded, "verifiedAt": "2026-11-01T10:00:00+08:00"}]}}
+    if classification:
+        case["source"] = {"classification": classification}
+    water = tmp_path / "waterline.json"
+    water.write_text(json.dumps({"cases": {CP: case}}, ensure_ascii=False), encoding="utf-8")
+    transport = BuildTransport()
+    transport.rows[(CASE, "recEXIST000001")] = {KEY: CP, "fld2Kdm4i2": [cloud_team] if cloud_team else None, DATE: f"{cloud_day}T00:00:00.000+08:00", RESULT_F: ["不合格"]}
+    return contract, water, transport
+
+
+def _child_build(tmp_path, contract, water, transport, **kw):
+    ledger = kw.pop("ledger_dir", None) or tmp_path / "child-ledger"
+    sync.Ledger(ledger, isolated_test=True).initialize() if not (ledger / "targets").is_dir() else None
+    return sync.build_child_specs(waterline_path=water, v3_path=contract, v3_sha=sha(contract), target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"},
+                                  transport=transport, out_dir=tmp_path / "specs", log_root=tmp_path / "logs", ledger_dir=ledger, isolated_test_ledger=True, **kw)
+
+
+def test_child_build_makes_one_spec_per_case_with_checks_first_then_products_and_local_key_notes(tmp_path):
+    contract, water, transport = _child_setup(tmp_path)
+    report = _child_build(tmp_path, contract, water, transport)
+    assert report["status"] == "OK" and report["counts"] == {"cases": 1, "inspections": 1, "products": 2, "specs": 1, "blocked": 0}
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    insp, p1, p2 = spec["creates"]
+    f, F = insp["fields"], sync.INSPECT_F
+    assert insp["tableId"] == CHECK and insp["stableKey"]["value"] == f"{CP}|初查" and insp["parent"]["recordId"] == "recEXIST000001"
+    assert (f[F["stage"]]["new"], f[F["date"]]["new"], f[F["month"]]["new"], f[F["team"]]["new"]) == ("初查", "2026-06-17", "2026-06", "梁溪大队")
+    assert (f[F["result"]]["new"], f[F["count"]]["new"], f[F["bad"]]["new"], f[F["method"]]["new"]) == ("不合格", 2, 1, "抽样送检、现场判定")
+    assert (f[F["source"]]["new"], f[F["date_source"]]["new"], f[F["in_scope"]]["new"]) == ("来源详情", "监督系统", "是") and F["round"] not in f
+    ref = f[F["key"]]["basis"]["sourceRef"]
+    assert "manifestSha256=sha256:" in ref and CP in ref and "原生标识留空" in ref
+    assert p1["stableKey"]["value"] == f"{CP}|初查|1" and p2["stableKey"]["value"] == f"{CP}|初查|2"
+    assert p1["parent"] == {"createRef": f"{CP}|初查", "stableKey": {"fieldId": F["key"], "value": f"{CP}|初查"}} and p1["fields"][sync.PRODUCT_F["inspection"]]["new"].startswith("rec")
+    assert p1["fields"][sync.PRODUCT_F["method"]]["new"] == "现场判定" and p2["fields"][sync.PRODUCT_F["method"]]["new"] == "抽样送检"
+    assert sync.PRODUCT_F["model"] not in p2["fields"] and p2["fields"][sync.PRODUCT_F["problem"]]["new"] == "标志不符合" and not transport.creates
+
+
+def test_child_build_zero_bad_count_is_an_explicit_negative_only_when_every_product_has_a_result(tmp_path):
+    contract, water, transport = _child_setup(tmp_path, initial=[{"name": "灭火器", "method": "ONSITE", "result": "QUALIFIED"}])
+    spec = json.loads(Path(_child_build(tmp_path, contract, water, transport)["specs"][0]["path"]).read_text(encoding="utf-8"))
+    bad = spec["creates"][0]["fields"][sync.INSPECT_F["bad"]]
+    assert bad["new"] == 0 and bad["basis"]["explicitNegative"] is True and spec["creates"][0]["fields"][sync.INSPECT_F["result"]]["new"] == "合格"
+    sub = tmp_path / "pending"
+    sub.mkdir()
+    contract, water, transport = _child_setup(sub, initial=[{"name": "灭火器", "method": "SAMPLING", "result": "PENDING"}])
+    spec = json.loads(Path(_child_build(sub, contract, water, transport)["specs"][0]["path"]).read_text(encoding="utf-8"))
+    fields = spec["creates"][0]["fields"]
+    assert fields[sync.INSPECT_F["result"]]["new"] == "待核实" and sync.INSPECT_F["bad"] not in fields   # 结果未出：不断言“不合格产品数=0”
+
+
+def test_child_build_without_any_product_result_uses_the_proven_classification_and_omits_unknown_fields(tmp_path):
+    evidence = tmp_path / "证据.json"
+    evidence.write_text("{}", encoding="utf-8")
+    contract, water, transport = _child_setup(tmp_path, initial=[{"name": "灭火器", "qualityCheckRaw": "市场准入检查不合格，未开展产品质量现场检查。"}],
+                                              classification={"initialResult": "UNQUALIFIED", "evidencePath": "证据.json", "evidenceSha256": "sha256:" + sha(evidence)})
+    spec = json.loads(Path(_child_build(tmp_path, contract, water, transport)["specs"][0]["path"]).read_text(encoding="utf-8"))
+    insp, product = spec["creates"]
+    assert insp["fields"][sync.INSPECT_F["result"]]["new"] == "不合格" and sync.INSPECT_F["method"] not in insp["fields"] and sync.INSPECT_F["bad"] not in insp["fields"]
+    assert sync.PRODUCT_F["result"] not in product["fields"] and sync.PRODUCT_F["method"] not in product["fields"]
+    assert product["fields"][sync.PRODUCT_F["cert"]]["new"].startswith("市场准入检查不合格")
+
+
+def test_child_build_recheck_gets_round_one_pdf_date_source_and_a_per_product_relation_fact(tmp_path):
+    recheck = {"clientRef": "rc", "stage": "RECHECK", "inspectionDate": "2026-07-20",
+               "products": [{"clientRef": "r1", "name": "灭火器", "method": "ONSITE", "result": "QUALIFIED", "initialProductRef": "p1"},
+                            {"clientRef": "r2", "name": "喷头", "method": "ONSITE", "result": "QUALIFIED"}]}
+    contract, water, transport = _child_setup(tmp_path, recheck=recheck)
+    report = _child_build(tmp_path, contract, water, transport)
+    assert report["counts"]["inspections"] == 2 and report["counts"]["products"] == 4
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    by_key = {c["stableKey"]["value"]: c for c in spec["creates"]}
+    rc = by_key[f"{CP}|复查"]["fields"]
+    assert rc[sync.INSPECT_F["round"]]["new"] == 1 and rc[sync.INSPECT_F["date_source"]]["new"] == "来源复查记录PDF" and rc[sync.INSPECT_F["date"]]["new"] == "2026-07-20"
+    assert f"{CP}|复查|2" in by_key and by_key[f"{CP}|复查|1"]["parent"]["createRef"] == f"{CP}|复查"
+    relations = report["cases"][0]["recheckRelations"]
+    assert [(r["recheckProduct"], r["relation"]) for r in relations] == [(f"{CP}|复查|1", "proven-by-initialProductRef"), (f"{CP}|复查|2", "unproven-no-matching-initialProductRef")]
+    assert relations[0]["initialProduct"] == f"{CP}|初查|1"
+
+
+@pytest.mark.parametrize("kw,why", [
+    ({"tamper": True}, "摘要"), ({"state": "NEW"}, "未完成"), ({"cloud_day": "2026-06-18"}, "不等于清单初查日"),
+    ({"brigade": "BINHU"}, "不一致"), ({"brigade": "ZZZ"}, "不一致"),
+])
+def test_child_build_holds_only_the_case_whose_evidence_does_not_hold(tmp_path, kw, why):
+    contract, water, transport = _child_setup(tmp_path, **kw)
+    report = _child_build(tmp_path, contract, water, transport)
+    assert report["status"] == "PARTIAL" and report["counts"]["cases"] == 0 and not report["specs"]
+    assert why in json.dumps(report["blockedEntities"], ensure_ascii=False)
+
+
+def test_child_build_leaves_cases_with_any_existing_child_and_unaccepted_release_targets_alone(tmp_path):
+    contract, water, transport = _child_setup(tmp_path)
+    transport.rows[(CHECK, "recCHK00000001")] = {sync.INSPECT_F["key"]: f"{CP}|初查"}
+    report = _child_build(tmp_path, contract, water, transport)
+    assert report["status"] == "OK" and report["counts"]["cases"] == 0 and report["fresh"]["casesAlreadyWithChildren"] == 1 and not report["specs"]
+    sub = tmp_path / "held"
+    sub.mkdir()
+    contract, water, transport = _child_setup(sub)
+    ledger = sub / "child-ledger"
+    sync.Ledger(ledger, isolated_test=True).initialize()
+    sync.Ledger(ledger, isolated_test=True).append(sync.Ledger.target_key(BASE, CASE, "create:" + CP), {"event": "human_release", "intentId": "i-old", "operator": "助手(历史)", "reason": "r"})
+    held = _child_build(sub, contract, water, transport, ledger_dir=ledger)
+    assert held["status"] == "PARTIAL" and "human_release" in json.dumps(held["blockedEntities"], ensure_ascii=False) and not held["specs"]
+
+
+def test_child_specs_validate_and_execute_with_parent_links_and_the_parent_release_gate(tmp_path):
+    contract, water, transport = _child_setup(tmp_path)
+    report = _child_build(tmp_path, contract, water, transport)
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    spec["mode"] = "plan"
+    plan = sync.run(write_spec(tmp_path, spec, "plan.json"), transport=transport, ledger_dir=tmp_path / "ledger")
+    assert plan["executable"] is True and len(plan["creates"]) == 3
+    ledger = tmp_path / "ledger"
+    # 执行器自己的闸门：父案目标上有未获用户接受的 human_release 时，不新增任何子行
+    sync.Ledger(ledger, isolated_test=True).initialize()
+    sync.Ledger(ledger, isolated_test=True).append(sync.Ledger.target_key(BASE, CASE, "create:" + CP), {"event": "human_release", "intentId": "i-old", "operator": "助手(历史)", "reason": "r"})
+    spec["mode"], spec["logDir"] = "execute", str(tmp_path / "exec-log")
+    result = sync.run(write_spec(tmp_path, spec, "exec.json"), execute_flag=True, transport=transport, ledger_dir=ledger)
+    assert [e["status"] for e in result["records"]] == ["BLOCKED_ENTITY"] * 3 and not transport.creates and result["status"] == "PARTIAL"
+    assert "human_release" in result["records"][0]["reasons"][0]
+
+
+def test_update_spec_refuses_a_create_once_field(tmp_path):
+    contract = make_child_contract(tmp_path)
+    base = json.loads(contract.read_text(encoding="utf-8"))["baseContract"]
+    v9 = tmp_path / "v9.json"
+    v9.write_text(json.dumps(base, ensure_ascii=False), encoding="utf-8")
+    field = sync.INSPECT_F["result"]
+    spec = {"schemaVersion": sync.SPEC_SCHEMA, "mode": "plan", "contract": {"path": str(v9), "sha256": sha(v9)},
+            "target": {"baseToken": BASE, "profile": "offline-fake", "identity": "user"}, "limits": {"maxRecords": 5},
+            "allowlist": {CHECK: {"records": ["recCHK00000001"], "fields": [field]}},
+            "updates": [{"tableId": CHECK, "recordId": "recCHK00000001", "stableKey": {"fieldId": sync.INSPECT_F["key"], "value": f"{CP}|初查"},
+                         "fields": {field: {"new": "合格", "basis": basis()}}}]}
+    with pytest.raises(sync.SyncError, match="create-once"):
+        sync.run(write_spec(tmp_path, spec), transport=BuildTransport(), ledger_dir=tmp_path / "ledger")

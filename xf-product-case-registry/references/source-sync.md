@@ -169,3 +169,17 @@ python scripts/registry_cli.py feishu-source-build --capture 采集批次.json -
 - **UNKNOWN 更新意图的技术恢复**：`feishu-source-sync --reconcile` 的 V2 reconcile spec 可带 `"technicalRecovery": {"kind": "history-quiet-readback", "intentId": "<精确意图>", "minQuietSeconds": ≥3600}`（不得与 `humanRelease` 同用）。只有同时满足才在账本追加 `reconciled / NOT_APPLIED_PROVEN` 并解封：该意图恰有一条 `UNKNOWN` 终态（进程已结束并记账；无终态的 PENDING 不可恢复）；身份核对后的读回仍是全部旧值；服务端 `+record-history-list` 在意图时间之后没有涉及该意图字段（或字段不明）的修订；距终态已过静默期。证据不足记 `RECOVERY_REFUSED` 并保持封锁。原 `UNKNOWN` 终态与历史对账事件原样保留，不伪造 humanRelease，不改账本旧事件。恢复后的更正仍走普通 `execute`（旧值门禁、写后读回）。
 - **无回执日志的未决创建**：V3 `reconcile` 的 `requestTerminalProof` 可用 `{"kind": "record-history-creation", "intentId": …}`：唯一稳定键匹配、字段与意图逐项相等，且该行**首个服务端修订**创建于原意图时间窗内（意图前 5 秒～终态后 120 秒），窗内无同键的其他创建意图；证明由工具读服务端历史得出，不接受自报时间。通过记 `APPLIED`。
 - **字段计划** `feishu-field-plan-build --plan FeishuFieldPlanV1 …`（只读云）：计划逐条给出 `table/recordId/stableKey` 与每个字段的 `new/expectedOld/basisRef/observedAt/evidence[{path,sha256}]`。生成前重算证据文件摘要、核对合同类别/类型/选项、fresh 稳定键与旧值；`--ledger-dir` 时账本仍未决的目标、以及历史上有未获用户接受的 `human_release` 的目标（更新目标或其创建目标）整条拒绝。输出带旧值门禁的 V2 说明，执行仍由 `feishu-source-sync --execute`。`feishu-date-correct-build` 同样接受 `--ledger-dir` 做 human_release 门禁。
+
+## v41 补充：精确逆操作、执行器级放行闸门、检查/产品子行
+
+- **执行器级 human_release 闸门**：账本里该案的更新键或创建键上出现过未获用户风险接受的 `human_release`，`feishu-source-sync` 在任何外部调用之前拒绝对该案记录的新业务赋值(`HUMAN_RELEASE_UNACCEPTED`)；
+  不再只靠构建器拦截，手写 spec 也一样。V3 创建时，父案有这类历史则其下子行记 `BLOCKED_ENTITY`，不新增子行(子行会改动父行反向关联)。
+- **精确逆操作 `restore`**：只用于撤销本助手早先写入的误写值。字段项写 `{new:null, expectedOld:<误写值>, restore:{intentId}, basis}`；执行器核对账本里存在该精确意图
+  (同目标、同稳定键、写前旧值为空、线上值等于 expectedOld、唯一 OK 终态、其后没有任何别的写入意图)，云端当前值仍等于 expectedOld，才发 `null` 清空并读回为空；其余字段与关系写前写后不变。
+  原误写事件永久保留，另记修复意图/终态；不构造 humanRelease。`feishu-field-plan-build` 的条目带 `restore` 时需 `--ledger-dir`。
+- **创建时一次写入的字段**：合同里 `syncWrite` 以 `create-once` 开头的字段只能随新行创建写入，V2 更新说明一律拒绝。
+- **子行创建说明 `feishu-child-build`**：由本案已核验清单(总账完成记录摘要相符)为“云端还没有任何子行”的案卷生成检查明细与产品明细的 V3 创建说明(同案同份，先检查后产品，子行只设置子端父关联)。
+  稳定键 `项目编号|阶段(|序号)` 由本地按清单位置生成；来源清单未提供原生检查/产品标识，原生标识留空，并写入每个字段的 `sourceRef`。
+  检查结果按产品逐项汇总(任一不合格→不合格；全部合格→合格；其余待核实；产品都没有结果时才取带原件摘要的总账分类)，缺失值省略不兜底；
+  初查日须等于云端主行初查日、大队须与清单管辖一致，否则只保留该案并列出原因。复查产品的“同产品”关系按 `initialProductRef` 是否对应初查产品逐条记入报告(`recheckRelations`)，不写入云端。
+
