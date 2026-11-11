@@ -156,3 +156,10 @@ python scripts/registry_cli.py feishu-source-build --capture 采集批次.json -
 - 删除前 fresh 全页读：每个案卷行的稳定键必须等于计划项目编号，其云端检查行、产品行必须与快照逐 ID 相等（多一行或少一行都拒绝，任何检查键/产品键不属于该案也拒绝），没有子行被两个案共用；任何一项不符，零删除。
 - 缺省只核对（`PLAN_ONLY`）；`--execute` 才删，且必须带唯一正式 P18 账：每个目标先落 `intent`，按产品→检查→案卷顺序各一次请求，立即全页读回目标已不在才记 `final OK`；读不回或超时记 UNKNOWN 并封锁该目标，不重放；全部完成后再做终读核对行数（各表 = 删前 − 计划数）。
 - 恢复：按快照用 `+record-upsert`（不带 record_id）依次重建案卷行→检查行（父关联=新案卷行）→产品行（父关联=新检查行），公式/查找/汇总字段由云端重算，人工字段按快照原值回填；record_id 会变，旧 ID 留在快照里。
+
+## 初查日期口径下的新增能力（2026-11-11）
+
+- **本案已核验清单日**：`feishu-source-build` 在总账没有可证的页面检查日时，先取本案最近一次本地核验通过、清单摘要与总账完成记录相符的 `manifest.json` 里的 `initialInspection.inspectionDate`（本案监督检查记录文书所载监督检查时间）作为初查日，依据写清单路径与摘要；仍找不到才退回受理日期后备。云端非空且不同的值仍只报告、不覆盖。
+- **有据日期更正** `feishu-date-correct-build --plan 计划.json --plan-sha …`（只读云）：计划逐项给出 `projectNo / recordId / expectedOld / newDate`（可选成对的 `sourceOld/sourceNew` 同步更正“初查日期来源”）。生成前逐项核对：新日等于本案已核验清单日、不早于范围起点、fresh 云端键唯一命中该 recordId 且当前值正是 expectedOld；任一不符整条拒绝（含人工改动）。输出 V2 说明（allowlist 只含日期/来源字段），执行仍由 `feishu-source-sync --execute` 走 P18 账、写前旧值核对与写后读回。
+- **水上大队等不在八队名录的管辖**：路由文件可加 `{"sourceJurisdictionExact": …, "adminOnly": true, "sourceOptionExact": "大队来源选项原文"}`。创建时不写所属大队/归属大队（留空，仅管理员可见，与既有水上案同一做法）；“大队来源”仅在最新合同允许创建且选项存在时才写，合同把它列为只读时留空，不为此改合同。八队路由的“所属大队+归属大队同队”规则不放宽。
+

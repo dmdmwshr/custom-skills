@@ -2249,3 +2249,201 @@ def test_r36_d2_c_the_original_wrong_table_field_bad_digest_and_option_cases_sta
     with pytest.raises(sync.SyncError):
         run(tmp_path, bad, svc)
     assert svc.calls == [] and svc.upserts == []
+
+
+# ---------------------------------------------------------------------------------------------
+# 云端初查日期有据更正（本案已核验清单日 + 云端旧值门禁）；离线内存传输
+# ---------------------------------------------------------------------------------------------
+
+def _datefix_setup(tmp_path, *, manifest_day="2026-06-17", cloud_day="2026-06-18", state="COMPLETED", tamper=False, plan_over=None):
+    v3, v9 = make_basic_contracts(tmp_path)
+    manifest_dir = tmp_path / "工作区" / "历史工作区" / f"{PN_FILL}-G1"
+    manifest_dir.mkdir(parents=True)
+    manifest = manifest_dir / "manifest.json"
+    manifest.write_text(json.dumps({"case": {"projectNo": PN_FILL}, "initialInspection": {"inspectionDate": manifest_day}}), encoding="utf-8")
+    recorded = "sha256:" + sha(manifest)
+    if tamper:
+        manifest.write_text(manifest.read_text(encoding="utf-8").replace(manifest_day, "2026-06-30"), encoding="utf-8")
+    water = tmp_path / "waterline.json"
+    water.write_text(json.dumps({"cases": {PN_FILL: {"state": state, "local": {"status": "ARCHIVED"},
+                                                       "history": {"completions": [{"generation": "G1", "manifestSha256": recorded, "verifiedAt": "2026-11-01T10:00:00+08:00"}]}}}}), encoding="utf-8")
+    entry = {"projectNo": PN_FILL, "recordId": "recEXIST000001", "expectedOld": cloud_day, "newDate": manifest_day}
+    entry.update(plan_over or {})
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"schemaVersion": sync.DATE_CORRECTION_SCHEMA, "listingSha256": "sha256:abc", "entries": [entry]}), encoding="utf-8")
+    transport = BuildTransport()
+    transport.rows[(CASE, "recEXIST000001")] = {KEY: PN_FILL, DATE_FIELD: cloud_day}
+    return v3, v9, water, plan, transport
+
+
+def _datefix(tmp_path, **kw):
+    v3, v9, water, plan, transport = _datefix_setup(tmp_path, **kw)
+    report = sync.build_date_correction_specs(
+        plan_path=plan, plan_sha=sha(plan), waterline_path=water, v3_path=v3, v3_sha=sha(v3), v9_path=v9, v9_sha=sha(v9),
+        target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"}, transport=transport, out_dir=tmp_path / "specs", log_root=tmp_path / "logs")
+    return report, transport
+
+
+def test_date_correction_builds_a_guarded_update_from_the_cases_own_verified_manifest(tmp_path):
+    report, transport = _datefix(tmp_path)
+    assert report["status"] == "OK" and report["counts"] == {"entries": 1, "toCorrect": 1, "refused": 0}
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    update = spec["updates"][0]
+    item = update["fields"][DATE_FIELD]
+    assert item["new"] == "2026-06-17" and item["expectedOld"] == "2026-06-18" and set(update["fields"]) == {DATE_FIELD}
+    assert spec["allowlist"][CASE]["fields"] == [DATE_FIELD] and spec["allowlist"][CASE]["records"] == ["recEXIST000001"]
+    ref = item["basis"]["sourceRef"]
+    assert "initialInspection.inspectionDate" in ref and "manifestSha256=sha256:" in ref and PN_FILL in ref and "sha256:abc" in ref
+    assert not transport.creates                                                         # 生成入口只读云
+
+
+@pytest.mark.parametrize("kw,why", [
+    ({"cloud_day": "2026-06-20", "plan_over": {"expectedOld": "2026-06-18"}}, "不是计划旧值"),      # 云端已被改动(含人工)：保留
+    ({"tamper": True}, "摘要"),                                                                   # 清单与总账摘要不符
+    ({"state": "PENDING_LOCAL_VERIFY"}, "未完成本地核验归档"),
+    ({"plan_over": {"newDate": "2026-06-16"}}, "不一致"),                                          # 计划新日不等于清单日
+    ({"plan_over": {"recordId": "recOTHER0000001"}}, "未唯一命中"),
+    ({"manifest_day": "2025-12-31", "cloud_day": "2026-01-02"}, "早于范围起点"),
+])
+def test_date_correction_refuses_an_entry_whose_evidence_or_old_value_does_not_hold(tmp_path, kw, why):
+    report, _ = _datefix(tmp_path, **kw)
+    assert report["status"] == "PARTIAL" and report["counts"]["toCorrect"] == 0 and not report["specs"]
+    assert why in json.dumps(report["refused"], ensure_ascii=False)
+
+
+def test_date_correction_plan_digest_mismatch_is_refused(tmp_path):
+    v3, v9, water, plan, transport = _datefix_setup(tmp_path)
+    with pytest.raises(sync.SyncError, match="摘要"):
+        sync.build_date_correction_specs(plan_path=plan, plan_sha="0" * 64, waterline_path=water, v3_path=v3, v3_sha=sha(v3), v9_path=v9, v9_sha=sha(v9),
+                                         target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"}, transport=transport,
+                                         out_dir=tmp_path / "specs", log_root=tmp_path / "logs")
+
+
+# ---------------------------------------------------------------------------------------------
+# 水上大队(不在八队名录)：adminOnly 路由——不写所属大队/归属大队，只写大队来源选项，与既有水上案同一做法
+# ---------------------------------------------------------------------------------------------
+
+SOURCE_TEAM_F, WATER_SRC, WATER_OPTION = "fld73J0dOH", "无锡市消防救援支队水上大队", "来源详情消防管辖=水上大队(不在8大队名录)"
+
+
+def _water_contract(tmp_path: Path) -> Path:
+    path = make_v3_contract(tmp_path)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["baseContract"]["tables"]["案卷主表"]["fields"].append(
+        {**_f(SOURCE_TEAM_F, "大队来源", "select", "source-sync-whitelist", "allowed"), "options": [{"name": n} for n in ("系统", "底册", WATER_OPTION)]})
+    doc["extension"]["createFieldsCandidate"].append(_cand(CASE, SOURCE_TEAM_F, "大队来源", "select", "create-once-source-scalar", "optional-only-if-actual-source-value-observed", "omit unknown"))
+    path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _water_case(key="32002210C202600002", **fields_over):
+    basis = {"kind": "source-observed", "valueState": "observed", "sourceRef": "fixture", "observedAt": "2026-11-11T00:00:00Z"}
+    fields = {KEY: {"new": key, "basis": basis}, UNIT: {"new": "合成水上单位", "basis": basis}, SOURCE_TEAM_F: {"new": WATER_OPTION, "basis": basis}}
+    fields.update(fields_over)
+    return {"tableId": CASE, "stableKey": {"fieldId": KEY, "value": key}, "routingSource": WATER_SRC, "fields": fields}
+
+
+def _water_spec(tmp_path, contract, creates, mode="execute", log="w1"):
+    routes = [{"sourceJurisdictionExact": SRC, "teamOptionExact": "梁溪大队", "teamTableId": TEAM_TABLE, "teamRecordId": TEAM_REC},
+              {"sourceJurisdictionExact": WATER_SRC, "adminOnly": True, "sourceOptionExact": WATER_OPTION}]
+    return v3_spec(tmp_path, contract, creates, mode=mode, log=log, routes=routes)
+
+
+def test_admin_only_route_creates_a_water_case_without_any_team_fields_and_reads_it_back(tmp_path):
+    contract, ledger, transport = _water_contract(tmp_path), tmp_path / "ledger", MemoryTransport()
+    report = _run_v3(_water_spec(tmp_path, contract, [_water_case()]), transport, ledger, execute=True)
+    assert report["status"] == "OK" and report["records"][0]["status"] == "CREATED_VERIFIED"
+    (_, wire), = transport.creates
+    assert SELECT_TEAM not in wire and LINK_TEAM not in wire and wire[SOURCE_TEAM_F] == [WATER_OPTION]
+    again = _run_v3(_water_spec(tmp_path, contract, [_water_case()], log="w2"), transport, ledger, execute=True)
+    assert again["records"][0]["status"] == "ALREADY_PRESENT_VERIFIED" and len(transport.creates) == 1
+
+
+@pytest.mark.parametrize("over,message", [
+    ({SELECT_TEAM: {"new": "梁溪大队", "basis": {"kind": "source-observed", "valueState": "observed", "sourceRef": "f", "observedAt": "t"}}}, "不得写所属大队"),
+    ({SOURCE_TEAM_F: {"new": "系统", "basis": {"kind": "source-observed", "valueState": "observed", "sourceRef": "f", "observedAt": "t"}}}, "冻结的大队来源选项"),
+])
+def test_admin_only_route_refuses_team_fields_or_a_different_source_option(tmp_path, over, message):
+    contract, transport = _water_contract(tmp_path), MemoryTransport()
+    with pytest.raises(sync.SyncError, match=message):
+        _run_v3(_water_spec(tmp_path, contract, [_water_case(**over)]), transport, tmp_path / "ledger", execute=True)
+    assert not transport.creates
+
+
+def test_admin_only_route_does_not_relax_the_team_routes(tmp_path):
+    contract, transport = _water_contract(tmp_path), MemoryTransport()
+    basis = {"kind": "source-observed", "valueState": "observed", "sourceRef": "fixture", "observedAt": "2026-11-11T00:00:00Z"}
+    broken = _wire_case()
+    del broken["fields"][LINK_TEAM]
+    with pytest.raises(sync.SyncError, match="同时给出所属大队与归属大队"):
+        _run_v3(_water_spec(tmp_path, contract, [broken], log="w3"), transport, tmp_path / "ledger", execute=True)
+    assert not transport.creates
+
+
+@pytest.mark.parametrize("source_class", ["source-sync-whitelist", "source-unconfirmed-readonly"])
+def test_build_routes_a_water_source_case_through_the_admin_only_route_and_leaves_team_cases_alone(tmp_path, source_class):
+    v3, v9 = make_basic_contracts(tmp_path)
+    for path in (v3, v9):
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        base = doc["baseContract"] if "baseContract" in doc else doc
+        base["tables"]["案卷主表"]["fields"].append({**_f(SOURCE_TEAM_F, "大队来源", "select", source_class, "allowed"), "options": [{"name": WATER_OPTION}, {"name": "系统"}]})
+        if "extension" in doc:
+            doc["extension"]["createFieldsCandidate"].append(_cand(CASE, SOURCE_TEAM_F, "大队来源", "select", "create-once-source-scalar", "optional-only-if-actual-source-value-observed", "omit unknown"))
+        path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    records = {"2001": _detail("32002210C202600002", "2001", jurisdiction=WATER_SRC), "2002": _detail(PN_NEW, "2002")}
+    capture, water, routes = make_basic_inputs(tmp_path, records)
+    doc = json.loads(routes.read_text(encoding="utf-8"))
+    doc["routes"].append({"sourceJurisdictionExact": WATER_SRC, "adminOnly": True, "sourceOptionExact": WATER_OPTION})
+    routes.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    report = sync.build_basic_specs(
+        capture_path=capture, capture_sha=sha(capture), waterline_path=water, v3_path=v3, v3_sha=sha(v3), v9_path=v9, v9_sha=sha(v9),
+        routes_path=routes, routes_sha=sha(routes), target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"},
+        transport=BuildTransport(), out_dir=tmp_path / "specs", log_root=tmp_path / "logs", ledger_dir=tmp_path / "build-ledger")
+    assert report["status"] == "OK" and report["counts"]["toCreate"] == 2
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    by_key = {c["stableKey"]["value"]: c["fields"] for c in spec["creates"]}
+    assert SELECT_TEAM not in by_key["32002210C202600002"] and LINK_TEAM not in by_key["32002210C202600002"]
+    if source_class == "source-sync-whitelist":
+        assert by_key["32002210C202600002"][SOURCE_TEAM_F]["new"] == WATER_OPTION
+    else:   # 合同把大队来源列为只读：留空，不为此改合同
+        assert SOURCE_TEAM_F not in by_key["32002210C202600002"]
+    assert by_key[PN_NEW][SELECT_TEAM]["new"] == "梁溪大队" and SOURCE_TEAM_F not in by_key[PN_NEW]
+    assert {r["sourceJurisdictionExact"] for r in spec["routes"]} == {SRC, WATER_SRC}
+
+
+def test_date_correction_can_move_the_date_source_with_its_own_old_value_guard(tmp_path):
+    v3, v9, water, plan, transport = _datefix_setup(tmp_path)
+    for path in (v3, v9):
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        base = doc["baseContract"] if "baseContract" in doc else doc
+        base["tables"]["案卷主表"]["fields"].append({**_f(DATE_SRC_F, "初查日期来源", "select", "source-sync-whitelist", "allowed(v11)"), "options": [{"name": n} for n in ("底册", "监督系统")]})
+        path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    transport.rows[(CASE, "recEXIST000001")][DATE_SRC_F] = ["底册"]
+    body = json.loads(plan.read_text(encoding="utf-8"))
+    body["entries"][0].update({"sourceOld": "底册", "sourceNew": "监督系统"})
+    plan.write_text(json.dumps(body), encoding="utf-8")
+    args = dict(plan_path=plan, plan_sha=sha(plan), waterline_path=water, v3_path=v3, v3_sha=sha(v3), v9_path=v9, v9_sha=sha(v9),
+                target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"}, transport=transport, out_dir=tmp_path / "specs", log_root=tmp_path / "logs")
+    report = sync.build_date_correction_specs(**args)
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    fields = spec["updates"][0]["fields"]
+    assert fields[DATE_SRC_F]["new"] == "监督系统" and fields[DATE_SRC_F]["expectedOld"] == "底册" and sorted(spec["allowlist"][CASE]["fields"]) == sorted([DATE_FIELD, DATE_SRC_F])
+    transport.rows[(CASE, "recEXIST000001")][DATE_SRC_F] = ["登记系统"]                    # 来源已被改动：整条拒绝
+    refused = sync.build_date_correction_specs(**{**args, "out_dir": tmp_path / "specs2"})
+    assert refused["counts"]["toCorrect"] == 0 and "初查日期来源当前值" in json.dumps(refused["refused"], ensure_ascii=False)
+
+
+def test_build_prefers_the_verified_manifest_initial_day_over_the_acceptance_fallback_and_keeps_the_difference(tmp_path):
+    manifest_dir = tmp_path / "工作区" / "历史工作区" / f"{PN_NEW}-G1"
+    manifest_dir.mkdir(parents=True)
+    manifest = manifest_dir / "manifest.json"
+    manifest.write_text(json.dumps({"case": {"projectNo": PN_NEW}, "initialInspection": {"inspectionDate": "2026-11-02"}}), encoding="utf-8")
+    water = {PN_NEW: {"state": "COMPLETED", "local": {"status": "ARCHIVED"},
+                      "history": {"completions": [{"generation": "G1", "manifestSha256": "sha256:" + sha(manifest), "verifiedAt": "2026-11-05T10:00:00+08:00"}]}}}
+    report, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water)
+    field = _first_create(report)[DATE_FIELD]
+    assert field["new"] == "2026-11-02" and "initialInspection.inspectionDate" in field["basis"]["sourceRef"] and "manifestSha256" in field["basis"]["sourceRef"]
+    assert report["initialDateAcceptanceFallbacks"] == [] and report["initialDateConflicts"][0]["electronic"] == "2026-11-02"
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace("2026-11-02", "2026-11-03"), encoding="utf-8")      # 清单被改：摘要不符，退回受理日期后备
+    again, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water)
+    assert _first_create(again)[DATE_FIELD]["new"] == "2026-11-04"

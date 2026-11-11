@@ -2635,6 +2635,17 @@ def build_parser() -> argparse.ArgumentParser:
     feishu_build.add_argument("--batch-size", type=int, default=20)
     feishu_build.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     feishu_build.set_defaults(func=feishu_source_build_command)
+    date_fix = sub.add_parser(
+        "feishu-date-correct-build",
+        help="云端初查日期有据更正：按计划逐项核对本案已核验清单日期与云端旧值，生成带旧值门禁的 V2 说明；只读云，不写",
+    )
+    for flag in ("--plan", "--plan-sha", "--waterline", "--contract-v3", "--contract-v3-sha", "--contract-v9", "--contract-v9-sha",
+                 "--base-token", "--profile", "--out-dir", "--log-root"):
+        date_fix.add_argument(flag, required=True)
+    date_fix.add_argument("--identity", default="user", choices=["user", "bot"])
+    date_fix.add_argument("--batch-size", type=int, default=20)
+    date_fix.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    date_fix.set_defaults(func=feishu_date_correct_build_command)
     feishu_retire = sub.add_parser(
         "feishu-scope-retire",
         help="删除云端范围外案卷及其自有检查/产品子行（先子后主）；计划绑定全字段快照，缺省只核对不删，--execute 才删，落账读回",
@@ -2842,6 +2853,29 @@ def feishu_source_build_command(args: argparse.Namespace) -> None:
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["status"] != "OK":
         print("WARNING: 有被挡实体或路由问题(PARTIAL)，其余说明已生成；退出码 4，不代表全部可同步", file=sys.stderr)
+        raise SystemExit(4)
+
+
+def feishu_date_correct_build_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(
+        f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync"
+    )
+    target = {"baseToken": args.base_token, "profile": args.profile, "identity": args.identity}
+    try:
+        transport = module.LarkCliTransport(args.cli or module.DEFAULT_CLI, args.profile, args.identity)
+        report = module.build_date_correction_specs(
+            plan_path=Path(args.plan), plan_sha=args.plan_sha, waterline_path=Path(args.waterline),
+            v3_path=Path(args.contract_v3), v3_sha=args.contract_v3_sha, v9_path=Path(args.contract_v9), v9_sha=args.contract_v9_sha,
+            target=target, transport=transport, out_dir=Path(args.out_dir), log_root=Path(args.log_root), batch_size=args.batch_size,
+        )
+    except module.SyncError as error:
+        raise RegistryError(f"日期更正说明生成已拒绝：{error}") from error
+    except module.RuntimeSyncError as error:
+        print(f"ERROR: fresh 云读取失败，未生成说明：{error}", file=sys.stderr)
+        raise SystemExit(3) from error
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["status"] != "OK":
+        print("WARNING: 有条目被拒(PARTIAL)，其余说明已生成；退出码 4", file=sys.stderr)
         raise SystemExit(4)
 
 

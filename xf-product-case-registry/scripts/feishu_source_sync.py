@@ -1053,9 +1053,14 @@ def validate_create_spec(spec: Any, v3: dict[str, Any]) -> dict[str, Any]:
     _require(isinstance(routes, list), "routes 格式无效")
     route_by_source: dict[str, dict[str, Any]] = {}
     for route in routes:
-        _require(isinstance(route, dict) and all(isinstance(route.get(k), str) and route[k] for k in ("sourceJurisdictionExact", "teamOptionExact", "teamTableId", "teamRecordId")), "route 需要精确原文管辖/队选项/底册表/底册记录")
-        _require(TABLE_ID.match(route["teamTableId"]) is not None and RECORD_ID.match(route["teamRecordId"]) is not None, "route 的底册表/记录无效")
-        _require(len({r["teamTableId"] for r in routes}) == 1, "所有 route 必须指向同一大队底册表")
+        if isinstance(route, dict) and route.get("adminOnly") is True:
+            # 不在八队名录的来源管辖(水上大队)：不写所属大队/归属大队(留空，仅管理员可见)，只以“大队来源”选项如实标明；与既有水上案同一做法。
+            _require(all(isinstance(route.get(k), str) and route[k] for k in ("sourceJurisdictionExact", "sourceOptionExact")) and not any(k in route for k in ("teamOptionExact", "teamRecordId")),
+                     "adminOnly route 只需要精确原文管辖与大队来源选项，且不得带队选项/底册记录")
+        else:
+            _require(isinstance(route, dict) and all(isinstance(route.get(k), str) and route[k] for k in ("sourceJurisdictionExact", "teamOptionExact", "teamTableId", "teamRecordId")), "route 需要精确原文管辖/队选项/底册表/底册记录")
+            _require(TABLE_ID.match(route["teamTableId"]) is not None and RECORD_ID.match(route["teamRecordId"]) is not None, "route 的底册表/记录无效")
+            _require(len({r["teamTableId"] for r in routes if r.get("adminOnly") is not True}) == 1, "所有 route 必须指向同一大队底册表")
         _require(route["sourceJurisdictionExact"] not in route_by_source, "route 的管辖原文重复")
         route_by_source[route["sourceJurisdictionExact"]] = route
     synthetic = spec.get("syntheticOnly") is True
@@ -1119,17 +1124,27 @@ def validate_create_spec(spec: Any, v3: dict[str, Any]) -> dict[str, Any]:
                 blocked.append(f"选项不在最新合同中：{meta['name']}={value}")
             writes[field_id] = {"name": meta["name"], "type": meta["type"], "new": value, "wire": wire, "basis": basis, "class": cand["proposedCreateClass"]}
         _require(stable_field in writes and writes[stable_field]["new"] == key["value"], "稳定键字段必须作为 create-once-identity 写入且等于 stableKey.value")
+        select_id, link_id, source_id = "fld2Kdm4i2", "fldlw1KAaR", "fld73J0dOH"
+        route_for_case = None
+        if table_name == "案卷主表":
+            source_name = create.get("routingSource")
+            route_for_case = route_by_source.get(source_name) if isinstance(source_name, str) else None
+        admin_only = bool(route_for_case and route_for_case.get("adminOnly") is True)
         for field_id, cand in candidates.items():  # required fields missing => only this entity is blocked
+            if admin_only and field_id in {select_id, link_id}:
+                continue
             if cand.get("tableId") == table_id and str(cand.get("emptySemantics", "")).startswith("required") and field_id not in writes:
                 blocked.append(f"缺必需字段 {cand['name']}")
         route_info = None
         if table_name == "案卷主表":
-            source = create.get("routingSource")
-            route = route_by_source.get(source) if isinstance(source, str) else None
+            route = route_for_case
             if route is None:
                 blocked.append("路由未匹配：消防管辖原文无冻结映射(不按单位名/项目号前缀猜)")
+            elif admin_only:
+                _require(select_id not in writes and link_id not in writes, "adminOnly 路由的案卷不得写所属大队/归属大队")
+                _require(source_id not in writes or writes[source_id]["new"] == route["sourceOptionExact"], "adminOnly 路由的案卷若写大队来源，必须是冻结的大队来源选项")
+                route_info = route
             else:
-                select_id, link_id = "fld2Kdm4i2", "fldlw1KAaR"
                 _require(select_id in writes and link_id in writes, "案卷创建必须同时给出所属大队与归属大队")
                 _require(writes[select_id]["new"] == route["teamOptionExact"] and writes[link_id]["new"] == route["teamRecordId"], "所属大队/归属大队与冻结路由不一致(必须同队)")
                 route_info = route
@@ -1225,7 +1240,7 @@ def execute_creates(spec: dict[str, Any], checked: dict[str, Any], transport: Tr
                 if isinstance(pkey, dict) and not cell_equals("text", parent_row.get(pkey.get("fieldId")), pkey.get("value", "")):
                     entry.update(status="BLOCKED_ENTITY", reasons=["父记录稳定键与云端不符"])
                     continue
-            if item["route"] is not None:  # the team base row must exist and be the frozen one
+            if item["route"] is not None and item["route"].get("adminOnly") is not True:  # the team base row must exist and be the frozen one
                 route = item["route"]
                 try:
                     transport.get_records(base, route["teamTableId"], [route["teamRecordId"]])
@@ -1489,6 +1504,7 @@ def _verify_terminal_proof(proof: Any, item, intent, base: str, record_id: str) 
 BASIC_FIELDS = {"key": "fld1lHXHpk", "unit": "fld2Lo4dpD", "addr": "fld71ckPl9", "date": "fld5azNPuE", "team": "fld2Kdm4i2", "link": "fldlw1KAaR"}
 # 2026-11-09 必有字段：初查结果（含待结果/待核实）与外显初查日期来源。字段与选项以最新合同为准，合同没有则整项跳过并在报告列出。
 LIFECYCLE_FIELDS = {"result": "fld77TOx5G", "date_source": "fld4upZMpZ"}
+SOURCE_TEAM_FIELD = "fld73J0dOH"  # 大队来源
 PENDING_LABELS = {"待结果", "待核实"}
 BUILD_SCHEMA = "FeishuBasicFieldBuildReportV1"
 RWID_IN_URL = re.compile(r"[?&#]RWID=(\d+)")
@@ -1817,13 +1833,20 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
     routes_doc = json.loads(routes_path.read_text(encoding="utf-8"))
     _require(routes_doc.get("baseId") == target["baseToken"], "路由文件 Base 与目标不一致")
     # 1) fresh cloud: team base + case rows
-    team_table = {r["teamTableId"] if "teamTableId" in r else None for r in routes_doc.get("routes", [])}
+    team_table = {r["teamTableId"] if "teamTableId" in r else None for r in routes_doc.get("routes", []) if r.get("adminOnly") is not True}
     _require(len(team_table) == 1 and None not in team_table, "路由必须指向同一大队底册")
     (team_table_id,) = team_table
     teams = transport.list_rows(target["baseToken"], team_table_id, None)
     live_routes: dict[str, dict[str, Any]] = {}
     route_problems: list[dict[str, Any]] = []
     for route in routes_doc["routes"]:
+        if route.get("adminOnly") is True:
+            option = route.get("sourceOptionExact")
+            if isinstance(option, str) and option:
+                live_routes[route["sourceJurisdictionExact"]] = {"sourceJurisdictionExact": route["sourceJurisdictionExact"], "adminOnly": True, "sourceOptionExact": option}
+            else:
+                route_problems.append({"source": route["sourceJurisdictionExact"], "reason": "adminOnly 路由缺少大队来源选项原文"})
+            continue
         record_id = route.get("savedTeamRecordId")
         row = teams.get(record_id)
         names = {v for v in (row or {}).values() if isinstance(v, str)} | {x for v in (row or {}).values() if isinstance(v, list) for x in v if isinstance(x, str)}
@@ -1884,6 +1907,10 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
                             "intentIds": [st["intentId"] for _, st in held]})
             continue
         date, date_reason = _initial_date(waterline.get(project), waterline_path.parent, project, rwid)
+        if date is None:  # 总账没有可证的页面检查日时，取本案已核验清单里的初查日(本案监督检查记录文书所载)，仍优于受理日期后备
+            manifest_day, _why = _manifest_initial_date(waterline_path.parent, project, waterline.get(project))
+            if manifest_day is not None:
+                date, date_reason = manifest_day, None
         if date_reason:
             dates_omitted.append({"projectNo": project, "rwid": rwid, "reason": date_reason})
         resolved = fv.resolve_initial_date(date[0] if date else None, evidence["acceptance"])
@@ -1906,9 +1933,17 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
             fields: dict[str, Any] = {
                 BASIC_FIELDS["key"]: {"new": project, "basis": _record_basis(evidence["ref"]("项目编号"), observed)},
                 BASIC_FIELDS["unit"]: {"new": evidence["unit"], "basis": _record_basis(evidence["ref"]("单位名称"), observed)},
-                BASIC_FIELDS["team"]: {"new": route["teamOptionExact"], "basis": _record_basis(evidence["ref"]("消防管辖") + f" | route={routes_path.name} sha256={routes_sha}", observed)},
-                BASIC_FIELDS["link"]: {"new": route["teamRecordId"], "basis": _record_basis(evidence["ref"]("消防管辖") + f" | route={routes_path.name} sha256={routes_sha}", observed)},
             }
+            route_basis = _record_basis(evidence["ref"]("消防管辖") + f" | route={routes_path.name} sha256={routes_sha}", observed)
+            if route.get("adminOnly") is True:
+                source_meta = index[case_table].get(SOURCE_TEAM_FIELD)
+                # 大队来源只在最新合同允许创建且选项存在时才写；合同把它列为只读时留空(所属大队/归属大队本来就为空，仅管理员可见)，不为此改合同。
+                if (source_meta is not None and source_meta["class"] in CREATE_BASE_CLASS["create-once-source-scalar"]
+                        and route["sourceOptionExact"] in (source_meta.get("options") or [])):
+                    fields[SOURCE_TEAM_FIELD] = {"new": route["sourceOptionExact"], "basis": route_basis}
+            else:
+                fields[BASIC_FIELDS["team"]] = {"new": route["teamOptionExact"], "basis": route_basis}
+                fields[BASIC_FIELDS["link"]] = {"new": route["teamRecordId"], "basis": route_basis}
             if evidence["address"]:
                 fields[BASIC_FIELDS["addr"]] = {"new": evidence["address"], "basis": _record_basis(evidence["ref"]("单位地址"), observed)}
             if date:
@@ -1993,6 +2028,134 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
               "specs": specs, "blockedEntities": blocked, "differing": differing, "initialDatesOmitted": dates_omitted,
               "initialDateAcceptanceFallbacks": date_fallbacks, "initialDateConflicts": date_conflicts, "lifecycleFieldsSkipped": lifecycle_skipped,
               "status": "PARTIAL" if blocked or route_problems else "OK"}
+    (out_dir / "build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return report
+
+
+DATE_CORRECTION_SCHEMA = "FeishuDateCorrectionPlanV1"
+
+
+def _manifest_initial_date(root: Path, project: str, waterline_case: Any) -> tuple[tuple[str, str, str] | None, str | None]:
+    """本案最近一次本地核验通过的清单里的初查日；只认哈希与总账完成记录相符的清单。返回 ((日, 依据, 核验时点), None) 或 (None, 原因)。
+
+    清单日来自本案自己的监督检查记录文书(local-verify 已核对清单、文件与原包)，不是受理日、创建日或下载日。
+    """
+    if not isinstance(waterline_case, dict) or waterline_case.get("state") != "COMPLETED" or (waterline_case.get("local") or {}).get("status") != "ARCHIVED":
+        return None, "案卷未完成本地核验归档"
+    completions = ((waterline_case.get("history") or {}).get("completions")) or []
+    if not completions:
+        return None, "总账没有完成记录"
+    last = completions[-1]
+    generation, recorded = _text(last.get("generation")), _text(last.get("manifestSha256"))
+    relative = Path("工作区") / "历史工作区" / f"{project}-{generation}" / "manifest.json"
+    path = root / relative
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        return None, "清单路径越出业务根"
+    if not generation or not path.is_file():
+        return None, "清单文件不存在"
+    if "sha256:" + file_sha(path) != recorded:
+        return None, "清单摘要与总账完成记录不符"
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, "清单无法读取"
+    if (manifest.get("case") or {}).get("projectNo") != project:
+        return None, "清单不是本案"
+    day = _text(((manifest.get("initialInspection") or {}).get("inspectionDate")))
+    if ISO_DAY.match(day) is None:
+        return None, "清单没有有效的初查日"
+    ref = f"{relative.as_posix()}#initialInspection.inspectionDate | 本地核验清单 manifestSha256={recorded} | projectNo={project}"
+    return (day, ref, _text(last.get("verifiedAt")) or now()), None
+
+
+def build_date_correction_specs(*, plan_path: Path, plan_sha: str, waterline_path: Path, v3_path: Path, v3_sha: str, v9_path: Path,
+                                v9_sha: str, target: dict[str, str], transport: Any, out_dir: Path, log_root: Path,
+                                batch_size: int = HARD_CAP_RECORDS, scope_from: str = "2026-01-01") -> dict[str, Any]:
+    """云端初查日期有据更正说明（V2 spec，旧值门禁）。
+
+    计划逐项给出 projectNo、云端 recordId、此刻应有的旧值 expectedOld 与新日。生成前核对：新日等于本案已核验清单里的初查日、
+    不早于范围起点；fresh 云端该键唯一且 recordId 相符、当前值正是 expectedOld；任一不符的条目整条拒绝并列入报告，不写其他条目以外的任何字段。
+    执行仍由 feishu-source-sync 的 P18 账、写前旧值核对与写后读回完成；写前云端值已变（含人工改动）会被执行器拒绝。
+    """
+    _require(1 <= batch_size <= HARD_CAP_RECORDS, f"batch_size 必须是 1..{HARD_CAP_RECORDS}")
+    _require(file_sha(plan_path) == plan_sha, "更正计划摘要与固定值不一致")
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    _require(isinstance(plan, dict) and plan.get("schemaVersion") == DATE_CORRECTION_SCHEMA, "更正计划版本不支持")
+    entries = plan.get("entries")
+    _require(isinstance(entries, list) and entries and len({e.get("projectNo") for e in entries}) == len(entries), "更正计划没有条目或含重复项目")
+    v3 = load_contract_v3(v3_path, v3_sha)
+    contract = load_contract(v9_path, v9_sha)
+    case_table = v3["base"]["tables"]["案卷主表"]["tableId"]
+    _require(target.get("baseToken") == v3["base"]["baseId"] == contract["baseId"], "目标 Base 与合同不一致")
+    index = field_index(v3["base"])
+    date_field = BASIC_FIELDS["date"]
+    ftype = index[case_table][date_field]["type"]
+    waterline = json.loads(waterline_path.read_text(encoding="utf-8")).get("cases", {})
+    root = waterline_path.parent
+    excluded = initial_scope.excluded_projects_in_root(root)
+    source_field = LIFECYCLE_FIELDS["date_source"]
+    source_meta = index[case_table].get(source_field)
+    cloud = transport.list_rows(target["baseToken"], case_table, [BASIC_FIELDS["key"], date_field] + ([source_field] if source_meta else []))
+    by_key: dict[str, list[str]] = {}
+    for record_id, row in cloud.items():
+        by_key.setdefault(_text(row.get(BASIC_FIELDS["key"])), []).append(record_id)
+    updates: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
+    for entry in entries:
+        project = _text(entry.get("projectNo"))
+        problems: list[str] = []
+        proven, reason = _manifest_initial_date(root, project, waterline.get(project))
+        new_day, old_day, record_id = _text(entry.get("newDate")), _text(entry.get("expectedOld")), _text(entry.get("recordId"))
+        if project in excluded:
+            problems.append("案卷已移出活动集合")
+        if proven is None:
+            problems.append(f"无已核验的本案清单日期：{reason}")
+        elif proven[0] != new_day:
+            problems.append(f"清单初查日 {proven[0]} 与计划新日 {new_day} 不一致")
+        if ISO_DAY.match(new_day) is None or new_day < scope_from:
+            problems.append("新日格式无效或早于范围起点")
+        if ISO_DAY.match(old_day) is None or old_day == new_day:
+            problems.append("旧值格式无效或与新日相同")
+        ids = by_key.get(project, [])
+        if ids != [record_id]:
+            problems.append(f"fresh 云端稳定键未唯一命中计划 recordId：{ids}")
+        else:
+            stored = cloud[record_id].get(date_field)
+            if cell_is_empty(stored) or not cell_equals(ftype, stored, old_day):
+                problems.append(f"云端当前值 {stored!r} 不是计划旧值 {old_day}（同期变化或人工改动，保留）")
+        source_old, source_new = _text(entry.get("sourceOld")), _text(entry.get("sourceNew"))
+        if bool(source_old) != bool(source_new):
+            problems.append("sourceOld 与 sourceNew 必须同时给出")
+        elif source_new:  # 日期来源随依据更正(如 底册 -> 监督系统)：同样带旧值门禁，且新值必须是合同选项
+            options = (source_meta or {}).get("options")
+            if source_meta is None or (options is not None and source_new not in options):
+                problems.append("合同没有该初查日期来源选项")
+            elif ids == [record_id] and not cell_equals(source_meta["type"], cloud[record_id].get(source_field), wire_value(source_meta["type"], source_old)):
+                problems.append(f"云端初查日期来源当前值 {cloud[record_id].get(source_field)!r} 不是计划旧值 {source_old}")
+        if problems:
+            refused.append({"projectNo": project, "recordId": record_id, "problems": problems})
+            continue
+        ref = proven[1] + f" | 来源任务列表检查日期对照={_text(plan.get('listingSha256'))} | 计划={plan_path.name}"
+        fields = {date_field: {"new": new_day, "expectedOld": old_day, "basis": _record_basis(ref, proven[2])}}
+        if source_new:
+            fields[source_field] = {"new": source_new, "expectedOld": source_old, "basis": _record_basis(ref, proven[2])}
+        updates.append({"tableId": case_table, "recordId": record_id, "stableKey": {"fieldId": BASIC_FIELDS["key"], "value": project}, "fields": fields})
+    out_dir.mkdir(parents=True, exist_ok=True)
+    specs: list[dict[str, Any]] = []
+    for number, start in enumerate(range(0, len(updates), batch_size), start=1):
+        chunk = updates[start:start + batch_size]
+        name = f"datefix-{number:02d}"
+        spec = {"mode": "execute", "target": dict(target), "limits": {"maxRecords": batch_size}, "logDir": str(log_root / name),
+                "schemaVersion": SPEC_SCHEMA, "contract": {"path": str(v9_path), "sha256": v9_sha},
+                "allowlist": {case_table: {"records": [c["recordId"] for c in chunk], "fields": sorted({f for c in chunk for f in c["fields"]})}}, "updates": chunk}
+        path = out_dir / f"{name}.json"
+        path.write_text(json.dumps(spec, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        specs.append({"name": name, "path": str(path), "sha256": file_sha(path), "records": len(chunk), "kind": "datefix"})
+    report = {"schema": "FeishuDateCorrectionBuildReportV1", "builtAt": now(), "externalCalls": "read-only fresh scan", "target": dict(target),
+              "plan": {"path": str(plan_path), "sha256": plan_sha}, "counts": {"entries": len(entries), "toCorrect": len(updates), "refused": len(refused)},
+              "specs": specs, "refused": refused, "status": "OK" if not refused else "PARTIAL"}
     (out_dir / "build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return report
 
