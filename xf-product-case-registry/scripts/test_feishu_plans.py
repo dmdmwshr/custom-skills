@@ -129,6 +129,19 @@ def test_label_default_fills_only_empty_and_placeholder_cells_and_keeps_explicit
     assert again["counts"]["recordsToWrite"] == 0 and not again["specs"]             # 重复触发不再写
 
 
+def test_label_default_sets_aside_a_case_whose_old_human_release_was_never_accepted_and_writes_the_rest(tmp_path, contract):
+    cloud, ledger = Cloud(_case_rows()), _ledger(tmp_path)
+    sync.Ledger(ledger, isolated_test=True).append(sync.Ledger.target_key(BASE, CASE, "create:P-1"),
+                                                   {"event": "human_release", "intentId": "old-intent", "reason": "历史放行"})
+    report = plans.build_label_initial_specs(
+        contract_path=contract, contract_sha=_sha(contract), table_name="案卷主表", target={"baseToken": BASE, "profile": "offline", "identity": "user"},
+        transport=cloud, out_dir=tmp_path / "out", log_root=tmp_path / "log", ledger_dir=ledger, source_ref="规则", isolated_test_ledger=True)
+    assert report["status"] == "PARTIAL" and report["counts"]["recordsToWrite"] == 1
+    assert report["held"] == [{"recordId": "recA00000000001", "stableKey": "P-1", "problem": "历史 human_release 未获用户风险接受，保护继续，不写"}]
+    assert _execute(report["specs"][0]["path"], cloud, ledger)["status"] == "OK"     # 其余记录照常写，不被同批拖住
+    assert cloud.rows[(CASE, "recA00000000001")][NET] is None and cloud.rows[(CASE, "recA00000000003")][NET] == ["否"]
+
+
 def test_label_default_does_not_overwrite_a_value_a_person_saved_between_plan_and_write(tmp_path, contract):
     cloud, ledger = Cloud(_case_rows()), _ledger(tmp_path)
     report = plans.build_label_initial_specs(

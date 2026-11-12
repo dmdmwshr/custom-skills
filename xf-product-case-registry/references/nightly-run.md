@@ -21,3 +21,15 @@
 - 来源里未检查、检查中、抽样待结果、复查待结果、来源缺件的任务用 `nightly observe --items <文件> --entry <入口>` 登记（`items` 为 `[{rwid,state,unitName?,brigade?,projectNo?,inspectionDate?}]`），每 7 天到期一次；等待多久都不降频。
 - 只有来源给出检查日期（真实初查日）且不早于 2026-01-01 才 `ENTER_SCOPE`，随后按正常详情确认进入总账；早于边界记 `OUT_OF_SCOPE`；没有检查日期的只观察，不建案、不下载。
 - 已入总账案卷的到期重取由 `source scan-plan` 的包决策给出，同为 7 天；文书叶集合未证完整时不自动打包，材料未齐不标归档完成，可信事实仍先本地后飞书。
+
+## 各阶段对应入口
+
+| 阶段 | 入口 | 记 `done` 的条件 |
+| --- | --- | --- |
+| `discover` | 来源页面可见列表 → `source scan-plan`、`nightly observe`、`nightly due` | 分页总数与观察时间已记录 |
+| `acquire` | 详情截图与打包（叶集合证明完整才打包）→ `source` 接件 | 原包摘要与截图已入业务根 |
+| `organize`/`validate` | 清点、拆分、字段校验、本地核验归档 | 指纹未变且已有完成证据的案卷记 `skipped` |
+| `sync` | 各规划器 → `feishu-source-sync --execute`；产品数量走 `record_quantities.py scan` → `feishu-quantity-plan` | 每份说明读回一致；UNKNOWN 记 `unknown` 并只封锁该目标 |
+| `mirror` | `feishu-mirror` | 镜像、当日快照、变更记录已写 |
+| `reconcile` | `feishu-recount --out` | 退出 0；退出 4 记 `failed` 并保留差异文件 |
+| `report` | 汇总本轮变更、缺项、未知与到期 | 无变化时安静结束 |

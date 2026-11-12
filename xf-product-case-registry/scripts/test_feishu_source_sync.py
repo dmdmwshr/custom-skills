@@ -3192,3 +3192,10 @@ def test_ledger_migration_stops_on_a_leftover_lock_or_a_diverged_destination(tmp
     assert (formal / "targets" / ("a" * 32 + ".jsonl")).read_bytes() == b"different\n"
     with pytest.raises(sync.SyncError, match="只迁移登记过的旧账根"):
         sync.migrate_ledger(tmp_path / "elsewhere", apply=True)
+
+
+def test_datetime_readback_in_china_summer_time_compares_wall_time():
+    # 1990-07-06 落在上海夏令时，飞书返回 +09:00 的同一墙上时间。
+    assert sync.cell_equals("datetime", "1990-07-06T00:00:00.000+09:00", "1990-07-06 00:00")
+    assert sync.cell_equals("datetime", "2019-06-29T00:00:00.000+08:00", "2019-06-29 00:00")
+    assert not sync.cell_equals("datetime", "2019-06-29T00:00:00.000+09:00", "2019-06-29 00:00")

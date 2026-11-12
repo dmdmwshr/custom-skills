@@ -15,10 +15,12 @@ from pypdf import PdfReader
 
 if __package__:
     from . import image_pdf
+    from . import name_search as names
     from . import source_intake as source
     from . import workspace_state as ws
 else:
     import image_pdf
+    import name_search as names
     import source_intake as source
     import workspace_state as ws
 
@@ -91,7 +93,7 @@ def accept(layout: Any, review: dict[str, Any]) -> dict[str, Any]:
         image_review.get("readable") is not True
         or not required <= set(image_review.get("readableFields") or [])
         or image_review.get("projectNo") != project
-        or image_review.get("unitName") != unit
+        or not names.same_name(image_review.get("unitName"), unit)   # 系统原文可能带空格或全角括号，只差这些不算不一致
         or image_review.get("brigadeCode") != brigade
     ):
         raise ws.WorkspaceStateError("必须逐图核清案号、单位、大队、产品结果及文书目录")
@@ -121,7 +123,7 @@ def accept(layout: Any, review: dict[str, Any]) -> dict[str, Any]:
                 raise ws.WorkspaceStateError("包内身份文书缺少可核对单位、文号")
             if any("".join(v.split()) not in compact for v in (document_unit, document_no)):
                 raise ws.WorkspaceStateError("包内文书正文无法支持核查单身份")
-            if document_unit != unit and not proof.get("identityDifferenceResolution"):
+            if not names.same_name(document_unit, unit) and not proof.get("identityDifferenceResolution"):
                 raise ws.WorkspaceStateError("截图与文书单位名称有差异，必须保存对应证据与裁决")
             match = {
                 k: proof[k]

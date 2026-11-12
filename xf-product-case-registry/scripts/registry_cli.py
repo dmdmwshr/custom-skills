@@ -2734,6 +2734,62 @@ def build_parser() -> argparse.ArgumentParser:
     feishu_retire.add_argument("--log-dir", help="新建日志目录：before/requests/after/report")
     feishu_retire.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     feishu_retire.set_defaults(func=feishu_scope_retire_command)
+    mirror = sub.add_parser(
+        "feishu-mirror",
+        help="飞书→本地镜像：把大队维护字段的当前值与变化记到业务根“运行记录/飞书镜像”，并核对来源事实是否被改动；只读云，无变化不产生新文件",
+    )
+    for flag in ("--contract", "--contract-sha", "--base-token", "--profile", "--business-root", "--ledger-dir"):
+        mirror.add_argument(flag, required=True)
+    mirror.add_argument("--maintenance-base-token", help="维修企业台账 Base；给出时一并镜像合同 maintenanceBase 子库")
+    mirror.add_argument("--identity", default="user", choices=["user", "bot"])
+    mirror.add_argument("--date", help="运行日期 YYYY-MM-DD；省略取当前上海日期")
+    mirror.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    mirror.set_defaults(func=feishu_mirror_command)
+    recount = sub.add_parser(
+        "feishu-recount",
+        help="统计对账：由检查明细/产品明细/案卷主表独立重算月度各列，与飞书公式列逐格比较；只读云；有差异退出码 4",
+    )
+    for flag in ("--contract", "--contract-sha", "--base-token", "--profile"):
+        recount.add_argument(flag, required=True)
+    recount.add_argument("--identity", default="user", choices=["user", "bot"])
+    recount.add_argument("--out", help="把完整结果写到该文件")
+    recount.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    recount.set_defaults(func=feishu_recount_command)
+    case_find = sub.add_parser(
+        "feishu-case-find",
+        help="按单位名称或项目编号找案卷：忽略空格和全半角差异，结果给出系统原文(含空格)；规范化后同名的并列列出、不合并；只读云",
+    )
+    for flag in ("--contract", "--contract-sha", "--base-token", "--profile", "--name"):
+        case_find.add_argument(flag, required=True)
+    case_find.add_argument("--identity", default="user", choices=["user", "bot"])
+    case_find.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    case_find.set_defaults(func=feishu_case_find_command)
+    register = sub.add_parser(
+        "feishu-register",
+        help="主动登记：企业清单(enterprises)或网售清单(online-sales)与飞书现有记录匹配，结果与代录/证据计划写到业务根；"
+             "只读云。企业清单加 --create-batch 才逐条创建新企业(先回读，不重放)",
+    )
+    register.add_argument("kind", choices=["enterprises", "online-sales"])
+    for flag in ("--contract", "--contract-sha", "--base-token", "--profile", "--business-root"):
+        register.add_argument(flag, required=True)
+    register.add_argument("--list", help="清单 JSON")
+    register.add_argument("--list-sha", help="清单 sha256")
+    register.add_argument("--create-batch", help="enterprises：已生成的批次目录；逐条创建其中的新企业")
+    register.add_argument("--retry-not-found", action="store_true", help="创建结果未知且回读确认不存在的条目，允许再建一次")
+    register.add_argument("--identity", default="user", choices=["user", "bot"])
+    register.add_argument("--date", help="运行日期 YYYY-MM-DD；省略取当前上海日期")
+    register.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    register.set_defaults(func=feishu_register_command)
+    quantity = sub.add_parser(
+        "feishu-quantity-plan",
+        help="产品数量补空：按数量证据(record_quantities.py scan 的结果)对照产品明细 fresh 行，给仍为空的数量格生成字段计划并列出缺项；"
+             "只读云，不写；计划再交 feishu-field-plan-build",
+    )
+    for flag in ("--evidence", "--evidence-sha", "--base-token", "--profile", "--table-id", "--out-dir"):
+        quantity.add_argument(flag, required=True)
+    quantity.add_argument("--identity", default="user", choices=["user", "bot"])
+    quantity.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    quantity.set_defaults(func=feishu_quantity_plan_command)
 
     local_verify = sub.add_parser(
         "local-verify",
@@ -3032,6 +3088,87 @@ def nightly_command(args: argparse.Namespace) -> None:
     except (module.NightlyError, workspace.WorkspaceStateError, OSError, ValueError) as error:
         raise RegistryError(f"夜间运行：{error}") from error
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _feishu_read(args: argparse.Namespace, label: str, work) -> dict[str, Any]:
+    """只读云的命令共用：建官方 CLI 通道，拒绝与读取失败分开报。"""
+    sync = importlib.import_module(f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync")
+    try:
+        return work(sync, sync.LarkCliTransport(args.cli or sync.DEFAULT_CLI, args.profile, args.identity))
+    except (sync.SyncError, ValueError) as error:
+        raise RegistryError(f"{label}已拒绝：{error}") from error
+    except sync.RuntimeSyncError as error:
+        print(f"ERROR: {label}：云读取或写入未完成：{error}", file=sys.stderr)
+        raise SystemExit(3) from error
+
+
+def _run_day(args: argparse.Namespace) -> str:
+    nightly = importlib.import_module(f"{__package__}.nightly" if __package__ else "nightly")
+    return args.date or nightly.now_shanghai().date().isoformat()
+
+
+def feishu_mirror_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(f"{__package__}.feishu_mirror" if __package__ else "feishu_mirror")
+    targets: dict[str | None, dict[str, str]] = {None: {"baseToken": args.base_token, "profile": args.profile, "identity": args.identity}}
+    if args.maintenance_base_token:
+        targets["maintenanceBase"] = {"baseToken": args.maintenance_base_token, "profile": args.profile, "identity": args.identity}
+    report = _feishu_read(args, "飞书镜像", lambda sync, transport: module.mirror(
+        contract_path=Path(args.contract), contract_sha=args.contract_sha, sections=list(targets), targets=targets, transport=transport,
+        business_root=Path(args.business_root), ledger_dir=Path(args.ledger_dir), day=_run_day(args)))
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["status"] != "OK":
+        print("WARNING: 来源事实被改动或有读不清的行(ATTENTION)；退出码 4", file=sys.stderr)
+        raise SystemExit(4)
+
+
+def feishu_recount_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(f"{__package__}.feishu_mirror" if __package__ else "feishu_mirror")
+    report = _feishu_read(args, "统计对账", lambda sync, transport: module.recount(
+        contract_path=Path(args.contract), contract_sha=args.contract_sha,
+        target={"baseToken": args.base_token, "profile": args.profile, "identity": args.identity}, transport=transport))
+    if args.out:
+        Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report.get("diffs"):
+        print("WARNING: 飞书公式列与独立重算不一致；退出码 4", file=sys.stderr)
+        raise SystemExit(4)
+
+
+def feishu_case_find_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(f"{__package__}.name_search" if __package__ else "name_search")
+    report = _feishu_read(args, "案卷检索", lambda sync, transport: module.find_cases(
+        contract_path=Path(args.contract), contract_sha=args.contract_sha,
+        target={"baseToken": args.base_token, "profile": args.profile, "identity": args.identity}, transport=transport, query=args.name))
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+def feishu_register_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(f"{__package__}.feishu_register" if __package__ else "feishu_register")
+    target = {"baseToken": args.base_token, "profile": args.profile, "identity": args.identity}
+    common = dict(contract_path=Path(args.contract), contract_sha=args.contract_sha, target=target)
+    if args.create_batch:
+        if args.kind != "enterprises":
+            raise RegistryError("--create-batch 只用于 enterprises")
+        report = _feishu_read(args, "企业登记", lambda sync, transport: module.create_enterprises(
+            batch_dir=Path(args.create_batch), transport=transport, retry_not_found=args.retry_not_found, **common))
+    else:
+        if not args.list or not args.list_sha:
+            raise RegistryError("需要 --list 与 --list-sha")
+        plan = module.plan_enterprises if args.kind == "enterprises" else module.plan_online_sales
+        report = _feishu_read(args, "主动登记", lambda sync, transport: plan(
+            list_path=Path(args.list), list_sha=args.list_sha, transport=transport, business_root=Path(args.business_root), day=_run_day(args), **common))
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report.get("status") not in (None, "OK"):
+        raise SystemExit(4)
+
+
+def feishu_quantity_plan_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(f"{__package__}.record_quantities" if __package__ else "record_quantities")
+    fields = [module.PRODUCT_KEY, module.F_NAME, module.F_METHOD, module.F_TEXT, module.F_VALUE, module.F_UNIT, module.F_MEANING]
+    report = _feishu_read(args, "产品数量计划", lambda sync, transport: module.build_plan(
+        evidence_path=Path(args.evidence), evidence_sha=args.evidence_sha,
+        cloud_rows=transport.list_rows(args.base_token, args.table_id, fields), out_dir=Path(args.out_dir)))
+    print(json.dumps({k: v for k, v in report.items() if k != "missing"}, ensure_ascii=False, indent=2))
 
 
 def _feishu_plan_build(args: argparse.Namespace, label: str, build) -> None:

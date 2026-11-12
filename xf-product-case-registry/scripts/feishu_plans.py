@@ -64,6 +64,19 @@ def _emit(*, prefix: str, table_id: str, updates: list[dict[str, Any]], batch_si
     return specs
 
 
+def write_protection(ledger: sync.Ledger, base: str, table_id: str, record_id: str, stable_key: str) -> str | None:
+    """Why the write gate would refuse this target, or None. Same three protections ``feishu-source-sync`` applies
+    before any external call, checked at planning time so one protected record does not stop its whole batch."""
+    record_key, create_key = sync.Ledger.target_key(base, table_id, record_id), sync.Ledger.target_key(base, table_id, "create:" + stable_key)
+    if ledger.state(record_key)["state"] == "BLOCKED":
+        return "该目标账本仍未决(BLOCKED)，先对账"
+    if ledger.state(create_key)["state"] == "BLOCKED":
+        return "同案稳定键的创建仍未决(BLOCKED)，先对账"
+    if any(e.get("event") == "human_release" and not e.get("userAcceptance") for key in (record_key, create_key) for e in ledger.events(key)):
+        return "历史 human_release 未获用户风险接受，保护继续，不写"
+    return None
+
+
 def _plain(field_type: str, cell: Any) -> Any:
     """The stored cell as the plain value a spec carries (select -> its single option)."""
     if sync.cell_is_empty(cell):
@@ -122,8 +135,9 @@ def build_label_initial_specs(*, contract_path: Path, contract_sha: str, table_n
                            "basis": {"kind": field_policy.BASIS_LABEL_INITIAL, "sourceRef": source_ref, "observedAt": observed_at}}
         if not fields:
             continue
-        if ledger.state(sync.Ledger.target_key(target["baseToken"], table_id, record_id))["state"] == "BLOCKED":
-            held.append({"recordId": record_id, "stableKey": key, "problem": "该目标账本仍未决(BLOCKED)，先对账"})
+        protected = write_protection(ledger, target["baseToken"], table_id, record_id, key)
+        if protected:
+            held.append({"recordId": record_id, "stableKey": key, "problem": protected})
             continue
         updates.append({"tableId": table_id, "recordId": record_id, "stableKey": {"fieldId": key_field, "value": key}, "fields": fields})
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -228,8 +242,9 @@ def build_delegated_specs(*, plan_path: Path, plan_sha: str, contract_path: Path
                 problems.append(f"选项不在合同中：{meta['name']}={item['new']!r}")
                 continue
             writes[fid] = candidate
-        if writes and ledger.state(sync.Ledger.target_key(target["baseToken"], table_id, record_id))["state"] == "BLOCKED":
-            problems.append("该目标账本仍未决(BLOCKED)，先对账")
+        protected = write_protection(ledger, target["baseToken"], table_id, record_id, key) if writes else None
+        if protected:
+            problems.append(protected)
         conflicts.extend(entry_conflicts)
         if problems:
             refused.append({"stableKey": key, "recordId": record_id, "problems": problems})
@@ -351,8 +366,9 @@ def build_label_evidence_specs(*, plan_path: Path, plan_sha: str, contract_path:
             else:
                 differences.append({"stableKey": key, "recordId": record_id, "field": meta["name"], "current": current,
                                     "evidence": item["new"], "evidenceRef": item["evidenceRef"], "action": "REPORT_ONLY"})
-        if writes and ledger.state(ledger_key)["state"] == "BLOCKED":
-            problems.append("该目标账本仍未决(BLOCKED)，先对账")
+        protected = write_protection(ledger, target["baseToken"], table_id, record_id, key) if writes else None
+        if protected:
+            problems.append(protected)
         if problems:
             refused.append({"stableKey": key, "recordId": record_id, "problems": problems})
         elif writes:

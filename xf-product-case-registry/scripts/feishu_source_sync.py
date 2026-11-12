@@ -79,6 +79,7 @@ DEFAULT_CLI = "/opt/devtools/nvm/versions/node/v24.21.0/bin/lark-cli"
 DEFAULT_LEDGER = Path.home() / ".local" / "state" / "xf-product-case-registry" / "feishu-source-sync"
 VALUE_STATES = {"observed", "not-provided", "unknown"}
 SOURCE_TZ = timezone(timedelta(hours=8))  # responses carry timezone Asia/Shanghai
+CHINA_DST_OFFSET = timedelta(hours=9)  # Asia/Shanghai summer time, 1986-1991
 # Manual and relation fields from the v8 contract. They stay denied even if a later contract
 # edit mislabels them as source fields. Unknown or new fields are refused by default as well.
 # 2026-11-12: a contract that classifies one of them ``business-label`` / ``brigade-maintained`` opens it
@@ -228,6 +229,9 @@ def norm_cell(field_type: str, cell: Any) -> Any:
         except ValueError as error:
             raise Ambiguous from error
         if parsed.tzinfo is not None:
+            # 1986-1991 夏令时期间飞书按 +09:00 返回同一上海墙上时间；墙上时间即业务值。
+            if parsed.utcoffset() == CHINA_DST_OFFSET and 1986 <= parsed.year <= 1991:
+                return parsed.replace(tzinfo=None)
             parsed = parsed.astimezone(SOURCE_TZ).replace(tzinfo=None)
         return parsed
     raise Ambiguous
