@@ -142,7 +142,7 @@ python scripts/registry_cli.py feishu-source-build --capture 采集批次.json -
 
 ## r27 补充：唯一正式账根身份（不只是目录结构）
 
-- 正常入口（CLI 与函数默认）只认唯一正式 P18 账根 `P18_LEDGER_ROOT`（`D:/ws/05-temp/20261104_飞书大队权限/P18运行账本/实施`，Windows 与 WSL 写法规范化后相同）：路径身份必须相同、目录已有历史事件；校验只读，不写。结构合法但另建的“空账”（哪怕含 `targets/`、`locks/`）不是正式账，`feishu-source-sync`（execute/reconcile）与 `feishu-source-build` 都在任何云调用、账本/日志/输出目录写入之前拒绝。
+- 正常入口（CLI 与函数默认）只认唯一正式 P18 账根 `LEDGER_ROOT`（业务根 `运行记录/飞书写入账本`，Windows 与 WSL 写法规范化后相同；2026-11-12 由临时目录 `D:/ws/05-temp/20261104_飞书大队权限/P18运行账本/实施` 经 `feishu-ledger-migrate` 逐字节迁入，旧根只读留证、不再接受写入）：路径身份必须相同、目录已有历史事件；校验只读，不写。结构合法但另建的“空账”（哪怕含 `targets/`、`locks/`）不是正式账，`feishu-source-sync`（execute/reconcile）与 `feishu-source-build` 都在任何云调用、账本/日志/输出目录写入之前拒绝。
 - 隔离测试账仅在代码内部以 `isolated_test_ledger=True` 构造、根里有 `Ledger.initialize()` 写下的标记、且不是正式根时可用；该开关不在任何命令行选项里，`initialize()` 对正式根永远拒绝。
 - 变更 `P18_LEDGER_ROOT` 是源码变更(须评审)，不是运行时参数。
 - `UserRiskAcceptanceV1` 的校验仍只是材料结构及精确意图检查，不证明真实人类授权；本任务未获此项人类风险接受授权。
@@ -188,3 +188,18 @@ python scripts/registry_cli.py feishu-source-build --capture 采集批次.json -
   只有该意图恰有一条 UNKNOWN 终态、静默期已过、fresh 全页稳定键扫描 0 匹配、且整表没有“内容与意图完全相同(含父关联)而键不同”的行，才记 `NOT_APPLIED_PROVEN` 并清除封锁；
   有 1 匹配仍需 `requestTerminalProof`，不在此路径清除。原事件保留，不构造 humanRelease；清除后同一说明可原样重跑，只会产生一个新的创建意图。
 
+## 字段归属与四种写入依据（2026-11-12）
+
+规则唯一来源 `scripts/field_policy.py`，说明校验、规划器和执行共用，不另写第二份。
+
+| 依据 `basis.kind` | 可写的合同类别 | 约束 |
+| --- | --- | --- |
+| `source-observed` 监督事实更新 | `source-sync-whitelist` | 原规则不变；否/0 仍需 `explicitNegative`，缺失不补 |
+| `label-initial` 标签初值 | `business-label` | 只写“否”；`expectedOld` 只能是空白或“待核实”；`feishu-label-initial-build` 先落 `previous-values.json` |
+| `label-evidence` 证据确定标签 | `business-label` | 是/否加证据引用与摘要；只补空白/待核实或替换账本证明是助手上次写入的值，其余列 `differences`（REPORT_ONLY）；`feishu-label-evidence-build` |
+| `user-delegated` 用户授权代录 | `business-label`、`brigade-maintained`、`human` | 需 `authorizedBy=user` 与用户原话；必须带 `expectedOld`，当前值不同列 `conflicts` 不覆盖；`feishu-delegated-build`（`FeishuDelegatedPlanV1`） |
+
+- 合同可带 `maintenanceBase`，说明的 `contract.section: "maintenanceBase"` 指向维修企业库；稳定键企业编号为 `admin-only`，只作定位不被写。
+- 意图事件按字段记录依据种类，是“助手写入回执”；与平台修订记录一起判断某值是否由人改过。
+- 三类规划器都只读云、每批至多 20 条，产物仍由 `feishu-source-sync --execute` 写入：写前回读、旧值不符整批拒绝、中断只封锁该目标且不重放。
+- 账根迁移：`feishu-ledger-migrate --source <旧根>` 预演（文件数、封锁集合、清单摘要），`--apply` 逐文件字节复制并核对；任一端有锁、目标已有不同内容即拒绝，不清锁、不覆盖、不新建空账；重跑只核对。

@@ -2669,6 +2669,61 @@ def build_parser() -> argparse.ArgumentParser:
     child_build.add_argument("--only-project", action="append", help="只处理这些项目编号(可重复；用于小批试跑)")
     child_build.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     child_build.set_defaults(func=feishu_child_build_command)
+    nightly = sub.add_parser("nightly", help="夜间运行记录与检查点、观察队列（定时与人工触发共用；只写业务根“运行记录”，不联网）")
+    nightly.add_argument("action", choices=["begin", "checkpoint", "finish", "status", "observe", "due"])
+    nightly.add_argument("--date", help="运行日期 YYYY-MM-DD；begin 取当前上海日期")
+    nightly.add_argument("--trigger", default="manual", choices=["scheduled", "manual"])
+    nightly.add_argument("--actor", default="")
+    nightly.add_argument("--stage")
+    nightly.add_argument("--status")
+    nightly.add_argument("--case")
+    nightly.add_argument("--detail", default="")
+    nightly.add_argument("--ref", default="")
+    nightly.add_argument("--changed", type=int, default=0)
+    nightly.add_argument("--summary", default="")
+    nightly.add_argument("--items", help="observe：本次来源观察到的任务 JSON 文件")
+    nightly.add_argument("--entry", help="observe：来源入口名称")
+    add_workspace_resolution_options(nightly)
+    nightly.set_defaults(func=nightly_command)
+    label_initial = sub.add_parser(
+        "feishu-label-initial-build",
+        help="标签初值：把一张表里空白或“待核实”的业务标签(business-label)生成“否”的 V2 说明并先存旧值；已有是/否不动；只读云，不写",
+    )
+    for flag in ("--contract", "--contract-sha", "--table", "--base-token", "--profile", "--out-dir", "--log-root", "--ledger-dir", "--source-ref"):
+        label_initial.add_argument(flag, required=True)
+    label_initial.add_argument("--section", help="合同子库，如 maintenanceBase")
+    label_initial.add_argument("--identity", default="user", choices=["user", "bot"])
+    label_initial.add_argument("--batch-size", type=int, default=20)
+    label_initial.add_argument("--only-key", action="append", help="只处理这些稳定键(可重复；用于小批试跑)")
+    label_initial.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    label_initial.set_defaults(func=feishu_label_initial_build_command)
+    delegated = sub.add_parser(
+        "feishu-delegated-build",
+        help="用户授权代录：按 FeishuDelegatedPlanV1(用户原话、稳定键、字段新值)生成带旧值门禁的 V2 说明；当前值与计划旧值不同只报冲突不覆盖；只读云，不写",
+    )
+    for flag in ("--plan", "--plan-sha", "--contract", "--contract-sha", "--base-token", "--profile", "--out-dir", "--log-root", "--ledger-dir"):
+        delegated.add_argument(flag, required=True)
+    delegated.add_argument("--identity", default="user", choices=["user", "bot"])
+    delegated.add_argument("--batch-size", type=int, default=20)
+    delegated.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    delegated.set_defaults(func=feishu_delegated_build_command)
+    evidence = sub.add_parser(
+        "feishu-label-evidence-build",
+        help="证据确定标签：按 FeishuLabelEvidencePlanV1(稳定键、标签、是/否、证据引用与摘要)生成说明；只补空白/待核实或替换助手自己上次写入的值，大队改过的值只列差异；只读云，不写",
+    )
+    for flag in ("--plan", "--plan-sha", "--contract", "--contract-sha", "--base-token", "--profile", "--out-dir", "--log-root", "--ledger-dir"):
+        evidence.add_argument(flag, required=True)
+    evidence.add_argument("--identity", default="user", choices=["user", "bot"])
+    evidence.add_argument("--batch-size", type=int, default=20)
+    evidence.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    evidence.set_defaults(func=feishu_label_evidence_build_command)
+    ledger_migrate = sub.add_parser(
+        "feishu-ledger-migrate",
+        help="把旧账根逐字节迁到业务根固定运行位置并核对摘要与封锁集合；缺省只预演/核对，--apply 才复制；不清锁、不建空账",
+    )
+    ledger_migrate.add_argument("--source", required=True, help="迁移前的旧账根(须是源码登记的旧根)")
+    ledger_migrate.add_argument("--apply", action="store_true")
+    ledger_migrate.set_defaults(func=feishu_ledger_migrate_command)
     feishu_retire = sub.add_parser(
         "feishu-scope-retire",
         help="删除云端范围外案卷及其自有检查/产品子行（先子后主）；计划绑定全字段快照，缺省只核对不删，--execute 才删，落账读回",
@@ -2947,6 +3002,82 @@ def feishu_child_build_command(args: argparse.Namespace) -> None:
     if report["status"] != "OK":
         print("WARNING: 有案卷被挡(PARTIAL)，其余说明已生成；退出码 4", file=sys.stderr)
         raise SystemExit(4)
+
+
+def nightly_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(f"{__package__}.nightly" if __package__ else "nightly")
+    workspace = workspace_api()
+    try:
+        _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+        root = module.runtime_root(layout.root)
+        today = module.now_shanghai().date().isoformat()
+        if args.action == "begin":
+            result = module.begin(root, trigger=args.trigger, actor=args.actor)
+            result["observationQueue"] = module.queue_summary(root, today=today)
+        elif args.action == "checkpoint":
+            result = module.checkpoint(root, args.date or today, stage=args.stage, status=args.status, case=args.case,
+                                       detail=args.detail, ref=args.ref, changed=args.changed)
+        elif args.action == "finish":
+            result = module.finish(root, args.date or today, summary=args.summary)
+        elif args.action == "status":
+            result = module.status(root, args.date)
+            result["observationQueue"] = module.queue_summary(root, today=today)
+        elif args.action == "observe":
+            if not args.items or not args.entry:
+                raise RegistryError("observe 需要 --items 与 --entry")
+            items = json.loads(Path(args.items).read_text(encoding="utf-8"))
+            result = module.observe(root, items, observed_on=args.date or today, entry=args.entry)
+        else:
+            result = {"today": today, "observationsDue": module.due(root, today=args.date or today)}
+    except (module.NightlyError, workspace.WorkspaceStateError, OSError, ValueError) as error:
+        raise RegistryError(f"夜间运行：{error}") from error
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _feishu_plan_build(args: argparse.Namespace, label: str, build) -> None:
+    sync = importlib.import_module(f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync")
+    plans = importlib.import_module(f"{__package__}.feishu_plans" if __package__ else "feishu_plans")
+    target = {"baseToken": args.base_token, "profile": args.profile, "identity": args.identity}
+    try:
+        transport = sync.LarkCliTransport(args.cli or sync.DEFAULT_CLI, args.profile, args.identity)
+        report = build(plans, target, transport)
+    except sync.SyncError as error:
+        raise RegistryError(f"{label}说明生成已拒绝：{error}") from error
+    except sync.RuntimeSyncError as error:
+        print(f"ERROR: fresh 云读取失败，未生成说明：{error}", file=sys.stderr)
+        raise SystemExit(3) from error
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["status"] != "OK":
+        print("WARNING: 有条目被挡或有冲突(PARTIAL)，其余说明已生成；退出码 4", file=sys.stderr)
+        raise SystemExit(4)
+
+
+def feishu_label_initial_build_command(args: argparse.Namespace) -> None:
+    _feishu_plan_build(args, "标签初值", lambda plans, target, transport: plans.build_label_initial_specs(
+        contract_path=Path(args.contract), contract_sha=args.contract_sha, section=args.section, table_name=args.table, target=target,
+        transport=transport, out_dir=Path(args.out_dir), log_root=Path(args.log_root), ledger_dir=Path(args.ledger_dir),
+        source_ref=args.source_ref, batch_size=args.batch_size, only_keys=frozenset(args.only_key) if args.only_key else None))
+
+
+def feishu_delegated_build_command(args: argparse.Namespace) -> None:
+    _feishu_plan_build(args, "代录", lambda plans, target, transport: plans.build_delegated_specs(
+        plan_path=Path(args.plan), plan_sha=args.plan_sha, contract_path=Path(args.contract), contract_sha=args.contract_sha, target=target,
+        transport=transport, out_dir=Path(args.out_dir), log_root=Path(args.log_root), ledger_dir=Path(args.ledger_dir), batch_size=args.batch_size))
+
+
+def feishu_label_evidence_build_command(args: argparse.Namespace) -> None:
+    _feishu_plan_build(args, "证据标签", lambda plans, target, transport: plans.build_label_evidence_specs(
+        plan_path=Path(args.plan), plan_sha=args.plan_sha, contract_path=Path(args.contract), contract_sha=args.contract_sha, target=target,
+        transport=transport, out_dir=Path(args.out_dir), log_root=Path(args.log_root), ledger_dir=Path(args.ledger_dir), batch_size=args.batch_size))
+
+
+def feishu_ledger_migrate_command(args: argparse.Namespace) -> None:
+    sync = importlib.import_module(f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync")
+    try:
+        report = sync.migrate_ledger(Path(args.source), apply=args.apply)
+    except sync.SyncError as error:
+        raise RegistryError(f"账根迁移已拒绝：{error}") from error
+    print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
 def fields_validate_command(args: argparse.Namespace) -> None:

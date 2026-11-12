@@ -1159,6 +1159,7 @@ def describe(layout: Any, project: str, record: dict[str, Any], *, today: date |
         else None,
         "sourceIssuesRetained": retained_source_issues,
         "historicalComplete": historical_complete,
+        "materialGapOpen": bool(material_gaps and not (retained_source_issues and archived)),
         "activePending": system_changed
         or bool(material_gaps and not (retained_source_issues and archived))
         or bool(source.get("changePending"))
@@ -1682,10 +1683,12 @@ def package_decision(
     months: int = PACKAGE_WINDOW_MONTHS_DEFAULT,
     refresh_days: int = PACKAGE_REFRESH_DAYS_DEFAULT,
 ) -> dict[str, Any]:
-    """纯函数：只读决定“复用/首次获取/周期更新候选/仅显式更新/暂缓”及原因码，不产生任何副作用。
+    """纯函数：只读决定“复用/首次获取/到期更新候选/仅显式更新/暂缓”及原因码，不产生任何副作用。
 
-    默认任何已验证有效包都复用；状态/日期未知不妨碍复用；complete 不盖过明确合法的近期更新；
-    材料缺失从不是重下理由；已结案与合格案不周期更新。
+    默认任何已验证有效包都复用；状态/日期未知且无具体原因不妨碍复用；complete 不盖过明确合法的到期更新。
+    有具体原因（待结果、复查待结果、到期复核、新证据、来源缺件未收口）的案按 refresh_days 到期回看，
+    等待多久都保持同一间隔（2026-11-12：不再因检查日期早于窗口而转人工）；稳定案与无原因案不周期更新。
+    ``months``/``window`` 仅保留为展示口径，不参与判定。
     """
     today = today or datetime.now(ZoneInfo("Asia/Shanghai")).date()
     window = rolling_window(months, today)
@@ -1704,48 +1707,55 @@ def package_decision(
         return done("PKG_HOLD_PACKAGE_UNKNOWN", "HOLD", facts["packageIssue"])
     if has_package and not facts.get("packageValid", True):
         return done("PKG_BAD_LOCAL", "EXPLICIT_ONLY", facts.get("packageIssue") or "PACKAGE_UNREADABLE")
+    life = facts.get("lifecycle")
+    causes = list((life or {}).get("sourceCauses") or [])
+    if facts.get("materialGapOpen") and "SOURCE_MATERIAL_GAP" not in causes:
+        causes.append("SOURCE_MATERIAL_GAP")   # 来源缺件未收口：与待结果同样按到期间隔回看，不因缺件立即重下
+
+    def paced(code: str) -> dict[str, Any]:
+        """到期间隔(默认 7 天)自上次取包起算；等待多久都不降频、不转人工。"""
+        out["causes"] = causes
+        attached = facts.get("attachedAt")
+        last = None
+        if attached:
+            try:
+                last = datetime.fromisoformat(str(attached)).astimezone(ZoneInfo("Asia/Shanghai")).date()
+            except ValueError:
+                last = None
+        if last is not None and (today - last).days < refresh_days:
+            out["nextEligibleAt"] = date.fromordinal(last.toordinal() + refresh_days).isoformat()
+            return done("PKG_REUSE_EXISTING", "REUSE", "WITHIN_REFRESH_INTERVAL")
+        return done(code, "REFRESH_CANDIDATE", *causes)
+
     if result != "UNQUALIFIED":
         # 用户口径：2026消防产品案卷整包先全部获取(合格/未知也取)，已有有效包复用；不合格案优先靠排序，不靠准入。
         reason = "RESULT_QUALIFIED" if result == "QUALIFIED" else "RESULT_UNKNOWN"
-        if has_package:
-            return done("PKG_REUSE_EXISTING", "REUSE", reason)
-        return done("PKG_ACQUIRE_FIRST", "ACQUIRE_FIRST", reason)
+        if not has_package:
+            return done("PKG_ACQUIRE_FIRST", "ACQUIRE_FIRST", reason)
+        if causes and not (life or {}).get("stable"):
+            return paced("PKG_REFRESH_DUE_FOLLOW_UP")   # 未检查/检查中/抽样待结果/来源缺件：到期回看
+        return done("PKG_REUSE_EXISTING", "REUSE", reason)
     # 已确认不合格
-    if status == "CLOSED":
+    if status == "CLOSED" and not causes:
         return done("PKG_REUSE_CLOSED" if has_package else "PKG_ACQUIRE_FIRST",
                     "REUSE" if has_package else "ACQUIRE_FIRST")
     if not has_package:
         return done("PKG_ACQUIRE_FIRST", "ACQUIRE_FIRST", *(["STATUS_UNKNOWN"] if status is None else []))
-    if status != "OPEN":
+    if status != "OPEN" and not causes:
         return done("PKG_REUSE_EXISTING", "REUSE", "STATUS_UNKNOWN")
     check_date = facts.get("checkDate")
-    if check_date is None:
+    if check_date is None and not causes:
         return done("PKG_REUSE_EXISTING", "REUSE", facts.get("dateIssue") or "DATE_UNKNOWN")
-    if check_date > today:
+    if check_date is not None and check_date > today:
         return done("PKG_REUSE_EXISTING", "REUSE", "DATE_IN_FUTURE")
-    if check_date < date.fromisoformat(window["startDate"]):
-        return done("PKG_ACTIVE_OLDER_MANUAL", "EXPLICIT_ONLY", "OLDER_THAN_WINDOW")
-    life = facts.get("lifecycle")
     if life is not None:  # 2026-11-09：稳定案默认本地复用，只有具体原因才更新；不设统一过期天数
         if life.get("stable"):
             return done("PKG_REUSE_STABLE", "REUSE", "STABLE_NO_CAUSE")
-        causes = list(life.get("sourceCauses") or [])
         if not causes:
             if life.get("nextCheckOn"):
                 out["nextEligibleAt"] = life["nextCheckOn"]
             return done("PKG_REUSE_EXISTING", "REUSE", "NO_CAUSE_YET")
-        out["causes"] = causes
-    attached = facts.get("attachedAt")
-    last = None
-    if attached:
-        try:
-            last = datetime.fromisoformat(str(attached)).astimezone(ZoneInfo("Asia/Shanghai")).date()
-        except ValueError:
-            last = None
-    if last is not None and (today - last).days < refresh_days:
-        out["nextEligibleAt"] = date.fromordinal(last.toordinal() + refresh_days).isoformat()
-        return done("PKG_REUSE_EXISTING", "REUSE", "WITHIN_REFRESH_INTERVAL")
-    return done("PKG_REFRESH_DUE_RECENT_UNQUALIFIED", "REFRESH_CANDIDATE", *out.get("causes", []))
+    return paced("PKG_REFRESH_DUE_RECENT_UNQUALIFIED")
 
 
 def _package_capture_index(layout: Any) -> dict[str, dict[str, Any]]:
@@ -1825,6 +1835,7 @@ def package_facts(layout: Any, index: dict[str, Any], project: str, row: dict[st
         "dateIssue": issue,
         "localComplete": bool(row.get("complete")),
         "lifecycle": row.get("lifecycle"),
+        "materialGapOpen": bool(row.get("materialGapOpen")),
     }
 
 

@@ -225,9 +225,9 @@ def _validated_refresh(layout, project: str, refresh_reason, today) -> dict:
         else:
             import ledger_views as views
         decision = views.package_decision_for_project(layout, project, today=today)
-        if decision["code"] != "PKG_REFRESH_DUE_RECENT_UNQUALIFIED":
+        if decision["action"] != "REFRESH_CANDIDATE":
             raise source.SourceIntakeError(
-                "当前源证据不构成近期不合格更新候选：" + decision["code"] + "，拒绝重新打包"
+                "当前源证据不构成到期更新候选：" + decision["code"] + "，拒绝重新打包"
             )
     return {"ofSha": head["package"]["sha256"], "reason": refresh_reason}
 

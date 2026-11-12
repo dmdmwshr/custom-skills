@@ -42,6 +42,8 @@ metadata:
 | 已归档案卷的复查产品→初查产品对应(旧式归档/不产生新代际) | [本地扩展入口](references/manual-intake.md#已归档案卷的复查产品对应复核productlinkreviewv1)，source link-products |
 | 一案已有多段详情截图（含覆盖索引）要成为永久 D 引用 | [浏览器采集](references/browser-acquisition.md)，source attach-detail-segments（首段须为已登记截图，同案/顺序/重叠/末端全证明才绑定，同索引重入 0 写） |
 | 已存详情要生成飞书基础字段（项目号、单位、地址、管辖→八队路由、有证据的初查日）说明 | [来源字段同步](references/source-sync.md)，feishu-source-build（只读云）→ feishu-source-sync；退出码 4 表示有被挡实体(PARTIAL)，不是整体完成 |
+| 五类业务标签初值、证据确定标签、用户授权代录（含维修企业库）、写入账根迁移 | [来源字段同步](references/source-sync.md) 末节“字段归属与四种写入依据”：`feishu-label-initial-build`、`feishu-label-evidence-build`、`feishu-delegated-build`、`feishu-ledger-migrate` |
+| 每夜定时或人工触发的整轮运行、断点续办、未检查任务观察队列 | [夜间运行](references/nightly-run.md)，`nightly begin/checkpoint/finish/status/observe/due` |
 | PNG/JPEG 原图需要进入规范成果 | `normalize-images --work-dir <工作区> --relative-path <图片>` |
 | Word(.docx/.doc) 原件需要进入规范成果 | 操作者先用本机 Office 引擎转 PDF 并逐页目视核对，再 `normalize-office --work-dir <工作区> --relative-path <Word 原件> --converted-pdf <工作区外的 PDF> --converter-name <名称> --converter-version <版本> --rendering-check <核对说明>` |
 | 来源 PDF 无法结构解析（inventory 标记 `unparseablePdf`，如重复 /Info） | 用 PDFium 等引擎能打开且逐页目视核对后，同样走 `normalize-office`（来源格式 PDF_UNPARSEABLE）；未绑定的此类成员 compose 拒绝，仍可解析的 PDF 不得走该路径 |

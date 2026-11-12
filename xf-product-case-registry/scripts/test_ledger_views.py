@@ -1113,7 +1113,8 @@ def test_package_decision_interval_window_edges_and_unknown_dates():
     assert _code(attachedAt="2026-10-31T10:00:00+08:00") == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"
     # 窗口两端均含：起点 2026-09-07 与今日
     assert _code(checkDate=_dt.date(2026, 9, 7)) == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"
-    assert _code(checkDate=_dt.date(2026, 9, 6)) == "PKG_ACTIVE_OLDER_MANUAL"
+    assert _code(checkDate=_dt.date(2026, 9, 6)) == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"   # 早于窗口不降频
+    assert _code(checkDate=_dt.date(2026, 1, 5)) == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"
     assert _code(checkDate=TODAY) == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"
     # 未来/冲突/无值不自动入候选
     assert _code(checkDate=_dt.date(2026, 11, 8)) == "PKG_REUSE_EXISTING"
@@ -1679,3 +1680,16 @@ def test_r47_unmarked_rows_are_not_guessed_into_a_recheck():
     r = lifecycle.assess_case(project=L1, evidence_fields=_evidence_with_rows(rows), has_package=True,
                               today=_dt.date(2099, 2, 20), observed_on="2099-02-10")
     assert r["recheck"]["linkUnproven"] == 0
+
+
+def test_due_follow_up_keeps_the_same_seven_day_rhythm_however_long_the_wait():
+    waiting = {"stable": False, "sourceCauses": ["INITIAL_RESULT_PENDING"], "nextCheckOn": None}
+    old = dict(lifecycle=waiting, initialResult="UNKNOWN", checkDate=_dt.date(2026, 2, 1))
+    assert _code(**old, attachedAt="2026-03-01T10:00:00+08:00") == "PKG_REFRESH_DUE_FOLLOW_UP"      # 等了八个月仍到期回看
+    paced = views.package_decision(_facts(**old, attachedAt="2026-11-02T10:00:00+08:00"), today=TODAY)
+    assert paced["code"] == "PKG_REUSE_EXISTING" and paced["nextEligibleAt"] == "2026-11-09"
+    assert _code(initialResult="UNKNOWN", lifecycle={"stable": False, "sourceCauses": []}) == "PKG_REUSE_EXISTING"
+    assert _code(initialResult="QUALIFIED", materialGapOpen=True, attachedAt="2026-10-01T10:00:00+08:00") == "PKG_REFRESH_DUE_FOLLOW_UP"
+    assert _code(initialResult="QUALIFIED", lifecycle={"stable": True, "sourceCauses": ["X"]}) == "PKG_REUSE_EXISTING"
+    assert _code(sourceStatus="CLOSED", materialGapOpen=True) == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"
+    assert _code(hasPackage=False, initialResult="UNKNOWN", lifecycle=waiting) == "PKG_ACQUIRE_FIRST"

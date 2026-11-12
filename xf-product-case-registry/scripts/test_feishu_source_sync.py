@@ -1903,9 +1903,11 @@ def test_ledger_root_that_is_another_initialized_empty_ledger_is_not_the_formal_
 
 
 def test_ledger_root_identity_is_the_formal_path_in_either_notation_and_is_checked_read_only():
-    assert sync.canonical_ledger_path("D:\\ws\\05-temp\\20261104_飞书大队权限\\P18运行账本\\实施") == sync.canonical_ledger_path(sync.P18_LEDGER_ROOT)
-    assert sync.canonical_ledger_path("d:/ws/05-temp/20261104_飞书大队权限/P18运行账本/实施/") == sync.canonical_ledger_path(sync.P18_LEDGER_ROOT)
-    assert sync.canonical_ledger_path("/mnt/d/ws/05-temp/20261104_飞书大队权限/P18运行账本/实施x") != sync.canonical_ledger_path(sync.P18_LEDGER_ROOT)
+    formal = "D:\\工作备份\\移动硬盘\\1、工作\\2、产品科技联网\\1、产品监督\\案卷汇总\\运行记录\\飞书写入账本"
+    assert sync.canonical_ledger_path(formal) == sync.canonical_ledger_path(sync.P18_LEDGER_ROOT)
+    assert sync.canonical_ledger_path(formal.replace("\\", "/").replace("D:", "d:") + "/") == sync.canonical_ledger_path(sync.P18_LEDGER_ROOT)
+    assert sync.canonical_ledger_path(sync.P18_LEDGER_ROOT + "x") != sync.canonical_ledger_path(sync.P18_LEDGER_ROOT)
+    assert sync.LEDGER_ROOT == sync.P18_LEDGER_ROOT and sync.LEDGER_ROOT.startswith(sync.RUNTIME_ROOT + "/")
     root = Path(sync.P18_LEDGER_ROOT)
     if not root.is_dir():
         pytest.skip("正式 P18 账根不可达")
@@ -3137,3 +3139,56 @@ def test_create_recovery_spec_is_validated(tmp_path):
     with pytest.raises(sync.SyncError, match="不能同时使用"):
         _run_v3(v3_spec(tmp_path, contract, [_wire_case()], mode="reconcile", log="both", technicalRecovery=base,
                         humanRelease={**RELEASE, "intentId": "a" * 64}), transport, ledger, reconcile=True)
+
+
+# ---- 2026-11-12 机制改造：账根迁移、字段归属与写入依据 ----
+
+
+def _legacy_copy(tmp_path, monkeypatch, events):
+    legacy, formal = tmp_path / "legacy", tmp_path / "formal"
+    (legacy / "targets").mkdir(parents=True)
+    (legacy / "locks").mkdir()
+    for name, lines in events.items():
+        (legacy / "targets" / f"{name}.jsonl").write_bytes("".join(json.dumps(e, ensure_ascii=False, sort_keys=True) + "\n" for e in lines).encode())
+    monkeypatch.setattr(sync, "LEGACY_LEDGER_ROOTS", (str(legacy),))
+    monkeypatch.setattr(sync, "LEDGER_ROOT", str(formal))
+    monkeypatch.setattr(sync, "P18_LEDGER_ROOT", str(formal))
+    return legacy, formal
+
+
+def test_ledger_migration_copies_every_byte_keeps_the_blocking_set_and_never_creates_an_empty_ledger(tmp_path, monkeypatch):
+    intent = {"at": "t", "event": "intent", "intentId": "i1", "target": {"base": "b", "table": "t", "record": "r"}}
+    events = {"a" * 32: [intent, {"at": "t", "event": "final", "intentId": "i1", "status": "OK"}], "b" * 32: [intent]}
+    legacy, formal = _legacy_copy(tmp_path, monkeypatch, events)
+    plan = sync.migrate_ledger(legacy)
+    assert plan["status"] == "PLAN" and not formal.exists()                          # 预演不写
+    done = sync.migrate_ledger(legacy, apply=True)
+    assert done["status"] == "MIGRATED" and done["copied"] == 2 and done["blockedDest"] == done["blockedSource"] == {"b" * 32: "PENDING"}
+    for path in (legacy / "targets").iterdir():
+        assert (formal / "targets" / path.name).read_bytes() == path.read_bytes()
+    assert json.loads((formal / sync.LEDGER_IDENTITY).read_text(encoding="utf-8"))["predecessor"] == sync.canonical_ledger_path(legacy)
+    sync.Ledger(formal).validate_root()                                              # 新根是正式根
+    with pytest.raises(sync.SyncError, match="迁移前的旧账根"):
+        sync.Ledger(legacy).validate_root()                                          # 旧根不再可写
+    with (formal / "targets" / ("a" * 32 + ".jsonl")).open("ab") as stream:
+        stream.write(b'{"event":"intent","intentId":"i2"}\n')
+    again = sync.migrate_ledger(legacy, apply=True)                                  # 重跑=核对；迁移后追加的事件不被旧账覆盖
+    assert again["copied"] == 0 and again["extended"] == 1 and again["identical"] == 1
+    assert (formal / "targets" / ("a" * 32 + ".jsonl")).read_bytes().endswith(b'"i2"}\n')
+
+
+def test_ledger_migration_stops_on_a_leftover_lock_or_a_diverged_destination(tmp_path, monkeypatch):
+    intent = {"at": "t", "event": "intent", "intentId": "i1", "target": {"base": "b", "table": "t", "record": "r"}}
+    legacy, formal = _legacy_copy(tmp_path, monkeypatch, {"a" * 32: [intent]})
+    (legacy / "locks" / ("a" * 32 + ".lock")).write_text("x")
+    with pytest.raises(sync.SyncError, match="不清锁"):
+        sync.migrate_ledger(legacy, apply=True)
+    assert not formal.exists()
+    (legacy / "locks" / ("a" * 32 + ".lock")).unlink()
+    (formal / "targets").mkdir(parents=True)
+    (formal / "targets" / ("a" * 32 + ".jsonl")).write_bytes(b"different\n")
+    with pytest.raises(sync.SyncError, match="不覆盖"):
+        sync.migrate_ledger(legacy, apply=True)
+    assert (formal / "targets" / ("a" * 32 + ".jsonl")).read_bytes() == b"different\n"
+    with pytest.raises(sync.SyncError, match="只迁移登记过的旧账根"):
+        sync.migrate_ledger(tmp_path / "elsewhere", apply=True)

@@ -51,12 +51,14 @@ from typing import Any, Protocol
 
 if __package__:
     from . import case_lifecycle
+    from . import field_policy
     from . import field_validation as fv
     from . import initial_scope
     from . import ledger_views as _views
     from . import workspace_state as _ws
 else:
     import case_lifecycle
+    import field_policy
     import field_validation as fv
     import initial_scope
     import ledger_views as _views
@@ -79,6 +81,9 @@ VALUE_STATES = {"observed", "not-provided", "unknown"}
 SOURCE_TZ = timezone(timedelta(hours=8))  # responses carry timezone Asia/Shanghai
 # Manual and relation fields from the v8 contract. They stay denied even if a later contract
 # edit mislabels them as source fields. Unknown or new fields are refused by default as well.
+# 2026-11-12: a contract that classifies one of them ``business-label`` / ``brigade-maintained`` opens it
+# to the two non-source bases of field_policy (label-initial, user-delegated) only; a supervision-fact
+# update (source-observed) can still never write it.
 ALWAYS_DENIED = {
     "fld4mVYy5Y": "案卷.是否网售(人工)",
     "fldvHLpSKI": "案卷.是否加油加气站(人工)",
@@ -94,7 +99,16 @@ ALWAYS_DENIED = {
     "fldVZE4Yc9": "产品.网售标记案卷(人工关系反向)",
 }
 # Stable business key per table; it must match before any write.
-STABLE_KEYS = {"案卷主表": "fld1lHXHpk", "检查明细": "fld5ujrPv4", "产品明细": "fldqlwHjUW"}
+STABLE_KEYS = {"案卷主表": "fld1lHXHpk", "检查明细": "fld5ujrPv4", "产品明细": "fldqlwHjUW", "维修企业": "fld7d3PedK"}
+# 稳定键：来源键，或由管理员维护的内部编号(如企业编号)。
+STABLE_KEY_CLASSES = frozenset({WHITELIST, "admin-only"})
+WRITABLE_CLASSES = frozenset().union(*field_policy.ALLOWED_CLASSES.values())
+OPENED_CLASSES = frozenset({field_policy.CLASS_LABEL, field_policy.CLASS_BRIGADE})
+
+
+def _denied(field_id: str, meta: dict[str, Any] | None) -> bool:
+    """永久禁写名单仍然有效，除非最新合同把该字段明确归为标签/大队维护字段(只对非来源依据开放)。"""
+    return field_id in ALWAYS_DENIED and (meta is None or meta.get("class") not in OPENED_CLASSES)
 NEGATIVE_LITERALS = {"否", "0", 0, False}
 CLEAR_FINALS = {"OK", "UNCHANGED", "NOT_ATTEMPTED"}
 # APPLIED: positive evidence that the request took effect. NOT_APPLIED_PROVEN: the strict technical recovery below (the run ended, the
@@ -236,12 +250,17 @@ def cell_equals(field_type: str, stored: Any, intended_wire: Any) -> bool:
 # ---------------------------------------------------------------------------------------------
 
 
-def load_contract(path: Path, expected_sha: str) -> dict[str, Any]:
+def load_contract(path: Path, expected_sha: str, section: str | None = None) -> dict[str, Any]:
+    """``section`` 选合同里的一个子库(如 maintenanceBase：维修企业台账)，它自带 baseId 与 tables。"""
     if not path.is_file():
         raise SyncError("保护合同文件不存在")
     if file_sha(path) != expected_sha:
         raise SyncError("保护合同摘要与 spec 固定值不一致；合同变化须另版冻结")
     contract = json.loads(path.read_text(encoding="utf-8"))
+    if section is not None:
+        contract = contract.get(section) if isinstance(contract, dict) else None
+        if not isinstance(contract, dict):
+            raise SyncError(f"保护合同没有该子库：{section}")
     if not isinstance(contract.get("tables"), dict) or not contract.get("baseId"):
         raise SyncError("保护合同缺少 baseId 或 tables")
     return contract
@@ -312,15 +331,15 @@ def validate_spec(spec: Any, contract: dict[str, Any]) -> dict[str, Any]:
         _require(len(set(records)) == len(records), "record 白名单含重复")
         for field_id in fields:
             _require(isinstance(field_id, str) and FIELD_ID.match(field_id) is not None, f"白名单必须是 fieldId，不接受名称：{field_id}")
-            _require(field_id not in ALWAYS_DENIED, f"人工/关系字段永久禁写：{ALWAYS_DENIED.get(field_id, field_id)}")
             meta = index[table_id].get(field_id)
+            _require(not _denied(field_id, meta), f"人工/关系字段永久禁写：{ALWAYS_DENIED.get(field_id, field_id)}")
             _require(meta is not None, f"字段不在保护合同中（新增字段默认拒写）：{field_id}")
-            _require(meta["class"] == WHITELIST, f"字段不是 {WHITELIST}：{meta['name']}({meta['class']})")
+            _require(meta["class"] in WRITABLE_CLASSES, f"字段不是 {WHITELIST}：{meta['name']}({meta['class']})")
             _require(meta["type"] in SCALAR_TYPES, f"本版只写标量源字段，拒绝 {meta['type']}：{meta['name']}")
             _require(not str(meta.get("syncWrite") or "").lower().startswith("create-once"),
                      f"合同把该字段限定为创建时一次写入(create-once)，不得作为更新目标：{meta['name']}")
         stable = STABLE_KEYS.get(_table_name(index, table_id))
-        _require(stable in index[table_id] and index[table_id][stable]["class"] == WHITELIST, "稳定键字段未在合同中确认")
+        _require(stable in index[table_id] and index[table_id][stable]["class"] in STABLE_KEY_CLASSES, "稳定键字段未在合同中确认")
         allowed[table_id] = {"records": set(records), "fields": set(fields)}
     updates = spec.get("updates")
     _require(isinstance(updates, list) and updates, "updates 为空")
@@ -352,7 +371,7 @@ def validate_spec(spec: Any, contract: dict[str, Any]) -> dict[str, Any]:
         skipped: dict[str, dict[str, Any]] = {}
         for field_id, item in fields.items():
             _require(FIELD_ID.match(field_id) is not None, f"update 必须用 fieldId：{field_id}")
-            _require(field_id not in ALWAYS_DENIED, f"人工/关系字段永久禁写：{ALWAYS_DENIED.get(field_id, field_id)}")
+            _require(not _denied(field_id, index[table_id].get(field_id)), f"人工/关系字段永久禁写：{ALWAYS_DENIED.get(field_id, field_id)}")
             _require(field_id in allowed[table_id]["fields"], f"字段不在白名单：{field_id}")
             _require(field_id != stable, "稳定键字段不得作为更新目标")
             _require(isinstance(item, dict), "每个字段需 {new, basis}")
@@ -366,24 +385,22 @@ def validate_spec(spec: Any, contract: dict[str, Any]) -> dict[str, Any]:
                 writes[field_id] = {"name": index[table_id][field_id]["name"], "type": index[table_id][field_id]["type"], "new": None, "wire": None,
                                     "basis": basis, "expectedOld": item["expectedOld"], "restore": restore}
                 continue
-            _require(
-                isinstance(basis, dict)
-                and basis.get("kind") == "source-observed"
-                and basis.get("valueState") in VALUE_STATES
-                and isinstance(basis.get("sourceRef"), str)
-                and basis["sourceRef"]
-                and isinstance(basis.get("observedAt"), str)
-                and basis["observedAt"],
-                "每个字段需 basis{kind:source-observed, valueState:observed|not-provided|unknown, sourceRef, observedAt}",
-            )
+            problem = field_policy.basis_problem(basis)
+            _require(problem is None and (basis["kind"] != field_policy.BASIS_SOURCE or basis.get("valueState") in VALUE_STATES),
+                     "每个字段需 basis{kind:source-observed, valueState:observed|not-provided|unknown, sourceRef, observedAt}"
+                     + (f"；{problem}" if problem else ""))
             meta = index[table_id][field_id]
-            if basis["valueState"] != "observed":
+            problem = field_policy.write_problem(meta, basis, item)   # 一份字段归属规则：依据种类决定可写的字段类别
+            _require(problem is None, f"字段归属规则拒绝：{problem}")
+            _require(basis["kind"] != field_policy.BASIS_SOURCE or field_id not in ALWAYS_DENIED,
+                     f"人工/关系字段永久禁写：{ALWAYS_DENIED.get(field_id, field_id)}")
+            if basis.get("valueState", "observed") != "observed":
                 _require("new" not in item, "valueState 为 not-provided/unknown 时不得携带 new；缺失只跳过，不覆盖已有值")
                 skipped[field_id] = {"name": meta["name"], "valueState": basis["valueState"], "basis": basis}
                 continue
             _require("new" in item, "valueState=observed 需要 new")
             value = item["new"]
-            if isinstance(value, (str, int, float, bool)) and value in NEGATIVE_LITERALS:
+            if field_policy.needs_explicit_negative(basis) and isinstance(value, (str, int, float, bool)) and value in NEGATIVE_LITERALS:
                 _require(basis.get("explicitNegative") is True, "“否/0”只能来自来源明确否定(basis.explicitNegative)")
             if meta["type"] == "select" and meta.get("options") is not None:
                 # 最新合同列出的选项是唯一合法取值；合同外的值在任何 transport 调用与业务/账写入前拒绝。
@@ -651,7 +668,13 @@ class LarkCliTransport:
 
 # 唯一正式 P18 账根：正常入口(CLI/函数默认)只认这一个身份。结构合法但另建的“空账”不是它，不能绕过它的历史封锁。
 # 变更此常量是源码变更(须经 diff 评审)，不是运行时可传入的参数。
-P18_LEDGER_ROOT = "/mnt/d/ws/05-temp/20261104_飞书大队权限/P18运行账本/实施"
+# 2026-11-12：正式账迁到业务根固定运行位置(RUNTIME_ROOT)。原账逐字节迁入，目标键与路径无关，逻辑身份和封锁集合不变；
+# 旧根留作历史证据，正常入口拒绝再写它。P18_LEDGER_ROOT 保留为同一正式根的旧名。
+RUNTIME_ROOT = "/mnt/d/工作备份/移动硬盘/1、工作/2、产品科技联网/1、产品监督/案卷汇总/运行记录"
+LEDGER_ROOT = RUNTIME_ROOT + "/飞书写入账本"
+P18_LEDGER_ROOT = LEDGER_ROOT
+LEGACY_LEDGER_ROOTS = ("/mnt/d/ws/05-temp/20261104_飞书大队权限/P18运行账本/实施",)
+LEDGER_IDENTITY = "账本身份.json"
 ISOLATED_LEDGER_MARKER = ".isolated-test-ledger"
 
 
@@ -684,6 +707,8 @@ class Ledger:
             if is_production or not (self.root / ISOLATED_LEDGER_MARKER).is_file():
                 raise SyncError("隔离测试账必须是显式 initialize() 过、带标记且不是正式根的目录")
             return
+        if canonical_ledger_path(self.root) in {canonical_ledger_path(item) for item in LEGACY_LEDGER_ROOTS}:
+            raise SyncError(f"不是唯一正式 P18 账根：{self.root} 是迁移前的旧账根，只留作历史证据；正式账已在 {P18_LEDGER_ROOT}")
         if not is_production:
             raise SyncError(f"不是唯一正式 P18 账根(应为 {P18_LEDGER_ROOT})：{self.root}；另建的空账会绕过正式账的历史封锁，拒绝")
         if not any((self.root / "targets").glob("*.jsonl")):
@@ -696,6 +721,15 @@ class Ledger:
         (self.root / "targets").mkdir(parents=True, exist_ok=True)
         (self.root / "locks").mkdir(parents=True, exist_ok=True)
         (self.root / ISOLATED_LEDGER_MARKER).write_text("isolated test ledger; not the formal P18 ledger\n", encoding="utf-8")
+
+    def unresolved(self) -> dict[str, str]:
+        """Every target that is still BLOCKED, with its reason: the blocking set of this ledger."""
+        blocked: dict[str, str] = {}
+        for path in sorted((self.root / "targets").glob("*.jsonl")):
+            state = self.state(path.stem)
+            if state["state"] != "CLEAR":
+                blocked[path.stem] = state["reason"]
+        return blocked
 
     @staticmethod
     def target_key(base: str, table: str, record: str) -> str:
@@ -865,6 +899,78 @@ def _all_blocks(ledger: Ledger, spec: dict[str, Any], checked: dict[str, Any], a
             *_release_blocks(ledger, spec, checked, accepted), *_restore_blocks(ledger, spec, checked)]
 
 
+
+def _file_sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def migrate_ledger(source: Path, dest: Path | None = None, *, apply: bool = False) -> dict[str, Any]:
+    """Move the formal ledger to its fixed runtime root byte for byte; nothing is rewritten, unlocked or emptied.
+
+    Each target file is copied unchanged and its digest compared. A file already at the destination must
+    equal the source file or extend it (events appended after the move); anything else is a conflict and
+    stops the migration. A leftover lock or an active writer stops it too. Re-running is a verification.
+    """
+    source, dest = Path(source), Path(dest if dest is not None else LEDGER_ROOT)
+    _require(canonical_ledger_path(source) in {canonical_ledger_path(item) for item in LEGACY_LEDGER_ROOTS},
+             f"只迁移登记过的旧账根：{source}")
+    _require(canonical_ledger_path(dest) == canonical_ledger_path(LEDGER_ROOT) or (dest / ISOLATED_LEDGER_MARKER).is_file(),
+             f"目标必须是正式账根 {LEDGER_ROOT}")
+    files = sorted((source / "targets").glob("*.jsonl"))
+    _require(bool(files), f"旧账根没有历史事件：{source}")
+    for root in (source, dest):
+        leftover = sorted(p.name for p in (root / "locks").glob("*")) if (root / "locks").is_dir() else []
+        _require(not leftover, f"账根仍有锁({len(leftover)} 个，如 {leftover[:3]})：有活动写入或遗留锁，先串行对账，不清锁")
+    report: dict[str, Any] = {"source": str(source), "dest": str(dest), "apply": apply, "targets": len(files),
+                              "copied": 0, "identical": 0, "extended": 0, "conflicts": [], "extraAtDest": []}
+    digest_lines: list[str] = []
+    for path in files:
+        data = path.read_bytes()
+        digest_lines.append(f"{hashlib.sha256(data).hexdigest()}  {path.name}")
+        target = dest / "targets" / path.name
+        if target.is_file():
+            current = target.read_bytes()
+            if current == data:
+                report["identical"] += 1
+            elif current.startswith(data):
+                report["extended"] += 1
+            else:
+                report["conflicts"].append(path.name)
+        elif apply:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(target.name + ".migrating")
+            with temporary.open("wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            _require(_file_sha(temporary) == hashlib.sha256(data).hexdigest(), f"迁移副本摘要不符：{path.name}")
+            os.replace(temporary, target)
+            report["copied"] += 1
+    names = {p.name for p in files}
+    if (dest / "targets").is_dir():
+        report["extraAtDest"] = sorted(p.name for p in (dest / "targets").glob("*.jsonl") if p.name not in names)
+    report["sourceManifestSha256"] = hashlib.sha256(("\n".join(digest_lines) + "\n").encode()).hexdigest()
+    _require(not report["conflicts"], f"目标账根已有与旧账不一致的文件 {report['conflicts'][:5]}：停止，不覆盖")
+    if apply:
+        (dest / "locks").mkdir(parents=True, exist_ok=True)
+        identity = dest / LEDGER_IDENTITY
+        if not identity.is_file():
+            identity.write_text(json.dumps({
+                "schemaVersion": "LedgerIdentityV1", "ledger": "P18 飞书写入账本", "migratedAt": now(),
+                "predecessor": canonical_ledger_path(source), "targets": len(files),
+                "sourceManifestSha256": report["sourceManifestSha256"],
+                "note": "逐字节迁入；目标键=digest(base,table,record)，与路径无关；旧根留作历史证据不再写入",
+            }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        missing = [p.name for p in files if not (dest / "targets" / p.name).is_file()]
+        _require(not missing, f"迁移后目标缺文件：{missing[:5]}")
+        report["blockedSource"] = Ledger(source).unresolved()
+        report["blockedDest"] = Ledger(dest).unresolved()
+        if not report["extended"] and not report["extraAtDest"]:
+            _require(report["blockedSource"] == report["blockedDest"], "迁移后封锁集合与旧账不一致")
+    report["status"] = "MIGRATED" if apply else ("VERIFIED" if report["identical"] + report["extended"] == len(files) else "PLAN")
+    return report
+
+
 # ---------------------------------------------------------------------------------------------
 # execute / reconcile
 # ---------------------------------------------------------------------------------------------
@@ -943,7 +1049,8 @@ def _execute_locked(spec, checked, transport, ledger, keys, log_dir, run_id, ind
         ledger.append(keys[(item["tableId"], item["recordId"])], {
             "event": "intent", "intentId": intent_id, "runId": run_id, "operator": operator(), "logDir": str(log_dir),
             "target": {"base": base, "table": item["tableId"], "record": item["recordId"]}, "stableKey": item["stableKey"],
-            "fields": {fid: {"name": item["writes"][fid]["name"], "type": item["writes"][fid]["type"], "old": before[item["tableId"]][item["recordId"]].get(fid), "wire": wire}
+            "fields": {fid: {"name": item["writes"][fid]["name"], "type": item["writes"][fid]["type"], "old": before[item["tableId"]][item["recordId"]].get(fid), "wire": wire,
+                             "basis": item["writes"][fid]["basis"].get("kind")}
                        for fid, wire in item["changes"].items()},
         })
     failed = False
@@ -2963,7 +3070,7 @@ def run(spec_path: Path, *, execute_flag: bool = False, reconcile_flag: bool = F
         ledger.validate_root()
         use = transport or LarkCliTransport(cli, spec["target"]["profile"], spec["target"]["identity"])
         return execute_creates(spec, checked, use, ledger) if spec["mode"] == "execute" else reconcile_creates(spec, checked, use, ledger)
-    contract = load_contract(Path(spec["contract"].get("path", "")), str(spec["contract"].get("sha256", "")))
+    contract = load_contract(Path(spec["contract"].get("path", "")), str(spec["contract"].get("sha256", "")), spec["contract"].get("section"))
     checked = validate_spec(spec, contract)
     _require(spec["mode"] == "plan" or ledger_dir is not None, f"{spec['mode']} 必须显式给出 --ledger-dir(无默认账本，避免写到别处绕过封锁)")
     ledger = Ledger(ledger_dir or DEFAULT_LEDGER, isolated_test=isolated_test_ledger)
