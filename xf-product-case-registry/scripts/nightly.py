@@ -212,7 +212,7 @@ def _queue(root: Path) -> dict[str, Any]:
 
 
 def observe(root: Path, items: list[dict[str, Any]], *, observed_on: str, entry: str, days: int = FOLLOW_UP_DAYS) -> dict[str, Any]:
-    """Record what one source look saw. ``items``: ``{rwid, state, projectNo?, unitName?, brigade?, inspectionDate?}``.
+    """Record what one source look saw. ``items``: ``{rwid, state, projectNo?, unitName?, brigade?, inspectionDate?, awaitingProduct?}``.
 
     A task with a confirmed inspection date in range leaves the queue as ``ENTER_SCOPE`` (the caller then
     registers it through the normal source entry); one confirmed out of range leaves as ``OUT_OF_SCOPE``.
@@ -239,11 +239,13 @@ def observe(root: Path, items: list[dict[str, Any]], *, observed_on: str, entry:
                 current.update(status="OUT_OF_SCOPE", closedOn=observed_on, inspectionDate=inspected)
             result["outOfScope"].append(rwid)
             continue
-        if inspected and current is not None and current["status"] == "WAITING" and current["state"] == "NOT_INSPECTED":
-            current.update(status="ENTER_SCOPE", closedOn=observed_on, inspectionDate=inspected, state=state)
+        awaiting = bool(inspected) and bool(item.get("awaitingProduct"))   # 已检查但详情尚无产品行：未入总账，继续观察
+        if inspected and not awaiting and current is not None and current["status"] == "WAITING" \
+                and (current["state"] == "NOT_INSPECTED" or current.get("awaitingProduct")):
+            current.update(status="ENTER_SCOPE", closedOn=observed_on, inspectionDate=inspected, state=state, awaitingProduct=False)
             result["enterScope"].append(rwid)
             continue
-        if inspected and current is None:
+        if inspected and not awaiting and current is None:
             result["enterScope"].append(rwid)      # 已有检查日期且在范围内：直接走正常来源登记，不入观察队列
             continue
         if current is None:
@@ -252,6 +254,8 @@ def observe(root: Path, items: list[dict[str, Any]], *, observed_on: str, entry:
         else:
             result["kept"] += 1
         current.update({k: item[k] for k in ("projectNo", "unitName", "brigade") if item.get(k)})
+        if awaiting:
+            current.update(awaitingProduct=True, inspectionDate=inspected)
         current.update(state=state, status="WAITING", lastSeenOn=observed_on, looks=current["looks"] + 1,
                        nextDueOn=(seen + timedelta(days=days)).isoformat())
     _atomic(_queue_path(root), queue)

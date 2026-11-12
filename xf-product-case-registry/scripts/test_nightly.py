@@ -85,3 +85,13 @@ def test_observation_queue_keeps_the_seven_day_rhythm_and_enters_scope_only_on_a
     assert nightly.queue_summary(tmp_path, today="2026-11-12") == {"waiting": 0, "due": 0, "byState": {}, "enteredScope": 1, "outOfScope": 1}
     with pytest.raises(nightly.NightlyError, match="不是未检查"):
         nightly.observe(tmp_path, [{"rwid": "R9", "state": "NOT_INSPECTED", "inspectionDate": "2026-11-11"}], observed_on="2026-11-12", entry="x")
+
+
+def test_inspected_task_without_product_rows_keeps_waiting(tmp_path):
+    item = {"rwid": "R7", "state": "IN_PROGRESS", "inspectionDate": "2026-11-12", "awaitingProduct": True}
+    first = nightly.observe(tmp_path, [item], observed_on="2026-11-12", entry="日常监督任务")
+    assert first["added"] == 1 and first["enterScope"] == []
+    assert [i["rwid"] for i in nightly.due(tmp_path, today="2026-11-19")] == ["R7"]
+    assert nightly.observe(tmp_path, [item], observed_on="2026-11-19", entry="日常监督任务")["kept"] == 1
+    done = nightly.observe(tmp_path, [{"rwid": "R7", "state": "IN_PROGRESS", "inspectionDate": "2026-11-12"}], observed_on="2026-11-26", entry="日常监督任务")
+    assert done["enterScope"] == ["R7"] and nightly.due(tmp_path, today="2026-12-30") == []
