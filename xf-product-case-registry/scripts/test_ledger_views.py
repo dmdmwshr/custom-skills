@@ -1130,6 +1130,10 @@ def test_scan_plan_lists_package_candidates_read_only(layout):
     plan = views.scan_plan(layout, mode="annual-baseline", today=_dt.date(2099, 1, 1))
     assert plan["packagePolicy"]["windowMonths"] == 2 and plan["packagePolicy"]["readOnly"] is True
     assert "packageDecisionCounts" in plan and ws.load_waterline(layout) == before
+    # 尚无原包的在册案逐案列出，条数与计数一致，夜间才能按到期规则处理而不只看到一个数字
+    listed = [d["projectNo"] for d in plan["packageAcquireFirst"]]
+    assert len(listed) == plan["packageDecisionCounts"].get("PKG_ACQUIRE_FIRST", 0)
+    assert all(d["action"] == "ACQUIRE_FIRST" for d in plan["packageAcquireFirst"])
 
 
 # ---------------------------------------------------------------------------------------------

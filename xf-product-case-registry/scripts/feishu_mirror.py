@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -188,8 +189,38 @@ def mirror(*, contract_path: Path, contract_sha: str, sections: list[str | None]
 
 UNKNOWN_BRIGADE = "待核实"
 RECOUNT_COLUMNS = ("R02_初查次数", "R02_复查次数", "R02_初查合格", "R02_初查不合格", "R02_初查案卷数", "R02_初查产品项数",
-                   "R02_初查产品数量缺项数", "R02_初查产品数量缺数值项数", "R02_初查现场检查数量合计", "R02_产品归属缺项案卷数")
-NO_UNIT = "单位未载明"
+                   "R02_初查产品数量缺项数", "R02_初查产品数量缺数值项数", "R02_初查现场检查数量有单位项数",
+                   "R02_初查现场检查数量缺单位项数", "R02_产品归属缺项案卷数")
+# A quantity is a physical amount only together with its unit. Numbers are summed per (meaning, unit); a number
+# whose record gives no unit is counted as an item with a missing unit and never enters any sum.
+SITE_QUANTITY = "现场检查数量"
+QUANTITY_TEXT_COLUMN = "R02_初查现场检查数量（分单位）"
+QUANTITY_UNITS = ("具", "只", "个", "套", "台", "樘", "盏", "盘", "根", "米")   # 飞书公式逐一列出的单位；其余单位只报项数
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _plain(number: float) -> str:
+    return str(int(number)) if float(number).is_integer() else repr(round(float(number), 6))
+
+
+def quantity_text(sums: dict[str, float], items: dict[str, int], without_unit: int) -> str:
+    """The wording the 月度 formula column shows: per-unit sums only; no unit basis is said so, never a total or 0."""
+    with_unit = sum(items.values())
+    if not with_unit:
+        return f"尚无可分单位汇总：{without_unit}项有数值但未载明单位" if without_unit else "无数量记录"
+    parts = [f"{_plain(sums[unit])}{unit}" for unit in QUANTITY_UNITS if sums.get(unit, 0) > 0]
+    other = sum(count for unit, count in items.items() if unit not in QUANTITY_UNITS)
+    if other:
+        parts.append(f"其他单位{other}项见产品明细")
+    if without_unit:
+        parts.append(f"另{without_unit}项未载明单位未计入")
+    return "".join(part + "；" for part in parts)
+
+
+def _same_text(left: Any, right: str) -> bool:
+    left = "" if left is None else str(left)
+    numbers = lambda text: [float(n) for n in _NUMBER.findall(text)]   # noqa: E731  飞书与本地的小数写法可能不同
+    return _NUMBER.sub("#", left) == _NUMBER.sub("#", right) and all(abs(a - b) < 1e-6 for a, b in zip(numbers(left), numbers(right)))
 
 
 def _one(cell: Any) -> Any:
@@ -221,10 +252,11 @@ def recount(*, contract_path: Path, contract_sha: str, target: dict[str, str], t
     month_index = {meta["name"]: fid for fid, meta in index[ids["月度工作统计"]].items()}
     sync._require("月份" in month_index and "大队" in month_index, "合同里 月度工作统计 缺少 月份/大队")
     columns = [c for c in RECOUNT_COLUMNS if c in month_index]
+    text_columns = [c for c in (QUANTITY_TEXT_COLUMN,) if c in month_index]
     checks = transport.list_rows(base, ids["检查明细"], list(cf.values()))
     products = transport.list_rows(base, ids["产品明细"], list(pf.values()))
     cases = transport.list_rows(base, ids["案卷主表"], list(mf.values()))
-    months = transport.list_rows(base, ids["月度工作统计"], [month_index["月份"], month_index["大队"], *[month_index[c] for c in columns]])
+    months = transport.list_rows(base, ids["月度工作统计"], [month_index["月份"], month_index["大队"], *[month_index[c] for c in columns + text_columns]])
 
     info: dict[str, tuple[Any, Any, Any]] = {}
     counts: dict[str, Counter] = {c: Counter() for c in RECOUNT_COLUMNS}
@@ -244,6 +276,9 @@ def recount(*, contract_path: Path, contract_sha: str, target: dict[str, str], t
         elif stage == "复查":
             counts["R02_复查次数"][bucket] += 1
     quantity: dict[str, Counter] = defaultdict(Counter)
+    unitless: dict[str, Counter] = defaultdict(Counter)
+    site_sums: dict[tuple[Any, Any], Counter] = defaultdict(Counter)
+    site_items: dict[tuple[Any, Any], Counter] = defaultdict(Counter)
     located: dict[str, set[str]] = {"网售": set(), "维修后": set()}
     for row in products.values():
         product_key = row.get(pf["产品键"])
@@ -264,9 +299,15 @@ def recount(*, contract_path: Path, contract_sha: str, target: dict[str, str], t
         if number is None:
             counts["R02_初查产品数量缺数值项数"][bucket] += 1
         elif meaning:
-            quantity[f"{bucket[0]}|{bucket[1]}"][f"{meaning}/{unit or NO_UNIT}"] += number   # 原文没写单位的单列，不并入任何单位
-            if meaning == "现场检查数量":
-                counts["R02_初查现场检查数量合计"][bucket] += number
+            if unit:
+                quantity[f"{bucket[0]}|{bucket[1]}"][f"{meaning}/{unit}"] += number   # 同一含义、同一单位才相加
+            else:
+                unitless[f"{bucket[0]}|{bucket[1]}"][meaning] += 1                   # 原文没写单位：只记项数，数值不进任何合计
+            if meaning == SITE_QUANTITY:
+                counts["R02_初查现场检查数量有单位项数" if unit else "R02_初查现场检查数量缺单位项数"][bucket] += 1
+                if unit:
+                    site_sums[bucket][unit] += number
+                    site_items[bucket][unit] += 1
     unlocated: set[str] = set()
     for row in cases.values():
         project = row.get(mf["项目编号"])
@@ -293,10 +334,24 @@ def recount(*, contract_path: Path, contract_sha: str, target: dict[str, str], t
                 continue
             if cloud_number != float(counts[column].get(bucket, 0)):
                 diffs.append({"month": bucket[0], "brigade": bucket[1], "column": column, "feishu": cloud_number, "independent": counts[column].get(bucket, 0)})
+        for column in text_columns:
+            cloud, expected = _one(row.get(month_index[column])), quantity_text(
+                site_sums[bucket], site_items[bucket], counts["R02_初查现场检查数量缺单位项数"].get(bucket, 0))
+            if not _same_text(cloud, expected):
+                diffs.append({"month": bucket[0], "brigade": bucket[1], "column": column, "feishu": cloud, "independent": expected})
     uncovered = sorted(f"{m}|{b}" for (m, b) in set(case_sets) - seen)
     totals = {column: sum(counts[column].values()) for column in RECOUNT_COLUMNS}
+    by_unit: Counter = Counter()
+    for values in quantity.values():
+        by_unit.update(values)
+    without_unit = sum(sum(values.values()) for values in unitless.values())
+    physical = {"status": "BY_UNIT" if by_unit else ("NO_UNIT_BASIS" if without_unit else "NO_QUANTITY"), "byMeaningAndUnit": dict(sorted(by_unit.items())),
+                "itemsWithoutUnit": without_unit,
+                "note": "只对同一含义且同一单位的数值求和；未载明单位的项只计项数，其数值不构成实物数量，也不代表没有实物"}
     return {"schema": RECOUNT_SCHEMA, "readAt": sync.now(), "externalCalls": "read-only",
             "rows": {"案卷主表": len(cases), "检查明细": len(checks), "产品明细": len(products), "月度工作统计": len(months)},
-            "comparedColumns": columns, "notInFeishu": [c for c in RECOUNT_COLUMNS if c not in month_index], "totals": totals,
-            "quantityByUnit": {k: dict(v) for k, v in sorted(quantity.items())}, "productAttributionGaps": sorted(unlocated),
+            "comparedColumns": columns + text_columns,
+            "notInFeishu": [c for c in (*RECOUNT_COLUMNS, QUANTITY_TEXT_COLUMN) if c not in month_index], "totals": totals,
+            "physicalQuantity": physical, "quantityByUnit": {k: dict(v) for k, v in sorted(quantity.items())},
+            "quantityWithoutUnit": {k: dict(v) for k, v in sorted(unitless.items())}, "productAttributionGaps": sorted(unlocated),
             "bucketsWithoutMonthlyRow": uncovered, "diffs": diffs, "status": "OK" if not diffs else "DIFF"}

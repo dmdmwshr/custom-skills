@@ -37,7 +37,8 @@ def contract(tmp_path):
                 _field("fldPFIX0001", "是否维修后", "select", "source-sync-whitelist"), _field("fldPNET0001", "本产品涉及网售", "select", "source-sync-whitelist")]},
             "月度工作统计": {"tableId": MON, "fields": [
                 text("fldMMON0001", "月份", "admin-only"), text("fldMBRI0001", "大队", "admin-only"),
-                *[_field(f"fldM{i:07d}", name, "formula", "derived") for i, name in enumerate(mirror.RECOUNT_COLUMNS)]]},
+                *[_field(f"fldM{i:07d}", name, "formula", "derived") for i, name in enumerate(mirror.RECOUNT_COLUMNS)],
+                _field("fldMQTY0001", mirror.QUANTITY_TEXT_COLUMN, "formula", "derived")]},
         },
         "maintenanceBase": {"baseId": MBASE, "tables": {"维修企业": {"tableId": ENT, "fields": [
             _field(EKEY, "企业编号", "text", "admin-only"), _field(ENAME, "企业名称", "text", "brigade-maintained"),
@@ -125,19 +126,42 @@ def _stat_rows(monthly):
     for index, (bucket, values) in enumerate(monthly.items()):
         row = {"fldMMON0001": bucket[0], "fldMBRI0001": [bucket[1]]}
         row.update({f"fldM{i:07d}": str(values.get(name, 0)) for i, name in enumerate(mirror.RECOUNT_COLUMNS)})   # 公式列按文本返回
+        row["fldMQTY0001"] = values.get(mirror.QUANTITY_TEXT_COLUMN, "无数量记录")
         rows[(MON, f"recM{index:011d}")] = row
     return rows
 
 
 def test_recount_counts_cases_items_gaps_and_units_separately_and_never_fills_a_missing_quantity(tmp_path, contract):
     right = {("2026-03", "梁溪"): {"R02_初查次数": 2, "R02_初查合格": 1, "R02_初查不合格": 1, "R02_初查案卷数": 2, "R02_初查产品项数": 4,
-                                 "R02_初查产品数量缺项数": 2, "R02_初查产品数量缺数值项数": 1, "R02_初查现场检查数量合计": 7, "R02_产品归属缺项案卷数": 1},
+                                 "R02_初查产品数量缺项数": 2, "R02_初查产品数量缺数值项数": 1, "R02_初查现场检查数量有单位项数": 1,
+                                 "R02_初查现场检查数量缺单位项数": 1, "R02_产品归属缺项案卷数": 1,
+                                 mirror.QUANTITY_TEXT_COLUMN: "2.0米；另1项未载明单位未计入；"},     # 飞书把 2 写成 2.0 也算一致
              ("2026-04", "梁溪"): {"R02_复查次数": 1}}
     report = mirror.recount(contract_path=contract, contract_sha=_sha(contract), target={"baseToken": BASE}, transport=Cloud(_stat_rows(right)))
     assert report["status"] == "OK" and not report["diffs"], report["diffs"]
-    assert report["quantityByUnit"] == {"2026-03|梁溪": {"抽样数量/具": 3, "现场检查数量/米": 2, "现场检查数量/单位未载明": 5}}   # 单位分开，缺数量不补 1
+    assert report["quantityByUnit"] == {"2026-03|梁溪": {"抽样数量/具": 3, "现场检查数量/米": 2}}           # 同含义同单位才相加，缺数量不补 1
+    assert report["quantityWithoutUnit"] == {"2026-03|梁溪": {"现场检查数量": 1}}                          # 没写单位的 5 只记 1 项，不进合计
+    assert report["physicalQuantity"]["status"] == "BY_UNIT" and report["physicalQuantity"]["itemsWithoutUnit"] == 1
+    assert "合计" not in "".join(report["totals"]) and 5 not in report["physicalQuantity"]["byMeaningAndUnit"].values()
     assert report["productAttributionGaps"] == ["A" * 18]
-    wrong = {**right, ("2026-03", "梁溪"): {**right[("2026-03", "梁溪")], "R02_初查产品项数": 5}}
+    wrong = {**right, ("2026-03", "梁溪"): {**right[("2026-03", "梁溪")], "R02_初查产品项数": 5, mirror.QUANTITY_TEXT_COLUMN: "7"}}
     report = mirror.recount(contract_path=contract, contract_sha=_sha(contract), target={"baseToken": BASE}, transport=Cloud(_stat_rows(wrong)))
     assert report["status"] == "DIFF" and report["diffs"] == [
-        {"month": "2026-03", "brigade": "梁溪", "column": "R02_初查产品项数", "feishu": 5.0, "independent": 4}]
+        {"month": "2026-03", "brigade": "梁溪", "column": "R02_初查产品项数", "feishu": 5.0, "independent": 4},
+        {"month": "2026-03", "brigade": "梁溪", "column": mirror.QUANTITY_TEXT_COLUMN, "feishu": "7", "independent": "2米；另1项未载明单位未计入；"}]
+
+
+def test_quantities_without_any_unit_give_no_physical_total_and_are_not_zero(tmp_path, contract):
+    rows = _stat_rows({("2026-03", "梁溪"): {"R02_初查次数": 2, "R02_初查合格": 1, "R02_初查不合格": 1, "R02_初查案卷数": 2, "R02_初查产品项数": 4,
+                                           "R02_初查产品数量缺项数": 4, "R02_初查产品数量缺数值项数": 1, "R02_初查现场检查数量缺单位项数": 2,
+                                           "R02_产品归属缺项案卷数": 1, mirror.QUANTITY_TEXT_COLUMN: "尚无可分单位汇总：2项有数值但未载明单位"},
+                       ("2026-04", "梁溪"): {"R02_复查次数": 1}})
+    for key, row in rows.items():
+        if key[0] == PRD and row.get("fldPNUM0001") is not None:
+            row["fldPUNI0001"] = None
+    report = mirror.recount(contract_path=contract, contract_sha=_sha(contract), target={"baseToken": BASE}, transport=Cloud(rows))
+    assert report["status"] == "OK", report["diffs"]
+    assert report["physicalQuantity"]["status"] == "NO_UNIT_BASIS" and report["physicalQuantity"]["byMeaningAndUnit"] == {}
+    assert report["quantityByUnit"] == {} and report["quantityWithoutUnit"] == {"2026-03|梁溪": {"抽样数量": 1, "现场检查数量": 2}}
+    assert mirror.quantity_text({}, {}, 0) == "无数量记录"
+    assert mirror.quantity_text({"具": 3, "箱": 4}, {"具": 2, "箱": 1}, 0) == "3具；其他单位1项见产品明细；"

@@ -2040,6 +2040,7 @@ def scan_plan(
         },
         "packageDecisionCounts": dict(Counter(d["code"] for d in package_decisions)),
         "packageDecisions": [d for d in package_decisions if d["action"] in {"REFRESH_CANDIDATE"}][:limit],
+        "packageAcquireFirst": [d for d in package_decisions if d["action"] == "ACQUIRE_FIRST"][:limit],   # 尚无原包的在册案：逐案列出，夜间按同一规则取包
         "sourceActionCount": len(actions),
         "sourceActionCounts": dict(Counter(a["action"] for a in actions)),
         "sourceActions": actions[:limit],

@@ -12,6 +12,14 @@ root's fixed runtime folder ``运行记录``; nothing here reads the network or 
 - The observation queue holds tasks seen at the source that are not in scope yet (not inspected, no
   inspection date). They are looked at again every ``FOLLOW_UP_DAYS`` days, however long they wait, and
   enter the active range only once the inspection date is confirmed.
+- Source coverage: every night looks at two windows per entry (tasks created recently, and tasks whose
+  inspection date is recent whatever their creation date). Every ``COVERAGE_DAYS`` days the whole range is
+  read again by inspection date and compared with the ledger; each check is one line in a fixed log. A
+  check that is due and was not even attempted blocks ``finish``; an attempted but incomplete one stays
+  due, so a missed or failed weekly check is made up by the next run.
+- Executions: the model session that works on a run binds itself (session id, runner receipt, runner pid)
+  into that run's record, so a supervisor asks about exactly that execution and never about "the latest
+  receipt" of some other project.
 
 Standard library only.
 """
@@ -31,6 +39,12 @@ RUNS_DIR = "夜间运行"
 QUEUE_DIR = "跟进队列"
 FOLLOW_UP_DAYS = 7
 SCOPE_FROM = "2026-01-01"
+COVERAGE_LOG = "来源覆盖核对.jsonl"
+COVERAGE_DAYS = 7
+COVERAGE_FIELD = "检查日期"
+# 任务列表的五个入口；消防装备抽查入口来源侧不可用，作为已知限制随每次核对如实记录，不计入“完整”。
+COVERAGE_ENTRIES = ("日常监督任务", "开业前检查任务", "举报投诉核查任务", "火灾事故调查核查任务", "社会单位产品抽查任务")
+DISPOSITIONS = frozenset({"OBSERVED", "REGISTERED", "OUT_OF_SCOPE"})
 
 # Fixed order. Write stages reach outside the local ledger; an interrupted one is an unknown write.
 STAGES = ("discover", "acquire", "organize", "validate", "sync", "mirror", "reconcile", "report")
@@ -135,6 +149,8 @@ def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled"
     run["triggers"].append({"at": now.isoformat(timespec="seconds"), "kind": trigger, "actor": actor})
     _atomic(path, run)
     return {"status": outcome, "date": day, "missedDates": missed, "earlierUnfinished": earlier, **progress(root, day),
+            "weeklyCoverage": coverage_state(root, today=day), "lastFinishedDate": finished[-1] if finished else None,
+            "openExecutions": open_executions(root),
             "rule": "先对账 unknown（回读，不重放）；到期事项按绝对到期日处理，错过的夜晚不单独补跑"}
 
 
@@ -179,12 +195,20 @@ def finish(root: Path, day: str, *, summary: str = "", now: datetime | None = No
     if run.get("status") == "FINISHED":
         return {"status": "ALREADY_FINISHED", "date": day, "wrote": False}
     state = progress(root, day)
+    weekly = coverage_state(root, today=day)
     if state["unknown"] or state["quota"] or state["resumable"] or state["nextStage"] is not None:
         return {"status": "NOT_FINISHED", "date": day, "wrote": False, **state}
+    if weekly["due"] and not weekly["attemptedToday"]:
+        return {"status": "NOT_FINISHED", "date": day, "wrote": False, **state, "coverageDue": weekly,
+                "rule": "全范围检查日期核对已到期且今晚未做：先做并用 nightly coverage 登记（来源不可用也要登记这次尝试）"}
+    quiet = state["changed"] == 0 and not weekly["due"]
     run.update(status="FINISHED", finishedAt=(now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds"),
-               changed=state["changed"], quiet=state["changed"] == 0, summary=summary)
+               changed=state["changed"], quiet=quiet, summary=summary)
+    result = {"status": "FINISHED", "date": day, "changed": state["changed"], "quiet": quiet}
+    if weekly["due"]:
+        run["weeklyCoverage"] = result["weeklyCoverage"] = weekly      # 今晚试过但未完整：如实带出，下一轮仍到期
     _atomic(path, run)
-    return {"status": "FINISHED", "date": day, "changed": state["changed"], "quiet": run["quiet"]}
+    return result
 
 
 def status(root: Path, day: str | None = None) -> dict[str, Any]:
@@ -195,7 +219,139 @@ def status(root: Path, day: str | None = None) -> dict[str, Any]:
     run = _load(_run_dir(root, day) / "run.json", None)
     if run is None:
         return {"status": "NO_RUN", "date": day, "runs": len(days)}
-    return {"date": day, "run": run, "runs": len(days), **progress(root, day)}
+    return {"date": day, "run": run, "runs": len(days), **progress(root, day),
+            "weeklyCoverage": coverage_state(root, today=now_shanghai().date().isoformat()), "openExecutions": open_executions(root)}
+
+
+# ---------------------------------------------------------------------------------------------
+# Source coverage: the weekly full-range check by inspection date
+# ---------------------------------------------------------------------------------------------
+
+
+def coverage_checks(root: Path) -> list[dict[str, Any]]:
+    path = root / RUNS_DIR / COVERAGE_LOG
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def coverage(root: Path, report: dict[str, Any], *, day: str, now: datetime | None = None) -> dict[str, Any]:
+    """Record one full-range check. ``report``: ``{dateField, scopeFrom, scopeTo, entries: {name: {total, rows, complete,
+    observedAt}}, unregistered: [{entry, unitName, inspectionDate, disposition, ...}], unavailable?, ref?, sha256?}``.
+
+    The check is ``COMPLETE`` only if it filtered on the inspection date, covers the whole range up to the
+    day before the run, read every entry to the last page with the row count equal to the page total, and
+    every task missing from the ledger has been disposed of (observed, registered or out of scope).
+    """
+    seen = date.fromisoformat(day)
+    entries = report.get("entries")
+    if not isinstance(entries, dict):
+        raise NightlyError("覆盖核对需要 entries")
+    reasons: list[str] = []
+    if report.get("dateField") != COVERAGE_FIELD:
+        reasons.append(f"筛选字段不是{COVERAGE_FIELD}：{report.get('dateField')}")
+    start, end = str(report.get("scopeFrom") or ""), str(report.get("scopeTo") or "")
+    try:
+        if date.fromisoformat(start) > date.fromisoformat(SCOPE_FROM):
+            reasons.append(f"范围起点晚于 {SCOPE_FROM}")
+        if date.fromisoformat(end) < seen - timedelta(days=1):
+            reasons.append("范围终点早于运行日前一天")
+    except ValueError as error:
+        raise NightlyError("scopeFrom/scopeTo 必须是 YYYY-MM-DD") from error
+    for name in COVERAGE_ENTRIES:
+        entry = entries.get(name)
+        if not isinstance(entry, dict):
+            reasons.append(f"缺入口：{name}")
+        elif entry.get("complete") is not True or entry.get("rows") != entry.get("total") or not isinstance(entry.get("total"), int):
+            reasons.append(f"入口未读完整：{name}（共 {entry.get('total')} 条，读到 {entry.get('rows')} 行）")
+    unregistered = report.get("unregistered") or []
+    open_rows = [row for row in unregistered if row.get("disposition") not in DISPOSITIONS]
+    if open_rows:
+        reasons.append(f"{len(open_rows)} 个未登记任务还没有处置")
+    item = {"at": (now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds"), "date": day,
+            "outcome": "COMPLETE" if not reasons else "INCOMPLETE", "reasons": reasons, "dateField": report.get("dateField"),
+            "scopeFrom": start, "scopeTo": end,
+            "entries": {name: {k: entry.get(k) for k in ("total", "rows", "complete", "observedAt", "error") if entry.get(k) is not None}
+                        for name, entry in entries.items() if isinstance(entry, dict)},
+            "rowsTotal": sum(int(e.get("rows") or 0) for e in entries.values() if isinstance(e, dict)),
+            "unregistered": unregistered, "unavailable": report.get("unavailable") or [], "ref": report.get("ref") or "",
+            "sha256": report.get("sha256") or ""}
+    path = root / RUNS_DIR / COVERAGE_LOG
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return {**item, "weeklyCoverage": coverage_state(root, today=day)}
+
+
+def coverage_state(root: Path, *, today: str) -> dict[str, Any]:
+    """When the last complete full-range check was and whether the next one is due. Never done counts as due."""
+    checks = [c for c in coverage_checks(root) if c["date"] <= today]
+    complete = sorted(c["date"] for c in checks if c["outcome"] == "COMPLETE")
+    last = complete[-1] if complete else None
+    due_on = (date.fromisoformat(last) + timedelta(days=COVERAGE_DAYS)).isoformat() if last else today
+    attempts = [c for c in checks if c["date"] == today]
+    return {"lastCompleteOn": last, "dueOn": due_on, "due": due_on <= today, "attemptedToday": bool(attempts),
+            "todayOutcome": attempts[-1]["outcome"] if attempts else None, "todayReasons": attempts[-1]["reasons"] if attempts else [],
+            "everyDays": COVERAGE_DAYS}
+
+
+# ---------------------------------------------------------------------------------------------
+# Executions bound to a run
+# ---------------------------------------------------------------------------------------------
+
+
+def bind(root: Path, day: str, *, session_id: str, receipt: str, runner_pid: int, runner: str = "claude-exec", note: str = "",
+         now: datetime | None = None) -> dict[str, Any]:
+    """Bind the executing model session to this run. Same session and receipt again is a no-op; a resumed
+    session comes with a new receipt and is a new execution."""
+    path = _run_dir(root, day) / "run.json"
+    run = _load(path, None)
+    if run is None:
+        raise NightlyError("该日期没有运行记录，先 begin")
+    if not session_id.strip() or not receipt.strip() or runner_pid <= 0:
+        raise NightlyError("绑定需要会话标识、回执路径和派发进程号；取不到时如实报告，不填猜测值")
+    executions = run.setdefault("executions", [])
+    for item in executions:
+        if item["sessionId"] == session_id and item["receipt"] == receipt:
+            return {"status": "ALREADY_BOUND", "date": day, "execution": item, "wrote": False}
+    item = {"sessionId": session_id, "receipt": receipt, "runnerPid": runner_pid, "runner": runner,
+            "boundAt": (now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds")}
+    if note:
+        item["note"] = note
+    executions.append(item)
+    _atomic(path, run)
+    return {"status": "BOUND", "date": day, "execution": item}
+
+
+def bind_end(root: Path, day: str, *, receipt: str, state: str, detail: str = "", now: datetime | None = None) -> dict[str, Any]:
+    """Record the observed end of one bound execution: ``ENDED`` (receipt is a complete result), ``ENDED_ERROR``
+    or ``LOST`` (runner gone without a readable receipt; its effects were reconciled by hand)."""
+    if state not in ("ENDED", "ENDED_ERROR", "LOST"):
+        raise NightlyError("state 必须是 ENDED/ENDED_ERROR/LOST")
+    path = _run_dir(root, day) / "run.json"
+    run = _load(path, None)
+    match = [item for item in (run or {}).get("executions", []) if item["receipt"] == receipt]
+    if not match:
+        raise NightlyError("该运行没有绑定这份回执")
+    item = match[-1]
+    if item.get("endedAt"):
+        return {"status": "ALREADY_ENDED", "date": day, "execution": item, "wrote": False}
+    item.update(endedAt=(now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds"), endState=state)
+    if detail:
+        item["endDetail"] = detail
+    _atomic(path, run)
+    return {"status": "RECORDED", "date": day, "execution": item}
+
+
+def open_executions(root: Path) -> list[dict[str, Any]]:
+    """Bound executions with no recorded end, over all runs: what a supervisor checks before dispatching again."""
+    found = []
+    for day in _run_days(root):
+        run = _load(root / RUNS_DIR / day / "run.json", {})
+        found += [{"date": day, "runStatus": run.get("status"), **item} for item in run.get("executions", []) if not item.get("endedAt")]
+    return found
 
 
 # ---------------------------------------------------------------------------------------------

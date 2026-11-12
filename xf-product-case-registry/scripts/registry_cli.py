@@ -2670,7 +2670,7 @@ def build_parser() -> argparse.ArgumentParser:
     child_build.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     child_build.set_defaults(func=feishu_child_build_command)
     nightly = sub.add_parser("nightly", help="夜间运行记录与检查点、观察队列（定时与人工触发共用；只写业务根“运行记录”，不联网）")
-    nightly.add_argument("action", choices=["begin", "checkpoint", "finish", "status", "observe", "due"])
+    nightly.add_argument("action", choices=["begin", "checkpoint", "finish", "status", "observe", "due", "coverage", "bind", "bind-end", "executions"])
     nightly.add_argument("--date", help="运行日期 YYYY-MM-DD；begin 取当前上海日期")
     nightly.add_argument("--trigger", default="manual", choices=["scheduled", "manual"])
     nightly.add_argument("--actor", default="")
@@ -2683,6 +2683,13 @@ def build_parser() -> argparse.ArgumentParser:
     nightly.add_argument("--summary", default="")
     nightly.add_argument("--items", help="observe：本次来源观察到的任务 JSON 文件")
     nightly.add_argument("--entry", help="observe：来源入口名称")
+    nightly.add_argument("--report", help="coverage：全范围检查日期核对的结果 JSON 文件")
+    nightly.add_argument("--session-id", help="bind：执行本轮的模型会话标识")
+    nightly.add_argument("--receipt", help="bind/bind-end：派发入口为这次执行写的回执路径")
+    nightly.add_argument("--runner-pid", type=int, help="bind：派发入口进程号")
+    nightly.add_argument("--runner", default="claude-exec")
+    nightly.add_argument("--note", default="")
+    nightly.add_argument("--state", help="bind-end：ENDED/ENDED_ERROR/LOST")
     add_workspace_resolution_options(nightly)
     nightly.set_defaults(func=nightly_command)
     label_initial = sub.add_parser(
@@ -3083,6 +3090,21 @@ def nightly_command(args: argparse.Namespace) -> None:
                 raise RegistryError("observe 需要 --items 与 --entry")
             items = json.loads(Path(args.items).read_text(encoding="utf-8"))
             result = module.observe(root, items, observed_on=args.date or today, entry=args.entry)
+        elif args.action == "coverage":
+            if not args.report:
+                raise RegistryError("coverage 需要 --report")
+            result = module.coverage(root, json.loads(Path(args.report).read_text(encoding="utf-8")), day=args.date or today)
+        elif args.action == "bind":
+            if not (args.session_id and args.receipt and args.runner_pid):
+                raise RegistryError("bind 需要 --session-id、--receipt、--runner-pid")
+            result = module.bind(root, args.date or today, session_id=args.session_id, receipt=args.receipt,
+                                 runner_pid=args.runner_pid, runner=args.runner, note=args.note)
+        elif args.action == "bind-end":
+            if not (args.receipt and args.state and args.date):
+                raise RegistryError("bind-end 需要 --date、--receipt、--state")
+            result = module.bind_end(root, args.date, receipt=args.receipt, state=args.state, detail=args.detail)
+        elif args.action == "executions":
+            result = {"today": today, "openExecutions": module.open_executions(root)}
         else:
             result = {"today": today, "observationsDue": module.due(root, today=args.date or today)}
     except (module.NightlyError, workspace.WorkspaceStateError, OSError, ValueError) as error:
