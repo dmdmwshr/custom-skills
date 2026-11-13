@@ -1,0 +1,4 @@
+interface:
+  display_name: "Breeze TTS 2 本机配音"
+  short_description: "用本机 ComfyUI 的 Breeze TTS 2 生成中英文候选配音，仅限非商用"
+  default_prompt: "使用 $breeze-tts-manager 为指定台词设计或克隆音色，生成待试听的候选配音并写回执，商用前先确认授权。"

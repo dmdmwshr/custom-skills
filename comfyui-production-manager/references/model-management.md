@@ -91,3 +91,15 @@ python scripts/delegate_model_downloads.py reconcile
 成功下载后，下载器会更新工作区 `models/catalog.json`，记录文件名、类别、模型根目录、相对路径、大小、SHA-256、脱敏来源、许可证核验状态、适用工作流、传输方式和验证时间。历史盘点和下载目录不纳入 Git。
 
 删除模型前检查 `catalog.json`、项目 `manifest.json`、工作流依赖报告和 ComfyUI 日志。默认只提出清理建议；需要删除时，先移动到精确的可恢复位置，再验证没有引用，绝不按目录通配符批量删除。
+
+## 语音 / TTS 模型
+
+语音模型不按视频模型的类别目录管理，各自留在所属运行环境，并同样登记到 `catalog.json`：
+
+| 模型 | 位置与环境 | 许可 |
+| --- | --- | --- |
+| Qwen3-TTS 1.7B CustomVoice | 媒体中心 `extensions/qwen-voice`，独立 uv 环境，不进 ComfyUI | Apache-2.0 |
+| Breeze TTS 2（int8-hybrid） | `<模型根>\breezetts2\drbaph_Breeze-TTS-2-comfyui\`，由 `ComfyUI-Breeze-TTS-2` 节点读取，使用 ComfyUI 的 `.venv` | 权重仅研究/非商用，节点 Apache-2.0 |
+| Applio RVC 模型 | Applio 自带环境，见 `applio-rvc-manager` | 逐个模型核对 |
+
+`breezetts2` 不是 ComfyUI 标准模型类别：`audit_models.py` 会把它记为一个类别并盘点，`audit_model_dependencies.py` 不会从模板里解析到它，因此“缺失”报告不用于它。节点只在下载开关打开时才联网，工作流一律把 `download_if_missing` 设为关闭，新增或升级权重由本流程显式下载、校验、再登记。Breeze 权重落在“实际运行的 ComfyUI 基础目录”的 `models`（当前为 `C:\Users\12070\Documents\ComfyUI\models`），不进 E 盘冷存储。登记条目带 `license_status: research_non_commercial`，商用项目引用前必须先停下确认授权。操作入口见 `breeze-tts-manager`。
