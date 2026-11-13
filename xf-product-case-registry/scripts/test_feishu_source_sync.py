@@ -2851,7 +2851,7 @@ def make_child_contract(tmp_path: Path) -> Path:
         {**_f(inspect_f["result"], "检查结果", "select", "source-sync-whitelist", sw), "options": sel("合格", "不合格", "待核实")},
         _f(inspect_f["count"], "产品数", "number", "source-sync-whitelist", sw), _f(inspect_f["bad"], "不合格产品数", "number", "source-sync-whitelist", sw),
         {**_f(inspect_f["method"], "检查方式", "select", "source-sync-whitelist", sw), "options": sel("抽样送检", "现场判定", "抽样送检、现场判定")},
-        {**_f(inspect_f["source"], "数据来源", "select", "source-sync-whitelist", sw), "options": sel("来源详情")},
+        {**_f(inspect_f["source"], "数据来源", "select", "source-sync-whitelist", sw), "options": sel("来源详情", "监督系统")},
         {**_f(inspect_f["date_source"], "日期来源", "select", "source-sync-whitelist", sw), "options": sel("监督系统", "来源复查记录PDF")},
         _f(inspect_f["round"], "检查序次", "number", "source-sync-whitelist", sw),
         {**_f(inspect_f["in_scope"], "计入2026统计", "select", "source-sync-whitelist", sw), "options": sel("是", "否", "待核实")}]
@@ -2864,7 +2864,7 @@ def make_child_contract(tmp_path: Path) -> Path:
         {**_f(product_f["result"], "检查结果", "select", "source-sync-whitelist", sw), "options": sel("合格", "不合格", "待核实")},
         {**_f(product_f["access"], "市场准入", "select", "source-sync-whitelist", sw), "options": sel("CCC认证")},
         _f(product_f["problem"], "问题描述", "text", "source-sync-whitelist", sw),
-        {**_f(product_f["source"], "数据来源", "select", "source-sync-whitelist", sw), "options": sel("来源详情")}, _f(product_f["cert"], "证书编号/核查原文", "text", "source-sync-whitelist", sw)]
+        {**_f(product_f["source"], "数据来源", "select", "source-sync-whitelist", sw), "options": sel("来源详情", "监督系统")}, _f(product_f["cert"], "证书编号/核查原文", "text", "source-sync-whitelist", sw)]
     base = {"baseId": BASE, "version": "synthetic-v14", "tables": {"案卷主表": {"tableId": CASE, "fields": case_fields}, "检查明细": {"tableId": CHECK, "fields": inspect_fields},
                                                                     "产品明细": {"tableId": PRODUCT, "fields": product_fields}}}
     kinds = {"text": "create-once-source-scalar"}
@@ -2920,7 +2920,7 @@ def test_child_build_makes_one_spec_per_case_with_checks_first_then_products_and
     assert insp["tableId"] == CHECK and insp["stableKey"]["value"] == f"{CP}|初查" and insp["parent"]["recordId"] == "recEXIST000001"
     assert (f[F["stage"]]["new"], f[F["date"]]["new"], f[F["month"]]["new"], f[F["team"]]["new"]) == ("初查", "2026-06-17", "2026-06", "梁溪大队")
     assert (f[F["result"]]["new"], f[F["count"]]["new"], f[F["bad"]]["new"], f[F["method"]]["new"]) == ("不合格", 2, 1, "抽样送检、现场判定")
-    assert (f[F["source"]]["new"], f[F["date_source"]]["new"], f[F["in_scope"]]["new"]) == ("来源详情", "监督系统", "是") and F["round"] not in f
+    assert (f[F["source"]]["new"], f[F["date_source"]]["new"], f[F["in_scope"]]["new"]) == ("监督系统", "监督系统", "是") and F["round"] not in f
     ref = f[F["key"]]["basis"]["sourceRef"]
     assert "manifestSha256=sha256:" in ref and CP in ref and "原生标识留空" in ref
     assert p1["stableKey"]["value"] == f"{CP}|初查|1" and p2["stableKey"]["value"] == f"{CP}|初查|2"
@@ -2984,12 +2984,28 @@ def test_child_build_holds_only_the_case_whose_evidence_does_not_hold(tmp_path, 
     assert why in json.dumps(report["blockedEntities"], ensure_ascii=False)
 
 
-def test_child_build_leaves_cases_with_any_existing_child_and_unaccepted_release_targets_alone(tmp_path):
+def test_child_build_adds_only_the_product_rows_the_cloud_lacks_under_an_existing_inspection(tmp_path):
     contract, water, transport = _child_setup(tmp_path)
     transport.rows[(CHECK, "recCHK00000001")] = {sync.INSPECT_F["key"]: f"{CP}|初查"}
     transport.rows[(PRODUCT, "recPRD00000001")] = {sync.PRODUCT_F["key"]: f"{CP}|初查|1"}
-    report = _child_build(tmp_path, contract, water, transport)
-    assert report["status"] == "OK" and report["counts"]["cases"] == 0 and report["fresh"]["casesAlreadyWithChildren"] == 1 and not report["specs"]
+    report = _child_build(tmp_path, contract, water, transport)       # 清单两个产品，云端只有第 1 个：只补第 2 个，挂在已有的检查行下
+    assert report["status"] == "OK" and report["counts"]["products"] == 1 and report["counts"]["inspections"] == 0 and report["fresh"]["casesAlreadyWithChildren"] == 0
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    assert [c["stableKey"]["value"] for c in spec["creates"]] == [f"{CP}|初查|2"]
+    assert spec["creates"][0]["parent"]["recordId"] == "recCHK00000001" and "createRef" not in spec["creates"][0]["parent"]
+    assert report["cases"][0]["inspections"][0]["onlyMissingProducts"] == [f"{CP}|初查|2"]
+    transport.rows[(PRODUCT, "recPRD00000002")] = {sync.PRODUCT_F["key"]: f"{CP}|初查|2"}       # 云端已齐：不再生成任何说明
+    sub0 = tmp_path / "complete"
+    sub0.mkdir()
+    contract0, water0, transport0 = _child_setup(sub0)
+    transport0.rows[(CHECK, "recCHK00000001")] = {sync.INSPECT_F["key"]: f"{CP}|初查"}
+    transport0.rows[(PRODUCT, "recPRD00000001")] = {sync.PRODUCT_F["key"]: f"{CP}|初查|1"}
+    transport0.rows[(PRODUCT, "recPRD00000002")] = {sync.PRODUCT_F["key"]: f"{CP}|初查|2"}
+    done = _child_build(sub0, contract0, water0, transport0)
+    assert done["status"] == "OK" and done["counts"]["cases"] == 0 and done["fresh"]["casesAlreadyWithChildren"] == 1 and not done["specs"]
+
+
+def test_child_build_leaves_unaccepted_release_targets_alone(tmp_path):
     sub = tmp_path / "held"
     sub.mkdir()
     contract, water, transport = _child_setup(sub)
@@ -3007,6 +3023,7 @@ def test_child_build_adds_only_the_inspection_the_cloud_lacks_and_holds_unpaired
     # 初查及其产品早已在云端(可能来自旧载体，产品行数与清单不同也不动)；复查后来才归档 -> 只补复查这一次检查
     transport.rows[(CHECK, "recCHK00000001")] = {sync.INSPECT_F["key"]: f"{CP}|初查"}
     transport.rows[(PRODUCT, "recPRD00000001")] = {sync.PRODUCT_F["key"]: f"{CP}|初查|1"}
+    transport.rows[(PRODUCT, "recPRD00000002")] = {sync.PRODUCT_F["key"]: f"{CP}|初查|2"}
     report = _child_build(tmp_path, contract, water, transport)
     assert report["status"] == "OK" and report["counts"] == {"cases": 1, "inspections": 1, "products": 1, "specs": 1, "blocked": 0}
     spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
@@ -3079,6 +3096,26 @@ def test_update_spec_refuses_a_create_once_field(tmp_path):
                          "fields": {field: {"new": "合格", "basis": basis()}}}]}
     with pytest.raises(sync.SyncError, match="create-once"):
         sync.run(write_spec(tmp_path, spec), transport=BuildTransport(), ledger_dir=tmp_path / "ledger")
+
+
+def test_a_create_once_field_registered_for_evidence_correction_may_be_updated_but_only_through_the_same_guards(tmp_path):
+    contract = make_child_contract(tmp_path)
+    base = json.loads(contract.read_text(encoding="utf-8"))["baseContract"]
+    field = sync.INSPECT_F["result"]
+    metas = [f for t in base["tables"].values() for f in t["fields"] if f["fieldId"] == field]
+    assert metas and str(metas[0]["syncWrite"]).lower().startswith("create-once")
+    assert sync._create_once_locked(metas[0]) is True
+    metas[0]["evidenceCorrection"] = True
+    assert sync._create_once_locked(metas[0]) is False             # 登记后可作为更新目标；执行器的旧值门禁、账本、回读不变
+    assert sync._create_once_locked({"syncWrite": "allowed"}) is False and sync._create_once_locked(None) is False
+    v9 = tmp_path / "v9c.json"
+    v9.write_text(json.dumps(base, ensure_ascii=False), encoding="utf-8")
+    spec = {"schemaVersion": sync.SPEC_SCHEMA, "mode": "plan", "contract": {"path": str(v9), "sha256": sha(v9)},
+            "target": {"baseToken": BASE, "profile": "offline-fake", "identity": "user"}, "limits": {"maxRecords": 5},
+            "allowlist": {CHECK: {"records": ["recCHK00000001"], "fields": [field]}},
+            "updates": [{"tableId": CHECK, "recordId": "recCHK00000001", "stableKey": {"fieldId": sync.INSPECT_F["key"], "value": f"{CP}|初查"},
+                         "fields": {field: {"new": "合格", "basis": basis()}}}]}
+    sync.run(write_spec(tmp_path, spec), transport=BuildTransport(), ledger_dir=tmp_path / "ledger")   # plan 模式：校验通过，不再拒绝 create-once
 
 
 # ------------------------------------------------------------------ 只读调用的网络层重试(写调用不重试)
@@ -3251,3 +3288,16 @@ def test_datetime_readback_in_china_summer_time_compares_wall_time():
     assert sync.cell_equals("datetime", "1990-07-06T00:00:00.000+09:00", "1990-07-06 00:00")
     assert sync.cell_equals("datetime", "2019-06-29T00:00:00.000+08:00", "2019-06-29 00:00")
     assert not sync.cell_equals("datetime", "2019-06-29T00:00:00.000+09:00", "2019-06-29 00:00")
+
+
+def test_non_json_cli_output_error_carries_a_masked_diagnostic_hint():
+    token = "A" * 40
+    def runner(argv, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr='{"error":{"type":"network","token":"%s"}}' % token)
+    transport = sync.LarkCliTransport("/x/lark-cli", "p", "user", runner=runner)
+    with pytest.raises(sync.RuntimeSyncError) as caught:
+        transport._run(["+record-upsert", "--table-id", "tbl"])
+    message = str(caught.value)
+    assert message.startswith("UNKNOWN: 官方 CLI 输出不是 JSON")
+    assert "rc=1" in message and "stdout=''" in message and "network" in message
+    assert token not in message and "<tok>" in message

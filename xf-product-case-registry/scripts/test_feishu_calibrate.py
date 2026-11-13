@@ -62,8 +62,8 @@ def test_qualified_case_without_recheck_becomes_no_recheck_needed_and_old_source
 def test_second_run_after_values_agree_plans_nothing(tmp_path):
     contract, water, transport = _setup(tmp_path, initial=ONE_OK)
     transport.rows[(CASE, "recEXIST000001")].update({RESULT_F: ["合格"], DATE_SRC_F: ["监督系统"], M["recheck_result"]: ["无需复查"]})
-    _rows(transport, **{I["date_source"]: ["监督系统"], I["month"]: "2026-06", I["bad"]: 0, I["method"]: ["现场判定"], I["team"]: ["梁溪大队"]})
-    transport.rows[(PRODUCT, "recPRD初查1")].update({P["location"]: "大厅", P["method"]: ["现场判定"]})
+    _rows(transport, **{I["date_source"]: ["监督系统"], I["month"]: "2026-06", I["bad"]: 0, I["method"]: ["现场判定"], I["team"]: ["梁溪大队"], I["source"]: ["监督系统"]})
+    transport.rows[(PRODUCT, "recPRD初查1")].update({P["location"]: "大厅", P["method"]: ["现场判定"], P["source"]: ["监督系统"]})
     report, writes, diffs = _plan(tmp_path, contract, water, transport)
     assert not writes and not diffs and report["status"] == "OK" and report["plan"] is None
 
@@ -163,7 +163,7 @@ def test_a_text_difference_is_closed_only_by_a_ruling_that_still_matches_both_si
     assert (key, "标称生产者") not in writes and diffs[(key, "标称生产者")]["kind"] == "证据文件不可读或摘要已变"
 
 
-def test_a_name_ruling_never_rewrites_the_create_once_name_and_only_a_same_product_ruling_opens_the_row(tmp_path):
+def test_a_name_ruling_that_adopts_the_manifest_corrects_the_name_with_evidence_and_the_cloud_adopting_ruling_writes_nothing(tmp_path):
     product = {**ONE_OK[0], "name": "钢质防火门", "modelSpec": "GFM-1"}
     contract, water, transport = _setup(tmp_path, initial=[product])
     transport.rows[(CASE, "recEXIST000001")].update({RESULT_F: ["合格"]})
@@ -180,8 +180,135 @@ def test_a_name_ruling_never_rewrites_the_create_once_name_and_only_a_same_produ
         rulings.write_text(json.dumps({"schema": cal.RESOLUTION_SCHEMA, "entries": [{**entry, **change}]}, ensure_ascii=False), encoding="utf-8")
         return _plan(tmp_path, contract, water, transport, resolutions_path=rulings)
 
-    _, writes, diffs = run()                                  # 行序不一致：整行不动
-    assert not [k for k in writes if k[0] == key] and diffs[(key, "产品名称")]["kind"].startswith("产品行序与检查记录不一致")
-    _, writes, diffs = run(sameProduct=True)                  # 同一产品：名称不改，其余字段照常补
-    assert (key, "产品名称") not in writes and writes[(key, "规格型号")] == (None, "GFM-1")
-    assert diffs[(key, "产品名称")]["kind"].startswith("产品名称与监督系统原文不同")
+    _, writes, diffs = run()                                  # 采用清单值：名称与其余事实字段同批更正，旧值门禁
+    assert writes[(key, "产品名称")] == ("钢质防火门(GFM-1)", "钢质防火门") and writes[(key, "规格型号")] == (None, "GFM-1") and (key, "产品名称") not in diffs
+    plan = json.loads((tmp_path / "cal" / "calibrate-plan.json").read_text(encoding="utf-8"))
+    name_item = next(e for e in plan["entries"] if e["table"] == "产品明细")["fields"][P["name"]]
+    assert name_item["expectedOld"] == "钢质防火门(GFM-1)" and name_item["evidence"] and name_item["basisRef"]
+    _, writes, diffs = run(adopt="cloud")                     # 采用云端值：名称不写，规格等其余字段照常
+    assert (key, "产品名称") not in writes
+    doc.write_bytes(b"changed")                               # 证据摘要变了：裁决失效，名称不写
+    _, writes, diffs = run()
+    assert (key, "产品名称") not in writes
+
+
+def _name_case(tmp_path, cloud_name="钢质防火门(GFM-1)"):
+    product = {**ONE_OK[0], "name": "钢质防火门", "modelSpec": "GFM-1"}
+    contract, water, transport = _setup(tmp_path, initial=[product])
+    transport.rows[(CASE, "recEXIST000001")].update({RESULT_F: ["合格"]})
+    _rows(transport)
+    transport.rows[(PRODUCT, "recPRD初查1")].update({P["name"]: cloud_name})
+    return contract, water, transport, f"{CP}|初查|1"
+
+
+def test_without_correction_mode_a_wrong_cloud_name_is_only_listed_and_with_it_the_fact_is_corrected_with_old_value_and_evidence(tmp_path):
+    contract, water, transport, key = _name_case(tmp_path)
+    _, writes, diffs = _plan(tmp_path, contract, water, transport)
+    assert (key, "产品名称") not in writes and diffs[(key, "产品名称")]["kind"].startswith("同序号产品名称与清单不同")
+    report, writes, diffs = _plan(tmp_path, contract, water, transport, correct_facts=True)
+    assert writes[(key, "产品名称")] == ("钢质防火门(GFM-1)", "钢质防火门") and (key, "产品名称") not in diffs
+    assert report["counts"]["corrections"] >= 1 and any(w.get("correction") for w in report["writes"] if w["key"] == key)
+
+
+def test_a_manifest_value_that_looks_like_a_duplicated_extraction_is_never_auto_corrected(tmp_path):
+    plan = cal._Plan(tmp_path, {"t": {"f": {"name": "产品名称"}}}, {"产品明细": "t"}, correct=True)
+    assert plan.malformed("钢质防火门钢质防火门") and plan.malformed(" ") and not plan.malformed("钢质防火门")
+    assert plan.try_correct("P", "产品明细", "rec", "k", "K", "f", "钢质防火门", "钢质防火门钢质防火门", "产品名称与清单不同", "how", [{"path": "x", "sha256": "y"}], "t0") is True
+    assert not plan.staged and plan.diffs[0]["action"] == "不更正；交核对" and "疑似提取错误" in plan.diffs[0]["kind"]
+    assert plan.try_correct("P", "产品明细", "rec", "k", "K", "f", None, "新值", "补空走普通路径", "how", [], "t0") is False
+
+
+def test_more_corrections_than_the_limit_are_all_held_and_listed_not_written(tmp_path):
+    contract, water, transport, key = _name_case(tmp_path)
+    report, writes, diffs = _plan(tmp_path, contract, water, transport, correct_facts=True, max_corrections=0)
+    assert (key, "产品名称") not in writes and report["counts"]["correctionsHeld"] >= 1
+    assert "超过单次上限" in diffs[(key, "产品名称")]["action"]
+
+
+def test_legacy_data_source_labels_on_both_child_tables_are_unified_to_the_supervision_system_with_the_old_label_as_expected_old(tmp_path):
+    contract, water, transport = _setup(tmp_path, initial=ONE_OK)
+    transport.rows[(CASE, "recEXIST000001")].update({RESULT_F: ["合格"], DATE_SRC_F: ["监督系统"], M["recheck_result"]: ["无需复查"]})
+    _rows(transport, **{I["date_source"]: ["监督系统"], I["month"]: "2026-06", I["bad"]: 0, I["method"]: ["现场判定"], I["team"]: ["梁溪大队"], I["source"]: ["人工底册"]})
+    transport.rows[(PRODUCT, "recPRD初查1")].update({P["location"]: "大厅", P["method"]: ["现场判定"], P["source"]: ["来源详情"]})
+    _, writes, diffs = _plan(tmp_path, contract, water, transport)
+    assert writes[(f"{CP}|初查", "数据来源")] == ("人工底册", "监督系统") and writes[(f"{CP}|初查|1", "数据来源")] == ("来源详情", "监督系统") and not diffs
+
+
+def _setup_unit_form(tmp_path, **kw):
+    contract, water, transport = _setup(tmp_path, **kw)
+    doc = json.loads(contract.read_text(encoding="utf-8"))
+    doc["tables"]["案卷主表"]["fields"] += [
+        {**_f(M["unit"], "单位类别", "select", "source-sync-whitelist", "allowed"), "options": [{"name": n} for n in cal.UNIT_OPTIONS]},
+        {**_f(M["form"], "检查形式", "select", "source-sync-whitelist", "allowed"), "options": [{"name": n} for n in ("专项监督抽查", "日常检查", "举报投诉核查", "其他", "待核实")]}]
+    contract.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    transport.rows[(CASE, "recEXIST000001")].update({RESULT_F: ["合格"], DATE_SRC_F: ["监督系统"], M["recheck_result"]: ["无需复查"]})
+    _rows(transport, **{I["date_source"]: ["监督系统"], I["month"]: "2026-06", I["bad"]: 0, I["method"]: ["现场判定"], I["team"]: ["梁溪大队"], I["source"]: ["监督系统"]})
+    transport.rows[(PRODUCT, "recPRD初查1")].update({P["location"]: "大厅", P["method"]: ["现场判定"], P["source"]: ["监督系统"]})
+    return contract, water, transport
+
+
+def _form_evidence(tmp_path, water, value="日常检查", manifest_sha=None):
+    record = water.parent / "记录.pdf"
+    record.write_bytes(b"record bytes")
+    manifest = next(water.parent.rglob("manifest.json"))
+    body = {"schemaVersion": "RecordFormEvidenceV1", "cases": {CP: {"inspectionForm": value, "record": {"path": "记录.pdf", "sha256": sha(record)},
+                                                                    "manifest": {"path": "m", "sha256": manifest_sha or sha(manifest)}}}}
+    path = tmp_path / "form-evidence.json"
+    path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def test_inspection_form_from_the_record_checkbox_fills_a_blank_with_both_files_as_evidence(tmp_path):
+    contract, water, transport = _setup_unit_form(tmp_path, initial=ONE_OK)
+    _, writes, diffs = _plan(tmp_path, contract, water, transport, form_evidence_path=_form_evidence(tmp_path, water))
+    assert writes[(CP, "检查形式")] == (None, "日常检查")
+    plan = json.loads((tmp_path / "cal" / "calibrate-plan.json").read_text(encoding="utf-8"))
+    item = next(e for e in plan["entries"] if e["table"] == "案卷主表")["fields"][M["form"]]
+    assert item["expectedOld"] is None and {e["path"].split("/")[-1] for e in item["evidence"]} == {"manifest.json", "记录.pdf"} and not diffs
+
+
+def test_a_different_cloud_inspection_form_is_listed_unless_correction_mode_is_on_and_stale_evidence_never_writes(tmp_path):
+    contract, water, transport = _setup_unit_form(tmp_path, initial=ONE_OK)
+    transport.rows[(CASE, "recEXIST000001")][M["form"]] = ["专项监督抽查"]
+    evidence = _form_evidence(tmp_path, water)
+    _, writes, diffs = _plan(tmp_path, contract, water, transport, form_evidence_path=evidence)
+    assert (CP, "检查形式") not in writes and diffs[(CP, "检查形式")]["kind"] == "检查形式与记录勾选不同"
+    _, writes, _ = _plan(tmp_path, contract, water, transport, form_evidence_path=evidence, correct_facts=True)
+    assert writes[(CP, "检查形式")] == ("专项监督抽查", "日常检查")
+    stale = _form_evidence(tmp_path, water, manifest_sha="0" * 64)
+    _, writes, diffs = _plan(tmp_path, contract, water, transport, form_evidence_path=stale, correct_facts=True)
+    assert (CP, "检查形式") not in writes and diffs[(CP, "检查形式")]["kind"].startswith("检查形式证据与现行清单或记录摘要不符")
+
+
+def test_unit_category_comes_from_the_saved_source_detail_and_an_unknown_value_is_only_listed(tmp_path, monkeypatch):
+    contract, water, transport = _setup_unit_form(tmp_path, initial=ONE_OK)
+    detail = water.parent / "source-evidence.json"
+    detail.write_text("{}", encoding="utf-8")
+    value = {"v": "重点单位"}
+    monkeypatch.setattr(sync, "saved_detail_evidence", lambda root, project, case: {"fields": {"单位类别": value["v"]}, "observedAt": "2026-11-01T00:00:00+08:00", "path": "source-evidence.json", "sha256": sha(detail)})
+    _, writes, diffs = _plan(tmp_path, contract, water, transport)
+    assert writes[(CP, "单位类别")] == (None, "重点单位")
+    value["v"] = "神秘类别"
+    _, writes, diffs = _plan(tmp_path, contract, water, transport)
+    assert (CP, "单位类别") not in writes and diffs[(CP, "单位类别")]["kind"] == "来源详情的单位类别不在合同选项里"
+
+
+def test_unit_category_that_contradicts_the_record_key_unit_box_is_listed_and_never_written_or_corrected(tmp_path, monkeypatch):
+    contract, water, transport = _setup_unit_form(tmp_path, initial=ONE_OK)
+    detail = water.parent / "source-evidence.json"
+    detail.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(sync, "saved_detail_evidence", lambda root, project, case: {"fields": {"单位类别": "其他单位"}, "observedAt": "t", "path": "source-evidence.json", "sha256": sha(detail)})
+    evidence = _form_evidence(tmp_path, water)
+    body = json.loads(evidence.read_text(encoding="utf-8"))
+    body["cases"][CP]["keyUnit"] = True                                  # 记录勾“重点单位”，详情写“其他单位”
+    evidence.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    for blank in (True, False):
+        if not blank:
+            transport.rows[(CASE, "recEXIST000001")][M["unit"]] = ["重点单位"]
+        _, writes, diffs = _plan(tmp_path, contract, water, transport, form_evidence_path=evidence, correct_facts=True)
+        assert (CP, "单位类别") not in writes and diffs[(CP, "单位类别")]["kind"] == "单位类别：来源详情与初查电子记录勾选互相矛盾"
+    body["cases"][CP]["keyUnit"] = False                                 # 一致时照常补空
+    evidence.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    transport.rows[(CASE, "recEXIST000001")][M["unit"]] = None
+    _, writes, _ = _plan(tmp_path, contract, water, transport, form_evidence_path=evidence)
+    assert writes[(CP, "单位类别")] == (None, "其他单位")

@@ -2808,6 +2808,10 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--scope-from", default="2026-01-01")
     calibrate.add_argument("--project", action="append", help="只核这些项目编号(可重复)；省略为全部")
     calibrate.add_argument("--resolutions", help="校准裁决文件(CalibrationResolutionsV1)：已按原包文书核过的差异逐条采用哪一方；省略则差异只报告")
+    calibrate.add_argument("--correct-facts", action="store_true",
+                           help="更正模式：云端已有明确值而可信清单证据给出另一个明确值时，带证据和精确旧值更正(管理员误改、早期写错)；默认只列差异")
+    calibrate.add_argument("--max-corrections", type=int, default=25, help="单次更正处数上限，超过整批不写、全部列出(默认 25)")
+    calibrate.add_argument("--form-evidence", help="RecordFormEvidenceV1：record_forms.py scan 产出的检查形式证据(初查电子记录勾选框)；省略则不处理检查形式")
     calibrate.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     calibrate.set_defaults(func=feishu_calibrate_plan_command)
 
@@ -3213,7 +3217,9 @@ def feishu_calibrate_plan_command(args: argparse.Namespace) -> None:
         waterline_path=Path(args.waterline), contract_path=Path(args.contract), contract_sha=args.contract_sha, target=target, transport=transport,
         out_dir=Path(args.out_dir), ledger_dir=Path(args.ledger_dir), scope_from=args.scope_from,
         only_projects=frozenset(args.project) if args.project else None,
-        resolutions_path=Path(args.resolutions) if args.resolutions else None))
+        resolutions_path=Path(args.resolutions) if args.resolutions else None,
+        correct_facts=args.correct_facts, max_corrections=args.max_corrections,
+        form_evidence_path=Path(args.form_evidence) if args.form_evidence else None))
     print(json.dumps({k: v for k, v in report.items() if k not in ("writes", "differences", "resolved", "casesLeftAlone")}, ensure_ascii=False, indent=2))
 
 

@@ -89,13 +89,10 @@ ALWAYS_DENIED = {
     "fld4mVYy5Y": "案卷.是否网售(人工)",
     "fldvHLpSKI": "案卷.是否加油加气站(人工)",
     "fld5E2njAU": "案卷.是否微型消防站(人工)",
-    "fldrKL9rDE": "案卷.是否核实(人工)",
     "fldW2kJC0V": "案卷.无值说明(人工，原名核实说明)",
     "fldtBHoCzK": "案卷.是否维修后灭火器(人工，2026-11-09 起由大队填报)",
     "fldoFEnhmd": "案卷.涉及网售产品(人工关系)",
-    "fld4atEDRT": "检查.是否核实(人工)",
     "fldYkXBvEt": "检查.无值说明(人工，原名核实说明)",
-    "fldwsnqeJ4": "产品.是否核实(人工)",
     "fld1Plox8P": "产品.无值说明(人工，原名核实说明)",
     "fldVZE4Yc9": "产品.网售标记案卷(人工关系反向)",
 }
@@ -103,6 +100,14 @@ ALWAYS_DENIED = {
 STABLE_KEYS = {"案卷主表": "fld1lHXHpk", "检查明细": "fld5ujrPv4", "产品明细": "fldqlwHjUW", "维修企业": "fld7d3PedK"}
 # 稳定键：来源键，或由管理员维护的内部编号(如企业编号)。
 STABLE_KEY_CLASSES = frozenset({WHITELIST, "admin-only"})
+def _create_once_locked(meta: dict[str, Any] | None) -> bool:
+    """create-once 字段只在创建本案子行时写一次；合同给该字段登记 ``evidenceCorrection: true`` 时，
+    已有值还可由监督事实校准经可信证据 + 精确旧值检查更正(日常同步仍不更新它)。"""
+    if not isinstance(meta, dict):
+        return False
+    return str(meta.get("syncWrite") or "").lower().startswith("create-once") and meta.get("evidenceCorrection") is not True
+
+
 WRITABLE_CLASSES = frozenset().union(*field_policy.ALLOWED_CLASSES.values())
 OPENED_CLASSES = frozenset({field_policy.CLASS_LABEL, field_policy.CLASS_BRIGADE})
 
@@ -292,6 +297,7 @@ def field_index(contract: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]
                 "class": field["class"],
                 "table": table_name,
                 "syncWrite": field.get("syncWrite"),
+                "evidenceCorrection": field.get("evidenceCorrection") is True,
                 "options": _option_names(field.get("options")),
                 "key": f"{table_id}/{field['fieldId']}",
             }
@@ -340,7 +346,7 @@ def validate_spec(spec: Any, contract: dict[str, Any]) -> dict[str, Any]:
             _require(meta is not None, f"字段不在保护合同中（新增字段默认拒写）：{field_id}")
             _require(meta["class"] in WRITABLE_CLASSES, f"字段不是 {WHITELIST}：{meta['name']}({meta['class']})")
             _require(meta["type"] in SCALAR_TYPES, f"本版只写标量源字段，拒绝 {meta['type']}：{meta['name']}")
-            _require(not str(meta.get("syncWrite") or "").lower().startswith("create-once"),
+            _require(not _create_once_locked(meta),
                      f"合同把该字段限定为创建时一次写入(create-once)，不得作为更新目标：{meta['name']}")
         stable = STABLE_KEYS.get(_table_name(index, table_id))
         _require(stable in index[table_id] and index[table_id][stable]["class"] in STABLE_KEY_CLASSES, "稳定键字段未在合同中确认")
@@ -544,6 +550,14 @@ class LarkCliTransport:
             return False
         return isinstance(error, dict) and error.get("type") == "network" and not (getattr(result, "stdout", "") or "").strip()
 
+    @staticmethod
+    def _raw_hint(result: Any) -> str:
+        """非 JSON 输出的诊断：退出码与脱敏截断的 stdout/stderr 头部（只在错误说明里，不含令牌）。"""
+        def clip(value: Any) -> str:
+            text = re.sub(r"[A-Za-z0-9_\-]{27,}", "<tok>", str(value or "")).replace("\n", " ")
+            return text[:160]
+        return f"（rc={getattr(result, 'returncode', None)} stdout={clip(getattr(result, 'stdout', ''))!r} stderr={clip(getattr(result, 'stderr', ''))!r}）"
+
     def _run(self, args: list[str]) -> dict[str, Any]:
         argv = [self.cli, "base", *args, "--profile", self.profile, "--as", self.identity]
         # 只读调用遇到明确的网络层失败可重试(无副作用)；写调用从不重试，结果未知按 UNKNOWN 处理
@@ -562,7 +576,7 @@ class LarkCliTransport:
         try:
             body = json.loads(result.stdout)
         except ValueError as error:
-            raise RuntimeSyncError("UNKNOWN: 官方 CLI 输出不是 JSON") from error
+            raise RuntimeSyncError(f"UNKNOWN: 官方 CLI 输出不是 JSON{self._raw_hint(result)}") from error
         self.last_body = body  # 供创建回执解析失败时留证（只保存在日志，不用于判断身份）
         if result.returncode != 0 or not isinstance(body, dict) or not body.get("ok"):
             raise RuntimeSyncError("官方 CLI 返回失败")
@@ -2204,6 +2218,39 @@ def _detail_initial_result(root: Path, project: str, waterline_case: Any, classi
     return None
 
 
+def saved_detail_evidence(root: Path, project: str, waterline_case: Any) -> dict[str, Any] | None:
+    """本案已保存、可信的来源详情页：返回 {fields, observedAt, path(业务根相对), sha256}；读不到或校验不过返回 None，不猜。
+
+    与 ``_detail_initial_result`` 同一读取与校验(本地视图的 ``_saved_detail``)，再找回承载这份页面的 source-evidence.json 及其摘要。
+    """
+    source = waterline_case.get("source") if isinstance(waterline_case, dict) else None
+    if not isinstance(source, dict):
+        return None
+    try:
+        layout = _ws.BusinessLayout.from_root(root)
+        found, _ = _views._saved_detail(layout, project, source)
+    except Exception:  # noqa: BLE001 - 无法读取/校验就不采纳
+        return None
+    if not found:
+        return None
+    fields, _, captured = found
+    candidates = [layout.pending_case_dir(project) / "source-evidence.json"]
+    completed = layout.completed_case_dir(project)
+    if completed.is_dir():
+        candidates += sorted(completed.glob("*/source-evidence.json"), reverse=True)
+    for path in candidates:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8-sig"))
+            relative = path.resolve().relative_to(root.resolve())
+        except (OSError, ValueError):
+            continue
+        records = [doc] if doc.get("projectNo") == project and doc.get("capturedAt") == captured else []
+        records += [r for r in (doc.get("records") or {}).values() if isinstance(r, dict) and r.get("projectNo") == project and r.get("capturedAt") == captured]
+        if any(r.get("fields") == fields for r in records):
+            return {"fields": fields, "observedAt": captured, "path": relative.as_posix(), "sha256": file_sha(path)}
+    return None
+
+
 def unified_initial_result(root: Path, project: str, waterline_case: Any, *, classification: dict[str, Any] | None = None,
                            jurisdiction: str | None = None, manifest_found: Any = None) -> dict[str, Any]:
     """案卷级初查结果的唯一规则：主行、初查检查行和可由案卷结论确定的产品行都用它，不再各算各的。
@@ -2699,6 +2746,9 @@ def build_field_plan_specs(*, plan_path: Path, plan_sha: str, waterline_path: Pa
             if "new" not in item or "expectedOld" not in item:
                 problems.append(f"字段 {meta['name']} 缺 new 或 expectedOld")
                 continue
+            if _create_once_locked(meta):
+                problems.append(f"字段 {meta['name']} 合同限定创建时一次写入，且未登记 evidenceCorrection，不能更新")
+                continue
             if isinstance(item.get("restore"), dict):   # 精确逆操作条目：new 必须为 null，expectedOld 为被恢复的误写值，因果证据由执行器对账本核验
                 if item["new"] is not None or not _text(item["expectedOld"]) or not _text(item["restore"].get("intentId")) or ledger is None:
                     problems.append(f"字段 {meta['name']} restore 需要 new=null、expectedOld=误写值、restore.intentId，且构建必须带 --ledger-dir")
@@ -2983,13 +3033,18 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
             continue
         initial = inspections[0]
         wanted, unpaired = [], []
+        missing_products: dict[str, list[str]] = {}   # 检查行和部分产品行已有、清单里还有云端没有的产品键：只补缺的产品行
         for inspection in inspections:
             has_products = any(k.startswith(inspection["key"] + "|") for k in product_keys)
             if inspection["key"] not in inspect_keys and not has_products:
                 wanted.append(inspection["key"])
             elif inspection["key"] not in inspect_keys or not has_products:
                 unpaired.append(f"{inspection['key']} 云端检查行与产品行不成套(只有其一)：不自动补，交核对")
-        if not wanted and not unpaired:
+            else:
+                lacking = [p["key"] for p in inspection["products"] if p["key"] not in product_keys]
+                if lacking:
+                    missing_products[inspection["key"]] = lacking
+        if not wanted and not unpaired and not missing_products:
             already += 1   # 清单里的检查云端都已有：不动(清单另有读不出的检查时由校准对账列出)
             continue
         if unpaired:
@@ -3012,7 +3067,7 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
             continue
         cases.append({"project": project, "recordId": record_id, "manifest": manifest, "relative": relative, "recorded": recorded, "verifiedAt": verified_at,
                       "unified": unified_initial_result(root, project, waterline.get(project), jurisdiction=None, manifest_found=found),
-                      "inspections": inspections, "wanted": set(wanted), "team": team, "cloudResult": _cell_text(row.get(LIFECYCLE_FIELDS["result"]))})
+                      "inspections": inspections, "wanted": set(wanted), "missingProducts": missing_products, "team": team, "cloudResult": _cell_text(row.get(LIFECYCLE_FIELDS["result"]))})
     # 生成创建项
     creates_by_case: list[tuple[str, list[dict[str, Any]], dict[str, Any]]] = []
     source_counts: dict[str, int] = {}
@@ -3030,7 +3085,8 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
             return value
 
         for number, inspection in enumerate(case["inspections"]):
-            if inspection["key"] not in case["wanted"]:
+            only_missing = case["missingProducts"].get(inspection["key"])
+            if inspection["key"] not in case["wanted"] and not only_missing:
                 continue
             is_initial = inspection["tag"] == "initial"
             products = [dict(p, result=r) for p, r in zip(inspection["products"], product_results(inspection["products"], case["unified"], is_initial))]
@@ -3038,46 +3094,47 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
             result, why = _inspection_result(products, case["unified"], is_initial)
             if is_initial and (result is None or (case["cloudResult"] in CLASSIFICATION_RESULT.values() and result != case["cloudResult"])):
                 notes.append({"projectNo": project, "kind": "初查结果证据冲突或与主行不同(双方原值保留，交核对)", "cloud": case["cloudResult"], "children": result, "why": why})
-            methods = {p["method"] for p in products if p["method"]}
-            all_methods = all(p["method"] for p in products)
-            bad_known = all(p["result"] in ("合格", "不合格") for p in products)   # 有待结果/缺项时不断言不合格产品数
-            fields: dict[str, Any] = {
-                INSPECT_F["key"]: {"new": inspection["key"], "basis": basis(stage_path, f"检查键={inspection['key']}")},
-                INSPECT_F["case"]: {"new": case["recordId"], "basis": basis(stage_path, "父案卷为云端主行(项目编号精确匹配)")},
-                INSPECT_F["stage"]: {"new": inspection["stage"], "basis": basis(f"{stage_path}.stage", "清单检查阶段")},
-                INSPECT_F["date"]: {"new": inspection["day"], "basis": basis(f"{stage_path}.inspectionDate", "清单检查日")},
-                INSPECT_F["month"]: {"new": inspection["day"][:7], "basis": basis(f"{stage_path}.inspectionDate", "由清单检查日取年月")},
-                INSPECT_F["count"]: {"new": len(products), "basis": basis(f"{stage_path}.products", "清单产品条数")},
-                INSPECT_F["source"]: {"new": "来源详情", "basis": basis(stage_path, "来源=本案已核验清单(来源详情)")},
-                INSPECT_F["date_source"]: {"new": "监督系统",
-                                           "basis": basis(f"{stage_path}.inspectionDate", "检查日是监督系统事实，由本案已核验清单(本地稳定证据)代表；清单文件与摘要见本依据")},
-                INSPECT_F["in_scope"]: {"new": "是", "basis": basis(f"{stage_path}.inspectionDate", f"检查日 {inspection['day']} 在范围起点 {scope_from} 及以后")},
-            }
-            if result is not None:
-                fields[INSPECT_F["result"]] = {"new": result, "basis": basis(f"{stage_path}.products[*].result", why)}
-            if case["team"] is not None:
-                fields[INSPECT_F["team"]] = {"new": case["team"], "basis": basis("case.brigadeCode", f"清单管辖 {_text(manifest['case'].get('brigadeCode'))} 与云端主行所属大队一致")}
-            if methods and all_methods:
-                label = "抽样送检、现场判定" if len(methods) == 2 else next(iter(methods))
-                fields[INSPECT_F["method"]] = {"new": label, "basis": basis(f"{stage_path}.products[*].method", "按产品检查方式汇总")}
-            if bad_known:
-                bad = sum(1 for p in products if p["result"] == "不合格")
-                fields[INSPECT_F["bad"]] = {"new": bad, "basis": basis(f"{stage_path}.products[*].result", "产品均有明确结果，按不合格产品计数", negative=(bad == 0))}
-            if inspection["tag"] == "recheck":
-                fields[INSPECT_F["round"]] = {"new": 1, "basis": basis(stage_path, "本案第 1 次复查")}
-            for fid in fields:
-                source_counts[fid] = source_counts.get(fid, 0) + 1
-            items.append({"tableId": inspect_table, "stableKey": {"fieldId": INSPECT_F["key"], "value": inspection["key"]}, "fields": fields,
-                          "parent": {"recordId": case["recordId"], "stableKey": {"fieldId": BASIC_FIELDS["key"], "value": project}}})
-            info = {"key": inspection["key"], "date": inspection["day"], "products": len(products), "result": result}
-            for product in products:
+            if not only_missing:
+                methods = {p["method"] for p in products if p["method"]}
+                all_methods = all(p["method"] for p in products)
+                bad_known = all(p["result"] in ("合格", "不合格") for p in products)   # 有待结果/缺项时不断言不合格产品数
+                fields: dict[str, Any] = {
+                    INSPECT_F["key"]: {"new": inspection["key"], "basis": basis(stage_path, f"检查键={inspection['key']}")},
+                    INSPECT_F["case"]: {"new": case["recordId"], "basis": basis(stage_path, "父案卷为云端主行(项目编号精确匹配)")},
+                    INSPECT_F["stage"]: {"new": inspection["stage"], "basis": basis(f"{stage_path}.stage", "清单检查阶段")},
+                    INSPECT_F["date"]: {"new": inspection["day"], "basis": basis(f"{stage_path}.inspectionDate", "清单检查日")},
+                    INSPECT_F["month"]: {"new": inspection["day"][:7], "basis": basis(f"{stage_path}.inspectionDate", "由清单检查日取年月")},
+                    INSPECT_F["count"]: {"new": len(products), "basis": basis(f"{stage_path}.products", "清单产品条数")},
+                    INSPECT_F["source"]: {"new": "监督系统", "basis": basis(stage_path, "来源=本案已核验清单(监督系统事实)")},
+                    INSPECT_F["date_source"]: {"new": "监督系统",
+                                               "basis": basis(f"{stage_path}.inspectionDate", "检查日是监督系统事实，由本案已核验清单(本地稳定证据)代表；清单文件与摘要见本依据")},
+                    INSPECT_F["in_scope"]: {"new": "是", "basis": basis(f"{stage_path}.inspectionDate", f"检查日 {inspection['day']} 在范围起点 {scope_from} 及以后")},
+                }
+                if result is not None:
+                    fields[INSPECT_F["result"]] = {"new": result, "basis": basis(f"{stage_path}.products[*].result", why)}
+                if case["team"] is not None:
+                    fields[INSPECT_F["team"]] = {"new": case["team"], "basis": basis("case.brigadeCode", f"清单管辖 {_text(manifest['case'].get('brigadeCode'))} 与云端主行所属大队一致")}
+                if methods and all_methods:
+                    label = "抽样送检、现场判定" if len(methods) == 2 else next(iter(methods))
+                    fields[INSPECT_F["method"]] = {"new": label, "basis": basis(f"{stage_path}.products[*].method", "按产品检查方式汇总")}
+                if bad_known:
+                    bad = sum(1 for p in products if p["result"] == "不合格")
+                    fields[INSPECT_F["bad"]] = {"new": bad, "basis": basis(f"{stage_path}.products[*].result", "产品均有明确结果，按不合格产品计数", negative=(bad == 0))}
+                if inspection["tag"] == "recheck":
+                    fields[INSPECT_F["round"]] = {"new": 1, "basis": basis(stage_path, "本案第 1 次复查")}
+                for fid in fields:
+                    source_counts[fid] = source_counts.get(fid, 0) + 1
+                items.append({"tableId": inspect_table, "stableKey": {"fieldId": INSPECT_F["key"], "value": inspection["key"]}, "fields": fields,
+                              "parent": {"recordId": case["recordId"], "stableKey": {"fieldId": BASIC_FIELDS["key"], "value": project}}})
+            info = {"key": inspection["key"], "date": inspection["day"], "products": len(products), "result": result, **({"onlyMissingProducts": only_missing} if only_missing else {})}
+            for product in ([p for p in products if p["key"] in only_missing] if only_missing else products):
                 raw, path = product["raw"], f"{stage_path}.products[{product['seq'] - 1}]"
                 pfields: dict[str, Any] = {
                     PRODUCT_F["key"]: {"new": product["key"], "basis": basis(path, f"产品键={product['key']}(按清单产品顺序编号；清单本地引用 {product['clientRef'] or '无'})")},
                     PRODUCT_F["inspection"]: {"new": "recPLACEHOLDER1", "basis": basis(path, f"父检查为同案同阶段 {inspection['key']}")},
                     PRODUCT_F["seq"]: {"new": product["seq"], "basis": basis(path, "清单产品顺序")},
                     PRODUCT_F["name"]: {"new": _text(raw.get("name")), "basis": basis(f"{path}.name", "清单产品名称")},
-                    PRODUCT_F["source"]: {"new": "来源详情", "basis": basis(path, "来源=本案已核验清单(来源详情)")},
+                    PRODUCT_F["source"]: {"new": "监督系统", "basis": basis(path, "来源=本案已核验清单(监督系统事实)")},
                 }
                 optional = (("model", "modelSpec", "规格型号"), ("producer", "nominalProducer", "标称生产者"), ("location", "location", "所在部位"), ("problem", "problemDescription", "问题描述"))
                 for key_name, raw_name, label in optional:
@@ -3092,8 +3149,9 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
                     pfields[PRODUCT_F["cert"]] = {"new": cert, "basis": basis(path, "清单证书编号/核查原文原样保留")}
                 for fid in pfields:
                     source_counts[fid] = source_counts.get(fid, 0) + 1
-                items.append({"tableId": product_table, "stableKey": {"fieldId": PRODUCT_F["key"], "value": product["key"]}, "fields": pfields,
-                              "parent": {"createRef": inspection["key"], "stableKey": {"fieldId": INSPECT_F["key"], "value": inspection["key"]}}})
+                parent = ({"recordId": inspect_keys[inspection["key"]], "stableKey": {"fieldId": INSPECT_F["key"], "value": inspection["key"]}} if only_missing
+                          else {"createRef": inspection["key"], "stableKey": {"fieldId": INSPECT_F["key"], "value": inspection["key"]}})
+                items.append({"tableId": product_table, "stableKey": {"fieldId": PRODUCT_F["key"], "value": product["key"]}, "fields": pfields, "parent": parent})
                 case_info["products"] += 1
                 product_total += 1
                 if inspection["tag"] == "recheck":
@@ -3104,7 +3162,7 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
                          "relation": "proven-by-initialProductRef" if ref and ref in initial_refs else "unproven-no-matching-initialProductRef",
                          "initialProduct": initial_refs.get(ref)})
             case_info["inspections"].append(info)
-            inspection_total += 1
+            inspection_total += 0 if only_missing else 1   # 只补缺产品行时检查行不是新建
         creates_by_case.append((project, items, case_info))
     # 分批：同一案的子行不拆开
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -3137,7 +3195,7 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
     report = {"schema": CHILD_BUILD_SCHEMA, "builtAt": now(), "externalCalls": "read-only fresh scan", "target": dict(target),
               "inputs": {"contractV3": {"path": str(v3_path), "sha256": v3_sha}, "waterline": {"path": str(waterline_path), "sha256": file_sha(waterline_path)}},
               "fresh": {"cloudCaseRows": len(main_rows), "cloudInspectionRows": len(inspect_rows), "cloudProductRows": len(product_rows), "casesAlreadyWithChildren": already},
-              "counts": {"cases": len(built), "inspections": sum(len(i["inspections"]) for p, _, i in creates_by_case if p in built),
+              "counts": {"cases": len(built), "inspections": sum(1 for p, _, i in creates_by_case if p in built for x in i["inspections"] if "onlyMissingProducts" not in x),
                          "products": sum(i["products"] for p, _, i in creates_by_case if p in built), "specs": len(specs), "blocked": len(blocked)},
               "nativeIdentity": NATIVE_ID_NOTE, "fieldWrites": source_counts, "notes": notes,
               "cases": [info for p, _, info in creates_by_case if p in built], "specs": specs, "blockedEntities": blocked,
