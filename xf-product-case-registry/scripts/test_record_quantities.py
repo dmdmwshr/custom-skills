@@ -121,3 +121,14 @@ def test_plan_refuses_a_cloud_row_whose_name_differs_and_is_quiet_once_filled(ro
     assert again["counts"] == {"initialProducts": 2, "toFill": 0, "alreadyFilled": 2, "missing": 0}
     with pytest.raises(ValueError):
         q.build_plan(evidence_path=out, evidence_sha="0" * 64, cloud_rows=done, out_dir=root / "plan3")
+
+
+def test_a_headerless_continuation_table_on_a_later_page_is_read_after_the_header_table():
+    first = [HEADER, _row("手提式干粉灭火器MF/ABCE5", "3", "2")]
+    cont = [_row("手提式二氧化碳灭火器MT/3", "2", "2"), ["备 注", "已拍摄检查视频", "", "", "", "", ""]]
+    rows, why = q.record_rows([first, cont])
+    assert why is None and [r["checked"] for r in rows] == ["2", "2"]
+    # 没有先出现表头的无头表不被当成产品表
+    assert q.record_rows([cont]) == (None, "记录里没有产品表")
+    # 列数不对的无头表不并入（行数因此对不上时整案仍按行数不一致挂起，不猜）
+    assert q.record_rows([first, [["残缺", "行"]]])[0] == [{"nameCell": "手提式干粉灭火器MF/ABCE5", "base": "3", "checked": "2"}]

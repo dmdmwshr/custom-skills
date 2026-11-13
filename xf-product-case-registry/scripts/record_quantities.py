@@ -66,13 +66,19 @@ def pdf_tables(path: Path) -> list[list[list[str | None]]]:
 def record_rows(tables: list[list[list[str | None]]]) -> tuple[list[dict[str, Any]] | None, str | None]:
     """产品表各行的名称格、检查基数、检查数量；表头不是预期七列时拒绝。"""
     rows: list[dict[str, Any]] = []
+    seen_header = False
     for table in tables:
         header = [norm(cell) for cell in (table[0] if table else [])]
-        if not header or "产品名称" not in header[0]:
+        if header and "产品名称" in header[0]:
+            if len(header) < 7 or "基数" not in header[3] or "检查数量" not in header[4]:
+                return None, "表头不是预期列：" + "|".join(header)
+            seen_header = True
+            body = table[1:]
+        elif seen_header and table and all(len(row or []) >= 7 for row in table):
+            body = table   # 跨页续表：没有表头，列数与产品表一致，只在已见过表头之后才接
+        else:
             continue
-        if len(header) < 7 or "基数" not in header[3] or "检查数量" not in header[4]:
-            return None, "表头不是预期列：" + "|".join(header)
-        for row in table[1:]:
+        for row in body:
             if not row or norm(row[0]).startswith("备注"):
                 continue
             if len(row) < 7 or not norm(row[0]):
