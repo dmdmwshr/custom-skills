@@ -2812,6 +2812,7 @@ def build_parser() -> argparse.ArgumentParser:
                            help="更正模式：云端已有明确值而可信清单证据给出另一个明确值时，带证据和精确旧值更正(管理员误改、早期写错)；默认只列差异")
     calibrate.add_argument("--max-corrections", type=int, default=25, help="单次更正处数上限，超过整批不写、全部列出(默认 25)")
     calibrate.add_argument("--form-evidence", help="RecordFormEvidenceV1：record_forms.py scan 产出的检查形式证据(初查电子记录勾选框)；省略则不处理检查形式")
+    calibrate.add_argument("--visual-evidence", help="VisualDetailEvidenceV1：手动交件没有结构化详情时，逐图人工视觉确认的单位类别(带截图路径与摘要)；只补云端空格，不更正已有值")
     calibrate.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     calibrate.set_defaults(func=feishu_calibrate_plan_command)
 
@@ -3219,7 +3220,8 @@ def feishu_calibrate_plan_command(args: argparse.Namespace) -> None:
         only_projects=frozenset(args.project) if args.project else None,
         resolutions_path=Path(args.resolutions) if args.resolutions else None,
         correct_facts=args.correct_facts, max_corrections=args.max_corrections,
-        form_evidence_path=Path(args.form_evidence) if args.form_evidence else None))
+        form_evidence_path=Path(args.form_evidence) if args.form_evidence else None,
+        visual_evidence_path=Path(args.visual_evidence) if args.visual_evidence else None))
     print(json.dumps({k: v for k, v in report.items() if k not in ("writes", "differences", "resolved", "casesLeftAlone")}, ensure_ascii=False, indent=2))
 
 

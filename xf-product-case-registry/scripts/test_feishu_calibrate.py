@@ -312,3 +312,28 @@ def test_unit_category_that_contradicts_the_record_key_unit_box_is_listed_and_ne
     transport.rows[(CASE, "recEXIST000001")][M["unit"]] = None
     _, writes, _ = _plan(tmp_path, contract, water, transport, form_evidence_path=evidence)
     assert writes[(CP, "单位类别")] == (None, "其他单位")
+
+
+def test_visual_detail_evidence_only_fills_a_blank_unit_category_and_never_corrects_or_overrides_the_record_box(tmp_path, monkeypatch):
+    contract, water, transport = _setup_unit_form(tmp_path, initial=ONE_OK)
+    monkeypatch.setattr(sync, "saved_detail_evidence", lambda root, project, case: None)      # 手动交件：没有结构化详情
+    shot = water.parent / "案卷详情.png"
+    shot.write_bytes(b"png bytes")
+    def evidence(unit="重点单位", digest=None):
+        path = tmp_path / "visual.json"
+        path.write_text(json.dumps({"schemaVersion": "VisualDetailEvidenceV1", "cases": {CP: {"unitCategory": unit, "readAt": "2026-11-14T00:30:00+08:00",
+                        "screenshot": {"path": "案卷详情.png", "sha256": digest or sha(shot)}}}}, ensure_ascii=False), encoding="utf-8")
+        return path
+    _, writes, diffs = _plan(tmp_path, contract, water, transport, visual_evidence_path=evidence())
+    assert writes[(CP, "单位类别")] == (None, "重点单位") and not diffs
+    _, writes, diffs = _plan(tmp_path, contract, water, transport, visual_evidence_path=evidence(digest="0" * 64))   # 截图改过：不写
+    assert (CP, "单位类别") not in writes and diffs[(CP, "单位类别")]["kind"] == "单位类别证据文件缺失或摘要不符"
+    transport.rows[(CASE, "recEXIST000001")][M["unit"]] = ["其他单位"]                      # 云端已有不同值：只列差异，更正模式也不改
+    _, writes, diffs = _plan(tmp_path, contract, water, transport, visual_evidence_path=evidence(), correct_facts=True)
+    assert (CP, "单位类别") not in writes and diffs[(CP, "单位类别")]["kind"] == "单位类别与详情截图视觉确认不同"
+    transport.rows[(CASE, "recEXIST000001")][M["unit"]] = None
+    form = _form_evidence(tmp_path, water)
+    body = json.loads(form.read_text(encoding="utf-8")); body["cases"][CP]["keyUnit"] = False   # 记录勾“非重点”，视觉写“重点”：矛盾不写
+    form.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    _, writes, diffs = _plan(tmp_path, contract, water, transport, visual_evidence_path=evidence(), form_evidence_path=form)
+    assert (CP, "单位类别") not in writes and diffs[(CP, "单位类别")]["kind"] == "单位类别：来源详情与初查电子记录勾选互相矛盾"

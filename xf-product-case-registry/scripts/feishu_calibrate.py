@@ -205,7 +205,7 @@ def _recheck_state(layout: Any, project: str, record: dict[str, Any], today: dat
 def build_calibration_plan(*, waterline_path: Path, contract_path: Path, contract_sha: str, target: dict[str, str], transport: Any, out_dir: Path,
                            ledger_dir: Path | None, scope_from: str = "2026-01-01", only_projects: frozenset[str] | None = None,
                            today: date | None = None, isolated_test_ledger: bool = False, resolutions_path: Path | None = None,
-                           correct_facts: bool = False, max_corrections: int = 25, form_evidence_path: Path | None = None) -> dict[str, Any]:
+                           correct_facts: bool = False, max_corrections: int = 25, form_evidence_path: Path | None = None, visual_evidence_path: Path | None = None) -> dict[str, Any]:
     """读本地已核证据与云端三表当前值，写出字段计划(calibrate-plan.json)和校准报告(calibrate-report.json)。只读云端。"""
     sync._require(ledger_dir is not None, "校准必须沿唯一写入账本(--ledger-dir)：缺账会跳过历史封锁与放行核查，拒绝")
     ledger = sync.Ledger(ledger_dir, isolated_test=isolated_test_ledger)
@@ -238,6 +238,11 @@ def build_calibration_plan(*, waterline_path: Path, contract_path: Path, contrac
         loaded = json.loads(form_evidence_path.read_text(encoding="utf-8"))
         sync._require(loaded.get("schemaVersion") == "RecordFormEvidenceV1", "检查形式证据版本不支持")
         form_evidence = loaded.get("cases") or {}
+    visual_evidence: dict[str, Any] = {}
+    if visual_evidence_path is not None:
+        loaded = json.loads(visual_evidence_path.read_text(encoding="utf-8"))
+        sync._require(loaded.get("schemaVersion") == "VisualDetailEvidenceV1", "视觉确认证据版本不支持")
+        visual_evidence = loaded.get("cases") or {}
     if resolutions_path is not None:
         plan.load_resolutions(resolutions_path)
     layout = None
@@ -322,18 +327,32 @@ def build_calibration_plan(*, waterline_path: Path, contract_path: Path, contrac
         # ---------------- 单位类别(已保存的可信来源详情)与检查形式(初查电子记录的勾选框)：补空；云端已有不同值时走更正/差异
         detail = sync.saved_detail_evidence(root, project, record)
         unit_local = sync._text((detail or {}).get("fields", {}).get("单位类别")) if detail else ""
+        visual = visual_evidence.get(project) or {}
+        visual_used = False
+        if not unit_local and sync._text(visual.get("unitCategory")):
+            unit_local, visual_used = sync._text(visual["unitCategory"]), True   # 手动交件没有结构化详情：改用逐图人工视觉确认(只补空)
         if unit_local:
             unit_cloud = plan.value("案卷主表", row, M["unit"])
-            unit_ev = plan.evidence(detail["path"], detail["sha256"])
+            if visual_used:
+                shot = visual.get("screenshot") or {}
+                unit_ev = plan.evidence(sync._text(shot.get("path")), sync._text(shot.get("sha256")))
+            else:
+                unit_ev = plan.evidence(detail["path"], detail["sha256"])
             key_unit = (form_evidence.get(project) or {}).get("keyUnit")
-            if key_unit is not None and unit_local in UNIT_OPTIONS and (unit_local == "重点单位") != key_unit:
+            if unit_ev is None:
+                plan.diff(project, "案卷主表", project, M["unit"], unit_cloud, unit_local, "单位类别证据文件缺失或摘要不符", "不写；重新核证据")
+            elif key_unit is not None and unit_local in UNIT_OPTIONS and (unit_local == "重点单位") != key_unit:
                 plan.diff(project, "案卷主表", project, M["unit"], unit_cloud, {"来源详情": unit_local, "初查电子记录勾选": "重点单位" if key_unit else "非重点单位"},
                           "单位类别：来源详情与初查电子记录勾选互相矛盾", "不写不更正，保留双方；交核对")
             elif unit_local not in UNIT_OPTIONS:
                 plan.diff(project, "案卷主表", project, M["unit"], unit_cloud, unit_local, "来源详情的单位类别不在合同选项里", "不写；交核对")
             elif unit_cloud is None:
                 plan.write(project, "案卷主表", record_id, M["key"], project, M["unit"], None, unit_local, [manifest_ev, unit_ev],
-                           f"{detail['path']}#fields.单位类别 | 已保存来源详情 | observedAt={detail['observedAt']} | projectNo={project}", verified_at)
+                           (f"{shot.get('path')} | 详情截图逐图人工视觉确认(单位类别={unit_local}) | readAt={sync._text(visual.get('readAt'))} | projectNo={project}" if visual_used else
+                            f"{detail['path']}#fields.单位类别 | 已保存来源详情 | observedAt={detail['observedAt']} | projectNo={project}"), verified_at)
+            elif visual_used:
+                if unit_cloud != unit_local:
+                    plan.diff(project, "案卷主表", project, M["unit"], unit_cloud, unit_local, "单位类别与详情截图视觉确认不同", "不写不更正；视觉确认只补空，交核对")
             elif unit_cloud != unit_local:
                 if not corr("案卷主表", record_id, M["key"], project, M["unit"], unit_cloud, unit_local, "单位类别与来源详情不同",
                             f"{detail['path']}#fields.单位类别 | 已保存来源详情 | observedAt={detail['observedAt']}", extra=[unit_ev]):
