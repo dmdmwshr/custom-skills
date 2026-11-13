@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,8 @@ class Cloud:
         self.rows = copy.deepcopy(rows)   # (table, record) -> {fid: cell}
         self.writes: list[tuple[str, str, dict]] = []
         self.fail_at: int | None = None
+        self.history: dict[str, list[dict]] = {}
+        self.history_fails = False
 
     def list_rows(self, base, table, field_ids=None):
         return {r: {f: row.get(f) for f in (field_ids or row)} for (t, r), row in self.rows.items() if t == table}
@@ -66,7 +69,19 @@ class Cloud:
             raise sync.RuntimeSyncError("UNKNOWN: 模拟限额/断线")
         self.writes.append((table, record_id, copy.deepcopy(fields)))
         self.rows[(table, record_id)].update(fields)
+        self.person(record_id, *fields, operator="管理员", after="工具写入", at=time.time())
         return {"data": {"record": {"record_id": record_id}}}
+
+    def person(self, record_id, *field_ids, operator, after, at=1.0):
+        """One service-side revision: who changed which cells, as ``+record-history-list`` reports it."""
+        revisions = self.history.setdefault(record_id, [{"rev": 1, "createTime": 0.0, "operator": "管理员", "fieldIds": [KEY], "changes": []}])
+        revisions.insert(0, {"rev": len(revisions) + 1, "createTime": at, "operator": operator, "fieldIds": sorted(field_ids),
+                             "changes": [{"fieldId": f, "before": "", "after": after} for f in field_ids]})
+
+    def get_record_history(self, base, table, record_id):
+        if self.history_fails:
+            raise sync.RuntimeSyncError("历史接口不可用")
+        return self.history.get(record_id, [{"rev": 1, "createTime": 0.0, "operator": "管理员", "fieldIds": [KEY], "changes": []}])
 
 
 def _case_rows():
@@ -112,7 +127,7 @@ def test_label_default_fills_only_empty_and_placeholder_cells_and_keeps_explicit
     report = plans.build_label_initial_specs(
         contract_path=contract, contract_sha=_sha(contract), table_name="案卷主表", target={"baseToken": BASE, "profile": "offline", "identity": "user"},
         transport=cloud, out_dir=tmp_path / "out", log_root=tmp_path / "log", ledger_dir=ledger, source_ref="规则", isolated_test_ledger=True)
-    assert report["status"] == "OK" and report["counts"] == {"rows": 3, "explicit": 3, "empty": 2, "placeholder": 1, "recordsToWrite": 2, "held": 0}
+    assert report["status"] == "OK" and report["counts"] == {"rows": 3, "explicit": 3, "empty": 2, "placeholder": 1, "protected": 0, "recordsToWrite": 2, "held": 0}
     saved = json.loads(Path(report["previousValues"]["path"]).read_text(encoding="utf-8"))["values"]
     assert {(v["stableKey"], v["field"], v["old"]) for v in saved} == {("P-1", "是否网售", None), ("P-1", "是否加油加气站", "待核实"), ("P-3", "是否网售", None)}
     assert not cloud.writes                                                          # 规划只读
@@ -257,3 +272,59 @@ def test_evidence_sets_a_label_the_assistant_defaulted_but_only_reports_against_
     spec = _spec(tmp_path, contract, {NET: {"new": "是", "expectedOld": "否", "basis": _basis("label-evidence")}}, record="recA00000000002", key=(KEY, "P-2"))
     with pytest.raises(sync.SyncError, match="evidenceSha256"):
         _plan(spec, cloud)
+
+
+def _initial(tmp_path, contract, cloud, ledger, name="out"):
+    return plans.build_label_initial_specs(
+        contract_path=contract, contract_sha=_sha(contract), table_name="案卷主表", target={"baseToken": BASE, "profile": "offline", "identity": "user"},
+        transport=cloud, out_dir=tmp_path / name, log_root=tmp_path / (name + "-log"), ledger_dir=ledger, source_ref="规则", isolated_test_ledger=True)
+
+
+def test_a_cell_someone_filled_and_set_back_is_kept_as_a_persons_value(tmp_path, contract):
+    body = json.loads(contract.read_text(encoding="utf-8"))
+    body["assistantOperators"] = ["管理员"]
+    contract.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    cloud, ledger = Cloud(_case_rows()), _ledger(tmp_path)
+    cloud.person("recA00000000001", NET, operator="梁溪成员", after="是")                # 大队填“是”
+    cloud.person("recA00000000001", NET, operator="梁溪成员", after="", at=2.0)          # 又清空：现值与没人动过一样
+    cloud.person("recA00000000001", GAS, operator="管理员", after="待核实")              # 旧迁移写的占位，不是人工答案
+    cloud.person("recA00000000003", NET, operator="管理员", after="是")                  # 管理员手工保存过明确值
+    cloud.person("recA00000000003", NET, operator="管理员", after="", at=2.0)
+    report = _initial(tmp_path, contract, cloud, ledger)
+    assert report["counts"]["protected"] == 2 and report["counts"]["recordsToWrite"] == 1 and report["status"] == "PARTIAL"
+    assert {(h["stableKey"], h["field"], h["history"]) for h in report["held"]} == {("P-1", "是否网售", "person"), ("P-3", "是否网售", "person")}
+    _execute(report["specs"][0]["path"], cloud, ledger)
+    assert cloud.rows[(CASE, "recA00000000001")][NET] is None and cloud.rows[(CASE, "recA00000000001")][GAS] == ["否"]
+    assert cloud.rows[(CASE, "recA00000000003")][NET] == []
+
+
+def test_unreadable_history_is_reported_as_uncertain_and_nothing_is_written(tmp_path, contract):
+    cloud, ledger = Cloud(_case_rows()), _ledger(tmp_path)
+    cloud.history_fails = True
+    report = _initial(tmp_path, contract, cloud, ledger)
+    assert report["counts"]["recordsToWrite"] == 0 and not report["specs"]
+    assert {h["history"] for h in report["held"]} == {"unknown"} and all("不确定" in h["problem"] for h in report["held"])
+
+
+def test_without_a_named_tool_account_every_unledgered_revision_counts_as_a_person(tmp_path, contract):
+    cloud, ledger = Cloud(_case_rows()), _ledger(tmp_path)
+    cloud.person("recA00000000001", GAS, operator="管理员", after="待核实")
+    report = _initial(tmp_path, contract, cloud, ledger)
+    assert [(h["stableKey"], h["field"]) for h in report["held"]] == [("P-1", "是否加油加气站")]
+
+
+def test_evidence_does_not_replace_a_default_that_a_person_changed_and_changed_back(tmp_path, contract):
+    cloud, ledger = Cloud(_case_rows()), _ledger(tmp_path)
+    target = {"baseToken": BASE, "profile": "offline", "identity": "user"}
+    first = _initial(tmp_path, contract, cloud, ledger, "o1")
+    _execute(first["specs"][0]["path"], cloud, ledger)                               # P-1、P-3 网售 = 否（工具写入，在账本窗口内）
+    cloud.person("recA00000000001", NET, operator="梁溪成员", after="是", at=time.time() + 600)
+    cloud.person("recA00000000001", NET, operator="梁溪成员", after="否", at=time.time() + 700)   # 改回“否”
+    evidence = {"new": "是", "evidenceRef": "网售清单 第3行", "evidenceSha256": "a" * 64}
+    plan = tmp_path / "evidence.json"
+    plan.write_text(json.dumps({"schemaVersion": "FeishuLabelEvidencePlanV1", "sourceRef": "网售清单", "table": "案卷主表", "entries": [
+        {"stableKey": "P-1", "fields": {"是否网售": evidence}}, {"stableKey": "P-3", "fields": {"是否网售": evidence}}]}, ensure_ascii=False), encoding="utf-8")
+    report = plans.build_label_evidence_specs(plan_path=plan, plan_sha=_sha(plan), contract_path=contract, contract_sha=_sha(contract), target=target,
+                                              transport=cloud, out_dir=tmp_path / "o2", log_root=tmp_path / "l2", ledger_dir=ledger, isolated_test_ledger=True)
+    assert report["counts"]["recordsToWrite"] == 1 and report["counts"]["differences"] == 1
+    assert report["differences"][0]["stableKey"] == "P-1" and report["differences"][0]["history"] == "person"

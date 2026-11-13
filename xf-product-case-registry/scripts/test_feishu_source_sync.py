@@ -2949,12 +2949,14 @@ def test_child_build_without_any_product_result_uses_the_proven_classification_a
                                               classification={"initialResult": "UNQUALIFIED", "evidencePath": "证据.json", "evidenceSha256": "sha256:" + sha(evidence)})
     spec = json.loads(Path(_child_build(tmp_path, contract, water, transport)["specs"][0]["path"]).read_text(encoding="utf-8"))
     insp, product = spec["creates"]
-    assert insp["fields"][sync.INSPECT_F["result"]]["new"] == "不合格" and sync.INSPECT_F["method"] not in insp["fields"] and sync.INSPECT_F["bad"] not in insp["fields"]
-    assert sync.PRODUCT_F["result"] not in product["fields"] and sync.PRODUCT_F["method"] not in product["fields"]
+    assert insp["fields"][sync.INSPECT_F["result"]]["new"] == "不合格" and sync.INSPECT_F["method"] not in insp["fields"]
+    # 案卷结论不合格且只有一个产品：该产品即不合格(唯一确定)，不合格产品数=1；方式仍未知不写
+    assert insp["fields"][sync.INSPECT_F["bad"]]["new"] == 1
+    assert product["fields"][sync.PRODUCT_F["result"]]["new"] == "不合格" and sync.PRODUCT_F["method"] not in product["fields"]
     assert product["fields"][sync.PRODUCT_F["cert"]]["new"].startswith("市场准入检查不合格")
 
 
-def test_child_build_recheck_gets_round_one_pdf_date_source_and_a_per_product_relation_fact(tmp_path):
+def test_child_build_recheck_gets_round_one_system_date_source_and_a_per_product_relation_fact(tmp_path):
     recheck = {"clientRef": "rc", "stage": "RECHECK", "inspectionDate": "2026-07-20",
                "products": [{"clientRef": "r1", "name": "灭火器", "method": "ONSITE", "result": "QUALIFIED", "initialProductRef": "p1"},
                             {"clientRef": "r2", "name": "喷头", "method": "ONSITE", "result": "QUALIFIED"}]}
@@ -2964,7 +2966,7 @@ def test_child_build_recheck_gets_round_one_pdf_date_source_and_a_per_product_re
     spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
     by_key = {c["stableKey"]["value"]: c for c in spec["creates"]}
     rc = by_key[f"{CP}|复查"]["fields"]
-    assert rc[sync.INSPECT_F["round"]]["new"] == 1 and rc[sync.INSPECT_F["date_source"]]["new"] == "来源复查记录PDF" and rc[sync.INSPECT_F["date"]]["new"] == "2026-07-20"
+    assert rc[sync.INSPECT_F["round"]]["new"] == 1 and rc[sync.INSPECT_F["date_source"]]["new"] == "监督系统" and rc[sync.INSPECT_F["date"]]["new"] == "2026-07-20"
     assert f"{CP}|复查|2" in by_key and by_key[f"{CP}|复查|1"]["parent"]["createRef"] == f"{CP}|复查"
     relations = report["cases"][0]["recheckRelations"]
     assert [(r["recheckProduct"], r["relation"]) for r in relations] == [(f"{CP}|复查|1", "proven-by-initialProductRef"), (f"{CP}|复查|2", "unproven-no-matching-initialProductRef")]
@@ -2985,6 +2987,7 @@ def test_child_build_holds_only_the_case_whose_evidence_does_not_hold(tmp_path, 
 def test_child_build_leaves_cases_with_any_existing_child_and_unaccepted_release_targets_alone(tmp_path):
     contract, water, transport = _child_setup(tmp_path)
     transport.rows[(CHECK, "recCHK00000001")] = {sync.INSPECT_F["key"]: f"{CP}|初查"}
+    transport.rows[(PRODUCT, "recPRD00000001")] = {sync.PRODUCT_F["key"]: f"{CP}|初查|1"}
     report = _child_build(tmp_path, contract, water, transport)
     assert report["status"] == "OK" and report["counts"]["cases"] == 0 and report["fresh"]["casesAlreadyWithChildren"] == 1 and not report["specs"]
     sub = tmp_path / "held"
@@ -2995,6 +2998,55 @@ def test_child_build_leaves_cases_with_any_existing_child_and_unaccepted_release
     sync.Ledger(ledger, isolated_test=True).append(sync.Ledger.target_key(BASE, CASE, "create:" + CP), {"event": "human_release", "intentId": "i-old", "operator": "助手(历史)", "reason": "r"})
     held = _child_build(sub, contract, water, transport, ledger_dir=ledger)
     assert held["status"] == "PARTIAL" and "human_release" in json.dumps(held["blockedEntities"], ensure_ascii=False) and not held["specs"]
+
+
+def test_child_build_adds_only_the_inspection_the_cloud_lacks_and_holds_unpaired_rows(tmp_path):
+    recheck = {"clientRef": "rc", "stage": "RECHECK", "inspectionDate": "2026-07-20",
+               "products": [{"clientRef": "r1", "name": "洒水喷头", "method": "ONSITE", "result": "QUALIFIED", "initialProductRef": "p2"}]}
+    contract, water, transport = _child_setup(tmp_path, recheck=recheck)
+    # 初查及其产品早已在云端(可能来自旧载体，产品行数与清单不同也不动)；复查后来才归档 -> 只补复查这一次检查
+    transport.rows[(CHECK, "recCHK00000001")] = {sync.INSPECT_F["key"]: f"{CP}|初查"}
+    transport.rows[(PRODUCT, "recPRD00000001")] = {sync.PRODUCT_F["key"]: f"{CP}|初查|1"}
+    report = _child_build(tmp_path, contract, water, transport)
+    assert report["status"] == "OK" and report["counts"] == {"cases": 1, "inspections": 1, "products": 1, "specs": 1, "blocked": 0}
+    spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
+    assert [c["stableKey"]["value"] for c in spec["creates"]] == [f"{CP}|复查", f"{CP}|复查|1"]
+    assert spec["creates"][1]["parent"]["createRef"] == f"{CP}|复查"
+    # 只有检查行、没有产品行(或反过来)：不自动补，列出交核对
+    sub = tmp_path / "unpaired"
+    sub.mkdir()
+    contract, water, transport = _child_setup(sub)
+    transport.rows[(CHECK, "recCHK00000001")] = {sync.INSPECT_F["key"]: f"{CP}|初查"}
+    held = _child_build(sub, contract, water, transport)
+    assert held["status"] == "PARTIAL" and not held["specs"] and "不成套" in json.dumps(held["blockedEntities"], ensure_ascii=False)
+
+
+def test_child_build_initial_result_follows_the_one_case_level_rule(tmp_path):
+    evidence = tmp_path / "证据.json"
+    evidence.write_text("{}", encoding="utf-8")
+    cls = {"evidencePath": "证据.json", "evidenceSha256": "sha256:" + sha(evidence)}
+    # 清单产品待结果、案卷分类已有终局合格：检查行与每个产品行都是合格(案卷合格即每项合格)
+    pending = [{"name": "灭火器", "method": "SAMPLING", "result": "PENDING"}, {"name": "喷头", "method": "SAMPLING", "result": "PENDING"}]
+    contract, water, transport = _child_setup(tmp_path, initial=pending, classification={**cls, "initialResult": "QUALIFIED"})
+    insp, first, second = json.loads(Path(_child_build(tmp_path, contract, water, transport)["specs"][0]["path"]).read_text(encoding="utf-8"))["creates"]
+    assert insp["fields"][sync.INSPECT_F["result"]]["new"] == "合格" and insp["fields"][sync.INSPECT_F["bad"]]["new"] == 0
+    assert first["fields"][sync.PRODUCT_F["result"]]["new"] == second["fields"][sync.PRODUCT_F["result"]]["new"] == "合格"
+    # 多产品、案卷不合格：不推断到具体产品，产品保持待核实，不断言不合格产品数
+    sub = tmp_path / "multi"
+    sub.mkdir()
+    (sub / "证据.json").write_text("{}", encoding="utf-8")
+    contract, water, transport = _child_setup(sub, initial=pending, classification={**cls, "initialResult": "UNQUALIFIED"})
+    insp, first, _ = json.loads(Path(_child_build(sub, contract, water, transport)["specs"][0]["path"]).read_text(encoding="utf-8"))["creates"]
+    assert insp["fields"][sync.INSPECT_F["result"]]["new"] == "不合格" and sync.INSPECT_F["bad"] not in insp["fields"]
+    assert first["fields"][sync.PRODUCT_F["result"]]["new"] == "待核实"
+    # 案卷侧终局与清单逐项终局相反：检查结果不写(双方原值保留)，报告列为冲突
+    sub = tmp_path / "conflict"
+    sub.mkdir()
+    (sub / "证据.json").write_text("{}", encoding="utf-8")
+    contract, water, transport = _child_setup(sub, initial=[{"name": "灭火器", "method": "ONSITE", "result": "QUALIFIED"}], classification={**cls, "initialResult": "UNQUALIFIED"})
+    report = _child_build(sub, contract, water, transport)
+    insp = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))["creates"][0]
+    assert sync.INSPECT_F["result"] not in insp["fields"] and "冲突" in json.dumps(report["notes"], ensure_ascii=False)
 
 
 def test_child_specs_validate_and_execute_with_parent_links_and_the_parent_release_gate(tmp_path):

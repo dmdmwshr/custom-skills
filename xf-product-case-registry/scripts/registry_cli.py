@@ -2797,6 +2797,19 @@ def build_parser() -> argparse.ArgumentParser:
     quantity.add_argument("--identity", default="user", choices=["user", "bot"])
     quantity.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     quantity.set_defaults(func=feishu_quantity_plan_command)
+    calibrate = sub.add_parser(
+        "feishu-calibrate-plan",
+        help="监督事实校准：本地已核证据(代表监督系统)对照三表 fresh 行，给可补空/可推进的格生成字段计划，云端与证据不同的列为待核对差异；"
+             "只读云，不写；计划再交 feishu-field-plan-build",
+    )
+    for flag in ("--waterline", "--contract", "--contract-sha", "--base-token", "--profile", "--out-dir", "--ledger-dir"):
+        calibrate.add_argument(flag, required=True)
+    calibrate.add_argument("--identity", default="user", choices=["user", "bot"])
+    calibrate.add_argument("--scope-from", default="2026-01-01")
+    calibrate.add_argument("--project", action="append", help="只核这些项目编号(可重复)；省略为全部")
+    calibrate.add_argument("--resolutions", help="校准裁决文件(CalibrationResolutionsV1)：已按原包文书核过的差异逐条采用哪一方；省略则差异只报告")
+    calibrate.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    calibrate.set_defaults(func=feishu_calibrate_plan_command)
 
     local_verify = sub.add_parser(
         "local-verify",
@@ -3191,6 +3204,17 @@ def feishu_quantity_plan_command(args: argparse.Namespace) -> None:
         evidence_path=Path(args.evidence), evidence_sha=args.evidence_sha,
         cloud_rows=transport.list_rows(args.base_token, args.table_id, fields), out_dir=Path(args.out_dir)))
     print(json.dumps({k: v for k, v in report.items() if k != "missing"}, ensure_ascii=False, indent=2))
+
+
+def feishu_calibrate_plan_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(f"{__package__}.feishu_calibrate" if __package__ else "feishu_calibrate")
+    target = {"baseToken": args.base_token, "profile": args.profile, "identity": args.identity}
+    report = _feishu_read(args, "监督事实校准计划", lambda sync, transport: module.build_calibration_plan(
+        waterline_path=Path(args.waterline), contract_path=Path(args.contract), contract_sha=args.contract_sha, target=target, transport=transport,
+        out_dir=Path(args.out_dir), ledger_dir=Path(args.ledger_dir), scope_from=args.scope_from,
+        only_projects=frozenset(args.project) if args.project else None,
+        resolutions_path=Path(args.resolutions) if args.resolutions else None))
+    print(json.dumps({k: v for k, v in report.items() if k not in ("writes", "differences", "resolved", "casesLeftAlone")}, ensure_ascii=False, indent=2))
 
 
 def _feishu_plan_build(args: argparse.Namespace, label: str, build) -> None:

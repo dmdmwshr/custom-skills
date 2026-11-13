@@ -113,7 +113,8 @@ def build_label_initial_specs(*, contract_path: Path, contract_sha: str, table_n
     updates: list[dict[str, Any]] = []
     previous: list[dict[str, Any]] = []
     held: list[dict[str, Any]] = []
-    counts = {"rows": len(rows), "explicit": 0, "empty": 0, "placeholder": 0}
+    counts = {"rows": len(rows), "explicit": 0, "empty": 0, "placeholder": 0, "protected": 0}
+    operators = _assistant_operators(contract)
     for record_id, row in sorted(rows.items()):
         key = row.get(key_field)
         if not isinstance(key, str) or not key or (only_keys is not None and key not in only_keys):
@@ -128,6 +129,12 @@ def build_label_initial_specs(*, contract_path: Path, contract_sha: str, table_n
                 continue
             if old not in field_policy.LABEL_REPLACEABLE:
                 held.append({"recordId": record_id, "stableKey": key, "field": meta["name"], "current": old, "problem": "不是空白/待核实/是/否，保留原值"})
+                continue
+            state, why = person_history(transport, ledger, target["baseToken"], table_id, record_id, key, fid, operators)
+            if state != HISTORY_TOOL:
+                counts["protected"] += 1
+                held.append({"recordId": record_id, "stableKey": key, "field": meta["name"], "current": old, "history": state,
+                             "problem": ("有人填过又改回，按人工值保留：" if state == HISTORY_PERSON else "不确定，先保留：") + why})
                 continue
             counts["empty" if old is None else "placeholder"] += 1
             previous.append({"recordId": record_id, "stableKey": key, "fieldId": fid, "field": meta["name"], "old": old})
@@ -289,6 +296,61 @@ def last_assistant_value(ledger: sync.Ledger, key: str, field_id: str) -> Any:
     return last
 
 
+HISTORY_TOOL, HISTORY_PERSON, HISTORY_UNKNOWN = "tool-only", "person", "unknown"
+
+
+def _blank_answer(value: Any) -> bool:
+    text = "" if value is None else str(value)
+    return text in ("", "[]") or "待核实" in text
+
+
+def person_history(transport: Any, ledger: sync.Ledger, base: str, table_id: str, record_id: str, stable_key: str, field_id: str,
+                   assistant_operators: frozenset[str] | None) -> tuple[str, str]:
+    """Whether a person ever answered this cell, from the service-side revisions: (state, reason).
+
+    A cell that a person filled and then set back looks exactly like one nobody touched, so the current
+    value alone cannot tell. A revision of the field is the tool's own when it falls inside the window of
+    a ledger intent that names the field. Any other revision is a person's when its operator is not one
+    of the accounts the tools write as, or when it saved an explicit answer. Revisions that cannot be
+    read, or that do not say which field changed, leave the answer unknown and the cell protected.
+    """
+    try:
+        history = transport.get_record_history(base, table_id, record_id)
+    except (sync.RuntimeSyncError, AttributeError) as error:
+        return HISTORY_UNKNOWN, f"修订历史读不到（{error}），不能确定有没有人工填过"
+    if not history:
+        return HISTORY_UNKNOWN, "修订历史为空，不能确定有没有人工填过"
+    windows: list[tuple[float, float]] = []
+    for key in (sync.Ledger.target_key(base, table_id, record_id), sync.Ledger.target_key(base, table_id, "create:" + stable_key)):
+        opened: dict[str, float] = {}
+        for event in ledger.events(key):
+            at = sync._iso_epoch(event.get("at"))
+            if at is None:
+                continue
+            if event["event"] == "intent" and field_id in (event.get("fields") or {}):
+                opened[event["intentId"]] = at
+                windows.append((at - sync.HISTORY_CREATE_SLACK_BEFORE, at + sync.HISTORY_CREATE_SLACK_AFTER))
+            elif event.get("intentId") in opened:
+                windows.append((opened[event["intentId"]] - sync.HISTORY_CREATE_SLACK_BEFORE, at + sync.HISTORY_CREATE_SLACK_AFTER))
+    for revision in history:
+        if not revision["fieldIds"]:
+            return HISTORY_UNKNOWN, f"修订 {revision['rev']} 没有列出改了哪些字段，不能确定有没有人工填过"
+        change = next((c for c in revision.get("changes") or [] if c["fieldId"] == field_id), None)
+        if field_id not in revision["fieldIds"] or any(low <= revision["createTime"] <= high for low, high in windows):
+            continue
+        operator = sync._text(revision.get("operator"))
+        if assistant_operators is None or operator not in assistant_operators:
+            return HISTORY_PERSON, f"修订 {revision['rev']} 由 {operator or '未知操作者'} 改过此项"
+        if change is None or not _blank_answer(change.get("after")):
+            return HISTORY_PERSON, f"修订 {revision['rev']} 在工具写入记录之外保存过明确的值"
+    return HISTORY_TOOL, ""
+
+
+def _assistant_operators(contract: dict[str, Any]) -> frozenset[str] | None:
+    names = contract.get("assistantOperators")
+    return frozenset(str(n) for n in names) if isinstance(names, list) and names else None
+
+
 def build_label_evidence_specs(*, plan_path: Path, plan_sha: str, contract_path: Path, contract_sha: str, target: dict[str, str],
                                transport: Any, out_dir: Path, log_root: Path, ledger_dir: Path | None,
                                batch_size: int = sync.HARD_CAP_RECORDS, isolated_test_ledger: bool = False) -> dict[str, Any]:
@@ -314,6 +376,7 @@ def build_label_evidence_specs(*, plan_path: Path, plan_sha: str, contract_path:
     by_name = {meta["name"]: fid for fid, meta in index[table_id].items()}
     labels = [fid for fid, meta in index[table_id].items() if meta["class"] == field_policy.CLASS_LABEL]
     ledger = _ledger(ledger_dir, isolated_test_ledger)
+    operators = _assistant_operators(contract)
     rows = transport.list_rows(target["baseToken"], table_id, [key_field, *labels])
     by_key: dict[str, list[str]] = {}
     for record_id, row in rows.items():
@@ -362,7 +425,12 @@ def build_label_evidence_specs(*, plan_path: Path, plan_sha: str, contract_path:
             elif current == item["new"]:
                 unchanged += 1
             elif current in field_policy.LABEL_REPLACEABLE or last_assistant_value(ledger, ledger_key, fid) == current:
-                writes[fid] = candidate
+                state, why = person_history(transport, ledger, target["baseToken"], table_id, record_id, key, fid, operators)
+                if state == HISTORY_TOOL:
+                    writes[fid] = candidate
+                else:
+                    differences.append({"stableKey": key, "recordId": record_id, "field": meta["name"], "current": current, "evidence": item["new"],
+                                        "evidenceRef": item["evidenceRef"], "action": "REPORT_ONLY", "history": state, "reason": why})
             else:
                 differences.append({"stableKey": key, "recordId": record_id, "field": meta["name"], "current": current,
                                     "evidence": item["new"], "evidenceRef": item["evidenceRef"], "action": "REPORT_ONLY"})

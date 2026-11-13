@@ -58,7 +58,7 @@
 | `discover` | 来源页面两类入口的可见列表 → `source scan-plan`、`nightly observe`、`nightly due`；到期时加做全范围核对并 `nightly coverage` | 分页总数与观察时间已记录；到期的核对已登记 |
 | `acquire` | 详情截图与打包（叶集合证明完整才打包）→ `source` 接件 | 原包摘要与截图已入业务根 |
 | `organize`/`validate` | 清点、拆分、字段校验、本地核验归档 | 指纹未变且已有完成证据的案卷记 `skipped` |
-| `sync` | 依次 `feishu-source-build`（新案主行）→ `feishu-child-build`（检查与产品子行）→ `feishu-label-initial-build`（标签初值）→ `record_quantities.py scan`（受管文档环境）→ `feishu-quantity-plan` → `feishu-field-plan-build`；每份说明用 `feishu-source-sync --execute` 写入。新案主行写入后子行的父记录才存在，所以整串在同一晚跑两遍：第二遍补上第一遍因父行未建而跳过的子行和数量。合同与路由取业务根 `运行记录/字段合同/`，用法见该目录“说明.md” | 每份说明读回一致；规划器退出 4 表示有案被保护挡住，其余照写；UNKNOWN 记 `unknown` 并只封锁该目标 |
+| `sync` | 依次 `feishu-source-build`（新案主行）→ `feishu-child-build`（检查与产品子行）→ `feishu-calibrate-plan`（按已核验本地清单补三表监督事实空格；云端与证据不同的只列差异，带 `--resolutions` 校准裁决文件时才按逐格裁决处理；创建时一次写入的名称类字段不改写）→ `feishu-label-initial-build`（标签初值）→ `record_quantities.py scan`（受管文档环境）→ `feishu-quantity-plan` → `feishu-field-plan-build`；每份说明用 `feishu-source-sync --execute` 写入。新案主行写入后子行的父记录才存在，所以整串在同一晚跑两遍：第二遍补上第一遍因父行未建而跳过的子行和数量。合同与路由取业务根 `运行记录/字段合同/`，用法见该目录“说明.md” | 每份说明读回一致；规划器退出 4 表示有案被保护挡住，其余照写；UNKNOWN 记 `unknown` 并只封锁该目标 |
 | `mirror` | `feishu-mirror` | 镜像、当日快照、变更记录已写 |
 | `reconcile` | `feishu-recount --out` | 退出 0；退出 4 记 `failed` 并保留差异文件。数量只对同一含义、同一单位相加；没有单位的数值只记项数，`physicalQuantity.status` 为 `NO_UNIT_BASIS` 时没有实物合计，不是 0 |
 | `report` | 汇总本轮变更、缺项、未知与到期 | 无变化时安静结束 |

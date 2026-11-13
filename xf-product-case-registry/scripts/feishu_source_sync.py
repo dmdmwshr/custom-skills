@@ -90,13 +90,13 @@ ALWAYS_DENIED = {
     "fldvHLpSKI": "案卷.是否加油加气站(人工)",
     "fld5E2njAU": "案卷.是否微型消防站(人工)",
     "fldrKL9rDE": "案卷.是否核实(人工)",
-    "fldW2kJC0V": "案卷.核实说明(人工)",
+    "fldW2kJC0V": "案卷.无值说明(人工，原名核实说明)",
     "fldtBHoCzK": "案卷.是否维修后灭火器(人工，2026-11-09 起由大队填报)",
     "fldoFEnhmd": "案卷.涉及网售产品(人工关系)",
     "fld4atEDRT": "检查.是否核实(人工)",
-    "fldYkXBvEt": "检查.核实说明(人工)",
+    "fldYkXBvEt": "检查.无值说明(人工，原名核实说明)",
     "fldwsnqeJ4": "产品.是否核实(人工)",
-    "fld1Plox8P": "产品.核实说明(人工)",
+    "fld1Plox8P": "产品.无值说明(人工，原名核实说明)",
     "fldVZE4Yc9": "产品.网售标记案卷(人工关系反向)",
 }
 # Stable business key per table; it must match before any write.
@@ -636,8 +636,10 @@ class LarkCliTransport:
             for item in page:
                 if not isinstance(item, dict) or not isinstance(item.get("rev"), int) or not isinstance(item.get("create_time"), (int, float)):
                     raise RuntimeSyncError("历史条目缺少 rev/create_time")
+                changes = [c for c in (item.get("field_changes") or []) if isinstance(c, dict) and c.get("field_id")]
                 items.append({"rev": item["rev"], "createTime": float(item["create_time"]), "operator": item.get("operator"),
-                              "fieldIds": sorted({c.get("field_id") for c in (item.get("field_changes") or []) if isinstance(c, dict) and c.get("field_id")})})
+                              "fieldIds": sorted({c["field_id"] for c in changes}),
+                              "changes": [{"fieldId": c["field_id"], "before": c.get("before"), "after": c.get("after")} for c in changes]})
             if not data.get("has_more"):
                 if len({i["rev"] for i in items}) != len(items):
                     raise RuntimeSyncError("历史含重复 rev")
@@ -2123,7 +2125,7 @@ def _proven_classification(waterline_case: Any, root: Path) -> dict[str, Any] | 
 
 
 def _followup_initial_result(root: Path, project: str, waterline_case: Any, classification: dict[str, Any] | None,
-                             jurisdiction: str) -> dict[str, str] | None:
+                             jurisdiction: str | None) -> dict[str, str] | None:
     """初查结果只在总账分类证据不能证明时，才取已归档案卷的最新可信后续观察(source_intake.add_followup_observation)。
 
     观察须经消费者同样的校验(证据摘要、同案、[产]根、目录覆盖、截图、同一大队)，且比分类证据更新；只采纳页面产品行明确给出的
@@ -2136,7 +2138,16 @@ def _followup_initial_result(root: Path, project: str, waterline_case: Any, clas
         return None
     try:
         layout = _ws.BusinessLayout.from_root(root)
-        trusted, _ = _views._followup_observations(layout, project, source, [jurisdiction])
+        baseline = [jurisdiction]
+        if jurisdiction is None:  # 与本地视图同一顺序取大队基线：已保存详情 → 总账大队 → 人工接件基线
+            saved = _views._saved_detail(layout, project, source)[0]
+            baseline = [_views.source_intake_brigade(saved[0]) if saved else None]
+            if baseline == [None]:
+                baseline = [waterline_case.get("brigadeName")]
+            if baseline == [None]:
+                manual = _views.source_intake_manual_baseline(layout, project, source)
+                baseline = [manual["brigade"]] if manual is not None else [None]
+        trusted, _ = _views._followup_observations(layout, project, source, baseline)
     except Exception:  # noqa: BLE001 - 无法读取/校验就不采纳，不猜
         return None
     if not trusted:
@@ -2191,6 +2202,52 @@ def _detail_initial_result(root: Path, project: str, waterline_case: Any, classi
             ref = f"{relative.as_posix()}#fields.检查产品信息 | 已保存来源详情 | evidenceSha256=sha256:{file_sha(path)} | projectNo={project}"
             return {"label": label, "ref": ref, "observedAt": captured}
     return None
+
+
+def unified_initial_result(root: Path, project: str, waterline_case: Any, *, classification: dict[str, Any] | None = None,
+                           jurisdiction: str | None = None, manifest_found: Any = None) -> dict[str, Any]:
+    """案卷级初查结果的唯一规则：主行、初查检查行和可由案卷结论确定的产品行都用它，不再各算各的。
+
+    来源只有本地已核证据(代表监督系统)：总账分类终局(原件摘要相符) → 最新可信后续观察 → 本案已保存的可信详情 → 本案已核验清单的
+    产品逐项结果(任一不合格→不合格；全部合格→合格)。案卷侧终局与清单逐项终局不一致时不取任何一方(conflict)，双方原值都保留，交核对。
+    都没有终局时给待结果(分类登记了抽样待出)或待核实；这两个未决标签之间互转没有信息增量，调用方不据此改写已有未决值。
+    """
+    classification = classification if classification is not None else _proven_classification(waterline_case, root)
+    found = manifest_found if manifest_found is not None else _verified_manifest(root, project, waterline_case)[0]
+    manifest_label = manifest_ref = manifest_at = None
+    if found is not None:
+        manifest, relative, recorded, verified_at = found
+        products = case_lifecycle._manifest_products(manifest)[0]
+        results = [case_lifecycle._manifest_result(p) for p in products]
+        if "不合格" in results:
+            manifest_label = "不合格"
+        elif results and all(r == "合格" for r in results):
+            manifest_label = "合格"
+        manifest_ref = f"{relative}#initialInspection.products[*].result | 本地核验清单 manifestSha256={recorded} | projectNo={project}"
+        manifest_at = verified_at
+    case_label = case_source = case_ref = case_at = None
+    if isinstance(classification, dict) and classification.get("initialResult") in case_lifecycle._RESULT_FROM_ENUM:
+        case_label, case_source = case_lifecycle._RESULT_FROM_ENUM[classification["initialResult"]], "classification"
+        case_ref = (f"{_text(classification.get('evidencePath')).replace(chr(92), '/')}#classification.initialResult | 总账分类证据 "
+                    f"evidenceSha256={_text(classification.get('evidenceSha256'))} | projectNo={project}")
+    else:
+        for source_name, getter in (("followup", lambda: _followup_initial_result(root, project, waterline_case, classification, jurisdiction)),
+                                    ("detail", lambda: _detail_initial_result(root, project, waterline_case, classification))):
+            extra = getter()
+            if extra:
+                case_label, case_source, case_ref, case_at = extra["label"], source_name, extra["ref"], extra["observedAt"]
+                break
+    out: dict[str, Any] = {"manifestLabel": manifest_label, "caseLabel": case_label, "conflict": None}
+    if case_label and manifest_label and case_label != manifest_label:
+        out |= {"label": None, "terminal": False, "source": None, "ref": None, "observedAt": None,
+                "conflict": f"案卷侧证据({case_source})为{case_label}，清单产品逐项汇总为{manifest_label}"}
+    elif case_label:
+        out |= {"label": case_label, "terminal": True, "source": case_source, "ref": case_ref, "observedAt": case_at}
+    elif manifest_label:
+        out |= {"label": manifest_label, "terminal": True, "source": "manifest", "ref": manifest_ref, "observedAt": manifest_at}
+    else:
+        out |= {"label": case_lifecycle.initial_result_label(classification), "terminal": False, "source": None, "ref": None, "observedAt": None}
+    return out
 
 
 def _lifecycle_values(index_case: dict[str, dict[str, Any]], candidates: set[str], classification: dict[str, Any] | None,
@@ -2330,8 +2387,9 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
         elif date is not None and resolved.get("conflict"):
             date_conflicts.append({"projectNo": project, "rwid": rwid, "electronic": resolved["value"], "acceptance": resolved["acceptanceDate"], "handling": "以电子监督检查记录为准，保留差异"})
         classification = _proven_classification(waterline.get(project), waterline_path.parent)
-        followup = (_followup_initial_result(waterline_path.parent, project, waterline.get(project), classification, evidence["jurisdiction"])
-                    or _detail_initial_result(waterline_path.parent, project, waterline.get(project), classification))
+        unified = unified_initial_result(waterline_path.parent, project, waterline.get(project), classification=classification or {}, jurisdiction=evidence["jurisdiction"])
+        followup = ({"label": unified["label"], "ref": unified["ref"], "observedAt": unified["observedAt"]}
+                    if unified["terminal"] and unified["source"] != "classification" else None)   # 与子行、校准同一规则；冲突时不取任何一方
         basis_ref = evidence["ref"]("检查产品信息") + (" | 总账分类证据已核" if classification else " | 缺可核的分类证据，初查结果按待核实")
         result_ref, result_at = (followup["ref"], followup["observedAt"]) if followup else (basis_ref, None)
         if not ids:
@@ -2719,8 +2777,10 @@ def build_field_plan_specs(*, plan_path: Path, plan_sha: str, waterline_path: Pa
                 elif stored == "__absent__" or cell_is_empty(stored) or not cell_equals(meta["type"], stored, wire_value(meta["type"], old)):
                     problems.append(f"{meta['name']} 当前 {stored!r} 不是计划旧值 {old!r}（同期变化或人工改动，保留）")
                     break
-                writes[fid] = {"new": item["new"], "expectedOld": old,
-                               "basis": _record_basis(f"{_text(item['basisRef'])} | 证据 " + "; ".join(pf["refs"]) + f" | 计划={plan_path.name}", _text(item["observedAt"]))}
+                basis = _record_basis(f"{_text(item['basisRef'])} | 证据 " + "; ".join(pf["refs"]) + f" | 计划={plan_path.name}", _text(item["observedAt"]))
+                if item.get("explicitNegative") is True:   # 证据明确给出的 0/否(如产品均有结果且无不合格)；缺值不走这里
+                    basis["explicitNegative"] = True
+                writes[fid] = {"new": item["new"], "expectedOld": old, "basis": basis}
             if problems:
                 refused.append({"projectNo": _text(entry.get("projectNo")), "table": table_name, "recordId": record_id, "problems": problems})
             elif writes:
@@ -2822,17 +2882,34 @@ def _child_inspection(project: str, stage_key: str, stage_name: str, stage_tag: 
     return {"stageKey": stage_key, "stage": stage_name, "tag": stage_tag, "day": day, "key": f"{project}|{stage_name}", "products": products}, None
 
 
-def _inspection_result(products: list[dict[str, Any]], classification: dict[str, Any] | None, initial: bool) -> tuple[str | None, str]:
-    """检查级结果：任一产品明确不合格→不合格；全部明确合格→合格；其余(待结果/缺项)→待核实；
-    初查且产品都没有明确结果时，才取总账分类里有原件摘要的终局初查结果。"""
+def _inspection_result(products: list[dict[str, Any]], unified: dict[str, Any] | None, initial: bool) -> tuple[str | None, str]:
+    """检查级结果。复查：任一产品明确不合格→不合格；全部明确合格→合格；其余→待核实。
+    初查：与主行同一规则(unified_initial_result)；证据冲突时不给值(None)，由校准列为待核对；没有终局时为待核实。"""
+    if initial and unified is not None:
+        if unified["conflict"]:
+            return None, unified["conflict"]
+        if unified["terminal"]:
+            return unified["label"], f"案卷级统一初查结论({unified['source']})"
+        return "待核实", "初查结果尚无终局证据"
     results = [p["result"] for p in products]
     if "不合格" in results:
         return "不合格", "产品逐项结果含不合格"
     if all(r == "合格" for r in results):
         return "合格", "产品逐项结果全部合格"
-    if initial and all(r is None for r in results) and classification and classification.get("initialResult") in CLASSIFICATION_RESULT:
-        return CLASSIFICATION_RESULT[classification["initialResult"]], "产品无逐项结果，取总账分类终局初查结果(带原件摘要)"
     return "待核实", "产品结果含待结果/缺项"
+
+
+def product_results(products: list[dict[str, Any]], unified: dict[str, Any] | None, initial: bool) -> list[str | None]:
+    """产品逐项结果：清单给了终局就用清单；初查产品清单未给终局时，只有案卷结论能唯一确定才补——
+    案卷初查合格即每项合格；案卷初查不合格且只有一个产品即该项不合格；多产品不合格不推断到具体产品。"""
+    out = []
+    for product in products:
+        result = product["result"] if product["result"] in ("合格", "不合格") else None
+        if result is None and initial and unified is not None and unified["terminal"]:
+            if unified["label"] == "合格" or len(products) == 1:
+                result = unified["label"]
+        out.append(result or product["result"])
+    return out
 
 
 def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, target: dict[str, str], transport: Any, out_dir: Path, log_root: Path,
@@ -2840,7 +2917,8 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
                       only_projects: frozenset[str] | None = None, isolated_test_ledger: bool = False) -> dict[str, Any]:
     """由本案已核验清单生成 检查明细/产品明细 的 V3 创建说明(先检查后产品，同一案的子行放在同一份说明里)。
 
-    只补“云端该案还没有任何子行”的案卷；已有同键子行一律不动。每个案卷要同时满足：总账完成且清单摘要相符、初查日等于云端主行初查日、
+    按检查键增量补行：清单里有而云端没有的那次检查(连同它的产品行)才创建，已有同键子行一律不动，所以初查早已在云端、
+    复查后来才归档的案卷也能补上复查行；云端已有该次检查但产品行不全的不自动补(列出，交核对)。每个案卷要同时满足：总账完成且清单摘要相符、初查日等于云端主行初查日、
     大队与清单管辖一致、主行无未获用户接受的历史 human_release、不在范围外保留；否则只保留该案并列出原因。
     稳定键 `项目编号|阶段(|序号)` 由本地按清单位置生成，来源未提供原生检查/产品标识，原生标识留空并写入每个字段的 sourceRef。
     """
@@ -2869,7 +2947,7 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
     by_project: dict[str, list[str]] = {}
     for record_id, row in main_rows.items():
         by_project.setdefault(_cell_text(row.get(BASIC_FIELDS["key"])), []).append(record_id)
-    inspect_keys = {_cell_text(r.get(INSPECT_F["key"])) for r in inspect_rows.values()}
+    inspect_keys = {_cell_text(r.get(INSPECT_F["key"])): rid for rid, r in inspect_rows.items()}
     product_keys = {_cell_text(r.get(PRODUCT_F["key"])) for r in product_rows.values()}
     date_type = index[case_table][BASIC_FIELDS["date"]]["type"]
     blocked: list[dict[str, Any]] = []
@@ -2880,10 +2958,6 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
         if only_projects is not None and project not in only_projects:
             continue
         ids = by_project[project]
-        has_children = any(k.startswith(project + "|") for k in inspect_keys | product_keys)
-        if has_children:
-            already += 1
-            continue
         reasons: list[str] = []
         if len(ids) != 1:
             blocked.append({"projectNo": project, "reasons": [f"云端主行不唯一：{ids}"]})
@@ -2901,7 +2975,6 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
             blocked.append({"projectNo": project, "recordId": record_id, "reasons": [why or "没有可用的已核验清单"]})
             continue
         manifest, relative, recorded, verified_at = found
-        classification = _proven_classification(waterline.get(project), root)
         facts = [_child_inspection(project, key, name, tag, manifest.get(key), scope_from) for key, name, tag in CHILD_STAGES if key == "initialInspection" or manifest.get(key) is not None]
         inspections = [f for f, _ in facts if f is not None]
         reasons += [w for f, w in facts if f is None and w]
@@ -2909,6 +2982,19 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
             blocked.append({"projectNo": project, "recordId": record_id, "reasons": reasons or ["清单没有可用的初查"]})
             continue
         initial = inspections[0]
+        wanted, unpaired = [], []
+        for inspection in inspections:
+            has_products = any(k.startswith(inspection["key"] + "|") for k in product_keys)
+            if inspection["key"] not in inspect_keys and not has_products:
+                wanted.append(inspection["key"])
+            elif inspection["key"] not in inspect_keys or not has_products:
+                unpaired.append(f"{inspection['key']} 云端检查行与产品行不成套(只有其一)：不自动补，交核对")
+        if not wanted and not unpaired:
+            already += 1   # 清单里的检查云端都已有：不动(清单另有读不出的检查时由校准对账列出)
+            continue
+        if unpaired:
+            blocked.append({"projectNo": project, "recordId": record_id, "reasons": unpaired + reasons})
+            continue
         stored_date = row.get(BASIC_FIELDS["date"])
         if cell_is_empty(stored_date) or not cell_equals(date_type, stored_date, initial["day"]):
             reasons.append(f"云端主行初查日 {stored_date!r} 不等于清单初查日 {initial['day']}")
@@ -2925,7 +3011,8 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
             blocked.append({"projectNo": project, "recordId": record_id, "reasons": reasons})
             continue
         cases.append({"project": project, "recordId": record_id, "manifest": manifest, "relative": relative, "recorded": recorded, "verifiedAt": verified_at,
-                      "classification": classification, "inspections": inspections, "team": team, "cloudResult": _cell_text(row.get(LIFECYCLE_FIELDS["result"]))})
+                      "unified": unified_initial_result(root, project, waterline.get(project), jurisdiction=None, manifest_found=found),
+                      "inspections": inspections, "wanted": set(wanted), "team": team, "cloudResult": _cell_text(row.get(LIFECYCLE_FIELDS["result"]))})
     # 生成创建项
     creates_by_case: list[tuple[str, list[dict[str, Any]], dict[str, Any]]] = []
     source_counts: dict[str, int] = {}
@@ -2943,11 +3030,14 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
             return value
 
         for number, inspection in enumerate(case["inspections"]):
-            products = inspection["products"]
+            if inspection["key"] not in case["wanted"]:
+                continue
+            is_initial = inspection["tag"] == "initial"
+            products = [dict(p, result=r) for p, r in zip(inspection["products"], product_results(inspection["products"], case["unified"], is_initial))]
             stage_path = inspection["stageKey"]
-            result, why = _inspection_result(products, case["classification"], inspection["tag"] == "initial")
-            if inspection["tag"] == "initial" and case["cloudResult"] in CLASSIFICATION_RESULT.values() and result != case["cloudResult"]:
-                notes.append({"projectNo": project, "kind": "主行初查结果与清单汇总不同(主行不改，列为对象事实)", "cloud": case["cloudResult"], "children": result, "why": why})
+            result, why = _inspection_result(products, case["unified"], is_initial)
+            if is_initial and (result is None or (case["cloudResult"] in CLASSIFICATION_RESULT.values() and result != case["cloudResult"])):
+                notes.append({"projectNo": project, "kind": "初查结果证据冲突或与主行不同(双方原值保留，交核对)", "cloud": case["cloudResult"], "children": result, "why": why})
             methods = {p["method"] for p in products if p["method"]}
             all_methods = all(p["method"] for p in products)
             bad_known = all(p["result"] in ("合格", "不合格") for p in products)   # 有待结果/缺项时不断言不合格产品数
@@ -2959,8 +3049,8 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
                 INSPECT_F["month"]: {"new": inspection["day"][:7], "basis": basis(f"{stage_path}.inspectionDate", "由清单检查日取年月")},
                 INSPECT_F["count"]: {"new": len(products), "basis": basis(f"{stage_path}.products", "清单产品条数")},
                 INSPECT_F["source"]: {"new": "来源详情", "basis": basis(stage_path, "来源=本案已核验清单(来源详情)")},
-                INSPECT_F["date_source"]: {"new": "监督系统" if inspection["tag"] == "initial" else "来源复查记录PDF",
-                                           "basis": basis(f"{stage_path}.inspectionDate", "初查日已由来源任务列表检查日期与本案清单印证；复查日取自本案复查检查记录")},
+                INSPECT_F["date_source"]: {"new": "监督系统",
+                                           "basis": basis(f"{stage_path}.inspectionDate", "检查日是监督系统事实，由本案已核验清单(本地稳定证据)代表；清单文件与摘要见本依据")},
                 INSPECT_F["in_scope"]: {"new": "是", "basis": basis(f"{stage_path}.inspectionDate", f"检查日 {inspection['day']} 在范围起点 {scope_from} 及以后")},
             }
             if result is not None:
@@ -3008,7 +3098,7 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
                 product_total += 1
                 if inspection["tag"] == "recheck":
                     ref = product["initialProductRef"]
-                    initial_refs = {p["clientRef"]: p["key"] for p in case["inspections"][0]["products"]}
+                    initial_refs = {p["clientRef"]: p["key"] for p in case["inspections"][0]["products"] if p["clientRef"]}
                     case_info.setdefault("recheckRelations", []).append(
                         {"recheckProduct": product["key"], "initialProductRef": ref or None,
                          "relation": "proven-by-initialProductRef" if ref and ref in initial_refs else "unproven-no-matching-initialProductRef",
