@@ -42,6 +42,12 @@ class TextScoringTests(unittest.TestCase):
     def test_spoken_chars_drops_tags_punctuation_and_emoji(self):
         self.assertEqual(dub.spoken_chars("[叹气]海雾，漫过(laugh)堤岸。😮"), "海雾漫过堤岸")
 
+    def test_numbers_read_as_chinese(self):
+        self.assertEqual(dub._cn_number(500), "五百")
+        self.assertEqual(dub._cn_number(15), "十五")
+        self.assertEqual(dub._cn_number(2026), "二千零二十六")
+        self.assertEqual(dub.cer("古月山寨真回到了五百年前", "古月山寨真回到了500年前"), 0.0)
+
     def test_cer(self):
         self.assertEqual(dub.cer("交出春秋蝉，给你个痛快。", "交出春秋蝉，给你个痛快"), 0.0)
         self.assertGreater(dub.cer("交出春秋蝉", "消除春秋尘"), 0.3)
@@ -193,6 +199,67 @@ class SelectionTests(unittest.TestCase):
             text = dub.write_review(project, cues).read_text(encoding="utf-8")
             self.assertIn("## C1（甲）", text)
             self.assertIn("s11 ✔", text)
+
+
+def write_wav(path: Path, seconds: float, amp: int = 3000):
+    import wave
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(3)
+        handle.setframerate(48000)
+        handle.writeframes((int(amp).to_bytes(3, "little", signed=True)) * int(48000 * seconds))
+
+
+class AutoMixTests(unittest.TestCase):
+    def prepared(self, tmp):
+        project = make_project(Path(tmp))
+        cues = dub.load_json(dub.dub_dir(project) / "cues.json")["cues"]
+        voices = dub.load_json(dub.dub_dir(project) / "voices.json")["voices"]
+        BatchTests().run_batch(project, fake_runner(), cues, voices, seeds=(11, 23))
+        path = dub.dub_dir(project) / "takes.json"
+        index = dub.load_json(path)
+        for t in index["takes"]:
+            t["asr"] = "x"
+            t["cer"] = 0.4 if t["take"] == "s11" else 0.0
+            t["mean_db"] = -26.0
+            t["flags"] = dub.flags_for(t, {})
+        dub.save_json(path, index)
+        return project
+
+    def test_auto_select_requires_user_authorization_and_prefers_clean_take(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.prepared(tmp)
+            with self.assertRaises(dub.DubError):
+                dub.auto_select(project, "测试脚本")
+            added = dub.auto_select(project, "用户授权自动选择(按预检评分)")
+            self.assertEqual(added, {"C1": "s23", "C2": "s23"})
+            sel = dub.load_json(dub.dub_dir(project) / "selection.json")
+            self.assertTrue(sel["C1"]["auto"])
+            dub.select_take(project, "C1", "s11", "人工改选", "用户试听")
+            self.assertEqual(dub.auto_select(project, "用户授权自动选择(按预检评分)"), {})
+            self.assertEqual(dub.load_json(dub.dub_dir(project) / "selection.json")["C1"]["take"], "s11")
+
+    def test_mix_orders_cues_adds_gaps_and_writes_timeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.prepared(tmp)
+            with self.assertRaises(dub.DubError):  # 没选定不能合并
+                dub.mix_final(project, Path(tmp) / "out0", ffmpeg="none", convert=lambda s, d, g: write_wav(d, 1.0))
+            dub.auto_select(project, "用户授权自动选择(按预检评分)")
+            gains = []
+            def convert(src, dest, gain):
+                gains.append(gain)
+                write_wav(dest, 1.0)
+            res = dub.mix_final(project, Path(tmp) / "out", ffmpeg="none", convert=convert, make_mp3=False)
+            self.assertEqual(gains, [6.0, 6.0])  # -20 - (-26) = 6 dB
+            tl = res["timeline"]
+            self.assertEqual([x["cue"] for x in tl], ["C1", "C2"])
+            self.assertAlmostEqual(tl[0]["start"], 0.3, places=3)
+            self.assertAlmostEqual(tl[1]["start"], 0.3 + 1.0 + 0.5, places=3)  # 同一场景 S1，间隔 0.5
+            self.assertAlmostEqual(res["duration_s"], 0.3 + 1.0 + 0.5 + 1.0 + 1.0, places=2)
+            self.assertTrue((Path(tmp) / "out" / "final.srt").is_file())
+            self.assertFalse((Path(tmp) / "out" / "_segments").exists())
+            with self.assertRaises(dub.DubError):  # 输出目录非空
+                dub.mix_final(project, Path(tmp) / "out", ffmpeg="none", convert=convert, make_mp3=False)
 
 
 class CliGateTests(unittest.TestCase):

@@ -75,9 +75,31 @@ _TAG = re.compile(r"\[[^\]]*\]|\([^)]*\)|（[^）]*）")
 _KEEP = re.compile(r"[^\u4e00-\u9fffA-Za-z0-9]")
 
 
+_DIGITS = "零一二三四五六七八九"
+
+
+def _cn_number(n: int) -> str:
+    """把识别结果里的阿拉伯数字读成汉字（0～9999），避免“500年”被算成与“五百年”不一致。"""
+    if n < 10:
+        return _DIGITS[n]
+    parts, units = [], [(1000, "千"), (100, "百"), (10, "十"), (1, "")]
+    zero_pending = False
+    for value, name in units:
+        digit, n = divmod(n, value)
+        if digit == 0:
+            zero_pending = bool(parts)
+            continue
+        if zero_pending:
+            parts.append("零")
+            zero_pending = False
+        parts.append(("" if (digit == 1 and value == 10 and not parts) else _DIGITS[digit]) + name)
+    return "".join(parts)
+
+
 def spoken_chars(text: str) -> str:
-    """去掉事件标签、标点和表情，只留可读字符，用于字数与字错率。"""
-    return _KEEP.sub("", _TAG.sub("", text)).lower()
+    """去掉事件标签、标点和表情，数字读成汉字，只留可读字符，用于字数与字错率。"""
+    text = re.sub(r"\d{1,4}", lambda m: _cn_number(int(m.group())), _TAG.sub("", text))
+    return _KEEP.sub("", text).lower()
 
 
 def cer(reference: str, hypothesis: str) -> float:
@@ -389,6 +411,123 @@ def ingest_selected(project: Path, media_center_root: Path, out_dir: Path, role:
     return results
 
 
+
+# --------------------------------------------------------------------------- 自动选定与合并成片
+
+
+def rank_key(take: dict) -> tuple:
+    """预检评分：转写没超限的优先，其次标记少、字错率低；同分取先生成的。只用于用户明确授权的自动选定。"""
+    value = take.get("cer") if take.get("cer") is not None else 0.5
+    return (value > CER_LIMIT, len(take.get("flags") or []), value, take["take"])
+
+
+def auto_select(project: Path, decided_by: str) -> dict:
+    """用户明确放弃逐句试听、要求直接出成片时，按预检评分替他选；已有人工选定的台词不覆盖。"""
+    if not decided_by.strip() or "用户" not in decided_by:
+        raise DubError("自动选定必须写明用户的授权，例如 --decided-by \"用户授权自动选择(按预检评分)\"。")
+    base = dub_dir(project)
+    index = load_json(base / "takes.json")
+    selection = load_json(base / "selection.json", {})
+    by_cue: dict[str, list[dict]] = {}
+    for t in index["takes"]:
+        if t["status"] == "succeeded_pending_listening" and t.get("asr") is not None:
+            by_cue.setdefault(t["cue"], []).append(t)
+    added = {}
+    for cue_id, takes in by_cue.items():
+        if cue_id in selection:
+            continue
+        best = min(takes, key=rank_key)
+        selection[cue_id] = {"take": best["take"], "audio": best["audio"], "audio_sha256": best["audio_sha256"],
+                             "by": decided_by, "auto": True, "score": list(rank_key(best))[:3],
+                             "note": "未试听，按预检评分自动选定", "at": now()}
+        added[cue_id] = best["take"]
+    save_json(base / "selection.json", selection)
+    return added
+
+
+def _wav_params(path: Path):
+    import wave
+    with wave.open(str(path), "rb") as handle:
+        return handle.getnchannels(), handle.getsampwidth(), handle.getframerate(), handle.getnframes()
+
+
+def _convert_segment(ffmpeg: str, src: Path, dest: Path, gain_db: float) -> None:
+    subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(src), "-af", f"volume={gain_db}dB,alimiter=limit=0.9:level=disabled",
+                    "-ar", "48000", "-ac", "1", "-c:a", "pcm_s24le", str(dest)], check=True, timeout=120)
+
+
+def mix_final(project: Path, out_dir: Path, *, ffmpeg: str, target_mean: float = -20.0, gap: float = 0.5,
+              scene_gap: float = 1.1, lead: float = 0.3, tail: float = 1.0, name: str = "final",
+              convert=None, make_mp3: bool = True) -> dict:
+    """按台词清单顺序把选定候选拼成一条成片：统一响度、按场景加停顿，写时间线和字幕。"""
+    import wave
+    base = dub_dir(project)
+    cues = load_json(base / "cues.json")["cues"]
+    selection = load_json(base / "selection.json", {})
+    missing = [c["id"] for c in cues if c["id"] not in selection]
+    if missing:
+        raise DubError(f"这些台词还没有选定候选，不能合并：{missing}")
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise DubError(f"输出目录必须是新目录或空目录：{out_dir}")
+    work = out_dir / "_segments"
+    work.mkdir(parents=True, exist_ok=True)
+    convert = convert or (lambda src, dest, gain: _convert_segment(ffmpeg, src, dest, gain))
+    rate, width = 48000, 3
+    timeline, cursor, frames_out = [], lead, []
+    index = {(t["cue"], t["take"]): t for t in load_json(base / "takes.json")["takes"]}
+    for i, cue in enumerate(cues):
+        sel = selection[cue["id"]]
+        take = index[(cue["id"], sel["take"])]
+        if bt.sha256_file(Path(take["audio"])) != sel["audio_sha256"]:
+            raise DubError(f"{cue['id']} 的音频与选定时的哈希不一致，拒绝合并。")
+        mean = take.get("mean_db")
+        gain = 0.0 if mean is None else max(-6.0, min(12.0, round(target_mean - mean, 1)))
+        seg = work / f"{i:03d}_{cue['id']}.wav"
+        convert(Path(take["audio"]), seg, gain)
+        ch, sw, sr, n = _wav_params(seg)
+        if (ch, sw, sr) != (1, width, rate):
+            raise DubError(f"{seg.name} 格式不是 48 kHz 单声道 24 bit：{(ch, sw, sr)}")
+        with wave.open(str(seg), "rb") as handle:
+            frames_out.append(handle.readframes(n))
+        dur = n / rate
+        nxt = cues[i + 1] if i + 1 < len(cues) else None
+        pause = cue.get("pause_after")
+        if pause is None:
+            pause = tail if nxt is None else (scene_gap if nxt.get("shot") != cue.get("shot") else gap)
+        frames_out.append(b"\x00" * (int(round(pause * rate)) * width))
+        timeline.append({"cue": cue["id"], "shot": cue.get("shot"), "character": cue["character"], "text": cue["text"],
+                         "take": sel["take"], "gain_db": gain, "start": round(cursor, 3), "end": round(cursor + dur, 3),
+                         "auto_selected": bool(sel.get("auto"))})
+        cursor += dur + pause
+    final = out_dir / f"{name}.wav"
+    with wave.open(str(final), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(width)
+        handle.setframerate(rate)
+        handle.writeframes(b"\x00" * (int(round(lead * rate)) * width))
+        for chunk in frames_out:
+            handle.writeframes(chunk)
+    srt = []
+    def stamp(x: float) -> str:
+        ms = int(round(x * 1000))
+        return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
+    for k, item in enumerate(timeline, 1):
+        srt.append(f"{k}\n{stamp(item['start'])} --> {stamp(item['end'])}\n{item['character']}：{item['text']}\n")
+    (out_dir / f"{name}.srt").write_text("\n".join(srt), encoding="utf-8")
+    result = {"wav": str(final), "duration_s": round(cursor, 2), "lines": len(timeline),
+              "wav_sha256": bt.sha256_file(final), "timeline": timeline}
+    if make_mp3 and Path(ffmpeg).is_file():
+        mp3 = out_dir / f"{name}.mp3"
+        proc = subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(final), "-c:a", "libmp3lame", "-b:a", "192k", str(mp3)],
+                              capture_output=True, timeout=300)
+        if proc.returncode == 0:
+            result["mp3"] = str(mp3)
+    if Path(ffmpeg).is_file():
+        result["level"] = {k: v for k, v in measure(final, "", ffmpeg).items() if k in ("peak_db", "mean_db")}
+    save_json(out_dir / f"{name}.timeline.json", result)
+    shutil.rmtree(work, ignore_errors=True)
+    return result
+
 # --------------------------------------------------------------------------- CLI
 
 EXAMPLE_CUES = {"project": "示例项目", "cues": [
@@ -436,6 +575,15 @@ def main(argv: list[str] | None = None) -> int:
     ig = sub.add_parser("ingest", help="把选定的候选交给媒体中心配音接收流程")
     ig.add_argument("--media-center-root", default=r"D:\ws\04-content\04-01-ai-imaging\comfy-workspace\media-center")
     ig.add_argument("--role", choices=["final_dialogue", "voice_reference"], default="final_dialogue")
+    au = sub.add_parser("auto-select", help="用户授权不逐句试听时，按预检评分自动选定（不覆盖已有选定）")
+    au.add_argument("--decided-by", required=True, help='必须写明用户授权，如 "用户授权自动选择(按预检评分)"')
+    mx = sub.add_parser("mix", help="按台词顺序把选定候选合并为一条成片，并写时间线与字幕")
+    mx.add_argument("--out-dir", required=True, help="新目录或空目录")
+    mx.add_argument("--name", default="final")
+    mx.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
+    mx.add_argument("--target-mean-db", type=float, default=-20.0)
+    mx.add_argument("--gap", type=float, default=0.5, help="同一场景内台词间隔秒")
+    mx.add_argument("--scene-gap", type=float, default=1.1, help="换场景间隔秒")
     sub.add_parser("status", help="汇总进度")
     args = p.parse_args(argv)
     project = Path(args.project)
@@ -481,6 +629,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "ingest":
             print(json.dumps(ingest_selected(project, Path(args.media_center_root), project / "audio", args.role),
                              ensure_ascii=False, indent=2))
+            return 0
+        if args.cmd == "auto-select":
+            print(json.dumps(auto_select(project, args.decided_by), ensure_ascii=False, indent=2))
+            write_review(project, cues_by_id)
+            return 0
+        if args.cmd == "mix":
+            res = mix_final(project, Path(args.out_dir), ffmpeg=args.ffmpeg, target_mean=args.target_mean_db, gap=args.gap,
+                            scene_gap=args.scene_gap, name=args.name)
+            print(json.dumps({k: v for k, v in res.items() if k != "timeline"}, ensure_ascii=False, indent=2))
             return 0
         if args.cmd == "status":
             index = load_json(base / "takes.json", {"takes": []})
