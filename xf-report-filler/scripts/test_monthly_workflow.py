@@ -35,13 +35,13 @@ class MonthlyWorkflowConfigTests(unittest.TestCase):
             ["cases.ndjson", "checks.ndjson", "products.ndjson", "monthly.ndjson"],
         )
         self.assertEqual(config["data_sources"]["case_data"]["required_for"], ["legacy_excel_history"])
-        with patch.dict(os.environ, {"HOME": "/nonexistent-home"}, clear=False):
+        with patch.dict(os.environ, {"HOME": "/nonexistent-home", "USERPROFILE": "/nonexistent-home"}, clear=False):
             os.environ.pop("XF_FEISHU_SNAPSHOT_DIR", None)
             os.environ.pop("XF_FEISHU_SNAPSHOT_CONFIG", None)
             self.assertIsNone(config["data_sources"]["case_snapshot"]["path"])
             self.assertIsNone(workflow.case_source_path(config))  # nothing baked in; message guides
         with patch.dict(os.environ, {"XF_FEISHU_SNAPSHOT_DIR": "/tmp/snap"}):
-            self.assertEqual(workflow.case_source_path(config), Path("/tmp/snap"))
+            self.assertEqual(workflow.case_source_path(config), workflow.path_from_config("/tmp/snap"))
 
     def test_template_and_real_score_dir_names_are_centralized(self):
         config = workflow.load_config()

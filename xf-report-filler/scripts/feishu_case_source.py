@@ -31,9 +31,16 @@ TABLE_ROLES = {
     "monthly": ("月份大队", "月份"),
 }
 BRIGADES = ("梁溪大队", "锡山大队", "惠山大队", "滨湖大队", "新吴大队", "江阴大队", "宜兴大队", "经开大队")
+# Brigades the Feishu 所属大队 option list carries that have no row in the monthly report table
+# (字段合同-20261116g: 水上大队). Only these names are *known* to be outside the table; any other
+# name that is not one of the eight rows (待核实, typos, blanks) is unknown and keeps coverage open.
+KNOWN_OUTSIDE_BRIGADES = ("水上大队",)
 ENV_SNAPSHOT_DIR = "XF_FEISHU_SNAPSHOT_DIR"
 INFO_FILE = "snapshot.info.json"
-INFO_FIELDS = ("source", "exportedAt", "completeness", "refreshedBy", "note")
+INFO_FIELDS = (
+    "source", "exportedAt", "completeness", "refreshedBy", "note",
+    "window", "windowStatus", "latestCheckDate", "latestRecordUpdate", "finalDataConfirmed", "tables",
+)
 # R02 columns B..K and the Feishu 月报_ fields that carry the brigade-reported values.
 REPORTED_FIELDS = {
     "B": ("月报_检查次数",),
@@ -194,11 +201,29 @@ def _first(value: Any) -> Any:
     return value
 
 
+def _case_brigade(case: dict[str, Any] | None) -> str | None:
+    """Case-level brigade; the Feishu column is a single-select list (``["惠山大队"]``), older exports a string."""
+    value = _first((case or {}).get("所属大队"))
+    return value if isinstance(value, str) and value in BRIGADES else None
+
+
 def _brigade(check: dict[str, Any], case: dict[str, Any] | None) -> str | None:
-    for candidate in (_first(check.get("大队")), check.get("所属大队(案卷)"), (case or {}).get("所属大队")):
+    for candidate in (_first(check.get("大队")), check.get("所属大队(案卷)"), _case_brigade(case)):
         if isinstance(candidate, str) and candidate in BRIGADES:
             return candidate
     return None
+
+
+def _named_brigade(check: dict[str, Any], case: dict[str, Any] | None) -> str | None:
+    """A brigade name the record carries even when it is not one of the 8 report-table rows (e.g. 水上大队)."""
+    for candidate in (_first(check.get("大队")), check.get("所属大队(案卷)"), _first((case or {}).get("所属大队"))):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return None
+
+
+def _is_outside(name: Any, known_outside) -> bool:
+    return isinstance(name, str) and name.strip() in known_outside
 
 
 def _window(year: int, month: int) -> tuple[date, date]:
@@ -206,8 +231,16 @@ def _window(year: int, month: int) -> tuple[date, date]:
     return date(start_year, start_month, 26), date(year, month, 25)
 
 
-def case_counts(snapshot: dict[str, Any], year: int, month: int) -> dict[str, Any]:
-    """Per-brigade counts for the 26th–25th reporting window plus an explicit coverage report."""
+def case_counts(
+    snapshot: dict[str, Any], year: int, month: int, known_outside_brigades=None
+) -> dict[str, Any]:
+    """Per-brigade counts for the 26th–25th reporting window plus an explicit coverage report.
+
+    ``known_outside_brigades`` lists names confirmed to have no report-table row (default
+    ``KNOWN_OUTSIDE_BRIGADES``). Only those are set aside as ``outside_table_*``; every other
+    unresolved brigade (blank, 待核实, typo) is unattributed and keeps all eight rows' coverage open.
+    """
+    known_outside = tuple(known_outside_brigades or KNOWN_OUTSIDE_BRIGADES)
     start, end = _window(year, month)
     cases = snapshot["cases"]
     by_check: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -242,6 +275,8 @@ def case_counts(snapshot: dict[str, Any], year: int, month: int) -> dict[str, An
         for name in BRIGADES
     }
     gaps: list[dict[str, Any]] = []
+    unattributed_window_projects: set[str] = set()
+    outside_window_checks = 0
     for check in snapshot["tables"]["checks"]:
         link = _first(check.get("项目编号"))
         case = cases.get(link["id"]) if isinstance(link, dict) else None
@@ -252,8 +287,13 @@ def case_counts(snapshot: dict[str, Any], year: int, month: int) -> dict[str, An
         if stage not in {"初查", "复查"}:
             gaps.append({"type": "stage_unknown", "checkKey": key, "stage": stage})
             continue
+        outside_name = None
         if brigade is None:
-            gaps.append({"type": "brigade_unknown", "checkKey": key, "stage": stage})
+            named = _named_brigade(check, case)
+            if _is_outside(named, known_outside):
+                outside_name = named
+            gaps.append({"type": "brigade_unknown", "checkKey": key, "stage": stage,
+                         "brigadeName": named, "knownOutsideTable": outside_name is not None})
         if checked is None:
             gaps.append({"type": "check_date_unknown", "checkKey": key, "stage": stage,
                          "brigade": brigade})
@@ -267,6 +307,13 @@ def case_counts(snapshot: dict[str, Any], year: int, month: int) -> dict[str, An
                 counts[brigade]["rechecks_excluded"] += 1
             continue
         if brigade is None:
+            if stage == "初查":
+                if outside_name:
+                    outside_window_checks += 1
+                elif isinstance(link, dict):
+                    # Dated initial check inside the window whose brigade cannot be resolved: it may
+                    # belong to any row, so every row's coverage stays open (never dropped, never 0).
+                    unattributed_window_projects.add(link["id"])
             continue
         item = counts[brigade]
         project = key.split("|", 1)[0]
@@ -318,33 +365,50 @@ def case_counts(snapshot: dict[str, Any], year: int, month: int) -> dict[str, An
         if _first(check.get("阶段")) == "初查" and _day(check.get("检查日期")) is not None:
             dated_initial.add(link["id"])
     unattributed = 0
+    outside_table = 0
     for record_id, case in cases.items():
         if record_id in dated_initial:
             continue
-        brigade = case.get("所属大队") if case.get("所属大队") in BRIGADES else None
+        brigade = _case_brigade(case)
         if brigade is None:
-            unattributed += 1
+            if _is_outside(_first(case.get("所属大队")), known_outside):
+                # Confirmed outside the eight rows (e.g. 水上大队): listed as uncovered, but it cannot
+                # belong to any row, so it does not make their counts a lower bound.
+                outside_table += 1
+            else:
+                unattributed += 1
             continue
         counts[brigade]["cases_without_dated_initial"] += 1
         if record_id not in has_check:
             counts[brigade]["cases_without_checks"] += 1
+    unattributed_window = len(unattributed_window_projects - {r for r, c in cases.items() if _case_brigade(c)})
     for item in counts.values():
         item["unattributed_unresolved_cases"] = unattributed
-        item["unresolved_initial_cases"] = item["cases_without_dated_initial"] + unattributed
+        item["unattributed_window_cases"] = unattributed_window
+        item["unresolved_initial_cases"] = (
+            item["cases_without_dated_initial"] + unattributed + unattributed_window
+        )
     totals = {
         "cases": len(cases),
         "cases_without_checks": sum(i["cases_without_checks"] for i in counts.values())
-        + sum(1 for r, c in cases.items() if r not in has_check and c.get("所属大队") not in BRIGADES),
+        + sum(1 for r, c in cases.items() if r not in has_check and _case_brigade(c) is None),
         "cases_without_dated_initial": sum(i["cases_without_dated_initial"] for i in counts.values())
-        + unattributed,
+        + unattributed + outside_table,
+        "outside_table_cases": outside_table,
+        "outside_table_window_checks": outside_window_checks,
+        "unattributed_cases": unattributed,
+        "unattributed_window_cases": unattributed_window,
+        "known_outside_brigades": list(known_outside),
     }
     for item in counts.values():
         item["unique_projects"] = len(item.pop("_projects"))
         item["unqualified_projects"] = len(item.pop("_unqualified_projects"))
         item["result_unknown_projects"] = len(item.pop("_result_unknown_projects"))
     for case in snapshot["tables"]["cases"]:
-        if case.get("所属大队") not in BRIGADES:
-            gaps.append({"type": "case_brigade_unknown", "projectNo": case["项目编号"]})
+        if _case_brigade(case) is None:
+            named = _named_brigade({}, case)
+            gaps.append({"type": "case_brigade_unknown", "projectNo": case["项目编号"],
+                         "brigadeName": named, "knownOutsideTable": _is_outside(named, known_outside)})
     return {
         "counts": counts,
         "gaps": gaps,

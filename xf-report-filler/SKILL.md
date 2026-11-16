@@ -18,6 +18,8 @@ metadata:
 2. **年度产品监督底册问题汇总**：按需扫描本年各月产品巡查底册，兼容 1 月旧版产品监督网上巡查 `.doc` 源，生成年度根目录下的 `YYYY年产品监督底册问题汇总.docx`。
 3. **旧版消防产品档案 `.doc` 批量填报**：从旧 `.doc` 或结构化 JSON 生成《消防产品专项监督抽查卷评查记录表》。
 
+让较弱的模型跑通一个月：读 `references/monthly/runbook.md`，所有命令来自 `scripts/monthly_run.py plan`（统一入口 plan/run/qa，今天早于当月 25 日只能待补）。用户本月明确授权的成品更正放在“本月显式覆盖文件”（`references/monthly/monthly_overrides.md`），不写进脚本。
+
 月度流程是当前优先维护对象。月度任务先读 `references/monthly_workflow.md`，再按任务加载 `references/monthly/00_workflow_router.md` 指定的文件对象和数据源对象文档。年度汇总任务先读 `references/annual_problem_summary/00_workflow_router.md`。机器配置分别见 `resources/monthly_workflow.json` 和 `resources/annual_problem_summary.json`。
 
 ## 渐进加载规则

@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from openpyxl import load_workbook
 import feishu_case_source as snapshot_source
 import monthly_grade_register as grade_register
 import monthly_workflow as workflow
+import staff_roster
 import template_resolver
 
 
@@ -95,6 +97,70 @@ def adopted_template_path(template_result, key):
         if status["key"] == key and status.get("adopted_path"):
             return Path(status["adopted_path"])
     return None
+
+
+STAFF_BRACKET = re.compile(r"[（(]\s*(\d+)\s*人?\s*[）)]")
+STAFF_BRIGADES = ["梁溪大队", "锡山大队", "惠山大队", "滨湖大队", "新吴大队", "江阴大队", "宜兴大队", "经开大队"]
+
+
+def read_stats_headcounts(path):
+    """Column-B bracket numbers of an R02 statistics workbook: {brigade: N or None}; read-only."""
+    sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
+    result = {}
+    for row in range(sheet.nrows):
+        name = str(sheet.cell_value(row, 0) or "").strip()
+        name = re.sub(r"\d+人$", "", name)
+        if name in STAFF_BRIGADES:
+            match = STAFF_BRACKET.search(str(sheet.cell_value(row, 1) or ""))
+            result[name] = int(match.group(1)) if match else None
+    return result
+
+
+def staff_roster_consistency(args, config, template_result, bulletin_dir):
+    """Compare the roster's name counts with the R02 template, the skill snapshot, this month's R02 and optional history files.
+
+    Differences are only reported (never edited). History files are read only and are compared with the *current*
+    roster, so a difference there is not an error of that month.
+    """
+    entry = config["data_sources"]["staff_roster"]
+    roster_path = Path(args.roster) if getattr(args, "roster", None) else staff_roster.resolve_path(entry["path"], args.bulletin_year)
+    try:
+        roster = staff_roster.read_roster(roster_path, entry.get("sheet", "Sheet1"), entry.get("group_label_pattern", staff_roster.DEFAULT_LABEL_PATTERN))
+    except staff_roster.RosterError as error:
+        return {"ok": False, "error": str(error)}, [{"code": "staff_roster_unreadable", "message": str(error), "path": str(roster_path)}], []
+    blockers = [{"code": item["code"], "message": item["message"], "brigade": item.get("brigade")} for item in roster["blockers"]]
+    warnings = [{"type": item["code"], **item} for item in roster["warnings"] + roster["info"]]
+    targets = {}
+    t09 = next((st for st in template_result["statuses"] if st["id"] == "T09"), None)
+    if t09 and t09["external_exists"]:
+        targets["external_template_T09"] = t09["external_path"]
+    if t09 and t09["snapshot_exists"]:
+        targets["skill_snapshot_T09"] = t09["snapshot_path"]
+    for pending in (True, False):
+        candidate = Path(bulletin_dir) / workflow.root_file_name(next(i for i in workflow.bulletin_root_files(config) if i["key"] == "product_stats"), args.bulletin_year, args.bulletin_month, pending=pending, config=config)
+        if candidate.exists():
+            targets["this_month_R02"] = str(candidate)
+            break
+    for index, extra in enumerate(getattr(args, "history_r02", None) or [], 1):
+        targets[f"history_{index}:{Path(extra).name}"] = str(extra)
+    differences = []
+    for label, path in targets.items():
+        try:
+            found = read_stats_headcounts(path)
+        except Exception as error:  # an unreadable comparison file must not hide the rest of the audit
+            warnings.append({"type": "staff_headcount_unreadable", "message": f"{label} 无法读取，未比对：{error}", "path": path})
+            continue
+        for brigade in STAFF_BRIGADES:
+            expected = roster["counts"].get(brigade)
+            if expected is None or found.get(brigade) == expected:
+                continue
+            differences.append({"target": label, "path": path, "brigade": brigade, "roster": expected, "found": found.get(brigade),
+                                "historical_read_only": label.startswith("history_")})
+    for item in differences:
+        if not item["historical_read_only"]:
+            warnings.append({"type": "staff_headcount_differs", "message": f"{item['target']} 的 {item['brigade']} B 列人数 {item['found']} 与人员总表 {item['roster']} 不一致（只报告，不改）", **item})
+    return {"ok": not blockers, "source": roster["source"], "sha256": roster["sha256"], "counts": roster["counts"],
+            "outside_table": roster["outside_table"], "targets": targets, "differences": differences}, blockers, warnings
 
 
 def run(args):
@@ -199,6 +265,11 @@ def run(args):
     warnings.extend(product_detail_leaks)
     warnings.extend(person_match_issues)
 
+    staff_report, staff_blockers, staff_warnings = staff_roster_consistency(args, config, template_result, bulletin_dir)
+    # Roster problems are reported here as warnings; the root stage itself refuses to write column B without a clean roster.
+    warnings.extend({"type": "staff_roster_issue", **item} for item in staff_blockers)
+    warnings.extend(staff_warnings)
+
     all_blockers = blockers + template_result["blockers"]
     return {
         "ok": not all_blockers,
@@ -221,6 +292,7 @@ def run(args):
             },
             "outputs": grade_outputs,
         },
+        "staff_roster": staff_report,
         "data_sources": {
             "work_plan": existing_status(work_plan),
             "case_data": existing_status(case_data),
@@ -247,6 +319,8 @@ def main():
     parser.add_argument("--score-month", type=int, required=True)
     parser.add_argument("--template-dir", default=str(workflow.template_root()))
     parser.add_argument("--work-plan")
+    parser.add_argument("--roster", help="大队执法人员总表；缺省按配置和通报年份推导")
+    parser.add_argument("--history-r02", action="append", help="只读：历史月份的消防产品监督统计表，列出其 B 列人数与当前名册的差异（可重复）")
     parser.add_argument("--case-data", help="飞书统计快照目录（默认）或历史 产品案卷数据.xlsx")
     args = parser.parse_args()
     result = run(args)

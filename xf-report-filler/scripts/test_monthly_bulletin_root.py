@@ -37,7 +37,7 @@ class MonthlyBulletinRootTests(unittest.TestCase):
         self.assertEqual(root.normalize_brigade("江阴大队12人"), "江阴大队")
         self.assertEqual(root.parse_staff_count("江阴大队12人"), 12)
         self.assertEqual(root.parse_staff_count("经开大队6人"), 6)
-        self.assertEqual(root.product_stats_pending_value(8), "（8）")
+        self.assertEqual(root.product_stats_pending_value(8), "（8人）")
         self.assertEqual(root.product_stats_pending_columns(), list("BCDEFGHIJK"))
 
     def test_timeliness_text_matches_may_style(self):
@@ -49,14 +49,51 @@ class MonthlyBulletinRootTests(unittest.TestCase):
         self.assertEqual(root.product_timeliness_text([]), "\\")
 
     def test_ensure_product_stats_required_value_preserves_reported_count(self):
-        self.assertEqual(root.ensure_product_stats_required_value("", 8), "（8）")
-        self.assertEqual(root.ensure_product_stats_required_value("7次", 8), "7次（8）")
+        self.assertEqual(root.ensure_product_stats_required_value("", 8), "（8人）")
+        self.assertEqual(root.ensure_product_stats_required_value("7次", 8), "7次（8人）")
         self.assertEqual(root.ensure_product_stats_required_value("7次（8）", 8), "7次（8）")
+        self.assertEqual(root.ensure_product_stats_required_value("7次（8人）", 8), "7次（8人）")
 
     def test_refresh_required_count_preserves_reported_data_and_notes(self):
         self.assertEqual(root.ensure_product_stats_required_value("（12）", 8), "（8）")
         self.assertEqual(root.ensure_product_stats_required_value("7次（12）已报", 8), "7次（8）已报")
         self.assertEqual(root.ensure_product_stats_required_value("7次(12)", 8), "7次（8）")
+
+    def test_headcount_unit_of_the_2026_10_26_template_is_recognised_not_appended(self):
+        # The template cell is "（8人）"; before the fix the pending run wrote "（8人）（8）".
+        self.assertEqual(root.parse_required_count("11次（8人）"), 8)
+        self.assertEqual(root.ensure_product_stats_required_value("（12人）", 8), "（8人）")
+        self.assertEqual(root.ensure_product_stats_required_value("7次（12人）已报", 8), "7次（8人）已报")
+
+    def test_office_print_layout_sets_area_and_zoom_without_touching_cells(self):
+        sheet = Workbook().active
+        sheet["B18"], sheet["B19"], sheet["F45"] = "合计扣分", "实际得分", 6  # F45: stray template value below the table
+        header = {"梁溪大队": 4, "水上大队": 14}
+        layout = root.CONFIG["pending_rules"]["office_product_timeliness"]["print_layout"]
+        result = root.apply_office_print_layout(sheet, layout, header)
+        self.assertEqual(result, {"print_area": "A1:N19", "scale": 90})
+        self.assertEqual(sheet.print_area, "'Sheet'!$A$1:$N$19")
+        self.assertEqual(sheet.page_setup.scale, 90)
+        self.assertEqual(sheet["F45"].value, 6)  # preserved, only outside the print area
+        self.assertIsNone(root.apply_office_print_layout(Workbook().active, layout, header))  # no end row -> unchanged
+
+    def test_staff_counts_come_from_roster_names_and_problems_are_reported(self):
+        import staff_roster
+        fake = {"counts": {"梁溪大队": 8}, "groups": {"梁溪大队": {"label_count": 9}}, "outside_table": {"轨道交通大队": 5},
+                "blockers": [{"code": "staff_roster_brigade_missing", "brigade": "经开大队", "message": "缺经开"}],
+                "warnings": [{"code": "staff_label_mismatch", "brigade": "梁溪大队", "message": "标签9姓名8"}],
+                "info": [], "sha256": "AA", "sheet": "Sheet1", "stable_during_read": True}
+        blockers, warnings = [], []
+        with patch.object(staff_roster, "read_roster", return_value=fake):
+            counts, summary = root.load_staff_counts("x.xlsx", 2026, blockers, warnings)
+        self.assertEqual(counts, {"梁溪大队": 8})
+        self.assertEqual(summary["outside_table"], {"轨道交通大队": 5})
+        self.assertEqual(blockers[0]["code"], "staff_roster_brigade_missing")
+        self.assertEqual(warnings[0]["type"], "staff_label_mismatch")
+        with patch.object(staff_roster, "read_roster", side_effect=staff_roster.RosterError("人员总表不存在")):
+            blockers = []
+            counts, _ = root.load_staff_counts("x.xlsx", 2026, blockers, [])
+        self.assertEqual((counts, blockers[0]["code"]), ({}, "staff_roster_unreadable"))  # no fallback value
 
     def test_pending_marker_preserves_template_font(self):
         from openpyxl.styles import Font
@@ -241,7 +278,8 @@ class MonthlyBulletinRootTests(unittest.TestCase):
                     cell(1,c).Value = 'header'
                 cell(3,1).Value = '梁溪大队'
                 cell(3,11).Value = '7次（2次）' if has_k else None
-                sheet = SimpleNamespace(Cells=cell, Name='Sheet1', UsedRange=SimpleNamespace(Rows=SimpleNamespace(Count=3)))
+                sheet = SimpleNamespace(Cells=cell, Name='Sheet1', UsedRange=SimpleNamespace(Rows=SimpleNamespace(Count=3), Address='$A$1:$K$3'),
+                                        PageSetup=SimpleNamespace(), ResetAllPageBreaks=lambda: None)
                 workbook = SimpleNamespace(Worksheets=lambda n:sheet, Save=lambda:None, Close=lambda **kw:None)
                 excel = SimpleNamespace(Workbooks=SimpleNamespace(Open=lambda p:workbook), Quit=lambda:None)
                 with patch.object(root,'excel_com',return_value=excel), patch.object(root,'excel_mark_pending') as mark:

@@ -601,6 +601,11 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
         class FakeSheet:
             def __init__(self):
                 self.cells = {(3, 1): FakeCell("梁溪大队")}
+                self.PageSetup = types.SimpleNamespace()
+                self.UsedRange = types.SimpleNamespace(Address="$A$1:$AA$23")
+
+            def ResetAllPageBreaks(self):
+                pass
 
             def Cells(self, row, col):
                 return self.cells.setdefault((row, col), FakeCell())
@@ -712,3 +717,62 @@ class MonthlyGradeRegisterMonthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CaseScoresPrintLayoutTests(unittest.TestCase):
+    def test_print_layout_fits_the_used_range_on_one_a3_landscape_page(self):
+        calls = []
+        page = types.SimpleNamespace()
+        ws = types.SimpleNamespace(PageSetup=page, UsedRange=types.SimpleNamespace(Address="$A$1:$AA$23"),
+                                   ResetAllPageBreaks=lambda: calls.append("reset"))
+        mgr.apply_one_page_print_layout(ws, mgr.CASE_SCORES_RULES["print_layout"])
+        self.assertEqual((page.PaperSize, page.Orientation, page.Zoom), (8, 2, False))
+        self.assertEqual((page.FitToPagesWide, page.FitToPagesTall), (1, 1))
+        self.assertEqual(page.PrintArea, "$A$1:$AA$23")
+        self.assertEqual(calls, ["reset"])
+
+    def test_no_profile_leaves_the_sheet_untouched(self):
+        ws = types.SimpleNamespace()
+        mgr.apply_one_page_print_layout(ws, {})
+
+
+class ReportHeadingTests(unittest.TestCase):
+    def test_headings_keep_with_next_and_body_does_not(self):
+        def paragraph(text):
+            fmt = types.SimpleNamespace()
+            font = types.SimpleNamespace()
+            return types.SimpleNamespace(Range=types.SimpleNamespace(Text=text + "\r", Font=font), Format=fmt)
+
+        items = [paragraph("二、网上监测基本情况"), paragraph("（五）联网监测"), paragraph("梁溪大队沈达兴联系的单位存在问题。")]
+        mgr.apply_report_fonts(types.SimpleNamespace(Paragraphs=items))
+        self.assertEqual([getattr(i.Format, "KeepWithNext", None) for i in items], [-1, -1, None])
+
+
+class PaperSizeFallbackTests(unittest.TestCase):
+    def test_printer_without_the_paper_keeps_template_paper_and_still_fits_one_page(self):
+        class Page:
+            Zoom = None
+
+            def __setattr__(self, name, value):
+                if name == "PaperSize":
+                    raise Rejecting_error()
+                object.__setattr__(self, name, value)
+
+        class Rejecting_error(Exception):
+            hresult = -2147352567
+
+        page = Page()
+        ws = types.SimpleNamespace(PageSetup=page, UsedRange=types.SimpleNamespace(Address="$A$1:$K$13"),
+                                   ResetAllPageBreaks=lambda: None)
+        mgr.apply_one_page_print_layout(ws, mgr.CASE_SCORES_RULES["print_layout"])
+        self.assertEqual((page.FitToPagesWide, page.FitToPagesTall, page.Zoom), (1, 1, False))
+        self.assertEqual(page.PrintArea, "$A$1:$K$13")
+
+
+class UnitNameTypoWarningTests(unittest.TestCase):
+    def test_known_source_typo_is_reported_but_never_rewritten(self):
+        details = [{"大队": "梁溪大队", "单位": "缺锡市救助管理站", "sheet": "梁溪", "row": 9},
+                   {"大队": "滨湖大队", "单位": "无锡市梁溪丽都商业发展有限公司"}]
+        warnings = mgr.monitor_unit_name_warnings(details)
+        self.assertEqual([w["单位"] for w in warnings], ["缺锡市救助管理站"])
+        self.assertEqual(details[0]["单位"], "缺锡市救助管理站")

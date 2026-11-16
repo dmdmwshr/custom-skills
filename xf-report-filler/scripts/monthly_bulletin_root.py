@@ -16,6 +16,8 @@ from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_bo
 import feishu_case_source as snapshot_source
 import monthly_grade_register as grade_register
 import monthly_workflow as workflow
+import overrides as month_overrides
+import staff_roster
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -157,16 +159,28 @@ def skeleton_path(template_dir, item):
     return workflow.bulletin_skeleton_dir(config=CONFIG, template_dir=template_dir) / item["skeleton"]
 
 
-def read_staff_counts(work_plan):
-    book = xlrd.open_workbook(str(work_plan), formatting_info=True)
-    sheet = book.sheet_by_name("任务总表")
-    counts = {}
-    for row in range(1, sheet.nrows):
-        brigade = normalize_brigade(sheet.cell_value(row, 0))
-        staff = parse_staff_count(sheet.cell_value(row, 0))
-        if brigade and staff:
-            counts[brigade] = staff
-    return counts
+def load_staff_counts(roster_path, year, blockers, warnings):
+    """Headcounts for R02 column B from the annual enforcement-staff roster (actual names, not the label number).
+
+    Roster problems are reported, never replaced with the work plan or an old template value.
+    Returns (counts, summary); counts only holds brigades whose roster group is clean.
+    """
+    entry = CONFIG["data_sources"]["staff_roster"]
+    path = Path(roster_path) if roster_path else staff_roster.resolve_path(entry["path"], year)
+    try:
+        roster = staff_roster.read_roster(path, entry.get("sheet", "Sheet1"), entry.get("group_label_pattern", staff_roster.DEFAULT_LABEL_PATTERN), BRIGADE_ORDER)
+    except staff_roster.RosterError as error:
+        add_blocker(blockers, str(error), code="staff_roster_unreadable", path=path)
+        return {}, {"source": str(path), "readable": False}
+    for item in roster["blockers"]:
+        add_blocker(blockers, item["message"], code=item["code"], brigade=item.get("brigade", ""), path=path)
+    warnings.extend({"type": item["code"], **{k: v for k, v in item.items() if k != "code"}} for item in roster["warnings"])
+    warnings.extend({"type": item["code"], **{k: v for k, v in item.items() if k != "code"}} for item in roster["info"])
+    if not roster["stable_during_read"]:
+        add_blocker(blockers, "人员总表在读取过程中被修改，请重试", code="staff_roster_changed_during_read", path=path)
+    summary = {"source": str(path), "sha256": roster["sha256"], "sheet": roster["sheet"], "counts": roster["counts"],
+               "outside_table": roster["outside_table"], "label_counts": {b: v["label_count"] for b, v in roster["groups"].items()}}
+    return roster["counts"], summary
 
 
 def _xlrd_rgb(book, index):
@@ -455,7 +469,8 @@ def read_case_source(case_data, year, month):
     """
     if snapshot_source.is_snapshot_source(case_data):
         snapshot = snapshot_source.load_snapshot(case_data)
-        result = snapshot_source.case_counts(snapshot, year, month)
+        known_outside = CONFIG["data_sources"]["case_snapshot"].get("known_outside_brigades")
+        result = snapshot_source.case_counts(snapshot, year, month, known_outside)
         return {
             "counts": result["counts"],
             "gaps": result["gaps"],
@@ -507,8 +522,12 @@ def parse_first_number(value):
     return int(match.group(1)) if match else None
 
 
+# Required headcount in column B: "（8）" up to the 2609 tables, "（8人）" since the 2026-10-26 template.
+REQUIRED_COUNT_PATTERN = re.compile(r"[（(]\s*(\d+)\s*(人?)\s*[）)]")
+
+
 def parse_required_count(value):
-    match = re.search(r"[（(]\s*(\d+)\s*[）)]", str(value or ""))
+    match = REQUIRED_COUNT_PATTERN.search(str(value or ""))
     return int(match.group(1)) if match else None
 
 
@@ -876,8 +895,46 @@ def mark_pending_office(path, timeliness_by_brigade=None, product_records=None, 
                     "pending": product_timeliness_needs_attention(cell.value),
                 }
             )
+        layout = apply_office_print_layout(sheet, rule.get("print_layout"), header)
+        if layout:
+            changed.append({"sheet": sheet.title, "kind": "print_layout", **layout})
     workbook.save(path)
     return changed
+
+
+def apply_office_print_layout(sheet, layout, header):
+    """Print area down to the 实际得分 row and across the last brigade column, plus a fixed zoom.
+
+    The template's UsedRange reaches stray cells far below the table (a lone "6" in F45), which makes
+    Excel print mostly blank pages. Only page setup changes; no cell value is touched or removed.
+    """
+    if not layout or not header:
+        return None
+    end_row = row_by_label(sheet, layout["end_label"], layout.get("end_label_column", 2))
+    if end_row is None:
+        return None
+    last_col = max(header.values())
+    area = f"A1:{get_column_letter(last_col)}{end_row}"
+    sheet.print_area = area
+    sheet.page_setup.scale = int(layout["scale"])
+    return {"print_area": area, "scale": int(layout["scale"])}
+
+
+RPC_E_CALL_REJECTED = -2147418111  # Excel is busy (just started, loading add-ins); the call is safe to repeat
+
+
+def com_retry(call, attempts=12, delay=0.5, sleep=None):
+    """Repeat one COM call while the server answers 'call rejected' (busy); any other error propagates at once."""
+    import time
+
+    pause = sleep or time.sleep
+    for number in range(1, attempts + 1):
+        try:
+            return call()
+        except Exception as error:  # pywintypes.com_error is only importable on Windows
+            if getattr(error, "hresult", None) != RPC_E_CALL_REJECTED or number == attempts:
+                raise
+            pause(delay)
 
 
 def excel_com():
@@ -894,7 +951,8 @@ def ensure_product_stats_required_value(value, staff_count):
     required = product_stats_pending_value(staff_count)
     if parse_required_count(text):
         refresh = CONFIG['pending_rules']['product_stats_required_counts'].get('refresh_required_count', True)
-        return re.sub(r"[（(]\s*\d+\s*[）)]", required, text, count=1) if refresh else text
+        # Refresh the number only; keep the unit ("人") the cell already uses.
+        return REQUIRED_COUNT_PATTERN.sub(lambda m: f"（{staff_count}{m.group(2)}）", text, count=1) if refresh else text
     return f"{text}{required}" if text else required
 
 
@@ -903,9 +961,9 @@ def mark_pending_product_stats(path, staff_counts):
     changed = []
     pending_letters = product_stats_pending_columns()
     try:
-        workbook = excel.Workbooks.Open(str(Path(path).resolve()))
+        workbook = com_retry(lambda: excel.Workbooks.Open(str(Path(path).resolve())))
         try:
-            sheet = workbook.Worksheets(1)
+            sheet = com_retry(lambda: workbook.Worksheets(1))
             used_rows = sheet.UsedRange.Rows.Count
             pending_letters = [
                 letter
@@ -919,15 +977,17 @@ def mark_pending_product_stats(path, staff_counts):
                 for letter in pending_letters:
                     col = coordinate_to_tuple(f"{letter}1")[1]
                     cell = sheet.Cells(row, col)
+                    previous = str(cell.Value or "")
                     if letter == "B":
                         cell.Value = ensure_product_stats_required_value(cell.Value, staff_counts[brigade])
                     excel_mark_pending(cell)
-                    changed.append({"sheet": sheet.Name, "cell": f"{letter}{row}", "value": str(cell.Value or "")})
+                    changed.append({"sheet": sheet.Name, "cell": f"{letter}{row}", "value": str(cell.Value or ""), "previous": previous})
+            grade_register.apply_one_page_print_layout(sheet, CONFIG["pending_rules"]["product_stats_required_counts"].get("print_layout"))
             workbook.Save()
         finally:
-            workbook.Close(SaveChanges=True)
+            com_retry(lambda: workbook.Close(SaveChanges=True))
     finally:
-        excel.Quit()
+        com_retry(excel.Quit)
     return changed
 
 
@@ -944,6 +1004,7 @@ def mark_pending_cells(
     blockers,
     warnings,
     apply,
+    month_overrides_loaded=None,
 ):
     paths = root_file_paths(bulletin_dir, year, month)
     timeliness_by_brigade = None
@@ -975,6 +1036,12 @@ def mark_pending_cells(
         add_blocker(blockers, "飞书统计快照（或历史案卷数据）不存在，无法预填产品工作实效和产品统计口径", path=case_data)
     if score_dir:
         sources, product_records, monitor_details = read_score_office_content(score_dir, score_month or month, blockers)
+        if month_overrides_loaded and not blockers:
+            try:
+                monitor_details, product_records, overrides_report = month_overrides.apply(month_overrides_loaded, monitor_details, product_records)
+                actions.append({"kind": "month_overrides_applied", "status": "done", **overrides_report})
+            except month_overrides.OverrideError as error:
+                add_blocker(blockers, str(error), code="overrides_unmatched", path=month_overrides_loaded.get("_path"))
         actions.append({"kind": "resolve_score_sources_for_root_office", "status": "done", "sources": {key: str(value) if value else None for key, value in sources.items()}})
     else:
         warnings.append({"message": "未提供 --score-dir，根层科室表不会预填产品案卷核查和联网系统核查。"})
@@ -1049,7 +1116,16 @@ def run(args):
         if not required.exists():
             add_blocker(blockers, "必要路径不存在", path=required)
 
-    staff_counts = read_staff_counts(work_plan) if work_plan.exists() else {}
+    # R02 column B headcounts are written only in pending mode; final-audit never needs the roster.
+    staff_counts, staff_summary = (
+        load_staff_counts(getattr(args, "roster", None), args.year, blockers, warnings) if args.mode == "pending" else ({}, None)
+    )
+    month_overrides_loaded = None
+    if getattr(args, "overrides", None):
+        try:
+            month_overrides_loaded = month_overrides.load(args.overrides, args.year, args.month)
+        except month_overrides.OverrideError as error:
+            add_blocker(blockers, str(error), code="overrides_invalid", path=args.overrides)
     if args.mode == "pending":
         pending_copy_roots(bulletin_dir, template_dir, args.year, args.month, actions, blockers, apply)
         if not blockers:
@@ -1066,6 +1142,7 @@ def run(args):
                 blockers,
                 warnings,
                 apply,
+                month_overrides_loaded,
             )
     else:
         paths = root_file_paths(bulletin_dir, args.year, args.month)
@@ -1097,6 +1174,7 @@ def run(args):
         "month": args.month,
         "case_window": [str(item) for item in previous_month_window(args.year, args.month)],
         "staff_counts": staff_counts,
+        "staff_roster": staff_summary,
         "actions": actions,
         "warnings": warnings,
         "blockers": blockers,
@@ -1118,6 +1196,8 @@ def main():
         help="飞书统计快照目录；缺省依次读环境变量 XF_FEISHU_SNAPSHOT_DIR、本机配置文件，均无则提示未配置。也可指向历史 产品案卷数据.xlsx 作兼容查询。",
     )
     parser.add_argument("--template-dir", default=str(DEFAULT_TEMPLATE_DIR))
+    parser.add_argument("--roster", help="大队执法人员总表；缺省按 monthly_workflow.json 的 staff_roster 配置和年份推导。R02 B 列人数只来自它的姓名数。")
+    parser.add_argument("--overrides", help="本月显式覆盖文件（见 references/monthly/monthly_overrides.md），只更正成品文字，不改源表。")
     parser.add_argument("--score-dir", help="成绩月份巡查目录，用于预填根层科室月考核情况记录表的产品/联网核查行。")
     parser.add_argument("--score-year", type=int, help="成绩月份年份；默认与通报年份一致。")
     parser.add_argument("--score-month", type=int, help="成绩月份；默认与通报月份一致。")

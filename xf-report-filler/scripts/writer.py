@@ -106,6 +106,34 @@ def safe_write(cell, text):
         # print(f"  [Skip] R:{cell.RowIndex}, C:{cell.ColumnIndex} NO-EMPTY: '{current_text}' -> Discard {text}")
         pass
 
+def keep_archive_tail_together(doc, item_rows):
+    """When an archive still needs several pages, keep the last ``item_rows`` item rows with the two result rows.
+
+    The only change is "keep with next" on the cells' paragraphs, so a page never ends with just the
+    综合评查合计/得分 rows. Text, margins, fonts and table content are untouched; the table has vertically merged
+    cells, so rows are found through Range.Cells/RowIndex instead of Rows(i). Reverted when it adds a page.
+    """
+    if not item_rows:
+        return False
+    cells = list(doc.Tables(1).Range.Cells)
+    if not cells:
+        return False
+    last_row = max(cell.RowIndex for cell in cells)
+    first_row = last_row - item_rows - 1  # score row, total row, then item rows above them
+    pages = doc.ComputeStatistics(2)
+    for cell in cells:
+        if cell.RowIndex >= first_row:
+            cell.Range.ParagraphFormat.KeepWithNext = True
+    doc.Repaginate()
+    if doc.ComputeStatistics(2) > pages:
+        for cell in cells:
+            if cell.RowIndex >= first_row:
+                cell.Range.ParagraphFormat.KeepWithNext = False
+        doc.Repaginate()
+        return False
+    return True
+
+
 def compact_archive_layout(doc):
     rules = monthly_workflow.load_config().get('archive_layout_rules', {})
     if not rules or doc.Tables.Count != 1:
@@ -129,6 +157,7 @@ def compact_archive_layout(doc):
         if doc.ComputeStatistics(2) > 1:
             doc.PageSetup.TopMargin, doc.PageSetup.BottomMargin = margins
             doc.Repaginate()
+            keep_archive_tail_together(doc, rules.get('keep_tail_item_rows', 0))
     if doc.Content.Text != original_text:
         raise RuntimeError('档案版式整理意外改变正文，停止保存')
 
@@ -138,6 +167,13 @@ def process_single_record(word_app, template_path, output_doc, output_pdf, recor
     auto_calculate_scores(record)
     
     doc = word_app.Documents.Open(template_path, ReadOnly=True, AddToRecentFiles=False, Visible=False)
+    if doc is None:
+        # Word returns no document in a non-interactive session (SSH/service session 0) or when a modal
+        # dialog blocks it; fail with the real cause instead of an AttributeError from the cleanup below.
+        raise RuntimeError(
+            f'Word 未能打开模板（返回空文档）：{template_path}。请在用户的交互桌面会话运行（SSH/服务会话 0 不可用），'
+            '并确认模板文件存在且没有弹窗阻塞。'
+        )
     try:
         table = doc.Tables(1)
         cells = table.Range.Cells

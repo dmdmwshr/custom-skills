@@ -8,7 +8,8 @@ R01、R02 的案卷类统计来源。快照是飞书多维表的官方只读导�
 
 - 目录来源（不内置任何导出路径）：`--case-data <目录>` > 环境变量 `XF_FEISHU_SNAPSHOT_DIR` > 本机配置文件 `~/.xf-report-filler/feishu-snapshot.json`（`{"snapshot_dir": "<目录>"}`，位置可由 `XF_FEISHU_SNAPSHOT_CONFIG` 改）。三者都没有时 pending/final-audit 与审计输出 blocker“未配置飞书统计快照目录”并说明设置方法，不猜测目录。
 - 来源与新鲜度：快照目录可带 `snapshot.info.json`（`source` 导出来源、`exportedAt` 导出时间、`completeness` 完整性说明、`refreshedBy`、`note`），会随覆盖摘要输出；缺少时明确标记“未声明”。任何一次导出都只是当时的只读副本，不是长期事实。
-- 刷新：需要新数据时由使用者用 feishu-bitable 的只读导出重新生成四张表到新目录（分页取全，`has_more` 必须为 false），写好 `snapshot.info.json`，再把上述任一入口指向新目录；旧目录保留，不原地覆盖。不新增服务、第二份台账或云端附件。
+- 刷新：在 WSL 运行 `scripts/feishu_snapshot_export.py --year Y --month M --out-dir <新目录>`（Windows 没有 lark-cli，用 `wsl.exe -e python3 <WSL 路径>/scripts/feishu_snapshot_export.py …`；`monthly_run.py plan` 会打印准确命令；`wsl.exe -e` 不加载登录环境，脚本会再用登录 shell 查找 lark-cli）（只调用官方 `lark-cli base +record-list`，user 身份，只读；沿 CLI 清单的 `has_more`/`next_offset` 分页取全，各页 `rev` 必须一致，行数与清单一致，通过结构校验后才复制到**新**目录并写 `snapshot.info.json`），再把上述任一入口指向新目录；旧目录保留，不原地覆盖。不新增服务、第二份台账或云端附件，不登录、不改授权；授权过期时只报告。分页续取（`has_more=true`）已用 `--page-limit` 对真实四表验证：分页导出与单页导出逐文件字节一致。
+- `snapshot.info.json` 另含统计窗口 `window`、`windowStatus`（`before_window_end`/`at_or_after_window_end`）、最新检查日期 `latestCheckDate`、资料最近更新 `latestRecordUpdate`、`finalDataConfirmed`（默认 false，只能人工确认后改 true）和各表行数/`rev`。窗口结束前的快照只能待补；不假设飞书与监督系统之间有固定时延。
 - 必需文件：`cases.ndjson`（案卷，主键项目编号）、`checks.ndjson`（检查，主键检查键＝项目编号|阶段）、`products.ndjson`（产品行，主键产品键）、`monthly.ndjson`（月表，主键月份大队，含外部月报快照 `月报_*`）；每个文件可带 `<表>.manifest.json`。
 - 下游文件：R02、R01；脚本 `scripts/feishu_case_source.py`，由 `monthly_bulletin_root.py` 的 pending 和 final-audit 实际入口调用。
 
@@ -21,6 +22,7 @@ R01、R02 的案卷类统计来源。快照是飞书多维表的官方只读导�
 - 检查日期缺失的初查记录进入 `date_unknown_initial_checks`，大队缺失记录和案卷大队缺失单列缺口；一律不计 0。
 - 检查结果为空/不是“合格”“不合格”的检查记入 `result_unknown_checks`（项目 `result_unknown_projects`，产品行 `product_result_unknown_rows`）并输出 `check_result_unknown` 缺口；`unqualified_*` 因此只是已知下限，未知结果绝不当作“合格”或 0。
 - 覆盖：`cases_without_checks`（无任何检查记录的案卷）、`cases_without_dated_initial`（无带日期初查的案卷）按大队和合计输出；`unresolved_initial_cases` 为该大队无法落入窗口判断的案卷数（含大队未知的案卷）。这些案卷可能属于本窗口，因此已确认数只是**下限**，绝不当作上限，也不把缺失阶段/大队/结果默认成“否”或 0。
+- 案卷“所属大队”是单选列，导出为列表（如 `["惠山大队"]`），旧导出为字符串，两种都按同一规则识别。只有**确知表外**的大队（`data_sources.case_snapshot.known_outside_brigades`，现为字段合同登记的“水上大队”）才不计入任何一行，也不让这 8 行的“未落入窗口判断的案卷数”变大（统计在 `outside_table_cases`/`outside_table_window_checks`，缺口仍列出并带 `brigadeName`、`knownOutsideTable=true`）。大队为空、待核实、错字等任何不在 8 行也不在确知表外清单里的值都是**未知**：案卷层计入各行 `unresolved_initial_cases`（`unattributed_unresolved_cases`），窗口内有日期的初查检查若案卷和检查都缺大队则计入各行 `unattributed_window_cases`；不能让下游覆盖看起来完整。不新增统计行、不补 0。
 - 文书份数不在案卷快照内，`documentCountsAvailable=false`。
 
 ## 生成规则

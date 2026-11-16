@@ -33,8 +33,10 @@ class Builder:
         self.cases, self.checks, self.products, self.monthly = [], [], [], []
         self.seq = 0
 
-    def case(self, project, brigade="梁溪大队"):
-        record = {"record_id": f"case-{project}", "项目编号": project, "所属大队": brigade, "初查结果": ["合格"]}
+    def case(self, project, brigade="梁溪大队", as_list=False):
+        # The current Feishu 所属大队 column is a single-select list; older exports carried a plain string.
+        value = [brigade] if as_list and brigade else brigade
+        record = {"record_id": f"case-{project}", "项目编号": project, "所属大队": value, "初查结果": ["合格"]}
         self.cases.append(record)
         return record
 
@@ -139,6 +141,95 @@ class SnapshotTests(unittest.TestCase):
         b.check("32002201C202600001", "初查", "2026-03-01", products=5)
         item = self.counts(b, 2026, 3)["counts"]["梁溪大队"]
         self.assertEqual((item["initial_checks"], item["product_rows"]), (1, 5))
+
+    def test_list_valued_case_brigade_is_recognised_and_not_a_false_gap(self):
+        b = Builder()
+        b.case("32002201C202600001", brigade="锡山大队", as_list=True)
+        b.case("32002201C202600002", brigade="锡山大队", as_list=True)  # no check at all
+        b.check("32002201C202600001", "初查", "2026-03-01", brigade="锡山大队")
+        result = self.counts(b, 2026, 3)
+        self.assertFalse(any(g["type"] == "case_brigade_unknown" for g in result["gaps"]))
+        item = result["counts"]["锡山大队"]
+        self.assertEqual((item["initial_checks"], item["cases_without_checks"], item["unattributed_unresolved_cases"]), (1, 1, 0))
+
+    def test_brigade_without_report_row_is_named_in_the_gap_and_never_counted(self):
+        b = Builder()
+        b.case("32002210C202600001", brigade="水上大队", as_list=True)
+        b.check("32002210C202600001", "初查", "2026-03-01", brigade="水上大队")
+        result = self.counts(b, 2026, 3)
+        named = [g for g in result["gaps"] if g["type"] == "brigade_unknown"]
+        self.assertEqual([g["brigadeName"] for g in named], ["水上大队"])
+        self.assertEqual(sum(v["initial_checks"] for v in result["counts"].values()), 0)
+        self.assertEqual(sorted(result["counts"]), sorted(source.BRIGADES))
+        # Not one of the eight rows: listed as uncovered, but not an unresolved case of any real row.
+        self.assertEqual(result["coverage"]["outside_table_cases"], 0)
+
+    def test_dateless_case_of_a_brigade_without_report_row_does_not_weaken_the_eight_rows(self):
+        b = Builder()
+        b.case("32002210C202600001", brigade="水上大队", as_list=True)  # no check at all
+        b.case("32002201C202600002", brigade=None)  # truly unattributed: still unresolved
+        result = self.counts(b, 2026, 3)
+        self.assertEqual(result["coverage"]["outside_table_cases"], 1)
+        self.assertEqual(result["counts"]["梁溪大队"]["unattributed_unresolved_cases"], 1)
+        self.assertEqual(result["counts"]["梁溪大队"]["unresolved_initial_cases"], 1)
+
+    def test_unresolved_brigade_name_keeps_all_rows_incomplete(self):
+        # Acceptance vector "unknown-name": 所属大队 = 待核实 is not a known outside brigade -> expect 1, never dropped.
+        b = Builder()
+        b.case("32002201C202600001", brigade="待核实", as_list=True)
+        result = self.counts(b, 2026, 11)
+        self.assertEqual(result["counts"]["梁溪大队"]["unresolved_initial_cases"], 1)
+        self.assertEqual(result["coverage"]["outside_table_cases"], 0)
+        self.assertEqual(result["coverage"]["unattributed_cases"], 1)
+
+    def test_misspelled_outside_name_is_unknown_not_outside(self):
+        b = Builder()
+        b.case("32002210C202600001", brigade="水上队", as_list=True)
+        result = self.counts(b, 2026, 11)
+        self.assertEqual(result["counts"]["惠山大队"]["unresolved_initial_cases"], 1)
+        self.assertEqual(result["coverage"]["outside_table_cases"], 0)
+
+    def test_dated_initial_check_without_any_brigade_counts_for_every_row(self):
+        # Acceptance vector "unknown-dated": dated initial check in the window, case and check both lack the brigade -> expect 1.
+        b = Builder()
+        b.case("32002201C202600001", brigade=None)
+        b.check("32002201C202600001", "初查", "2026-11-01", brigade=None)
+        result = self.counts(b, 2026, 11)
+        for name in source.BRIGADES:
+            self.assertEqual(result["counts"][name]["unresolved_initial_cases"], 1)
+            self.assertEqual(result["counts"][name]["unattributed_window_cases"], 1)
+        self.assertEqual(sum(v["initial_checks"] for v in result["counts"].values()), 0)
+
+    def test_known_outside_brigade_with_dated_check_leaves_the_eight_rows_complete(self):
+        # Acceptance vector "known-outside": 水上大队 (dated check too) -> expect 0 for every row, still reported.
+        b = Builder()
+        b.case("32002210C202600001", brigade="水上大队", as_list=True)
+        b.check("32002210C202600001", "初查", "2026-11-01", brigade="水上大队")
+        result = self.counts(b, 2026, 11)
+        self.assertTrue(all(v["unresolved_initial_cases"] == 0 for v in result["counts"].values()))
+        self.assertEqual(result["coverage"]["outside_table_window_checks"], 1)
+        named = [g for g in result["gaps"] if g["type"] == "brigade_unknown"]
+        self.assertEqual([(g["brigadeName"], g["knownOutsideTable"]) for g in named], [("水上大队", True)])
+
+    def test_outside_and_unknown_mixed_only_unknown_opens_coverage(self):
+        b = Builder()
+        b.case("32002210C202600001", brigade="水上大队", as_list=True)
+        b.check("32002210C202600001", "初查", "2026-11-01", brigade="水上大队")
+        b.case("32002201C202600002", brigade="待核实", as_list=True)
+        b.check("32002201C202600002", "初查", "2026-11-02", brigade="待核实")
+        result = self.counts(b, 2026, 11)
+        self.assertTrue(all(v["unresolved_initial_cases"] == 1 for v in result["counts"].values()))
+        self.assertEqual(result["coverage"]["outside_table_window_checks"], 1)
+
+    def test_known_outside_list_is_configurable(self):
+        b = Builder()
+        b.case("32002210C202600001", brigade="空港大队", as_list=True)
+        b.save(self.dir)
+        snapshot = source.load_snapshot(self.dir)
+        default = source.case_counts(snapshot, 2026, 11)
+        configured = source.case_counts(snapshot, 2026, 11, ["空港大队"])
+        self.assertEqual(default["counts"]["梁溪大队"]["unresolved_initial_cases"], 1)
+        self.assertEqual(configured["counts"]["梁溪大队"]["unresolved_initial_cases"], 0)
 
     def test_unknown_brigade_is_a_gap_and_not_attributed(self):
         b = Builder()
@@ -306,7 +397,6 @@ class EntryTests(unittest.TestCase):
         (self.base / "plan.xls").write_bytes(b"x")
         (self.base / "tpl").mkdir(exist_ok=True)
         with patch.object(root.workflow, "bulletin_skeleton_dir", return_value=self.base / "tpl"), \
-                patch.object(root, "read_staff_counts", return_value={}), \
                 patch.object(root, "read_product_stats", return_value=self.fake_stats()):
             return root.run(self.args("final-audit", case_data))
 
@@ -323,14 +413,13 @@ class EntryTests(unittest.TestCase):
 
     def test_unconfigured_snapshot_stops_with_a_clear_message(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith("XF_FEISHU_SNAPSHOT")}
-        env["HOME"] = str(self.base)
+        env["HOME"] = env["USERPROFILE"] = str(self.base)
         (self.base / "plan.xls").write_bytes(b"x")
         (self.base / "tpl").mkdir(exist_ok=True)
         args = self.args("final-audit", "")
         args.case_data = None
         with patch.dict(os.environ, env, clear=True), \
                 patch.object(root.workflow, "bulletin_skeleton_dir", return_value=self.base / "tpl"), \
-                patch.object(root, "read_staff_counts", return_value={}), \
                 patch.object(root, "read_product_stats", return_value=self.fake_stats()):
             result = root.run(args)
         self.assertFalse(result["ok"])
@@ -477,6 +566,7 @@ class ProvenanceAndConfigTests(unittest.TestCase):
         self.assertNotIn("/srv/work/tasks", json.dumps(config, ensure_ascii=False))
         env = {k: v for k, v in os.environ.items() if not k.startswith("XF_FEISHU_SNAPSHOT")}
         env["HOME"] = self.tmp.name
+        env["USERPROFILE"] = self.tmp.name  # Windows expanduser reads USERPROFILE, not HOME
         with patch.dict(os.environ, env, clear=True):
             self.assertIsNone(workflow.case_source_path(config))
             self.assertIn("未配置飞书统计快照目录", workflow.case_source_unconfigured_message(config))
@@ -486,4 +576,27 @@ class ProvenanceAndConfigTests(unittest.TestCase):
                 json.dumps({"snapshot_dir": str(self.dir)}), encoding="utf-8")
             self.assertEqual(workflow.case_source_path(config), self.dir)
         with patch.dict(os.environ, {**env, "XF_FEISHU_SNAPSHOT_DIR": "/tmp/explicit"}, clear=True):
-            self.assertEqual(workflow.case_source_path(config), Path("/tmp/explicit"))
+            self.assertEqual(workflow.case_source_path(config), workflow.path_from_config("/tmp/explicit"))
+
+
+class ComRetryTests(unittest.TestCase):
+    class Rejected(Exception):
+        hresult = root.RPC_E_CALL_REJECTED
+
+    def test_busy_excel_is_retried_then_succeeds(self):
+        calls = []
+
+        def call():
+            calls.append(1)
+            if len(calls) < 3:
+                raise self.Rejected()
+            return "ok"
+
+        self.assertEqual(root.com_retry(call, sleep=lambda _: None), "ok")
+        self.assertEqual(len(calls), 3)
+
+    def test_other_errors_and_exhausted_retries_propagate(self):
+        with self.assertRaises(ValueError):
+            root.com_retry(lambda: (_ for _ in ()).throw(ValueError("x")), sleep=lambda _: None)
+        with self.assertRaises(self.Rejected):
+            root.com_retry(lambda: (_ for _ in ()).throw(self.Rejected()), attempts=3, sleep=lambda _: None)

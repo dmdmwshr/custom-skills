@@ -23,6 +23,7 @@ ROOT_DIR = SKILL_DIR.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+import overrides as month_overrides
 import writer
 import monthly_workflow
 import template_resolver
@@ -64,6 +65,7 @@ MONTH_ONLY_PATTERN = re.compile(r"(\d{1,2})月")
 BULLETIN_CODE_PATTERN = re.compile(r"(?<!\d)(\d{2})(\d{2})_通报(?!\d)")
 WORKFLOW_CONFIG = monthly_workflow.load_config()
 PERSONAL_RULES = WORKFLOW_CONFIG.get("personal_stats_rules", {})
+CASE_SCORES_RULES = WORKFLOW_CONFIG.get("case_scores_rules", {})
 PENDING_FILL_RGB = PERSONAL_RULES.get("mismatch_fill_color", "FFFF0000")
 PENDING_FONT_RGB = PERSONAL_RULES.get("mismatch_font_color", "FF000000")
 PRODUCT_SCORE_NUMBER_FORMAT = "0.0"
@@ -522,6 +524,31 @@ def is_blank_product_template_item(description, deduction_line=""):
     description_text = norm_text(description).replace("(", "（").replace(")", "）")
     deduction_text = norm_text(deduction_line)
     return description_text in {"（）", ""} and not parse_deduction_value(deduction_text) and not parse_general_index(deduction_text)
+
+
+SUSPECT_UNIT_NAME_TYPOS = {"缺锡": "无锡"}
+
+
+def monitor_unit_name_warnings(monitor_details):
+    """List unit names with a known source typo (e.g. 缺锡). Only a warning: correcting a public name needs the user's
+    explicit authorization for that month (see source_monitor_base_info.md); the source table is never edited."""
+    warnings = []
+    for detail in monitor_details:
+        unit = str(detail.get("单位") or "")
+        for typo, expected in SUSPECT_UNIT_NAME_TYPOS.items():
+            if typo in unit:
+                warnings.append(
+                    {
+                        "type": "monitor_unit_name_suspect",
+                        "message": f"联网单位名含“{typo}”，疑为“{expected}”的录入错字；未改动，需用户逐月确认后才在成果中更正。",
+                        "大队": detail.get("大队"),
+                        "单位": unit,
+                        "path": detail.get("source_path"),
+                        "sheet": detail.get("sheet"),
+                        "row": detail.get("row"),
+                    }
+                )
+    return warnings
 
 
 def monitor_contact_warnings(monitor_details):
@@ -1365,6 +1392,27 @@ def write_office_record(template_path, output_path, product_records, monitor_det
     workbook.save(output_path)
 
 
+def apply_one_page_print_layout(ws, profile):
+    """One A3 landscape page over the used range (G04 case scores, R02 statistics); the templates' manual page breaks split the columns over several pages."""
+    if not profile:
+        return
+    page = ws.PageSetup
+    try:
+        page.PaperSize = profile["paper_size"]
+    except Exception as error:  # pywintypes.com_error is only importable on Windows
+        # Excel refuses a paper size the default printer cannot supply (e.g. A3 on PDF/A4 printers); keep the
+        # template's paper and still fit to one page rather than failing the whole generation.
+        if getattr(error, "hresult", None) != -2147352567:
+            raise
+        print(f"提示：默认打印机不支持纸张 {profile['paper_size']}，保留模板纸张并按 1 页调整。", file=sys.stderr)
+    page.Orientation = profile["orientation"]
+    page.Zoom = False
+    page.FitToPagesWide = profile["fit_to_width"]
+    page.FitToPagesTall = profile["fit_to_height"]
+    ws.ResetAllPageBreaks()
+    page.PrintArea = ws.UsedRange.Address
+
+
 def write_case_scores(template_path, output_path, product_records, monitor_scores, force):
     copy_output(template_path, output_path, force=force)
     import win32com.client
@@ -1382,6 +1430,7 @@ def write_case_scores(template_path, output_path, product_records, monitor_score
                 write_com_score(ws.Cells(row, 2), product_scores[short], PRODUCT_SCORE_NUMBER_FORMAT)
             if short in monitor_scores:
                 write_com_score(ws.Cells(row, 11), monitor_scores[short]["avg"], CASE_SCORE_MONITOR_NUMBER_FORMAT)
+        apply_one_page_print_layout(ws, CASE_SCORES_RULES.get("print_layout"))
         workbook.Save()
     finally:
         workbook.Close(False)
@@ -1768,6 +1817,7 @@ def apply_report_fonts(doc):
         if is_title:
             paragraph.Format.FirstLineIndent = 0
             paragraph.Format.CharacterUnitFirstLineIndent = 0
+            paragraph.Format.KeepWithNext = -1  # a heading must not be stranded at the page bottom
         else:
             paragraph.Format.CharacterUnitFirstLineIndent = 2
 
@@ -1888,12 +1938,17 @@ def run(args):
     output_files = build_output_files(month_dir, args.year, args.month, include_score_office_record)
 
     product_records = parse_product_register(product_register)
+    monitor_scores = read_monitor_scores(network_stats)
+    monitor_details = read_monitor_details(base_info, monitor_scores)
+    overrides_report = None
+    if getattr(args, "overrides", None):
+        loaded = month_overrides.load(args.overrides, bulletin_month_info["bulletin_year"], bulletin_month_info["bulletin_month"])
+        monitor_details, product_records, overrides_report = month_overrides.apply(loaded, monitor_details, product_records)
     product_score_guard = validate_product_score_guard(product_records)
     if product_score_guard["blocking_issues"] and not args.dry_run:
         raise ProductScoreReviewRequired(product_score_guard)
-    monitor_scores = read_monitor_scores(network_stats)
-    monitor_details = read_monitor_details(base_info, monitor_scores)
     contact_warnings = monitor_contact_warnings(monitor_details)
+    unit_name_warnings = monitor_unit_name_warnings(monitor_details)
     person_match_issues = collect_person_match_issues(personal_template, product_records, monitor_details)
     product_detail_leak_issues = product_detail_leak_issues_for_records(product_records)
     if product_detail_leak_issues and not args.dry_run:
@@ -1967,9 +2022,11 @@ def run(args):
                         for item in product_records
                     ],
                     "product_score_guard": product_score_guard,
+                    "month_overrides": overrides_report,
                     "product_detail_leak_issues": product_detail_leak_issues,
                     "person_match_issues": person_match_issues,
                     "monitor_contact_warnings": contact_warnings,
+                    "monitor_unit_name_warnings": unit_name_warnings,
                     "monitor_score_warnings": read_monitor_scores.last_warnings,
                     "monitor_avg": {k: v["avg"] for k, v in monitor_scores.items()},
                     "monitor_report_history_counts": history_counts,
@@ -2102,6 +2159,8 @@ def run(args):
         "product_scores": {item["short"]: item["score"] for item in product_records},
         "product_score_guard": product_score_guard,
         "monitor_contact_warnings": contact_warnings,
+        "monitor_unit_name_warnings": unit_name_warnings,
+        "month_overrides": overrides_report,
         "monitor_score_warnings": read_monitor_scores.last_warnings,
         "monitor_avg": {k: v["avg"] for k, v in monitor_scores.items()},
         "personal_warnings": personal_warnings,
@@ -2137,6 +2196,10 @@ def main():
     history_mode.add_argument("--update-history", action="store_true", help="仅在本次材料已明确确认后，显式更新联网通报历史台账")
     parser.add_argument("--bulletin-year", type=int, help="通报所属年份；默认从上级通报目录识别")
     parser.add_argument("--bulletin-month", type=int, help="通报所属月份；默认从上级通报目录识别")
+    parser.add_argument(
+        "--overrides",
+        help="本月显式覆盖文件（schema xf-report-overrides/1，见 references/monthly/monthly_overrides.md）：只更正成品，不改源表、底册和模板；条目未命中源数据即停止。",
+    )
     parser.add_argument(
         "--include-score-office-record",
         action="store_true",

@@ -39,3 +39,7 @@
 渲染入口不可用、页面/工作表未全部检查、收据字段缺失或结果无法回读时，标记 `qa_pending`，只能报告“成品已生成，视觉验收未完成”，不能宣称最终验收通过。
 
 inspection JSON 至少提供 `artifact_sha256`、`renderer`、`renderer_version`、`total_units`、`checked_units`、`checks`、`warnings` 和 `blockers`。`artifact_sha256`必须是在完成全量视觉检查时计算的该版本文件哈希；兼容已有`stage_sha256`，两者同时提供时必须一致。未记录哈希的新检查保持待验收，当前成品与已检查版本哈希不同则阻断，不自动把新文件当作已检查。Word 的 `checked_units` 必须按 `page-1` 到 `page-N` 连续列出；Excel 使用 `sheet:<名称>` 和需要时的 `print-page:<名称>:<页号>`。所有检查必须为 `passed` 或 `not_applicable`；失败项写 `failed` 或进入 blockers。旧收据保持可读，不覆盖旧终态。
+
+## 先冻结、再生成、再看图（月度入口）
+
+`scripts/monthly_run.py qa baseline` 必须在生成之前运行，并冻结**实际执行目录**的脚本、配置、内置模板、外部模板、人员总表、飞书快照和本月覆盖文件（`run-context.json` 记录技能目录树哈希，`qa verify` 会提示运行代码已变化）。`qa template` 生成的检查项全部为 `unknown`，只有看过渲染页面的人或模型才能改成 `passed`/`not_applicable`/`failed`；程序化文字核对只是辅助，不能代替看图。

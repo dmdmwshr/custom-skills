@@ -4,6 +4,9 @@
 
 ## 按用户任务加载
 
+- 让较弱的模型从头到尾跑通一个月：只读 `runbook.md`，其中的命令都来自 `monthly_run.py plan`。
+- 用户本月明确授权更正成品文字或扣分条款：读 `monthly_overrides.md`。
+
 - 说明整体流程：读取 `01_directory_model.md`、`02_template_strategy.md`。
 - 审计真实目录：读取 `01_directory_model.md`、`02_template_strategy.md`、`validation_and_audit.md`。
 - 整理月度通报目录：读取 `01_directory_model.md`、`02_template_strategy.md`。
@@ -17,7 +20,9 @@
 
 - `monthly_workflow_audit.py`：目录模型、模板策略、统一校验。
 - `monthly_file_organizer.py`：目录模型、模板策略。
-- `monthly_bulletin_root.py`：R01-R02、工作计划、飞书统计快照（`feishu_case_source.py`）、联网源表。
+- `monthly_bulletin_root.py`：R01-R02、工作计划、大队执法人员总表（`staff_roster.py`）、飞书统计快照（`feishu_case_source.py`）、联网源表。
+- `monthly_run.py`（统一入口 plan/run/qa）与 `feishu_snapshot_export.py`（只读导出四表）：`runbook.md`、`source_feishu_case_snapshot.md`。
+- `overrides.py`（本月显式覆盖）：`monthly_overrides.md`。
 - `monthly_grade_register.py`：产品底册、联网源表、G01-G06。
 - `sync_monthly_templates.py` 与 `template_resolver.py`：模板策略。
 

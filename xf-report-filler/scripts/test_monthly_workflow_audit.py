@@ -26,6 +26,44 @@ def write_fake_template_tree(template_dir):
         (skeleton / item["skeleton_file"]).write_bytes(f"root:{item['skeleton_file']}".encode("utf-8"))
 
 
+class StaffRosterAuditTests(unittest.TestCase):
+    def test_headcount_differences_are_reported_not_edited_and_history_is_read_only(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import staff_roster
+
+        roster = {"counts": {"梁溪大队": 8, "经开大队": 6}, "outside_table": {"轨道交通大队": 5}, "blockers": [],
+                  "warnings": [], "info": [], "source": "r.xlsx", "sha256": "AA"}
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            current = base / "2026年11月消防产品监督统计表.xls"
+            current.write_bytes(b"x")
+            history = base / "old.xls"
+            history.write_bytes(b"x")
+            template_result = {"statuses": [{"id": "T09", "external_exists": False, "snapshot_exists": False}]}
+            args = SimpleNamespace(roster="r.xlsx", bulletin_year=2026, bulletin_month=11, history_r02=[str(history)])
+            counts = {str(current): {"梁溪大队": 8, "经开大队": 5}, str(history): {"梁溪大队": 12, "经开大队": 6}}
+            with patch.object(staff_roster, "read_roster", return_value=roster), \
+                    patch.object(audit, "read_stats_headcounts", side_effect=lambda path: counts[str(path)]):
+                report, blockers, warnings = audit.staff_roster_consistency(args, workflow.load_config(), template_result, base)
+            self.assertEqual(blockers, [])
+            by_target = {item["target"]: item for item in report["differences"]}
+            self.assertEqual(by_target["this_month_R02"]["found"], 5)
+            self.assertEqual(by_target["this_month_R02"]["roster"], 6)
+            self.assertTrue(by_target[next(k for k in by_target if k.startswith("history_"))]["historical_read_only"])
+            kinds = [w["type"] for w in warnings]
+            self.assertEqual(kinds.count("staff_headcount_differs"), 1)  # history differences are listed in the report, not warned as errors
+            self.assertEqual(current.read_bytes(), b"x")
+
+    def test_unreadable_roster_is_reported_without_a_fallback(self):
+        from types import SimpleNamespace
+
+        args = SimpleNamespace(roster="/nonexistent/roster.xlsx", bulletin_year=2026, bulletin_month=11, history_r02=None)
+        report, blockers, _ = audit.staff_roster_consistency(args, workflow.load_config(), {"statuses": []}, Path("."))
+        self.assertFalse(report["ok"])
+        self.assertEqual(blockers[0]["code"], "staff_roster_unreadable")
+
+
 class MonthlyWorkflowAuditTests(unittest.TestCase):
     def test_all_source_readers_prefer_populated_alias_over_empty_standard_directory(self):
         with tempfile.TemporaryDirectory() as tmp:

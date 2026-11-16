@@ -33,6 +33,8 @@
 - 不把伪联系人写入个人执法统计表。
 - 不在公开材料中写 CAD、PDF、缺CAD图、缺PDF。
 
+- 单位名含“缺锡”时 dry-run 与生成摘要输出 `monitor_unit_name_warnings`（大队、单位、sheet、行）；它只是提示，不自动改写成果或源表，更正须用户本月明确授权。
+
 ## Warning/Blocker
 
 - 找不到基础信息考评截图：blocker。

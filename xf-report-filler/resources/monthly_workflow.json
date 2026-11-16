@@ -14,6 +14,16 @@
         "bulletin_root_final_audit"
       ]
     },
+    "staff_roster": {
+      "path": "D:\\工作备份\\移动硬盘\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\2、产品监督\\2、{yy}年大队执法人员收集\\执法人员信息\\{year}大队执法人员总表.xlsx",
+      "sheet": "Sheet1",
+      "group_label_pattern": "^(.+?大队)\\s*(\\d+)\\s*人$",
+      "required_for": [
+        "bulletin_root_pending",
+        "bulletin_root_final_audit"
+      ],
+      "note": "R02 B 列“（N人）”的唯一人数来源：每个大队分组下 B 列实际姓名数（标签数字只作核对，C 列“未上报”不是人数）。不再从工作计划或旧模板推导；缺失/重名/无法读取按缺口报告，不用旧值兜底。"
+    },
     "case_data": {
       "path": "D:\\工作备份\\移动硬盘\\1、工作\\2、产品科技联网\\1、产品监督\\26年\\2、案卷信息采集\\产品案卷数据.xlsx",
       "required_for": [
@@ -36,6 +46,24 @@
         "products.ndjson",
         "monthly.ndjson"
       ],
+      "known_outside_brigades": [
+        "水上大队"
+      ],
+      "export": {
+        "tool": "lark-cli base +record-list（官方 CLI，只读，user 身份）",
+        "profile": "wx-product",
+        "base_token": "XOZ1bfapIasXW1ssaeEcovPinLc",
+        "tables": {
+          "cases": "tbl30eWyoeTZqxmU",
+          "checks": "tbl6cARXeBhjWunC",
+          "products": "tbl6jr76MIVK1xXi",
+          "monthly": "tblrl7HCLDLAnlUi"
+        },
+        "contract_dir": "D:\\工作备份\\移动硬盘\\1、工作\\2、产品科技联网\\1、产品监督\\案卷汇总\\运行记录\\字段合同",
+        "contract_glob": "字段合同-*.json",
+        "page_limit": 2000,
+        "note": "案卷项目字段合同（01-04）登记的 Base 与四表；导出只读，不写飞书。表 ID 若与最新合同不符，导出脚本只报警告，是否换表由人工核对。"
+      },
       "override_env": "XF_FEISHU_SNAPSHOT_DIR",
       "local_config_env": "XF_FEISHU_SNAPSHOT_CONFIG",
       "local_config_default": "~/.xf-report-filler/feishu-snapshot.json",
@@ -247,14 +275,26 @@
       "label_column": 3,
       "brigade_columns": "from_header",
       "value_source": "work_plan_tasks_and_case_counts",
+      "print_layout": {
+        "end_label": "实际得分",
+        "end_label_column": 2,
+        "scale": 90,
+        "note": "只设置打印区域（到“实际得分”行、表头最后一个大队列）和缩放，不改任何单元格；模板 UsedRange 里游离的 F45 保留在区域之外。"
+      },
       "pending_style": "spreadsheet_pending_style"
     },
     "product_stats_required_counts": {
       "brigade_column": 1,
       "target_column": 2,
       "pending_columns": "B:K",
-      "value": "（{staff_count}）",
+      "value": "（{staff_count}人）",
       "refresh_required_count": true,
+      "print_layout": {
+        "paper_size": 8,
+        "orientation": 2,
+        "fit_to_width": 1,
+        "fit_to_height": 1
+      },
       "pending_style": "spreadsheet_pending_style"
     }
   },
@@ -316,6 +356,23 @@
       }
     }
   },
+  "case_scores_rules": {
+    "print_layout": {
+      "paper_size": 8,
+      "orientation": 2,
+      "fit_to_width": 1,
+      "fit_to_height": 1
+    }
+  },
+  "monthly_run": {
+    "bulletin_root": "D:\\工作备份\\移动硬盘\\1、工作\\2、产品科技联网\\1、产品监督\\{yy}年\\1、月度通报",
+    "bulletin_dir_pattern": "{yy}{month:02d}_通报",
+    "overrides_dir": "D:\\ws\\01-business\\01-05-monthly-bulletin\\执行记录\\覆盖",
+    "overrides_pattern": "{year}{month:02d}.overrides.json",
+    "pending_before_day": 25,
+    "windows_python": "C:\\Users\\12070\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+    "note": "monthly_run.py 的目录约定：通报月份目录、本月覆盖文件的固定位置。覆盖文件放项目“执行记录/覆盖/”，同月续办由 plan 自动发现，不靠聊天记忆。"
+  },
   "validation_rules": {
     "case_window": "previous_month_26_to_current_month_25",
     "root_files_pending_before_day": 25,
@@ -336,7 +393,8 @@
       "product_register": "references/monthly/source_product_register.md",
       "monitor_base_info": "references/monthly/source_monitor_base_info.md",
       "monitor_stats": "references/monthly/source_monitor_stats.md",
-      "case_snapshot": "references/monthly/source_feishu_case_snapshot.md"
+      "case_snapshot": "references/monthly/source_feishu_case_snapshot.md",
+    "staff_roster": "references/monthly/source_staff_roster.md"
     },
     "templates": {
       "T01": "references/monthly/source_product_register.md",
@@ -405,6 +463,7 @@
     "backup_lag_blocks_primary_write": false
   },
   "archive_layout_rules": {
+    "keep_tail_item_rows": 3,
     "empty_tail_font_points": 1,
     "maximum_margin_reduction_points": 14.2,
     "minimum_margin_points": 28.35,
