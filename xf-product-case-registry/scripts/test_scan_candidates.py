@@ -214,3 +214,74 @@ def test_text_layer_pdf_routes_without_ocr_and_cites_cells(tmp_path, engine):
     cells = {c["field"]: c for c in result["fields"]["products"]["cells"]}
     assert cells["name"]["citation"]["table"] == {"index": 1, "row": 2, "col": 1} and cells["producer"]["text"] == "虚构消防器材有限公司"
     assert cells["location"]["citation"]["page"] == 1 and len(cells["location"]["citation"]["bboxPt"]) == 4
+
+
+def _junk_layer_scan_pdf(tmp_path: Path, name="junk.pdf") -> Path:
+    """扫描图（整页表格图）加一层与目标结构无关的劣质识别文字（乱码），模拟带劣质文字层的扫描件。"""
+    rl = pytest.importorskip("reportlab.pdfgen.canvas")
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    png = _table_png(tmp_path / "junk-t.png")
+    pdf = tmp_path / name
+    c = rl.Canvas(str(pdf), pagesize=(W * 72 / sc.DPI, H * 72 / sc.DPI))
+    c.drawImage(str(png), 0, 0, width=W * 72 / sc.DPI, height=H * 72 / sc.DPI)
+    c.setFont("STSong-Light", 9)
+    c.drawString(20, 200, "元場市息山区消防救援局消防声品監督栓査氾景栓査形式被栓査単位名称地址")
+    c.save()
+    return pdf
+
+
+def test_unusable_text_layer_falls_back_to_scan_with_reason_and_never_reports_ok(tmp_path, engine):
+    pdf = _junk_layer_scan_pdf(tmp_path)
+    r = sc.recognize(pdf, tmp_path / "w")
+    assert r["route"] == "scan" and r["status"] == "partial" and len(engine.calls) > 0
+    assert r["textLayer"]["usable"] is False and r["textLayer"]["reason"] == "no-target-structure-found"
+    assert any(f.get("flag") == "text-layer-unusable-fell-back-to-scan" for f in r["flags"])
+    assert r["fields"]["productName"]["status"] == "accepted-candidate" and "all-candidates-need-human-confirmation" in r["needsReview"]   # 回退后仍走原两阶段闸门，仍只是候选
+
+
+def test_fallback_failure_is_unknown_with_text_layer_diagnostic_not_ok(tmp_path, engine):
+    pdf = _junk_layer_scan_pdf(tmp_path, "junk2.pdf")
+    def boom(*a, **k):
+        raise RuntimeError("engine down")
+    sc.set_engine(boom, engine.render)
+    r = sc.recognize(pdf, tmp_path / "w")
+    assert r["status"] == "unknown" and r["reason"] == "scan-fallback-failed" and r["textLayer"]["usable"] is False and "fields" not in r
+
+
+def test_scan_fallback_without_any_value_is_partial_with_explicit_reason(tmp_path):
+    pdf = _junk_layer_scan_pdf(tmp_path, "junk3.pdf")
+    png = _table_png(tmp_path / "blank-t.png")
+    sc.set_engine(lambda *a, **k: "", lambda p, w: [png])
+    try:
+        r = sc.recognize(pdf, tmp_path / "w")
+    finally:
+        sc.set_engine()
+    assert r["status"] == "partial" and r["reason"] == "scan-no-candidate-values" and "文字层不可用后回退" in r["detail"] and not r.get("acceptedCandidates")
+
+
+def test_partial_text_layer_keeps_text_route_and_states_what_is_missing(tmp_path, engine):
+    rl = pytest.importorskip("reportlab.pdfgen.canvas")
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    pdf = tmp_path / "partial.pdf"
+    c = rl.Canvas(str(pdf)); c.setFont("STSong-Light", 11)
+    c.drawString(40, 780, "消防产品监督检查记录 编号：〔2026〕第 0034 号 本页没有检查时间也没有产品表格，仅作测试。"); c.save()
+    r = sc.recognize(pdf, tmp_path / "w")
+    assert r["route"] == "text-layer" and r["status"] == "partial" and r["reason"] == "text-layer-incomplete"
+    assert r["fields"]["documentNo"]["value"] == "〔2026〕第0034号" and "inspectionDate" in r["needsReview"] and "products" in r["needsReview"] and not engine.calls
+
+
+def test_old_version_cache_is_isolated_and_kept_new_version_parses_then_reuses(tmp_path, engine):
+    pdf = _junk_layer_scan_pdf(tmp_path, "junk4.pdf")
+    cache = tmp_path / "cache"; cache.mkdir()
+    old = cache / f"{sc.sha(pdf)[:16]}-scan-candidates-v2.3.json"
+    old.write_text(json.dumps({"route": "text-layer", "fields": {}, "status": "ok", "parser": "scan-candidates-v2.3"}), encoding="utf-8")
+    first = sc.recognize_cached(pdf, cache, tmp_path / "w")
+    assert not first.get("reused") and first["parser"] == sc.VERSION == "scan-candidates-v2.4" and first["route"] == "scan" and first["status"] == "partial"
+    assert old.exists() and json.loads(old.read_text(encoding="utf-8"))["status"] == "ok"            # 旧错误缓存保留、不被读取
+    calls = len(engine.calls)
+    again = sc.recognize_cached(pdf, cache, tmp_path / "w")
+    assert again["reused"] is True and again["route"] == "scan" and len(engine.calls) == calls

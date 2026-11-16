@@ -24,7 +24,8 @@ import pdfplumber
 from PIL import Image
 
 SCHEMA = "RecognitionCandidatesV1"
-VERSION = "scan-candidates-v2.3"
+TEXT_TARGETS = ("documentNo", "inspectionDate", "products")  # 电子记录文字层应能读到的目标结构
+VERSION = "scan-candidates-v2.4"
 ANCHORS = ["监督检查", "检查记录", "产品名称", "标称生产者", "所在部位", "检查基数", "检查数量", "市场准入", "现场检查", "被检查单位", "消防救援"]
 ROT_ORDER = (0, 270, 90, 180)
 DPI = 400
@@ -385,13 +386,36 @@ def recognize(path: Path, work: Path, inject: str | None = None) -> dict:
             return {**out, "status": "blocked", "reason": "password-required" if ("Password" in nm or "Encrypt" in nm) else "file-damaged", "detail": nm}
         with pdf:
             chars = [len((p.extract_text() or "").strip()) for p in pdf.pages]
+        text_diag = None
         if chars and all(c >= 20 for c in chars):
-            return {**out, **text_route(path), "status": "ok"}
-        s = scan_route(path, work, inject=inject)
+            t = text_route(path)
+            found = [k for k in TEXT_TARGETS if k in t["fields"]]
+            if len(found) == len(TEXT_TARGETS):
+                return {**out, **t, "status": "ok"}
+            if found:
+                missing = [k for k in TEXT_TARGETS if k not in found]
+                return {**out, **t, "status": "partial", "reason": "text-layer-incomplete", "detail": f"文字层只含 {found}，缺 {missing}",
+                        "needsReview": sorted(set(missing + ["all-candidates-need-human-confirmation"]))}
+            # 有文字层但读不到任何目标结构（编号、检查时间、产品表）：文字层不可信（常见于扫描图带劣质识别文字），回退本地扫描路线
+            text_diag = {"usable": False, "reason": "no-target-structure-found", "charsPerPage": chars, "targets": list(TEXT_TARGETS)}
+        try:
+            s = scan_route(path, work, inject=inject)
+        except Exception as e:  # noqa: BLE001
+            if text_diag is None:
+                raise
+            return {**out, "status": "unknown", "reason": "scan-fallback-failed", "detail": f"{type(e).__name__}:{str(e)[:120]}", "textLayer": text_diag,
+                    "action": "文字层不可用且扫描回退失败；保留诊断，先回读再决定，不盲目重跑"}
+        if text_diag is not None:
+            s["flags"].append({"flag": "text-layer-unusable-fell-back-to-scan", "detail": text_diag["reason"], "action": "回退发生不等于识别成功，结果仍是候选"})
+            s["textLayer"] = text_diag
         unc = sorted(k for k, v in s["fields"].items() if v["status"] != "accepted-candidate")
-        return {**out, **s, "status": "partial", "needsReview": sorted(set(unc + ["all-candidates-need-human-confirmation"])),
-                "acceptedCandidates": sorted(k for k, v in s["fields"].items() if v["status"] == "accepted-candidate"),
-                "note": "扫描件结果一律是候选；accepted-candidate 只表示两阶段读数一致，不等于已核验"}
+        res = {**out, **s, "status": "partial", "needsReview": sorted(set(unc + ["all-candidates-need-human-confirmation"])),
+               "acceptedCandidates": sorted(k for k, v in s["fields"].items() if v["status"] == "accepted-candidate"),
+               "note": "扫描件结果一律是候选；accepted-candidate 只表示两阶段读数一致，不等于已核验"}
+        if not any(v.get("value") not in (None, "") for v in s["fields"].values()):
+            res["reason"] = "scan-no-candidate-values"
+            res["detail"] = "扫描路线没有读出任何字段值" + ("（文字层不可用后回退）" if text_diag else "")
+        return res
     except Exception as e:  # noqa: BLE001
         return {**out, "status": "unknown", "reason": "stage-exception", "detail": f"{type(e).__name__}:{str(e)[:120]}", "action": "保留已有结果，先回读再决定，不盲目重跑"}
 

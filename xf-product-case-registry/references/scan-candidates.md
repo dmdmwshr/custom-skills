@@ -10,7 +10,8 @@ document_tools.py exec -- env PYTHONPATH=<case-registry 环境 site-packages> py
 需要受管文档环境（numpy、Pillow、pdfplumber、pypdf、pdftoppm、tesseract chi_sim）；`registry_cli` 本身要 `jsonschema`，所以在文档环境里追加 case-registry 环境的 site-packages。
 
 ## 选路与规则（不依据已知答案调参）
-- 每页文字层字符数 ≥20：`text-layer`，只给编号、日期和产品表单元格（带引用），不 OCR；产品行拆分与校验仍走现有电子记录解析。
+- 每页文字层字符数 ≥20 时先试 `text-layer`：只给编号、日期和产品表单元格（带引用），不 OCR；产品行拆分与校验仍走现有电子记录解析。文字层必须能读到这三类目标结构才算可用：三者齐全 → `ok`；只读到部分 → `partial`（reason `text-layer-incomplete`，写明缺什么）；一项也读不到（常见于扫描图带劣质识别文字）→ 视为不可用，记 `textLayer: {usable:false, reason:"no-target-structure-found"}` 和标记 `text-layer-unusable-fell-back-to-scan`，回退本地扫描路线；回退发生不等于识别成功，结果仍是候选。回退后扫描路线一个值也没读出 → `partial`（reason `scan-no-candidate-values`）；回退抛异常 → `unknown`（reason `scan-fallback-failed`，保留 textLayer 诊断）。空 fields 不会标 `ok`。
+- v2.4 起解析器版本变化，缓存键随之变化；旧版本（如 v2.3）缓存文件保留、不被读取。
 - 否则 `scan`：页方向按“锚词得分”取 0/270/90/180；按表格外框估计倾斜；横竖线切单元格；表头列语义按字符集合覆盖度（整页读数＋单元格裁剪重读）。
 - stage1 整页 OCR(psm4)，stage2 单元格/行裁剪重读(psm6 chi_sim+eng)：**两阶段规范化后一致才标 `accepted-candidate`，否则 `uncertain` 并保留两种读数，不择一**。表头未识别、无表格线、手写或质量不足的字段保持缺项/uncertain 并写原因。
 - 扫描件结果一律是候选，须人工确认，不当已核验值，不覆盖监督事实或人工值。
