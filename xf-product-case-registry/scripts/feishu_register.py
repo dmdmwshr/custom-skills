@@ -385,6 +385,8 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
     index = sync.field_index(contract)[table_id]
     by_name = {meta["name"]: fid for fid, meta in index.items()}
     sync._require(label in by_name and index[by_name[label]].get("class") == field_policy.CLASS_LABEL, f"{label} 不是案卷主表的业务标签字段")
+    allowed = index[by_name[label]].get("options")     # 字段合同里该标签的可选值；取值先过这一关才进入匹配、冲突或裁决
+    sync._require(isinstance(value, str) and (allowed is None or value in allowed), f"标签取值“{value}”不在 {label} 的可选项 {allowed} 内")
     key_field, unit_fid, brigade_fid = sync.STABLE_KEYS["案卷主表"], by_name["单位名称"], by_name.get("所属大队")
     read_fields = [key_field, unit_fid] + ([brigade_fid] if brigade_fid else [])
     rows = transport.list_rows(target["baseToken"], table_id, read_fields)
@@ -416,6 +418,8 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
         reason, hints = None, []
         if not item_value:
             reason = "待匹配记录缺少当时的标签取值，不借用本次清单的取值；需重新交来该条"
+        elif not isinstance(item_value, str) or (allowed is not None and item_value not in allowed):
+            reason = f"待匹配记录的取值“{item_value}”不在 {label} 的可选项内，不能匹配、不能参与裁决"
         elif project:
             case = projects.get(project)
             if case is None:
