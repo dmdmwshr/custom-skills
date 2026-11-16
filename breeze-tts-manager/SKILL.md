@@ -1,91 +1,98 @@
 ---
 name: breeze-tts-manager
-description: 管理本机 ComfyUI 中的 Breeze TTS 2（中英文音色设计、音色克隆、情绪指令、多人对白）并把生成的候选音频交给 AI 视频制作链路的配音接收流程。用户提到 Breeze TTS、音色设计、用文字描述生成声音、本地中文配音候选、多角色对白生成时使用；权重仅限研究和非商用，商用先停下确认授权。
+description: 用本机 ComfyUI 的 Breeze TTS 2 为 AI 视频、短片和有声内容批量配声：按台词清单和角色声线库一次生成多条中文候选，自动做转写与响度、语速预检，由用户试听选定并锁定角色声线，再接入媒体中心配音接收流程。用户提到 Breeze、配音、角色配声、批量生成台词语音、音色设计、锁定角色声线、多角色对白时使用；权重仅限研究和非商用，商用先停下确认授权。
 metadata:
   x-custom-skill: true
   x-source-repo: dmdmwshr/custom-skills
 ---
 
-# Breeze TTS 2 本机配音
+# Breeze TTS 2 本机配声
 
-执行平台：Windows。先核对本机 ComfyUI、节点和权重是否仍在原位；WSL/Linux 不直接套用此入口。安装、发现和业务验收分别报告，以实测回执为准。
+执行平台：Windows。WSL 里的 AI 通过 `powershell.exe` 调用同一份脚本，不在 Linux 直接跑 ComfyUI。先核对本机 ComfyUI、节点和权重是否仍在原位；安装、发现和业务验收分别报告，以实测回执为准。
 
-## 它是什么
-
-BreezeBlue 的开放权重文字转语音**模型**（3B，中英双语），经 ComfyUI 节点包 `ComfyUI-Breeze-TTS-2` 调用。四种用法：
-
-| 模式 | 输入 | 用途 |
-| --- | --- | --- |
-| design | 台词 + 音色描述 | 还没有参考声音时，用文字设计角色音色 |
-| clone | 台词 + 参考音频 + 其逐字转写 | 复刻已有授权声音 |
-| direction | clone 的输入 + 表演指令 | 保持音色，调整情绪、语速、语气 |
-| multi | `名字: 台词` 脚本 + 最多 8 个说话人 | 一次生成多角色对白 |
-
-台词内可插入事件标签：中文 `[笑]` `[咳嗽]` `[清嗓子]` `[叹气]`，英文 `(laugh)` `(cough)` `(clears throat)` `(sigh)`。输出为 24 kHz 单声道。
+2026-11-15 用户在五句中文对比里试听后认为 Breeze 优于 Qwen3-TTS，因此中文配声默认先用本技能；这是用户对那五句的听感判断，不是通用结论。
 
 ## 许可闸门（先看这条）
 
-权重与自托管生成物受 *BreezeBlue Research and Non-Commercial License* 约束，**禁止商用**；节点代码本身是 Apache-2.0。用户要把声音用于收费作品、广告、对外商业发布或客户交付时：停止使用本入口，说明原因，改用已有商用许可方案，或由用户另向 BreezeBlue/RESONIA, INC. 取得书面授权。`breeze_tts.py run` 必须带 `--purpose evaluation|noncommercial`，传其他值会在写任何文件前拒绝。克隆真人声音还要有声音所有者授权，不制作冒充内容。
+权重与自托管生成物受 *BreezeBlue Research and Non-Commercial License* 约束，**禁止商用**；节点代码是 Apache-2.0。收费作品、广告、对外商业发布或客户交付要用的声音：停止使用本入口并说明原因，改用 Qwen3-TTS（Apache-2.0）等可商用方案，或由用户另向 BreezeBlue/RESONIA, INC. 取得书面授权。所有生成命令必须带 `--purpose evaluation|noncommercial`，其他值会在写任何文件前被拒绝。克隆真人声音还需要声音所有者授权，不制作冒充内容。
+
+## AI 配声工作流（日常用这个）
+
+目录在 `<项目>\audio\dubbing\`，入口 `scripts\dub.py`，所有命令都带 `--project <项目根目录>`。
+
+1. **准备清单**（AI 从剧本或分镜整理，让用户过目）：`dub.py init` 生成示例，然后写：
+   - `cues.json`：每句 `id`、`shot`、`character`、`text`、可选 `direction`（怎么说）和 `pace`（`slow|normal|fast`，用于预检）。台词里可插 `[笑]` `[叹气]` `[咳嗽]` `[清嗓子]`。
+   - `voices.json`：每个角色一段 `instruction`（音色描述：年龄、性别、质感、语速、气质，写具体）。同一角色所有台词共用它。
+2. **确认后端**：`comfyui-on-demand` 的 `health` 看 8188。未运行时按用户当前请求用媒体中心 `Start-Comfy.ps1` 启动，只收尾自己启动的进程；显卡空闲、内存余量沿媒体中心规则，Win10 虚拟机在用时不动。
+3. **批量生成候选**（默认每句 3 条，种子 11、23、37；已成功的候选自动跳过，可断点续跑）：
+
+   ```powershell
+   python scripts\dub.py --project <项目> batch --takes 3 --purpose noncommercial --yes
+   python scripts\dub.py --project <项目> batch --cue S005-02 --seeds 41,53 --purpose noncommercial --yes   # 只补某句
+   ```
+
+   模型加载后留在 ComfyUI 里，后续每句约 6～14 秒。提交结果不明确（`result_unknown`）时整批停止，不重放，先按 prompt_id 对账。
+4. **机器预检**：`dub.py check` 用本机 SenseVoice 转写并算字错率，连同响度、尾部静音、每秒字数写入 `REVIEW.md`。标记只用于排除明显问题：偏轻、尾部静音长、比期望 `pace` 更快或更慢、转写差异。**转写和标记不能代替试听。**
+5. **用户试听**：把 `REVIEW.md` 和对应音频路径交给用户。AI 不替用户选声；用户说选哪条，才执行：
+
+   ```powershell
+   python scripts\dub.py --project <项目> select --cue S005-02 --take s23 --decided-by 用户试听
+   ```
+
+6. **锁定角色声线**（强烈建议，保证同一角色前后一致）：用户认可某条后，把它固定为该角色参考，之后同角色的台词自动走 clone/direction：
+
+   ```powershell
+   python scripts\dub.py --project <项目> lock-voice --voice 方源 --cue S005-02 --take s23 --decided-by 用户试听
+   ```
+
+   参考音频需要逐字转写：转写与台词一致时自动采用，否则用 `--ref-text` 给出实际听到的文字。锁定后可对该角色其余台词再跑 `batch --cue …`。
+7. **接收到配音流程**：`dub.py ingest` 把所有已选定的候选交给媒体中心 `ingest_dialogue`，生成 48 kHz 单声道 24bit WAV 候选，清单带 `engine=breeze-tts-2`、许可、`commercial_use_allowed=false`、台词编号、take 和决定人；接收前核对音频哈希与选定时一致。要用媒体中心的 Python（`media-center\.venv`）运行这一步。
+
+   ```powershell
+   & D:\ws\04-content\04-01-ai-imaging\comfy-workspace\media-center\.venv\Scripts\python.exe scripts\dub.py --project <项目> ingest
+   ```
+
+   `dub.py status` 随时汇总进度。接收后的音频仍是候选，口型对齐前由用户最终确认。
+
+### 提升成功率的经验（来自 2026-11-13～15 实测）
+
+- 多采样再挑：同一句不同种子的语速、情绪、读音差别明显，3 条起步，重要台词 5～6 条。
+- 速度指令不稳：写“语速偏慢”的哽咽句可能读得很快，写“急促”的短喊句可能读得很慢。给 `cues.json` 写 `pace`，让预检把明显反的挑出来，再多采几条；不要靠后期拉伸时长，媒体中心规则也不允许硬拉伸。
+- 音量偏低的候选会被标“偏轻”，混音时加增益；接收流程不会自动归一化。
+- 生僻专名（如“春秋蝉”）容易读错，转写差异大时优先试听，必要时换同音通用字写在台词里并记录。
+- 想要情绪细节用 `direction`；想要稳定音色用 `lock-voice`；笑声、叹气用事件标签而不是写“哈哈”。
+- 几个角色在同一场景里对话，也可用 `breeze_tts.py run --mode multi` 一次出，但逐句批量更便于选和重做。
+
+## 单条工具（调试、一次性出一句）
+
+`scripts\breeze_tts.py` 提供 `build`（只生成 API 工作流）、`run`（提交并取回，写回执）、`ingest`（接收一条成功运行）、`info`。模式 design（台词+音色描述）、clone（参考音频+逐字转写）、direction（clone 加表演指令）、multi（`名字:台词` 脚本，最多 8 人，只认 ASCII 冒号，脚本会自动把行首全角冒号改掉）。ComfyUI 的 API 工作流必须写全必填输入，否则返回 400，回执记 `rejected`。
 
 ## 本机固定事实
 
-- 节点：`C:\Users\12070\Documents\ComfyUI\custom_nodes\ComfyUI-Breeze-TTS-2`，固定提交 `53d899bfaa1ea37badc58f901900c068a9755116`（v1.4.7）。ComfyUI 实际用 `--base-directory C:\Users\12070\Documents\ComfyUI`，由 `media-center\Start-Comfy.ps1` 按需启动，默认 8188。
-- 权重：`C:\Users\12070\Documents\ComfyUI\models\breezetts2\drbaph_Breeze-TTS-2-comfyui\`，默认 `Breeze-TTS-2-int8-hybrid.safetensors` 加 `audio_tokenizer/`。登记在工作区 `models\catalog.json`，含 SHA-256 与许可状态。
-- 依赖：只新增 `accelerate`；torch 2.8.0+cu129、transformers 5.5.4 不动。不装 flash-attn、sageattention，注意力用 sdpa。
-- 禁止联网下载：工作流中 `download_if_missing=false`，说话人节点 `auto_transcribe_if_empty=false`（避免触发 Whisper 下载）。克隆需要的逐字转写由人提供或另行核对。
-
-## 调用流程
-
-1. **确认用途与许可**：商用则停。确认台词、角色和授权。
-2. **确认后端**：用 `comfyui-on-demand` 的 `health` 检查 8188。未运行时由用户当前请求授权后，再用媒体中心 `Start-Comfy.ps1` 启动；本技能不自行启动、不终止进程，只收尾自己启动的那一个。GPU 与内存预算沿媒体中心规则（显卡空闲、提交余量足够），Win10 虚拟机在用时不动。
-3. **生成工作流**：
-
-   ```powershell
-   python scripts\breeze_tts.py build --mode design --text-file 台词.txt --instruction "沉稳的中年男声，语速偏慢" --out wf.api.json
-   python <comfyui-on-demand>\scripts\comfyui_api.py preflight --workflow wf.api.json
-   ```
-
-4. **提交并取回**（目录必须全新，失败回执保留）：
-
-   ```powershell
-   python scripts\breeze_tts.py run --mode design --text-file 台词.txt --instruction-file 音色.txt `
-     --run-dir <项目>\audio\tts_source\<镜头>_<角色>_breeze_v001 --purpose noncommercial --yes
-   ```
-
-   克隆或指令模式再加 `--reference 参考.wav --reference-text-file 参考转写.txt`；多人对白用 `--mode multi --cast-json cast.json`。参考音频会被上传到 ComfyUI `input\breeze_refs\`。
-5. **回执核对**：`receipt.json` 含 prompt_id、工作流哈希、节点提交、输出哈希、时长和 `approved=false, voice_locked=false`。`status=result_unknown` 时不重放，按 prompt_id 用 `comfyui-on-demand history/reconcile` 对账。
-6. **文字核对**：用媒体中心 `scripts/audit_local_voice.py`（FunASR SenseVoice）转写比对；同音字、标点差异保留，转写相同也不等于听感正确。
-7. **交给配音接收流程**：成功运行（`succeeded_pending_listening`）用 `breeze_tts.py ingest` 调用媒体中心 `media_center.audio.ingest_dialogue`，生成 48 kHz 单声道 24bit WAV 候选，清单 `metadata` 自动写入 `engine=breeze-tts-2`、许可、`commercial_use_allowed=false`、回执路径与哈希。接收前会核对输出哈希与回执一致。
-
-   ```powershell
-   python scripts\breeze_tts.py ingest --run-dir <运行目录> --shot-id S005 --speaker 方源 --out <项目>\audio --role final_dialogue
-   ```
-
-   做音色参考用 `--role voice_reference`。重采样与格式统一只由接收流程完成。
-8. **试听与选定**：必须由用户听后决定。本技能不批准音色、不锁定声线。
+- 节点：`C:\Users\12070\Documents\ComfyUI\custom_nodes\ComfyUI-Breeze-TTS-2`，固定提交 `53d899bfaa1ea37badc58f901900c068a9755116`（v1.4.7）。ComfyUI 用 `--base-directory C:\Users\12070\Documents\ComfyUI`，默认 8188。
+- 权重：`C:\Users\12070\Documents\ComfyUI\models\breezetts2\drbaph_Breeze-TTS-2-comfyui\`，`Breeze-TTS-2-int8-hybrid.safetensors` 加 `audio_tokenizer/`，已登记 `models\catalog.json`（SHA-256、许可状态）。
+- 依赖：只新增 `accelerate`；torch 2.8.0+cu129、transformers 5.5.4 不动。注意力用 sdpa，不装 flash-attn。显存相对基线约增加 4.7～4.9 GiB。
+- 禁止联网下载：工作流里 `download_if_missing=false`、说话人 `auto_transcribe_if_empty=false`。转写预检用本机 FunASR（`D:\Program_Files\FunASR-runtimes\1.4.16`）和 SenseVoiceSmall（`D:\aimodels\modelscope\iic`），CPU 离线运行，路径可用参数覆盖。
+- 输出为 24 kHz 单声道 FLAC，运行目录含 `receipt.json`（prompt_id、工作流哈希、节点提交、输出哈希、`approved=false`）。
 
 ## 与其他配音方案的选择
 
 | 需求 | 选用 |
 | --- | --- |
-| 固定预设音色、稳定离线、可评估商用边界 | 媒体中心 Qwen3-TTS（`Voice-Local.ps1`，Apache-2.0） |
-| 用文字设计全新角色音色、情绪指令、`[笑]` 类事件、多角色一次出 | Breeze TTS 2（仅非商用） |
+| 非商用的中文角色配声、情绪细节、笑声叹气标签、多角色对白 | Breeze TTS 2（本技能，用户听感偏好） |
+| 商用或需要可审计许可的镜头 | 媒体中心 Qwen3-TTS（`Voice-Local.ps1`，Apache-2.0）；其启动器受 GPU 利用率闸门限制，需要时在用户授权的窗口里显式放宽 |
 | 已训练好的角色音色转换 | `applio-rvc-manager` |
 | 草稿占位 | Windows 系统声音 |
 
-Breeze 与 Qwen 的中文听感没有官方独立对比，选型以同一批台词的试听为准；不要据英文榜单推断中文质量。
-
 ## 失败与回退
 
-- 节点载入失败先看 ComfyUI 日志与节点仓库 issue；已知 #14（ComfyUI ≥0.44 的 Dynamic VRAM 路径）和 #12（低显存 codec 设备放置）。当前 ComfyUI 为 0.39.0，不受 #14 影响。
-- 显存紧张：保持 hybrid + eager；不要为速度开 `cuda_graphs`（权重常驻显存、首次捕获数秒）。
-- 不用 TTS-Audio-Suite、ComfyUI-Manager 一键装节点或无固定提交的更新；升级节点需重新审查 `install.py`、依赖变化和许可，并更新 `catalog.json`。
-- 回退：删除节点目录和 `models\breezetts2\`，必要时 `uv pip uninstall accelerate`（仅当确认无其他节点依赖），还原 `catalog.json` 备份；基线记录在工作区 `reports\breeze-tts-2-20261112\`。
+- 节点载入失败先看 ComfyUI 日志与节点仓库 issue：已知 #14（ComfyUI ≥0.44 的 Dynamic VRAM 路径）、#12（低显存 codec 设备放置）；当前 ComfyUI 0.39.0 不受 #14 影响。
+- 显存紧张：保持 hybrid + eager，不开 `cuda_graphs`。
+- 不用 TTS-Audio-Suite、ComfyUI-Manager 一键装或无固定提交的更新；升级节点要重新审查 `install.py`、依赖和许可，并更新 `catalog.json`。
+- 回退：删除节点目录和 `models\breezetts2\`，必要时 `uv pip uninstall accelerate`（确认无其他节点依赖），还原 `catalog.json` 备份；基线在工作区 `reports\breeze-tts-2-20261112\`。
 
-## 实测记录
+## 实测范围
 
-2026-11-13 在本机 RTX 5080 上，design、clone、direction、multi 四种模式和 `ingest` 接收都跑通：已加载时 2～4 秒的音频约 6～14 秒出结果，首次含载入约 40 秒；相对基线显存增加约 4.7～4.9 GiB，关闭 ComfyUI 后释放。SenseVoice 转写大体一致，但会出现首字、同音字差异，`[笑]` 能被识别为笑声事件。详见工作区 `reports\breeze-tts-2-20261112\SMOKE-TEST.md`。
+2026-11-13～15 在 RTX 5080 上：design、clone、direction、multi、单条接收，以及批量流水线（批量生成、转写预检、选定、锁定声线后用参考生成、接收）都跑通；批量试跑记录在工作区 `reports\breeze-tts-2-20261112\dub-trial\`，对比样本在 `compare\`，冒烟记录在 `SMOKE-TEST.md`。试跑中的选定和锁定是脚本演练，`decided-by` 写的是“测试脚本”。
 
-经验：多人脚本只认 ASCII 冒号（`甲:台词`），`build/run` 会把行首全角冒号自动改掉；API 格式工作流必须写全所有必填输入，否则 ComfyUI 返回 400，回执记 `rejected` 而非结果不明。
-
-未覆盖，不视为已验收：中文听感与 Qwen 的对比、bf16/`cuda_graphs`、长文本与 8 人对白、真人声音克隆、Whisper 转写节点、长时间稳定性。
+未覆盖，不视为已验收：长时间稳定性、一次几十句的大批量、8 人对白、真人声音克隆、bf16 与 `cuda_graphs`、锁定参考后是否一定比多采样更一致（需用户试听判断）。

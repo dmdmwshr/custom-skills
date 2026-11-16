@@ -368,7 +368,7 @@ def run_workflow(base: str, workflow: dict, run_dir: Path, *, purpose: str, time
 
 
 def ingest_run(run_dir: Path, *, media_center_root: Path, shot_id: str, speaker: str, out_dir: Path,
-               role: str) -> dict:
+               role: str, extra_metadata: dict | None = None) -> dict:
     """把一次成功的 Breeze 运行交给媒体中心的 ingest_dialogue（48k 单声道 24bit WAV 候选）。"""
     receipt = json.loads((run_dir / "receipt.json").read_text(encoding="utf-8"))
     if receipt.get("status") != "succeeded_pending_listening" or not receipt.get("outputs"):
@@ -395,6 +395,7 @@ def ingest_run(run_dir: Path, *, media_center_root: Path, shot_id: str, speaker:
         "breeze_receipt_sha256": sha256_file(run_dir / "receipt.json"),
         "node_commit": receipt.get("node_commit"), "generation_mode": receipt.get("mode"),
         "commercial_use_allowed": False,
+        **(extra_metadata or {}),
     }
     text = text_path.read_text(encoding="utf-8") if text_path.is_file() else ""
     return mc_audio.ingest_dialogue(output, text, shot_id, speaker, out_dir, mc_audio.DEFAULT_FFMPEG,
