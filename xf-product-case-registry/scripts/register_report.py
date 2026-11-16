@@ -56,6 +56,9 @@ def export_workbook(*, spec_path: Path, out_path: Path) -> dict[str, Any]:
             if unknown:
                 raise ReportError(f"{sheet['name']} 有未声明的列：{sorted(unknown)}")
             ws.append([_cell(row.get(c)) for c in columns])
+            for cell in ws[ws.max_row]:
+                if isinstance(cell.value, str):
+                    cell.data_type = "s"        # 以 = 开头的字符串也是文本，不能被存成公式
         for cell in ws[1]:
             cell.font = Font(bold=True)
         for index, column in enumerate(columns, 1):
@@ -70,7 +73,7 @@ def export_workbook(*, spec_path: Path, out_path: Path) -> dict[str, Any]:
 
 
 def verify_workbook(*, spec: dict[str, Any], path: Path, load: Any = None) -> dict[str, Any]:
-    """重新打开已保存文件，与规格逐表逐格比较；返回每表行数。"""
+    """重新打开已保存文件，与规格逐表逐格比较（值与类型：字符串必须仍是文本，不是公式）；返回每表行数。"""
     if load is None:
         from openpyxl import load_workbook as load
     book = load(path)
@@ -82,9 +85,12 @@ def verify_workbook(*, spec: dict[str, Any], path: Path, load: Any = None) -> di
         rows = list(ws.iter_rows(values_only=True))
         if list(rows[0]) != list(sheet["columns"]) or len(rows) != len(sheet["rows"]) + 1:
             raise ReportError(f"{sheet['name']} 表头或行数与规格不一致")
-        for got, want in zip(rows[1:], sheet["rows"]):
-            expected = [_cell(want.get(c)) for c in sheet["columns"]]
-            if [g if g is not None else None for g in got] != expected:
-                raise ReportError(f"{sheet['name']} 内容与规格不一致：{got} != {expected}")
+        for got, want in zip(book[sheet["name"]].iter_rows(min_row=2), sheet["rows"]):
+            for cell, column in zip(got, sheet["columns"]):
+                expected = _cell(want.get(column))
+                kind = "s" if isinstance(expected, str) else ("n" if expected is not None else None)
+                actual_kind = cell.data_type if cell.value is not None else None
+                if cell.value != expected or actual_kind != kind:
+                    raise ReportError(f"{sheet['name']} 内容与规格不一致：{cell.coordinate} {cell.value!r}({actual_kind}) != {expected!r}({kind})")
         counts[sheet["name"]] = len(sheet["rows"])
     return {"path": str(path), "sheets": counts, "reopened": True}

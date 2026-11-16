@@ -45,3 +45,18 @@ def test_verification_catches_a_changed_file(tmp_path):
     book.save(tmp_path / "a.xlsx")
     with pytest.raises(report.ReportError, match="内容与规格不一致"):
         report.verify_workbook(spec=json.loads(spec_path.read_text(encoding="utf-8")), path=tmp_path / "a.xlsx")
+
+
+def test_strings_starting_with_equals_stay_text_and_verification_rejects_a_formula(tmp_path):
+    body = {"schemaVersion": report.SCHEMA, "sheets": [{"name": "主清单", "columns": ["单位", "数量"], "rows": [{"单位": "=1+1", "数量": 3}, {"单位": "+SUM(A1)", "数量": None}]}]}
+    spec = tmp_path / "s.json"
+    spec.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    report.export_workbook(spec_path=spec, out_path=tmp_path / "t.xlsx")
+    from openpyxl import load_workbook
+    cell = load_workbook(tmp_path / "t.xlsx")["主清单"]["A2"]
+    assert cell.value == "=1+1" and cell.data_type == "s"
+    book = load_workbook(tmp_path / "t.xlsx")
+    book["主清单"]["A2"] = "=1+1"                    # 同样的字符数据，但被存成公式
+    book.save(tmp_path / "t.xlsx")
+    with pytest.raises(report.ReportError, match="内容与规格不一致"):
+        report.verify_workbook(spec=body, path=tmp_path / "t.xlsx")

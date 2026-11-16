@@ -395,23 +395,29 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
     register_root = Path(business_root) / "运行记录" / REGISTER_DIR
     pending_path = register_root / f"{label}待匹配.json"
     pending = _load(pending_path) or {"schema": "LabelPendingV1", "label": label, "entries": {}}
-    candidates = [(digest, item["entry"], item["evidence"]) for digest, item in pending["entries"].items()]
+    # 每条待匹配记录带着自己当时的取值与证据；旧记录没有取值就不借用本次清单的取值。
+    candidates = [(digest, item["entry"], item["evidence"], item.get("value")) for digest, item in pending["entries"].items() if item.get("label", label) == label]
     evidence = {"evidenceRef": listing["sourceRef"], "evidenceSha256": list_sha}
     for entry in listing["entries"]:
         sync._require(isinstance(entry, dict) and (sync._text(entry.get("项目编号")) or norm_name(entry.get("单位名称"))), "标签清单条目需要项目编号或单位名称")
-        digest = sync.digest(json.dumps(entry, ensure_ascii=False, sort_keys=True))
+        digest = sync.digest(json.dumps({"entry": entry, "value": value}, ensure_ascii=False, sort_keys=True))
         if digest not in pending["entries"]:
-            candidates.append((digest, entry, evidence))
+            candidates.append((digest, entry, evidence, value))
 
-    matched: dict[str, dict[str, Any]] = {}
+    matched: dict[str, dict[str, dict[str, Any]]] = {}     # 项目编号 -> 取值 -> {证据, 条目}
     unmatched: dict[str, dict[str, Any]] = {}
-    for digest, entry, proof in candidates:
+    for digest, entry, proof, item_value in candidates:
         project, unit, brigade = sync._text(entry.get("项目编号")), norm_name(entry.get("单位名称")), norm_brigade(entry.get("大队"))
         reason, hints = None, []
-        if project:
+        if not item_value:
+            reason = "待匹配记录缺少当时的标签取值，不借用本次清单的取值；需重新交来该条"
+        elif project:
             case = projects.get(project)
             if case is None:
                 reason = "项目编号不在案卷主表"
+            elif unit and unit != case["unit"]:
+                reason = f"清单单位名称与项目编号对应案卷的单位({case['unit']})不一致，待核"
+                hints = [project + "|" + case["unit"]]
             elif brigade and case["brigade"] and brigade != case["brigade"]:
                 reason = f"清单大队({entry.get('大队')})与案卷所属大队({case['brigade']})不一致"
         else:
@@ -430,23 +436,28 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
                 hints = sorted(c["project"] for c in narrowed)[:5]
         if reason:
             previous = pending["entries"].get(digest, {})
-            unmatched[digest] = {"entry": entry, "evidence": proof, "reason": reason, "hints": hints, "firstSeen": previous.get("firstSeen", day), "lastTried": day}
+            unmatched[digest] = {"entry": entry, "evidence": proof, "label": label, "value": item_value, "reason": reason, "hints": hints, "firstSeen": previous.get("firstSeen", day), "lastTried": day}
         else:
-            matched.setdefault(project, {"entries": [], **proof})["entries"].append(entry)
+            matched.setdefault(project, {}).setdefault(item_value, {"entries": [], **proof})["entries"].append(entry)
+
+    conflicts = [{"项目编号": p, "values": sorted(v)} for p, v in sorted(matched.items()) if len(v) > 1]
+    for item in conflicts:
+        del matched[item["项目编号"]]       # 同一案卷收到不同取值：都不写，留给人核
 
     batch = _batch(business_root, label, day, list_sha)
     plan_ref = None
     if matched:
         plan = {"schemaVersion": plans.EVIDENCE_PLAN_SCHEMA, "sourceRef": listing["sourceRef"], "table": "案卷主表",
-                "entries": [{"stableKey": project, "fields": {label: {"new": value, "evidenceRef": info["evidenceRef"], "evidenceSha256": info["evidenceSha256"]}}}
-                            for project, info in sorted(matched.items())]}
+                "entries": [{"stableKey": project, "fields": {label: {"new": item_value, "evidenceRef": info["evidenceRef"], "evidenceSha256": info["evidenceSha256"]}}}
+                            for project, by_value in sorted(matched.items()) for item_value, info in by_value.items()]}
         _atomic(batch / "证据计划.json", plan)
         plan_ref = {"path": str(batch / "证据计划.json"), "sha256": sync.file_sha(batch / "证据计划.json")}
     result = {"schema": LABEL_REPORT, "day": day, "label": label, "value": value,
               "input": {"path": str(list_path), "sha256": list_sha, "sourceRef": listing["sourceRef"], "entries": len(listing["entries"])},
-              "feishuRowsRead": len(rows), "matched": [{"项目编号": p, "entries": len(i["entries"])} for p, i in sorted(matched.items())],
-              "unmatched": [{"entry": u["entry"], "reason": u["reason"], "hints": u["hints"], "firstSeen": u["firstSeen"]} for u in unmatched.values()],
-              "counts": {"matchedCases": len(matched), "unmatched": len(unmatched), "retriedPending": len(pending["entries"])},
+              "feishuRowsRead": len(rows), "matched": [{"项目编号": p, "value": v, "entries": len(i["entries"])} for p, by_value in sorted(matched.items()) for v, i in by_value.items()],
+              "conflicts": conflicts,
+              "unmatched": [{"entry": u["entry"], "value": u["value"], "reason": u["reason"], "hints": u["hints"], "firstSeen": u["firstSeen"]} for u in unmatched.values()],
+              "counts": {"matchedCases": len(matched), "unmatched": len(unmatched), "conflicts": len(conflicts), "retriedPending": len(pending["entries"])},
               "evidencePlan": plan_ref, "pendingFile": str(pending_path), "batchDir": str(batch), "externalCalls": "read-only"}
     _atomic(batch / "匹配结果.json", result)
     _atomic(pending_path, {"schema": "LabelPendingV1", "label": label, "updated": day, "entries": unmatched})
