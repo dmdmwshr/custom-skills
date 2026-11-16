@@ -94,6 +94,7 @@ class _Plan:
         self.skipped: list[dict[str, Any]] = []
         self.writes: list[dict[str, Any]] = []
         self.resolved: list[dict[str, Any]] = []
+        self.priority: list[dict[str, Any]] = []   # 按来源优先级采用监督系统详情、并行保留另一侧证据的记录
         self.resolutions: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._sha: dict[str, str | None] = {}
 
@@ -339,11 +340,13 @@ def build_calibration_plan(*, waterline_path: Path, contract_path: Path, contrac
             else:
                 unit_ev = plan.evidence(detail["path"], detail["sha256"])
             key_unit = (form_evidence.get(project) or {}).get("keyUnit")
+            if unit_ev is not None and key_unit is not None and unit_local in UNIT_OPTIONS and (unit_local == "重点单位") != key_unit:
+                # 用户 2026-11-16 裁决并入流程：单位类别在监督系统详情与初查记录勾选冲突时统一以监督系统详情为准；两侧证据都记入报告，不再列为待选差异
+                plan.priority.append({"projectNo": project, "field": "单位类别", "adopt": "监督系统详情" + ("(截图逐图确认)" if visual_used else ""), "detail": unit_local,
+                                      "recordBox": "重点单位" if key_unit else "非重点单位", "cloud": unit_cloud,
+                                      "basis": "来源优先级：监督系统详情 > 初查电子记录勾选（用户 2026-11-16 裁决）"})
             if unit_ev is None:
                 plan.diff(project, "案卷主表", project, M["unit"], unit_cloud, unit_local, "单位类别证据文件缺失或摘要不符", "不写；重新核证据")
-            elif key_unit is not None and unit_local in UNIT_OPTIONS and (unit_local == "重点单位") != key_unit:
-                plan.diff(project, "案卷主表", project, M["unit"], unit_cloud, {"来源详情": unit_local, "初查电子记录勾选": "重点单位" if key_unit else "非重点单位"},
-                          "单位类别：来源详情与初查电子记录勾选互相矛盾", "不写不更正，保留双方；交核对")
             elif unit_local not in UNIT_OPTIONS:
                 plan.diff(project, "案卷主表", project, M["unit"], unit_cloud, unit_local, "来源详情的单位类别不在合同选项里", "不写；交核对")
             elif unit_cloud is None:
@@ -608,10 +611,10 @@ def build_calibration_plan(*, waterline_path: Path, contract_path: Path, contrac
               "inputs": {"contract": {"path": str(contract_path), "sha256": contract_sha}, "waterline": {"path": str(waterline_path), "sha256": sync.file_sha(waterline_path)},
                          "resolutions": {"path": str(resolutions_path), "sha256": sync.file_sha(resolutions_path)} if resolutions_path else None},
               "fresh": {"cloudCaseRows": len(main_rows), "cloudInspectionRows": len(inspect_rows), "cloudProductRows": len(product_rows)},
-              "counts": {**counts, "plannedRecords": len(entries), "plannedFields": len(plan.writes), "differences": len(plan.diffs), "resolvedKeepCloud": len(plan.resolved), "corrections": sum(1 for w in plan.writes if w.get("correction")), "correctionsHeld": plan.held,
+              "counts": {**counts, "plannedRecords": len(entries), "plannedFields": len(plan.writes), "differences": len(plan.diffs), "resolvedKeepCloud": len(plan.resolved), "sourcePriorityApplied": len(plan.priority), "corrections": sum(1 for w in plan.writes if w.get("correction")), "correctionsHeld": plan.held,
                          "casesLeftAlone": len(plan.skipped)},
               "plannedByField": dict(sorted(by_field.items())), "differencesByKind": dict(sorted(by_kind.items())),
-              "plan": plan_file, "writes": plan.writes, "differences": plan.diffs, "resolved": plan.resolved, "casesLeftAlone": plan.skipped,
+              "plan": plan_file, "writes": plan.writes, "differences": plan.diffs, "resolved": plan.resolved, "sourcePriority": plan.priority, "casesLeftAlone": plan.skipped,
               "status": "OK" if not entries else "PLANNED"}
     (out_dir / "calibrate-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return report

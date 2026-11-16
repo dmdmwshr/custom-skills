@@ -100,3 +100,20 @@ def test_scan_records_the_key_unit_flag_next_to_the_form(tmp_path):
     boxes = {**BOXES[P1], "消防安全重点单位": True, "非消防安全重点单位": False}
     body = json.loads(Path(rf.scan(tmp_path, tmp_path / "e.json", "t", lambda path: boxes)["path"]).read_text(encoding="utf-8"))
     assert body["cases"][P1]["keyUnit"] is True and body["cases"][P1]["inspectionForm"] == "日常检查"
+
+
+def test_other_form_template_takes_the_checked_source_original_text_and_holds_ambiguous_or_review_boxes(tmp_path):
+    mark = rf.OTHER_TEMPLATE_MARK
+    boxes = {mark: True, "大型活动安全检查": False, "对举报投诉的核查": False, "对火灾事故调查核查": True, "复查": False, "申请恢复使用、生产、经营的检查": False,
+             "申请解除临时查封的检查": False, "技术服务机构检查": False, "其": False, "他检查": False}
+    assert rf.decide_other(boxes) == ("对火灾事故调查核查", None)
+    assert rf.decide_other({**boxes, "对火灾事故调查核查": False, "他检查": True}) == ("其他检查", None)        # 第 8 项分行读成“其”“他检查”
+    assert rf.decide_other({**boxes, "大型活动安全检查": True})[0] is None                                    # 勾了两项
+    assert rf.decide_other({**boxes, "对火灾事故调查核查": False, "复查": True})[0] is None                    # 只勾复查
+    assert rf.decide_other({**boxes, "对火灾事故调查核查": False})[0] is None                                  # 一项也没勾
+    _case(tmp_path, P1)
+    result = rf.extract_case(next((tmp_path / "工作区" / "历史工作区").iterdir()), tmp_path, lambda path: boxes)
+    assert result["inspectionForm"] == "对火灾事故调查核查" and "hold" not in result
+    held = {"generation": "x", "hold": "记录里没有读到检查形式方框", "parser": rf.PARSER, "record": result["record"]}
+    again = rf.extract_case(next((tmp_path / "工作区" / "历史工作区").iterdir()), tmp_path, lambda path: boxes, reuse={result["record"]["sha256"]: held})
+    assert again["inspectionForm"] == "对火灾事故调查核查" and not again.get("reused")                             # 缺项不复用：读法改进后自动重读

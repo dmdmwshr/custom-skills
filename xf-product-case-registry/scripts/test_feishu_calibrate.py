@@ -293,7 +293,8 @@ def test_unit_category_comes_from_the_saved_source_detail_and_an_unknown_value_i
     assert (CP, "单位类别") not in writes and diffs[(CP, "单位类别")]["kind"] == "来源详情的单位类别不在合同选项里"
 
 
-def test_unit_category_that_contradicts_the_record_key_unit_box_is_listed_and_never_written_or_corrected(tmp_path, monkeypatch):
+def test_unit_category_follows_the_supervision_detail_when_it_contradicts_the_record_key_unit_box(tmp_path, monkeypatch):
+    """用户 2026-11-16 裁决：详情与记录勾选冲突时统一以监督系统详情为准；两侧证据记入报告，不再列为待选差异。"""
     contract, water, transport = _setup_unit_form(tmp_path, initial=ONE_OK)
     detail = water.parent / "source-evidence.json"
     detail.write_text("{}", encoding="utf-8")
@@ -302,19 +303,22 @@ def test_unit_category_that_contradicts_the_record_key_unit_box_is_listed_and_ne
     body = json.loads(evidence.read_text(encoding="utf-8"))
     body["cases"][CP]["keyUnit"] = True                                  # 记录勾“重点单位”，详情写“其他单位”
     evidence.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
-    for blank in (True, False):
-        if not blank:
-            transport.rows[(CASE, "recEXIST000001")][M["unit"]] = ["重点单位"]
-        _, writes, diffs = _plan(tmp_path, contract, water, transport, form_evidence_path=evidence, correct_facts=True)
-        assert (CP, "单位类别") not in writes and diffs[(CP, "单位类别")]["kind"] == "单位类别：来源详情与初查电子记录勾选互相矛盾"
-    body["cases"][CP]["keyUnit"] = False                                 # 一致时照常补空
+    report, writes, diffs = _plan(tmp_path, contract, water, transport, form_evidence_path=evidence)       # 云端空：按详情补空，不再列矛盾差异
+    assert writes[(CP, "单位类别")] == (None, "其他单位") and (CP, "单位类别") not in diffs
+    assert report["counts"]["sourcePriorityApplied"] == 1 and report["sourcePriority"][0]["detail"] == "其他单位" and report["sourcePriority"][0]["recordBox"] == "重点单位"
+    transport.rows[(CASE, "recEXIST000001")][M["unit"]] = ["重点单位"]                                        # 云端有与详情不同的值
+    _, writes, diffs = _plan(tmp_path, contract, water, transport, form_evidence_path=evidence)            # 非更正模式：只列差异，不写
+    assert (CP, "单位类别") not in writes and diffs[(CP, "单位类别")]["kind"] == "单位类别与来源详情不同"
+    _, writes, diffs = _plan(tmp_path, contract, water, transport, form_evidence_path=evidence, correct_facts=True)   # 更正模式：带证据与精确旧值更正为详情值
+    assert writes[(CP, "单位类别")] == ("重点单位", "其他单位") and (CP, "单位类别") not in diffs
+    body["cases"][CP]["keyUnit"] = False                                 # 一致时照常补空，不记优先级
     evidence.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
     transport.rows[(CASE, "recEXIST000001")][M["unit"]] = None
-    _, writes, _ = _plan(tmp_path, contract, water, transport, form_evidence_path=evidence)
-    assert writes[(CP, "单位类别")] == (None, "其他单位")
+    report, writes, _ = _plan(tmp_path, contract, water, transport, form_evidence_path=evidence)
+    assert writes[(CP, "单位类别")] == (None, "其他单位") and report["counts"]["sourcePriorityApplied"] == 0
 
 
-def test_visual_detail_evidence_only_fills_a_blank_unit_category_and_never_corrects_or_overrides_the_record_box(tmp_path, monkeypatch):
+def test_visual_detail_evidence_only_fills_a_blank_unit_category_and_never_corrects(tmp_path, monkeypatch):
     contract, water, transport = _setup_unit_form(tmp_path, initial=ONE_OK)
     monkeypatch.setattr(sync, "saved_detail_evidence", lambda root, project, case: None)      # 手动交件：没有结构化详情
     shot = water.parent / "案卷详情.png"
@@ -335,5 +339,5 @@ def test_visual_detail_evidence_only_fills_a_blank_unit_category_and_never_corre
     form = _form_evidence(tmp_path, water)
     body = json.loads(form.read_text(encoding="utf-8")); body["cases"][CP]["keyUnit"] = False   # 记录勾“非重点”，视觉写“重点”：矛盾不写
     form.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
-    _, writes, diffs = _plan(tmp_path, contract, water, transport, visual_evidence_path=evidence(), form_evidence_path=form)
-    assert (CP, "单位类别") not in writes and diffs[(CP, "单位类别")]["kind"] == "单位类别：来源详情与初查电子记录勾选互相矛盾"
+    report, writes, diffs = _plan(tmp_path, contract, water, transport, visual_evidence_path=evidence(), form_evidence_path=form)
+    assert writes[(CP, "单位类别")] == (None, "重点单位") and report["counts"]["sourcePriorityApplied"] == 1      # 截图是监督系统详情：与记录勾选冲突时同样以详情为准

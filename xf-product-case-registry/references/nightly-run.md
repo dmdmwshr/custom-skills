@@ -59,6 +59,8 @@
 | `acquire` | 详情截图与打包（叶集合证明完整才打包）→ `source` 接件 | 原包摘要与截图已入业务根 |
 | `organize`/`validate` | 清点、拆分、字段校验、本地核验归档 | 指纹未变且已有完成证据的案卷记 `skipped` |
 | `sync` | 依次 `feishu-source-build`（新案主行）→ `feishu-child-build`（检查与产品子行）→ `feishu-calibrate-plan`（按已核验本地清单补三表监督事实空格；云端与证据不同的只列差异，带 `--resolutions` 校准裁决文件时才按逐格裁决处理；创建时一次写入的名称类字段默认不改写；合同登记 `evidenceCorrection` 的产品名称与两表“数据来源”只能在校准入口带本地已核验证据和精确旧值更正：`--correct-facts`、`--max-corrections N`（超限即停，防批量误改），检查记录里“检查形式”“单位类别”的勾选框由 `record_forms` 解析成 `--form-evidence` 证据，详情页与电子记录勾选互相矛盾时不写、只列差异；手动交件没有结构化详情时可用 `--visual-evidence`（VisualDetailEvidenceV1：逐图人工视觉确认的单位类别，带截图路径与摘要，只补云端空格、不更正已有值、与记录勾选矛盾时同样只列差异）；`feishu-child-build` 对已有子行的案卷也会按稳定键只补缺失的产品行，已有行不动）→ `feishu-label-initial-build`（标签初值）→ `record_quantities.py scan`（受管文档环境）→ `feishu-quantity-plan` → `feishu-field-plan-build`；每份说明用 `feishu-source-sync --execute` 写入。新案主行写入后子行的父记录才存在，所以整串在同一晚跑两遍：第二遍补上第一遍因父行未建而跳过的子行和数量。合同与路由取业务根 `运行记录/字段合同/`，用法见该目录“说明.md” | 每份说明读回一致；规划器退出 4 表示有案被保护挡住，其余照写；UNKNOWN 记 `unknown` 并只封锁该目标 |
+
+单位类别来源优先级：详情与初查记录勾选冲突时以监督系统详情为准并在校准报告 `sourcePriority` 逐案记录，不再列为待选差异；检查形式在“其他形式消防监督检查适用”模板下取被勾选项的来源原文（合同登记的选项才写）。
 | `mirror` | `feishu-mirror` | 镜像、当日快照、变更记录已写 |
 | `reconcile` | `feishu-recount --out` | 退出 0；退出 4 记 `failed` 并保留差异文件。数量只对同一含义、同一单位相加；没有单位的数值只记项数，`physicalQuantity.status` 为 `NO_UNIT_BASIS` 时没有实物合计，不是 0 |
 | `report` | 汇总本轮变更、缺项、未知与到期 | 无变化时安静结束 |

@@ -26,10 +26,13 @@ PARSER = "wingdings2-checkbox-v3"
 OFF, ON = "", ""
 ALLOWED = ("专项监督抽查", "日常检查", "举报投诉核查", "其他")
 FORMS = ("专项监督抽查", "举报投诉核查", "复查", "其他", "日常检查")
+# “其他形式消防监督检查适用”模板(标题《消防监督检查记录》)：检查类型有 8 个方框，值取被勾选项的来源原文(必须是合同选项才会写，否则列差异)
+OTHER_TEMPLATE_MARK = "其他形式消防监督检查适用"
+OTHER_TEMPLATE_FORMS = ("大型活动安全检查", "对举报投诉的核查", "对火灾事故调查核查", "复查", "申请恢复使用、生产、经营的检查", "申请解除临时查封的检查", "技术服务机构检查", "其他检查")
 
 
 def read_boxes(path: Path) -> dict[str, bool]:
-    """第 1 页每个方框后面的选项文字 -> 是否选中。"""
+    """第 1 页每个方框后面的选项文字 -> 是否选中。其他形式模板另加一个标记键 OTHER_TEMPLATE_MARK=True。"""
     try:
         import pdfplumber
     except ImportError as error:
@@ -46,7 +49,35 @@ def read_boxes(path: Path) -> dict[str, bool]:
             label = "".join("".join(w["text"].split()) for w in row if w["x0"] < limit)
             if label:
                 found[label] = box["text"] == ON
+        if not found and boxes:
+            # 词级读不到(方框与文字贴在同一个词里，如其他形式模板)：按字符取同一行、方框右侧到下一个方框之间的字
+            for box in boxes:
+                limit = min([b["x0"] for b in boxes if b is not box and b["x0"] > box["x0"] and abs(b["top"] - box["top"]) < 6], default=1e9)
+                chars = sorted((c for c in page.chars if abs(c["top"] - box["top"]) < 8 and box["x0"] < c["x0"] < limit and c["text"] not in (OFF, ON)), key=lambda c: c["x0"])
+                label = "".join(c["text"] for c in chars if not c["text"].isspace())
+                if label:
+                    found[label] = box["text"] == ON
+        if OTHER_TEMPLATE_MARK in "".join((page.extract_text() or "").split()):
+            found[OTHER_TEMPLATE_MARK] = True
         return found
+
+
+def decide_other(boxes: dict[str, bool]) -> tuple[str | None, str | None]:
+    """其他形式模板：恰好一项被选中且属于模板的 8 个检查类型，才取其来源原文(第 8 项“其他检查”分行时只读到“其”“他检查”，按前缀认)。"""
+    checked = []
+    for label, on in boxes.items():
+        if not on or label == OTHER_TEMPLATE_MARK:
+            continue
+        for form in OTHER_TEMPLATE_FORMS:
+            if label.startswith(form) or (form == "其他检查" and label in ("其", "他检查")):
+                checked.append(form)
+                break
+    checked = sorted(set(checked))
+    if len(checked) != 1:
+        return None, f"其他形式模板检查类型勾选不唯一：{checked or '无'}"
+    if checked[0] == "复查":
+        return None, "勾选项“复查”不是初查的检查形式"
+    return checked[0], None
 
 
 def decide(boxes: dict[str, bool]) -> tuple[str | None, str | None]:
@@ -83,11 +114,11 @@ def extract_case(generation_dir: Path, business_root: Path, boxes_of: Callable[[
     digest = rq.file_sha(record)
     out["record"] = {"path": record.relative_to(business_root).as_posix(), "sha256": digest}
     previous = (reuse or {}).get(digest)
-    if previous is not None and previous.get("parser") == PARSER:
+    if previous is not None and previous.get("parser") == PARSER and "inspectionForm" in previous:   # 缺项(hold)不复用：读法改进后下次自动重读
         return {**out, **{k: previous[k] for k in ("inspectionForm", "hold", "keyUnit") if k in previous}, "parser": PARSER, "reused": True}
     try:
         boxes = boxes_of(record)
-        value, why = decide(boxes)
+        value, why = decide_other(boxes) if boxes.get(OTHER_TEMPLATE_MARK) else decide(boxes)
         unit = key_unit(boxes)
     except RuntimeError:
         raise
