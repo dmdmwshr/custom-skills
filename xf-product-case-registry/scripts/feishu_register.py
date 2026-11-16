@@ -27,6 +27,7 @@ Standard library only.
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import unicodedata
@@ -363,6 +364,28 @@ def norm_brigade(value: Any) -> str:
     return text[:-2] if text.endswith("大队") else text
 
 
+AUTO_RATIO, AUTO_DICE, AUTO_MIN_LEN, HIGH_RATIO = 0.95, 0.85, 8, 0.80      # 2026-11-16 根定稿：唯一极高相似才默认命中，其余高相似询问用户
+
+
+def _dice(a: str, b: str) -> float:
+    left, right = {a[i:i + 2] for i in range(len(a) - 1)}, {b[i:i + 2] for i in range(len(b) - 1)}
+    return 2 * len(left & right) / (len(left) + len(right)) if left and right else 0.0
+
+
+def similar_cases(unit: str, cases: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Cases whose name is highly similar to ``unit`` (both already norm_name'd), best first.
+
+    Nothing is stripped or expanded to lift a score (no 企业后缀 removal, no abbreviation expansion): the
+    normalised names are compared as they are.
+    """
+    found = []
+    for case in cases:
+        ratio = difflib.SequenceMatcher(None, unit, case["unit"]).ratio()
+        if ratio >= HIGH_RATIO:
+            found.append({"project": case["project"], "name": case["unit"], "brigade": case["brigade"], "ratio": round(ratio, 4), "dice": round(_dice(unit, case["unit"]), 4)})
+    return sorted(found, key=lambda c: (-c["ratio"], c["project"]))
+
+
 def _cell_text(cell: Any) -> str:
     return sync._text(cell[0]) if isinstance(cell, list) and cell else sync._text(cell)
 
@@ -390,7 +413,7 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
     key_field, unit_fid, brigade_fid = sync.STABLE_KEYS["案卷主表"], by_name["单位名称"], by_name.get("所属大队")
     read_fields = [key_field, unit_fid] + ([brigade_fid] if brigade_fid else [])
     rows = transport.list_rows(target["baseToken"], table_id, read_fields)
-    cases = [{"project": row[key_field], "unit": norm_name(row.get(unit_fid)), "brigade": norm_brigade(_cell_text(row.get(brigade_fid)) if brigade_fid else "")}
+    cases = [{"project": row[key_field], "name_raw": sync._text(row.get(unit_fid)), "unit": norm_name(row.get(unit_fid)), "brigade": norm_brigade(_cell_text(row.get(brigade_fid)) if brigade_fid else "")}
              for row in rows.values() if row.get(key_field)]
     projects = {c["project"]: c for c in cases}
 
@@ -410,6 +433,7 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
         if digest not in pending["entries"] and digest not in held_digests:
             candidates.append((digest, entry, evidence, value))
 
+    similar_basis: dict[str, dict[str, Any]] = {}
     matched_items: dict[str, list[dict[str, Any]]] = {}
     matched: dict[str, dict[str, dict[str, Any]]] = {}     # 项目编号 -> 取值 -> {证据, 条目}
     unmatched: dict[str, dict[str, Any]] = {}
@@ -424,7 +448,7 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
             case = projects.get(project)
             if case is None:
                 reason = "项目编号不在案卷主表"
-            elif unit and unit != case["unit"]:
+            elif unit and unit != case["unit"] and not (sync._text(entry.get("确认依据")) and norm_name(entry.get("系统名称")) == case["unit"]):
                 reason = f"清单单位名称与项目编号对应案卷的单位({case['unit']})不一致，待核"
                 hints = [project + "|" + case["unit"]]
             elif brigade and case["brigade"] and brigade != case["brigade"]:
@@ -435,8 +459,17 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
             if len(narrowed) == 1:
                 project = narrowed[0]["project"]
             elif not hits:
-                reason = "单位名称没有对应案卷"
-                hints = sorted({c["project"] + "|" + c["unit"] + "|" + c["brigade"] for c in cases if unit and (unit in c["unit"] or c["unit"] in unit) and c["unit"]})[:5]
+                scope = [c for c in cases if not brigade or c["brigade"] == brigade]      # 给了大队先收窄；没给就看全部
+                near = similar_cases(unit, scope)
+                if len(near) == 1 and near[0]["ratio"] >= AUTO_RATIO and near[0]["dice"] >= AUTO_DICE and min(len(unit), len(near[0]["name"])) >= AUTO_MIN_LEN:
+                    project = near[0]["project"]
+                    similar_basis[digest] = {"how": "auto-similar", "ratio": near[0]["ratio"], "dice": near[0]["dice"], "canonicalName": near[0]["name"]}
+                elif near:
+                    reason = "相似候选需用户判断（" + ("有多个高相似候选" if len(near) > 1 else "唯一候选但未达自动阈值") + "）"
+                    hints = [f"{c['project']}|{c['name']}|{c['brigade']}|ratio {c['ratio']}|dice {c['dice']}" for c in near[:5]]
+                else:
+                    reason = "单位名称没有对应案卷"
+                    hints = sorted({c["project"] + "|" + c["unit"] + "|" + c["brigade"] for c in scope if unit and (unit in c["unit"] or c["unit"] in unit) and c["unit"]})[:5]
             elif not narrowed:
                 reason = f"单位名称有 {len(hits)} 个案卷，但没有一个在清单大队({entry.get('大队')})下"
                 hints = sorted(c["project"] + "|" + c["brigade"] for c in hits)[:5]
@@ -449,7 +482,8 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
         else:
             matched.setdefault(project, {}).setdefault(item_value, {"entries": [], **proof})["entries"].append(entry)
             matched_items.setdefault(project, []).append({"digest": digest, "entry": entry, "value": item_value, "evidence": proof,
-                                                 "firstSeen": pending["entries"].get(digest, {}).get("firstSeen", day)})
+                                                 "firstSeen": pending["entries"].get(digest, {}).get("firstSeen", day),
+                                                          "match": similar_basis.get(digest) or {"how": "alias" if sync._text(entry.get("确认依据")) and entry.get("系统名称") else ("project" if project and sync._text(entry.get("项目编号")) else "exact-name"), "canonicalName": projects[project]["name_raw"]}})
 
     conflicts_now, resolved = {}, list(pending.get("resolved") or [])
     for project in sorted(set(matched_items) | set(held)):
@@ -479,7 +513,7 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
         plan_ref = {"path": str(batch / "证据计划.json"), "sha256": sync.file_sha(batch / "证据计划.json")}
     result = {"schema": LABEL_REPORT, "day": day, "label": label, "value": value,
               "input": {"path": str(list_path), "sha256": list_sha, "sourceRef": listing["sourceRef"], "entries": len(listing["entries"])},
-              "feishuRowsRead": len(rows), "matched": [{"项目编号": p, "value": v, "entries": len(i["entries"])} for p, by_value in sorted(matched.items()) for v, i in by_value.items()],
+              "feishuRowsRead": len(rows), "matched": [{"项目编号": p, "value": v, "entries": len(i["entries"]), "basis": [x["match"] for x in matched_items.get(p, []) if x["value"] == v]} for p, by_value in sorted(matched.items()) for v, i in by_value.items()],
               "conflicts": conflicts,
               "unmatched": [{"entry": u["entry"], "value": u["value"], "reason": u["reason"], "hints": u["hints"], "firstSeen": u["firstSeen"]} for u in unmatched.values()],
               "counts": {"matchedCases": len(matched), "unmatched": len(unmatched), "conflicts": len(conflicts), "retriedPending": len(pending["entries"])},

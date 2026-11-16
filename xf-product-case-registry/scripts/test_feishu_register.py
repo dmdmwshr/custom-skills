@@ -330,3 +330,54 @@ def test_a_pending_entry_with_a_value_outside_the_options_is_not_matched_and_doe
     report = register.plan_label_list(list_path=lst, list_sha=_sha(lst), day="2026-11-16", transport=cloud, business_root=tmp_path / "root", **common)
     assert [m["value"] for m in report["matched"]] == ["是"] and "不在 是否网售 的可选项内" in report["unmatched"][0]["reason"]
     assert json.loads(pending.read_text(encoding="utf-8"))["conflicts"] == {}
+
+
+LONG = "无锡市恒达消防器材销售服务贸易发展有限公司"
+LONG_NEAR = "无锡市恒达消防器材销售服务贸易发展有限责司"          # 同长度只差一个字：自动阈值内
+
+
+def _run_labels(tmp_path, contract, rows, entries, name="l.json", day="2026-11-16"):
+    common = _label_contract(contract)
+    listing = _list(tmp_path, register.LABEL_LIST, entries, name=name, label="是否网售", value="是")
+    return register.plan_label_list(list_path=listing, list_sha=_sha(listing), day=day, transport=Cloud(rows), business_root=tmp_path / ("root-" + name), **common)
+
+
+def test_a_unique_very_high_similarity_matches_by_default_and_keeps_the_system_name_and_scores(tmp_path, contract):
+    report = _run_labels(tmp_path, contract, {(CASE, "recA00000000001"): _row("P-1", LONG), (CASE, "recA00000000002"): _row("P-2", "无锡市另一家完全不同的公司")}, [{"单位名称": LONG_NEAR}])
+    basis = report["matched"][0]["basis"][0]
+    assert report["matched"][0]["项目编号"] == "P-1" and basis["how"] == "auto-similar" and basis["canonicalName"] == LONG
+    assert basis["ratio"] >= register.AUTO_RATIO and basis["dice"] >= register.AUTO_DICE
+
+
+def test_a_second_high_candidate_or_a_same_name_pair_is_asked_not_picked(tmp_path, contract):
+    second = LONG.replace("恒达", "恒迈")                                     # 也是高相似
+    rows = {(CASE, "recA00000000001"): _row("P-1", LONG), (CASE, "recA00000000002"): _row("P-2", second)}
+    report = _run_labels(tmp_path, contract, rows, [{"单位名称": LONG_NEAR}])
+    assert report["matched"] == [] and "多个高相似候选" in report["unmatched"][0]["reason"] and len(report["unmatched"][0]["hints"]) == 2
+    twin = {(CASE, "recA00000000001"): _row("P-1", LONG), (CASE, "recA00000000002"): _row("P-2", LONG, "锡山大队")}
+    report = _run_labels(tmp_path, contract, twin, [{"单位名称": LONG}], name="t.json")
+    assert report["matched"] == [] and "需给出项目编号" in report["unmatched"][0]["reason"]
+
+
+def test_brigade_narrowing_short_names_below_threshold_and_common_suffixes_never_match_by_default(tmp_path, contract):
+    rows = {(CASE, "recA00000000001"): _row("P-1", LONG, "锡山大队")}
+    other = _run_labels(tmp_path, contract, rows, [{"单位名称": LONG_NEAR, "大队": "梁溪"}])
+    assert other["matched"] == [] and "没有对应案卷" in other["unmatched"][0]["reason"]                # 给了大队：别队的近名不进候选
+    anywhere = _run_labels(tmp_path, contract, rows, [{"单位名称": LONG_NEAR}], name="a.json")
+    assert [m["项目编号"] for m in anywhere["matched"]] == ["P-1"]                                    # 没给大队：看全部候选
+    short = _run_labels(tmp_path, contract, {(CASE, "recA00000000001"): _row("P-1", "江苏驰马科技股份有限公司")}, [{"单位名称": "驰马科技"}], name="s.json")
+    assert short["matched"] == [] and "没有对应案卷" in short["unmatched"][0]["reason"]
+    suffix = _run_labels(tmp_path, contract, {(CASE, "recA00000000001"): _row("P-1", "无锡市甲商贸有限公司")}, [{"单位名称": "无锡市乙商贸有限公司"}], name="x.json")
+    assert suffix["matched"] == [] and "未达自动阈值" in suffix["unmatched"][0]["reason"]             # 只差一字的短名：询问，不自动
+    unique_high = _run_labels(tmp_path, contract, {(CASE, "recA00000000001"): _row("P-1", "无锡风客网络服务有限公司", "经开大队")}, [{"单位名称": "无锡风客网络有限公司", "大队": "经开"}], name="f.json")
+    assert unique_high["matched"] == [] and "唯一候选但未达自动阈值" in unique_high["unmatched"][0]["reason"] and "ratio 0.9" in unique_high["unmatched"][0]["hints"][0]
+
+
+def test_a_confirmed_alias_binds_the_exact_project_and_system_name_and_nothing_else(tmp_path, contract):
+    rows = {(CASE, "recA00000000001"): _row("P-1", "无锡八方汇商业经营管理有限公司"), (CASE, "recA00000000002"): _row("P-2", "八方荟(无锡)茶文化交流有限公司")}
+    alias = {"项目编号": "P-1", "单位名称": "八方汇无锡茶文化交流有限公司", "系统名称": "无锡八方汇商业经营管理有限公司", "确认依据": "用户2026-11-16答复摘要805ea7e3"}
+    report = _run_labels(tmp_path, contract, rows, [alias])
+    assert report["matched"][0]["项目编号"] == "P-1" and report["matched"][0]["basis"][0] == {"how": "alias", "canonicalName": "无锡八方汇商业经营管理有限公司"}
+    for bad in ({**alias, "项目编号": "P-2"}, {k: v for k, v in alias.items() if k != "确认依据"}, {**alias, "系统名称": "八方荟(无锡)茶文化交流有限公司"}):
+        held = _run_labels(tmp_path, contract, rows, [bad], name="b%d.json" % len(str(bad)))
+        assert held["matched"] == [] and "待核" in held["unmatched"][0]["reason"]

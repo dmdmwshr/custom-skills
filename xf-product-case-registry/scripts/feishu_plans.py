@@ -164,7 +164,8 @@ def build_label_initial_specs(*, contract_path: Path, contract_sha: str, table_n
 
 def build_delegated_specs(*, plan_path: Path, plan_sha: str, contract_path: Path, contract_sha: str, target: dict[str, str], transport: Any,
                           out_dir: Path, log_root: Path, ledger_dir: Path | None, batch_size: int = sync.HARD_CAP_RECORDS,
-                          isolated_test_ledger: bool = False) -> dict[str, Any]:
+                          isolated_test_ledger: bool = False, authorization_path: Path | None = None,
+                          authorization_sha: str | None = None) -> dict[str, Any]:
     """Specs for values the user asked to have recorded.
 
     Plan (``FeishuDelegatedPlanV1``): ``{authorizedBy:"user", userQuote, sourceRef, section?, table,
@@ -172,6 +173,9 @@ def build_delegated_specs(*, plan_path: Path, plan_sha: str, contract_path: Path
     the value read now is the guard between this build and the write; with it, a different current value
     is a conflict that is reported and left untouched. A ``business-label`` cell that already holds an explicit answer is
     changed only when the ledger shows the assistant wrote it last and the revision history has no person's save.
+    A ``UserLabelAuthorizationV1`` file (digest fixed by the caller) lifts that protection for exactly the targets it
+    lists (项目编号, recordId, 字段, expectedOld, new all equal to what is read now); the file records the user's answer
+    relayed by the root, it is not machine proof of a person. Ledger UNKNOWN targets stay blocked either way.
     """
     sync._require(1 <= batch_size <= sync.HARD_CAP_RECORDS, f"batch_size 必须是 1..{sync.HARD_CAP_RECORDS}")
     sync._require(sync.file_sha(plan_path) == plan_sha, "代录计划摘要与固定值不一致")
@@ -189,6 +193,8 @@ def build_delegated_specs(*, plan_path: Path, plan_sha: str, contract_path: Path
     key_field = sync.STABLE_KEYS[table_name]
     by_name = {meta["name"]: fid for fid, meta in index[table_id].items()}
     ledger = _ledger(ledger_dir, isolated_test_ledger)
+    granted = _load_authorization(authorization_path, authorization_sha) if authorization_path else {}
+    used_grants: set[tuple[str, str, str, str]] = set()
     wanted: set[str] = set()
     for entry in entries:
         for ref in (entry.get("fields") or {}) if isinstance(entry, dict) else {}:
@@ -249,7 +255,11 @@ def build_delegated_specs(*, plan_path: Path, plan_sha: str, contract_path: Path
                     state, why = HISTORY_PERSON, "当前值不是助手最后写入并读回确认的值"
                 else:
                     state, why = person_history(transport, ledger, target["baseToken"], table_id, record_id, key, fid, _assistant_operators(contract))
-                if state != HISTORY_TOOL:
+                grant = (key, record_id, meta["name"], str(current), str(item["new"]))
+                if state != HISTORY_TOOL and grant in granted and item.get("expectedOld") == current:
+                    used_grants.add(grant)
+                    basis = {**basis, "userAuthorization": {"sha256": authorization_sha, "answerSha256": granted[grant]}}
+                elif state != HISTORY_TOOL:
                     entry_conflicts.append({"stableKey": key, "recordId": record_id, "field": meta["name"], "planned": item["new"], "expectedOld": item.get("expectedOld"),
                                             "current": current, "action": "REPORT_ONLY", "history": state, "reason": why})
                     continue
@@ -276,9 +286,35 @@ def build_delegated_specs(*, plan_path: Path, plan_sha: str, contract_path: Path
               "plan": {"path": str(plan_path), "sha256": plan_sha}, "table": table_name,
               "counts": {"entries": len(entries), "recordsToWrite": len(updates), "alreadyEqualFields": unchanged,
                          "conflicts": len(conflicts), "refused": len(refused)},
+              "authorization": {"sha256": authorization_sha, "targets": len(granted), "used": len(used_grants)} if authorization_path else None,
               "specs": specs, "conflicts": conflicts, "refused": refused, "status": "OK" if not refused and not conflicts else "PARTIAL"}
     (out_dir / "build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return report
+
+
+AUTHORIZATION_SCHEMA = "UserLabelAuthorizationV1"
+
+
+def _load_authorization(path: Path, sha: str | None) -> dict[tuple[str, str, str, str, str], str]:
+    """Exact targets the user's answer covers: {(项目编号, recordId, 字段名, expectedOld, new): 答复摘要}.
+
+    Nothing outside the list is lifted, and a list that is incomplete or digest-mismatched is refused whole.
+    """
+    sync._require(sha and sync.file_sha(path) == sha, "授权文件摘要与固定值不一致")
+    body = json.loads(Path(path).read_text(encoding="utf-8"))
+    sync._require(isinstance(body, dict) and body.get("schemaVersion") == AUTHORIZATION_SCHEMA, "授权文件版本不支持")
+    answer = sync._text(body.get("answerSha256"))
+    sync._require(len(answer) == 64 and sync._text(body.get("sourceRef")) and sync._text(body.get("quote")), "授权文件需要 sourceRef、quote 与 64 位 answerSha256")
+    targets = body.get("targets")
+    sync._require(isinstance(targets, list) and targets, "授权文件没有目标")
+    granted: dict[tuple[str, str, str, str, str], str] = {}
+    for target in targets:
+        sync._require(isinstance(target, dict) and all(isinstance(target.get(k), str) and target[k].strip() for k in ("stableKey", "recordId", "field", "expectedOld", "new")),
+                      "授权目标需要非空的 stableKey、recordId、field、expectedOld、new")
+        grant = (target["stableKey"], target["recordId"], target["field"], target["expectedOld"], target["new"])
+        sync._require(grant not in granted, f"授权目标重复：{grant[0]}")
+        granted[grant] = answer
+    return granted
 
 
 EVIDENCE_PLAN_SCHEMA = "FeishuLabelEvidencePlanV1"

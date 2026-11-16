@@ -349,3 +349,69 @@ def test_user_delegated_label_never_overwrites_a_persons_answer_even_with_a_matc
     assert report["conflicts"][0]["stableKey"] == "P-3" and report["conflicts"][0]["history"] == "person" and report["conflicts"][0]["action"] == "REPORT_ONLY"
     _execute(report["specs"][0]["path"], cloud, ledger)
     assert cloud.rows[(CASE, "recA00000000001")][NET] == ["是"] and cloud.rows[(CASE, "recA00000000003")][NET] == ["否"]
+
+
+def _authorization(tmp_path, targets, name="auth.json", answer="a" * 64):
+    path = tmp_path / name
+    path.write_text(json.dumps({"schemaVersion": plans.AUTHORIZATION_SCHEMA, "sourceRef": "根转交的用户答复", "quote": "以本次名单为准，更正这10项", "answerSha256": answer,
+                                "targets": targets}, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _label_plan(tmp_path, keys_old, name="lp.json"):
+    plan = tmp_path / name
+    plan.write_text(json.dumps({"schemaVersion": plans.DELEGATED_PLAN_SCHEMA, "authorizedBy": "user", "userQuote": "更正为是", "sourceRef": "聊天", "table": "案卷主表",
+                                "entries": [{"stableKey": k, "fields": {"是否网售": {"new": "是", "expectedOld": old}}} for k, old in keys_old]}, ensure_ascii=False), encoding="utf-8")
+    return plan
+
+
+def _build_auth(tmp_path, contract, cloud, ledger, plan, auth=None, auth_sha=None):
+    return plans.build_delegated_specs(plan_path=plan, plan_sha=_sha(plan), contract_path=contract, contract_sha=_sha(contract),
+                                       target={"baseToken": BASE, "profile": "offline", "identity": "user"}, transport=cloud, out_dir=tmp_path / "ua", log_root=tmp_path / "ualog",
+                                       ledger_dir=ledger, isolated_test_ledger=True, authorization_path=auth, authorization_sha=auth_sha if auth_sha else (_sha(auth) if auth else None))
+
+
+def test_an_authorization_lifts_the_person_protection_only_for_its_exact_targets(tmp_path, contract):
+    body = json.loads(contract.read_text(encoding="utf-8"))
+    body["assistantOperators"] = ["管理员"]
+    contract.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    cloud, ledger = Cloud(_case_rows()), _ledger(tmp_path)
+    cloud.rows[(CASE, "recA00000000001")][NET] = ["否"]; cloud.rows[(CASE, "recA00000000003")][NET] = ["否"]
+    for rec in ("recA00000000001", "recA00000000003"):
+        cloud.person(rec, NET, operator="梁溪成员", after="否", at=time.time() + 3600)     # 两格都有他人保存过：历史 person
+    plan = _label_plan(tmp_path, [("P-1", "否"), ("P-3", "否")])
+    none = _build_auth(tmp_path, contract, cloud, ledger, plan)
+    assert none["counts"]["recordsToWrite"] == 0 and none["counts"]["conflicts"] == 2                   # 没有授权：expectedOld 不是授权
+    exact = _authorization(tmp_path, [{"stableKey": "P-1", "recordId": "recA00000000001", "field": "是否网售", "expectedOld": "否", "new": "是"}])
+    one = _build_auth(tmp_path, contract, cloud, ledger, plan, exact)
+    assert one["counts"]["recordsToWrite"] == 1 and [c["stableKey"] for c in one["conflicts"]] == ["P-3"] and one["authorization"]["used"] == 1
+    _execute(one["specs"][0]["path"], cloud, ledger)
+    assert cloud.rows[(CASE, "recA00000000001")][NET] == ["是"] and cloud.rows[(CASE, "recA00000000003")][NET] == ["否"]
+    spec = json.loads(Path(one["specs"][0]["path"]).read_text(encoding="utf-8"))
+    assert "userAuthorization" in json.dumps(spec, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("wrong", [{"recordId": "recA00000000002"}, {"field": "是否加油加气站"}, {"expectedOld": "是"}, {"new": "否"}, {"stableKey": "P-9"}])
+def test_an_authorization_that_differs_in_any_element_does_not_lift_anything(tmp_path, contract, wrong):
+    body = json.loads(contract.read_text(encoding="utf-8"))
+    body["assistantOperators"] = ["管理员"]
+    contract.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    cloud, ledger = Cloud(_case_rows()), _ledger(tmp_path)
+    cloud.rows[(CASE, "recA00000000001")][NET] = ["否"]
+    cloud.person("recA00000000001", NET, operator="梁溪成员", after="否", at=time.time() + 3600)
+    target = {"stableKey": "P-1", "recordId": "recA00000000001", "field": "是否网售", "expectedOld": "否", "new": "是", **wrong}
+    report = _build_auth(tmp_path, contract, cloud, ledger, _label_plan(tmp_path, [("P-1", "否")]), _authorization(tmp_path, [target]))
+    assert report["counts"]["recordsToWrite"] == 0 and report["counts"]["conflicts"] == 1 and report["authorization"]["used"] == 0
+
+
+def test_a_bad_authorization_file_is_refused_whole(tmp_path, contract):
+    cloud, ledger = Cloud(_case_rows()), _ledger(tmp_path)
+    plan = _label_plan(tmp_path, [("P-1", "否")])
+    good = {"stableKey": "P-1", "recordId": "recA00000000001", "field": "是否网售", "expectedOld": "否", "new": "是"}
+    with pytest.raises(sync.SyncError, match="摘要"):
+        _build_auth(tmp_path, contract, cloud, ledger, plan, _authorization(tmp_path, [good]), auth_sha="0" * 64)
+    for bad in ([], [{**good, "new": ""}], [{**good}, {**good}]):
+        with pytest.raises(sync.SyncError):
+            _build_auth(tmp_path, contract, cloud, ledger, plan, _authorization(tmp_path, bad, name="bad.json"))
+    with pytest.raises(sync.SyncError, match="answerSha256"):
+        _build_auth(tmp_path, contract, cloud, ledger, plan, _authorization(tmp_path, [good], name="short.json", answer="abc"))

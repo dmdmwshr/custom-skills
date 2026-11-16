@@ -2712,6 +2712,8 @@ def build_parser() -> argparse.ArgumentParser:
         delegated.add_argument(flag, required=True)
     delegated.add_argument("--identity", default="user", choices=["user", "bot"])
     delegated.add_argument("--batch-size", type=int, default=20)
+    delegated.add_argument("--authorization", help="UserLabelAuthorizationV1：用户答复逐目标授权(项目编号/recordId/字段/旧值/新值)，只放行所列目标的人工/修订未知保护")
+    delegated.add_argument("--authorization-sha", help="授权文件 sha256")
     delegated.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     delegated.set_defaults(func=feishu_delegated_build_command)
     evidence = sub.add_parser(
@@ -3278,7 +3280,8 @@ def feishu_label_initial_build_command(args: argparse.Namespace) -> None:
 def feishu_delegated_build_command(args: argparse.Namespace) -> None:
     _feishu_plan_build(args, "代录", lambda plans, target, transport: plans.build_delegated_specs(
         plan_path=Path(args.plan), plan_sha=args.plan_sha, contract_path=Path(args.contract), contract_sha=args.contract_sha, target=target,
-        transport=transport, out_dir=Path(args.out_dir), log_root=Path(args.log_root), ledger_dir=Path(args.ledger_dir), batch_size=args.batch_size))
+        transport=transport, out_dir=Path(args.out_dir), log_root=Path(args.log_root), ledger_dir=Path(args.ledger_dir), batch_size=args.batch_size,
+        authorization_path=Path(args.authorization) if args.authorization else None, authorization_sha=args.authorization_sha))
 
 
 def feishu_label_evidence_build_command(args: argparse.Namespace) -> None:
