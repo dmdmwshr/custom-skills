@@ -1382,7 +1382,7 @@ def validate_create_spec(spec: Any, v3: dict[str, Any]) -> dict[str, Any]:
     route_by_source: dict[str, dict[str, Any]] = {}
     for route in routes:
         if isinstance(route, dict) and route.get("adminOnly") is True:
-            # 不在八队名录的来源管辖(水上大队)：不写所属大队/归属大队(留空，仅管理员可见)，只以“大队来源”选项如实标明；与既有水上案同一做法。
+            # 不在名录的来源管辖(adminOnly 路由，历史上的水上大队用法)：不写所属大队/归属大队(留空，仅管理员可见)，只以“大队来源”选项如实标明；与既有水上案同一做法。
             _require(all(isinstance(route.get(k), str) and route[k] for k in ("sourceJurisdictionExact", "sourceOptionExact")) and not any(k in route for k in ("teamOptionExact", "teamRecordId")),
                      "adminOnly route 只需要精确原文管辖与大队来源选项，且不得带队选项/底册记录")
         else:
@@ -2868,7 +2868,7 @@ PRODUCT_F = {"key": "fldqlwHjUW", "inspection": "fldD2pT8R7", "seq": "fld53DA0lX
              "producer": "fld1JERqCE", "location": "fld4leGJ9P", "method": "fld4gYH0cP", "result": "fldJUpLw89", "access": "fld532RUHS",
              "problem": "fld2GmMG7w", "source": "fldLCZvMp4", "cert": "fldAN4wz5l"}
 BRIGADE_NAMES = {"LIANGXI": "梁溪大队", "BINHU": "滨湖大队", "XINWU": "新吴大队", "XISHAN": "锡山大队", "HUISHAN": "惠山大队", "JIANGYIN": "江阴大队",
-                 "YIXING": "宜兴大队", "JINGKAI": "经开大队"}
+                 "YIXING": "宜兴大队", "JINGKAI": "经开大队", "SHUISHANG": "水上大队"}
 PRODUCT_METHOD = {"ONSITE": "现场判定", "SAMPLING": "抽样送检"}
 PRODUCT_RESULT = {"QUALIFIED": "合格", "UNQUALIFIED": "不合格", "PENDING": "待核实"}
 CLASSIFICATION_RESULT = {"QUALIFIED": "合格", "UNQUALIFIED": "不合格"}
@@ -3064,7 +3064,7 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
         cloud_team = _cell_text(row.get(BASIC_FIELDS["team"]))
         team = BRIGADE_NAMES.get(code)
         if team is None and not cloud_team:
-            team = None   # 水上等不在八队名录的管辖：主行也不写所属大队，子行同样留空
+            team = None   # 不在九队名录的管辖(含无法识别的代码)：主行也不写所属大队，子行同样留空
         elif team is None or team != cloud_team:
             reasons.append(f"清单管辖 {code!r} 与云端所属大队 {cloud_team!r} 不一致")
         if len(inspections) > 1 and inspections[1]["day"] < initial["day"]:

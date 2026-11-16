@@ -150,7 +150,7 @@ Excel 至少展示项目编号、单位、大队、标签、来源进度、本�
 - **无法结构解析的 PDF**：`inventory` 把 pypdf 读不开的 `%PDF-` 文件标为 `unparseablePdf`（不记页数）。该成员只能经 `normalize-office`（同上参数，`sourceFormat=PDF_UNPARSEABLE`）绑定由 PDFium 等重新渲染并逐页目视核对的规范 PDF；仍可解析的 PDF 或含脚本/启动/内嵌文件动作者拒绝；未绑定时 `compose` 拒绝。
 - **含并列第二幅图的 JPEG**：`normalize-images` 对“结束标记之后还有不小于主图的图像”拒绝猜测。操作者逐幅目视核对（说明里写明各幅内容与页序），用外部渲染得到的多页 PDF 经 `normalize-office` 绑定（`sourceFormat=JPEG_APPENDED_IMAGE`）；只有正是该原因被拒的 JPEG 可走此路径，其他拒绝原因（渐进式、CMYK、截断等）与可忠实转换者均拒绝。
 - **外加补采**：见[手动交件](manual-intake.md#本地扩展入口)；补采 PDF 只能先 split 再进入 compose。
-- **本地大队**：`case.brigadeCode` 除八个云端大队外允许 `SHUISHANG`，且必须同时写 `case.brigadeName: "水上大队"`；compose 与 `local-verify` 要求本案已绑定的真实来源证据（分类证据或手动交件回执）的“消防管辖”记载含“水上大队”。云端八队统计归属与权限不变，本地业务实体不新增虚假统计归属；其他代码、缺少名称或来源证据不足一律拒绝。
+- **本地大队**：`case.brigadeCode` 除八个云端大队外允许 `SHUISHANG`，且必须同时写 `case.brigadeName: "水上大队"`；compose 与 `local-verify` 要求本案已绑定的真实来源证据（分类证据或手动交件回执）的“消防管辖”记载含“水上大队”。水上大队自 2026-11-16 起是云端第九个常规大队（`SHUISHANG` 在飞书同步/校准的大队映射内，按常规大队逻辑区分）；本地专用的 `LOCAL_ONLY_BRIGADES` 与本地整理不变，本地业务实体不新增虚假统计归属；其他代码、缺少名称或来源证据不足一律拒绝。
 
 ## 本地证据到 manifest
 

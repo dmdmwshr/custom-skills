@@ -2975,13 +2975,20 @@ def test_child_build_recheck_gets_round_one_system_date_source_and_a_per_product
 
 @pytest.mark.parametrize("kw,why", [
     ({"tamper": True}, "摘要"), ({"state": "NEW"}, "未完成"), ({"cloud_day": "2026-06-18"}, "不等于清单初查日"),
-    ({"brigade": "BINHU"}, "不一致"), ({"brigade": "ZZZ"}, "不一致"),
+    ({"brigade": "BINHU"}, "不一致"), ({"brigade": "ZZZ"}, "不一致"), ({"brigade": "SHUISHANG"}, "不一致"),
 ])
 def test_child_build_holds_only_the_case_whose_evidence_does_not_hold(tmp_path, kw, why):
     contract, water, transport = _child_setup(tmp_path, **kw)
     report = _child_build(tmp_path, contract, water, transport)
     assert report["status"] == "PARTIAL" and report["counts"]["cases"] == 0 and not report["specs"]
     assert why in json.dumps(report["blockedEntities"], ensure_ascii=False)
+
+
+def test_child_build_treats_water_brigade_as_the_ninth_ordinary_brigade(tmp_path):
+    contract, water, transport = _child_setup(tmp_path, brigade="SHUISHANG", cloud_team="水上大队")      # 九队：水上与其他大队同一规则，云端所属大队须等于清单管辖
+    report = _child_build(tmp_path, contract, water, transport)
+    assert report["status"] == "OK" and report["counts"]["cases"] == 1
+    assert sync.BRIGADE_NAMES["SHUISHANG"] == "水上大队" and len(sync.BRIGADE_NAMES) == 9
 
 
 def test_child_build_adds_only_the_product_rows_the_cloud_lacks_under_an_existing_inspection(tmp_path):

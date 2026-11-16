@@ -161,7 +161,7 @@ python scripts/registry_cli.py feishu-source-build --capture 采集批次.json -
 
 - **本案已核验清单日**：`feishu-source-build` 在总账没有可证的页面检查日时，先取本案最近一次本地核验通过、清单摘要与总账完成记录相符的 `manifest.json` 里的 `initialInspection.inspectionDate`（本案监督检查记录文书所载监督检查时间）作为初查日，依据写清单路径与摘要；仍找不到才退回受理日期后备。云端非空且不同的值仍只报告、不覆盖。
 - **有据日期更正** `feishu-date-correct-build --plan 计划.json --plan-sha …`（只读云）：计划逐项给出 `projectNo / recordId / expectedOld / newDate`（可选成对的 `sourceOld/sourceNew` 同步更正“初查日期来源”）。生成前逐项核对：新日等于本案已核验清单日、不早于范围起点、fresh 云端键唯一命中该 recordId 且当前值正是 expectedOld；任一不符整条拒绝（含人工改动）。输出 V2 说明（allowlist 只含日期/来源字段），执行仍由 `feishu-source-sync --execute` 走 P18 账、写前旧值核对与写后读回。
-- **水上大队等不在八队名录的管辖**：路由文件可加 `{"sourceJurisdictionExact": …, "adminOnly": true, "sourceOptionExact": "大队来源选项原文"}`。创建时不写所属大队/归属大队（留空，仅管理员可见，与既有水上案同一做法）；“大队来源”仅在最新合同允许创建且选项存在时才写，合同把它列为只读时留空，不为此改合同。八队路由的“所属大队+归属大队同队”规则不放宽。
+- **水上大队已是第九个常规大队**（用户 2026-11-16 裁决）：路由用 `teamOptionExact:"水上大队"` 与底册记录，和其余八队同一规则（所属大队+归属大队同队）。下述 adminOnly 路由只留给确实不在九队名录的其他管辖：路由文件可加 `{"sourceJurisdictionExact": …, "adminOnly": true, "sourceOptionExact": "大队来源选项原文"}`。创建时不写所属大队/归属大队（留空，仅管理员可见，与既有水上案同一做法）；“大队来源”仅在最新合同允许创建且选项存在时才写，合同把它列为只读时留空，不为此改合同。八队路由的“所属大队+归属大队同队”规则不放宽。
 
 
 ## 未决写入的严格技术恢复与字段计划（2026-11-12）
