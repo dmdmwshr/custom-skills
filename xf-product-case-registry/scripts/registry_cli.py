@@ -2773,10 +2773,10 @@ def build_parser() -> argparse.ArgumentParser:
     case_find.set_defaults(func=feishu_case_find_command)
     register = sub.add_parser(
         "feishu-register",
-        help="主动登记：企业清单(enterprises)或网售清单(online-sales)与飞书现有记录匹配，结果与代录/证据计划写到业务根；"
+        help="主动登记：企业清单(enterprises)或网售清单(online-sales)或任意案卷业务标签清单(labels，清单内写 label/value)与飞书现有记录匹配，结果与代录/证据计划写到业务根；"
              "只读云。企业清单加 --create-batch 才逐条创建新企业(先回读，不重放)",
     )
-    register.add_argument("kind", choices=["enterprises", "online-sales"])
+    register.add_argument("kind", choices=["enterprises", "online-sales", "labels"])
     for flag in ("--contract", "--contract-sha", "--base-token", "--profile", "--business-root"):
         register.add_argument(flag, required=True)
     register.add_argument("--list", help="清单 JSON")
@@ -2787,6 +2787,10 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--date", help="运行日期 YYYY-MM-DD；省略取当前上海日期")
     register.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     register.set_defaults(func=feishu_register_command)
+    report_cmd = sub.add_parser("register-report", help="把 RegisterReportV1 规格导出为 Excel（不覆盖已有文件，保存后重新打开逐格核对）；不碰云端")
+    report_cmd.add_argument("--spec", required=True)
+    report_cmd.add_argument("--out", required=True)
+    report_cmd.set_defaults(func=register_report_command)
     quantity = sub.add_parser(
         "feishu-quantity-plan",
         help="产品数量补空：按数量证据(record_quantities.py scan 的结果)对照产品明细 fresh 行，给仍为空的数量格生成字段计划并列出缺项；"
@@ -3206,12 +3210,21 @@ def feishu_register_command(args: argparse.Namespace) -> None:
     else:
         if not args.list or not args.list_sha:
             raise RegistryError("需要 --list 与 --list-sha")
-        plan = module.plan_enterprises if args.kind == "enterprises" else module.plan_online_sales
+        plan = {"enterprises": module.plan_enterprises, "online-sales": module.plan_online_sales, "labels": module.plan_label_list}[args.kind]
         report = _feishu_read(args, "主动登记", lambda sync, transport: plan(
             list_path=Path(args.list), list_sha=args.list_sha, transport=transport, business_root=Path(args.business_root), day=_run_day(args), **common))
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report.get("status") not in (None, "OK"):
         raise SystemExit(4)
+
+
+def register_report_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(f"{__package__}.register_report" if __package__ else "register_report")
+    try:
+        result = module.export_workbook(spec_path=Path(args.spec), out_path=Path(args.out))
+    except module.ReportError as error:
+        raise RegistryError(str(error)) from error
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def feishu_quantity_plan_command(args: argparse.Namespace) -> None:

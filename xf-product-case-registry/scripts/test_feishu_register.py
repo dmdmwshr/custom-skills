@@ -145,3 +145,34 @@ def test_online_sale_list_only_touches_matched_cases_and_keeps_the_rest_local_un
     assert [m["项目编号"] for m in later["matched"]] == ["P-2", "P-4"] and later["counts"]["unmatched"] == 2 and later["counts"]["retriedPending"] == 3
     plan = json.loads(Path(later["evidencePlan"]["path"]).read_text(encoding="utf-8"))
     assert plan["entries"][1]["fields"]["是否网售"]["evidenceSha256"] == _sha(listing)      # 待匹配条目保留原清单摘要
+
+
+def test_label_list_matches_by_brigade_and_keeps_mismatches_ambiguities_and_unknown_names_local_with_hints(tmp_path, contract):
+    body = json.loads(contract.read_text(encoding="utf-8"))
+    body["tables"]["案卷主表"]["fields"] += [_field("fldBRCASE01", "所属大队", "select", "admin-only", ["梁溪大队", "锡山大队"]),
+                                           _field("fldFIX00001", "是否维修后灭火器", "select", "business-label", ["是", "否"])]
+    contract.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    rows = {(CASE, "recA00000000001"): {KEY: "P-1", UNIT: "甲店", "fldBRCASE01": ["梁溪大队"], "fldFIX00001": None},
+            (CASE, "recA00000000002"): {KEY: "P-2", UNIT: "乙店", "fldBRCASE01": ["梁溪大队"], "fldFIX00001": None},
+            (CASE, "recA00000000003"): {KEY: "P-3", UNIT: "乙店", "fldBRCASE01": ["锡山大队"], "fldFIX00001": None},
+            (CASE, "recA00000000004"): {KEY: "P-4", UNIT: "丙商贸有限公司", "fldBRCASE01": ["锡山大队"], "fldFIX00001": None}}
+    cloud = Cloud(rows)
+    entries = [{"单位名称": "甲店", "大队": "梁溪"}, {"单位名称": "甲店", "大队": "锡山大队"}, {"单位名称": "乙店"}, {"单位名称": "乙店", "大队": "锡山"},
+               {"单位名称": "丙商贸", "大队": "锡山"}, {"项目编号": "P-4", "大队": "梁溪大队"}, {"项目编号": "P-9"}]
+    listing = _list(tmp_path, register.LABEL_LIST, entries, label="是否维修后灭火器", value="是")
+    kwargs = dict(contract_path=contract, contract_sha=_sha(contract), target=CTARGET, transport=cloud, business_root=tmp_path / "root")
+    report = register.plan_label_list(list_path=listing, list_sha=_sha(listing), day="2026-11-16", **kwargs)
+    assert [m["项目编号"] for m in report["matched"]] == ["P-1", "P-3"] and not cloud.writes
+    reasons = {json.dumps(u["entry"], ensure_ascii=False): u for u in report["unmatched"]}
+    assert "没有一个在清单大队" in reasons['{"单位名称": "甲店", "大队": "锡山大队"}']["reason"]
+    assert "需给出项目编号" in reasons['{"单位名称": "乙店"}']["reason"] and reasons['{"单位名称": "乙店"}']["hints"] == ["P-2", "P-3"]
+    assert reasons['{"单位名称": "丙商贸", "大队": "锡山"}']["hints"] == ["P-4|丙商贸有限公司|锡山"]          # 简称：不猜，只给近名提示
+    assert "不一致" in reasons['{"项目编号": "P-4", "大队": "梁溪大队"}']["reason"] and "不在案卷主表" in reasons['{"项目编号": "P-9"}']["reason"]
+    plan = json.loads(Path(report["evidencePlan"]["path"]).read_text(encoding="utf-8"))
+    assert [(e["stableKey"], e["fields"]) for e in plan["entries"]][0][1]["是否维修后灭火器"]["new"] == "是"
+    cloud.rows[(CASE, "recA00000000005")] = {KEY: "P-5", UNIT: "丙商贸", "fldBRCASE01": ["锡山大队"], "fldFIX00001": None}   # 之后采集进来
+    again = register.plan_label_list(list_path=listing, list_sha=_sha(listing), day="2026-11-20", **kwargs)
+    assert "P-5" in [m["项目编号"] for m in again["matched"]] and again["counts"]["retriedPending"] == 5
+    with pytest.raises(sync.SyncError):
+        bad = _list(tmp_path, register.LABEL_LIST, entries, name="bad.json", label="核实说明", value="是")
+        register.plan_label_list(list_path=bad, list_sha=_sha(bad), day="2026-11-16", **kwargs)

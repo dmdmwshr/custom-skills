@@ -170,7 +170,8 @@ def build_delegated_specs(*, plan_path: Path, plan_sha: str, contract_path: Path
     Plan (``FeishuDelegatedPlanV1``): ``{authorizedBy:"user", userQuote, sourceRef, section?, table,
     entries:[{stableKey, recordId?, fields:{fieldId|name: {new, expectedOld?}}}]}``. Without ``expectedOld``
     the value read now is the guard between this build and the write; with it, a different current value
-    is a conflict that is reported and left untouched.
+    is a conflict that is reported and left untouched. A ``business-label`` cell that already holds an explicit answer is
+    changed only when the ledger shows the assistant wrote it last and the revision history has no person's save.
     """
     sync._require(1 <= batch_size <= sync.HARD_CAP_RECORDS, f"batch_size 必须是 1..{sync.HARD_CAP_RECORDS}")
     sync._require(sync.file_sha(plan_path) == plan_sha, "代录计划摘要与固定值不一致")
@@ -240,6 +241,18 @@ def build_delegated_specs(*, plan_path: Path, plan_sha: str, contract_path: Path
                 entry_conflicts.append({"stableKey": key, "recordId": record_id, "field": meta["name"], "planned": item["new"],
                                         "expectedOld": item["expectedOld"], "current": current, "action": "REPORT_ONLY"})
                 continue
+            if meta.get("class") == field_policy.CLASS_LABEL and not _blank_answer(current):
+                # 用户授权不等于可以覆盖大队自己的答案：标签只在“助手最后写入的值”且修订历史只有工具写入时才改，
+                # expectedOld 只是并发门禁。其余列 conflicts，不覆盖。
+                ledger_key = sync.Ledger.target_key(target["baseToken"], table_id, record_id)
+                if last_assistant_value(ledger, ledger_key, fid) != current:
+                    state, why = HISTORY_PERSON, "当前值不是助手最后写入并读回确认的值"
+                else:
+                    state, why = person_history(transport, ledger, target["baseToken"], table_id, record_id, key, fid, _assistant_operators(contract))
+                if state != HISTORY_TOOL:
+                    entry_conflicts.append({"stableKey": key, "recordId": record_id, "field": meta["name"], "planned": item["new"], "expectedOld": item.get("expectedOld"),
+                                            "current": current, "action": "REPORT_ONLY", "history": state, "reason": why})
+                    continue
             candidate = {"new": item["new"], "expectedOld": current, "basis": basis}
             problem = field_policy.write_problem(meta, basis, candidate)
             if problem or meta["type"] not in sync.SCALAR_TYPES or fid == key_field:

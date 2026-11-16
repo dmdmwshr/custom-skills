@@ -14,6 +14,10 @@ and what was read back:
   planner, which never overrides a brigade's own answer. Unmatched entries stay local in
   ``网售待匹配.json`` and are tried again by later runs; they are never written to Feishu.
 
+- label list (``LabelListV1``): the same matching for any 案卷主表 business label (``label`` + ``value``,
+  e.g. 是否维修后灭火器=是); an entry may carry the 大队, which must agree with the matched case. Unmatched
+  entries stay in ``<标签>待匹配.json`` with the reason and near-name hints.
+
 Field updates go through the existing planners and ``feishu-source-sync`` (ledger, readback,
 UNKNOWN reconciliation). Only the creation of new enterprise rows is done here, one row at a time,
 re-reading before each create so that a repeated or interrupted run cannot create a second row.
@@ -45,6 +49,8 @@ ENTERPRISE_LIST = "EnterpriseListV1"
 ONLINE_LIST = "OnlineSaleListV1"
 ENTERPRISE_REPORT = "EnterpriseRegisterReportV1"
 ONLINE_REPORT = "OnlineSaleRegisterReportV1"
+LABEL_LIST = "LabelListV1"
+LABEL_REPORT = "LabelRegisterReportV1"
 CREATE_REPORT = "EnterpriseCreateReportV1"
 SECTION = "maintenanceBase"
 ENTERPRISE_TABLE = "维修企业"
@@ -343,4 +349,105 @@ def plan_online_sales(*, list_path: Path, list_sha: str, contract_path: Path, co
               "evidencePlan": plan_ref, "pendingFile": str(pending_path), "batchDir": str(batch), "externalCalls": "read-only"}
     _atomic(batch / "匹配结果.json", result)
     _atomic(pending_path, {"schema": "OnlineSalePendingV1", "updated": day, "entries": unmatched})
+    return result
+
+
+# ---------------------------------------------------------------------------------------------
+# Label list (any business label of 案卷主表)
+# ---------------------------------------------------------------------------------------------
+
+
+def norm_brigade(value: Any) -> str:
+    """Brigade for comparison: width-folded, without the trailing 大队 (so 梁溪 and 梁溪大队 agree)."""
+    text = norm_name(value)
+    return text[:-2] if text.endswith("大队") else text
+
+
+def _cell_text(cell: Any) -> str:
+    return sync._text(cell[0]) if isinstance(cell, list) and cell else sync._text(cell)
+
+
+def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, contract_sha: str, target: dict[str, str], transport: Any,
+                    business_root: Path, day: str) -> dict[str, Any]:
+    """Match a label list to existing cases and build the label-evidence plan; nothing is written to Feishu here.
+
+    List: ``{schemaVersion: LabelListV1, sourceRef, label, value, entries:[{项目编号?, 单位名称?, 大队?, 说明?}]}``.
+    An entry is matched by 项目编号, or by a unit name that identifies exactly one case (narrowed by 大队 when given).
+    A given 大队 that disagrees with the matched case, several candidate cases and a name without a case are
+    kept unmatched with the reason (and similar names as hints); they are tried again by later runs.
+    """
+    listing = _read_list(list_path, list_sha, LABEL_LIST)
+    label, value = sync._text(listing.get("label")), sync._text(listing.get("value"))
+    sync._require(label and value, "标签清单需要 label 与 value")
+    contract = sync.load_contract(contract_path, contract_sha)
+    sync._require(target.get("baseToken") == contract["baseId"], "目标 Base 与合同不一致")
+    table_id = contract["tables"]["案卷主表"]["tableId"]
+    index = sync.field_index(contract)[table_id]
+    by_name = {meta["name"]: fid for fid, meta in index.items()}
+    sync._require(label in by_name and index[by_name[label]].get("class") == field_policy.CLASS_LABEL, f"{label} 不是案卷主表的业务标签字段")
+    key_field, unit_fid, brigade_fid = sync.STABLE_KEYS["案卷主表"], by_name["单位名称"], by_name.get("所属大队")
+    read_fields = [key_field, unit_fid] + ([brigade_fid] if brigade_fid else [])
+    rows = transport.list_rows(target["baseToken"], table_id, read_fields)
+    cases = [{"project": row[key_field], "unit": norm_name(row.get(unit_fid)), "brigade": norm_brigade(_cell_text(row.get(brigade_fid)) if brigade_fid else "")}
+             for row in rows.values() if row.get(key_field)]
+    projects = {c["project"]: c for c in cases}
+
+    register_root = Path(business_root) / "运行记录" / REGISTER_DIR
+    pending_path = register_root / f"{label}待匹配.json"
+    pending = _load(pending_path) or {"schema": "LabelPendingV1", "label": label, "entries": {}}
+    candidates = [(digest, item["entry"], item["evidence"]) for digest, item in pending["entries"].items()]
+    evidence = {"evidenceRef": listing["sourceRef"], "evidenceSha256": list_sha}
+    for entry in listing["entries"]:
+        sync._require(isinstance(entry, dict) and (sync._text(entry.get("项目编号")) or norm_name(entry.get("单位名称"))), "标签清单条目需要项目编号或单位名称")
+        digest = sync.digest(json.dumps(entry, ensure_ascii=False, sort_keys=True))
+        if digest not in pending["entries"]:
+            candidates.append((digest, entry, evidence))
+
+    matched: dict[str, dict[str, Any]] = {}
+    unmatched: dict[str, dict[str, Any]] = {}
+    for digest, entry, proof in candidates:
+        project, unit, brigade = sync._text(entry.get("项目编号")), norm_name(entry.get("单位名称")), norm_brigade(entry.get("大队"))
+        reason, hints = None, []
+        if project:
+            case = projects.get(project)
+            if case is None:
+                reason = "项目编号不在案卷主表"
+            elif brigade and case["brigade"] and brigade != case["brigade"]:
+                reason = f"清单大队({entry.get('大队')})与案卷所属大队({case['brigade']})不一致"
+        else:
+            hits = [c for c in cases if c["unit"] == unit]
+            narrowed = [c for c in hits if not brigade or c["brigade"] == brigade]
+            if len(narrowed) == 1:
+                project = narrowed[0]["project"]
+            elif not hits:
+                reason = "单位名称没有对应案卷"
+                hints = sorted({c["project"] + "|" + c["unit"] + "|" + c["brigade"] for c in cases if unit and (unit in c["unit"] or c["unit"] in unit) and c["unit"]})[:5]
+            elif not narrowed:
+                reason = f"单位名称有 {len(hits)} 个案卷，但没有一个在清单大队({entry.get('大队')})下"
+                hints = sorted(c["project"] + "|" + c["brigade"] for c in hits)[:5]
+            else:
+                reason = f"单位名称对应 {len(narrowed)} 个案卷，需给出项目编号"
+                hints = sorted(c["project"] for c in narrowed)[:5]
+        if reason:
+            previous = pending["entries"].get(digest, {})
+            unmatched[digest] = {"entry": entry, "evidence": proof, "reason": reason, "hints": hints, "firstSeen": previous.get("firstSeen", day), "lastTried": day}
+        else:
+            matched.setdefault(project, {"entries": [], **proof})["entries"].append(entry)
+
+    batch = _batch(business_root, label, day, list_sha)
+    plan_ref = None
+    if matched:
+        plan = {"schemaVersion": plans.EVIDENCE_PLAN_SCHEMA, "sourceRef": listing["sourceRef"], "table": "案卷主表",
+                "entries": [{"stableKey": project, "fields": {label: {"new": value, "evidenceRef": info["evidenceRef"], "evidenceSha256": info["evidenceSha256"]}}}
+                            for project, info in sorted(matched.items())]}
+        _atomic(batch / "证据计划.json", plan)
+        plan_ref = {"path": str(batch / "证据计划.json"), "sha256": sync.file_sha(batch / "证据计划.json")}
+    result = {"schema": LABEL_REPORT, "day": day, "label": label, "value": value,
+              "input": {"path": str(list_path), "sha256": list_sha, "sourceRef": listing["sourceRef"], "entries": len(listing["entries"])},
+              "feishuRowsRead": len(rows), "matched": [{"项目编号": p, "entries": len(i["entries"])} for p, i in sorted(matched.items())],
+              "unmatched": [{"entry": u["entry"], "reason": u["reason"], "hints": u["hints"], "firstSeen": u["firstSeen"]} for u in unmatched.values()],
+              "counts": {"matchedCases": len(matched), "unmatched": len(unmatched), "retriedPending": len(pending["entries"])},
+              "evidencePlan": plan_ref, "pendingFile": str(pending_path), "batchDir": str(batch), "externalCalls": "read-only"}
+    _atomic(batch / "匹配结果.json", result)
+    _atomic(pending_path, {"schema": "LabelPendingV1", "label": label, "updated": day, "entries": unmatched})
     return result

@@ -328,3 +328,24 @@ def test_evidence_does_not_replace_a_default_that_a_person_changed_and_changed_b
                                               transport=cloud, out_dir=tmp_path / "o2", log_root=tmp_path / "l2", ledger_dir=ledger, isolated_test_ledger=True)
     assert report["counts"]["recordsToWrite"] == 1 and report["counts"]["differences"] == 1
     assert report["differences"][0]["stableKey"] == "P-1" and report["differences"][0]["history"] == "person"
+
+
+def test_user_delegated_label_never_overwrites_a_persons_answer_even_with_a_matching_expected_old(tmp_path, contract):
+    body = json.loads(contract.read_text(encoding="utf-8"))
+    body["assistantOperators"] = ["管理员"]
+    contract.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    cloud, ledger = Cloud(_case_rows()), _ledger(tmp_path)
+    first = _initial(tmp_path, contract, cloud, ledger)                                 # P-1、P-3 的网售由规则初值写成“否”
+    _execute(first["specs"][0]["path"], cloud, ledger)
+    cloud.person("recA00000000003", NET, operator="梁溪成员", after="否", at=time.time() + 3600)   # P-3 的“否”之后有大队成员保存过
+    plan = tmp_path / "labels.json"
+    body = {"schemaVersion": plans.DELEGATED_PLAN_SCHEMA, "authorizedBy": "user", "userQuote": "这几家是维修后灭火器", "sourceRef": "聊天报送", "table": "案卷主表",
+            "entries": [{"stableKey": key, "fields": {"是否网售": {"new": "是", "expectedOld": old}}} for key, old in (("P-1", "否"), ("P-2", "是"), ("P-3", "否"))]}
+    plan.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    report = plans.build_delegated_specs(plan_path=plan, plan_sha=_sha(plan), contract_path=contract, contract_sha=_sha(contract),
+                                         target={"baseToken": BASE, "profile": "offline", "identity": "user"}, transport=cloud,
+                                         out_dir=tmp_path / "ud", log_root=tmp_path / "udlog", ledger_dir=ledger, isolated_test_ledger=True)
+    assert report["counts"]["recordsToWrite"] == 1 and report["counts"]["conflicts"] == 1 and report["counts"]["alreadyEqualFields"] == 1
+    assert report["conflicts"][0]["stableKey"] == "P-3" and report["conflicts"][0]["history"] == "person" and report["conflicts"][0]["action"] == "REPORT_ONLY"
+    _execute(report["specs"][0]["path"], cloud, ledger)
+    assert cloud.rows[(CASE, "recA00000000001")][NET] == ["是"] and cloud.rows[(CASE, "recA00000000003")][NET] == ["否"]

@@ -1,0 +1,25 @@
+# 功能模块与业务逻辑模块
+
+新增“用户交来清单 → 登记飞书 → 出 Excel”类需求时，先判断落在哪一类，只改对应一层；两层之间只通过 JSON 计划/规格文件交接。
+
+| 层 | 模块 | 做什么 | 不做什么 |
+| --- | --- | --- | --- |
+| 功能 | `feishu_source_sync.py` | 账本、写前旧值、读回、UNKNOWN 阻断与对账；`--execute` 唯一的云写入口 | 不判断业务含义 |
+| 功能 | `field_policy.py` / `feishu_plans.py` | 字段类别与可写条件；`person_history` 判断单元格是否被人填过；标签证据/用户委托计划 | 不决定哪些单位是什么标签 |
+| 功能 | `register_report.py` | `RegisterReportV1` → Excel，不覆盖已有文件，保存后重新打开逐格核对 | 不选列、不算数 |
+| 业务 | `feishu_register.py` | 清单匹配：企业清单、网售清单、任意业务标签清单(`labels`)；产出匹配结果、证据计划与本地待匹配文件 | 不直接写云 |
+| 业务 | 本次任务的清单与规格 | 决定标签、取值、证据、Excel 列与历史对照表 | 不改字段保护规则 |
+
+## 业务标签清单（`feishu-register labels`）
+
+清单 `LabelListV1`：`{schemaVersion, sourceRef, label, value, entries:[{项目编号?, 单位名称?, 大队?, 说明?}]}`；`label` 必须是案卷主表的业务标签字段。
+
+1. 匹配：项目编号优先；否则单位名称须对应唯一案卷，清单写了 `大队` 时先按大队收窄（`梁溪`与`梁溪大队`等同）。
+2. 清单大队与案卷所属大队不一致、同名多案、名称没有案卷：不写云，进入 `运行记录/主动登记/<标签>待匹配.json` 并给原因与近名提示（简称不猜），之后每次运行自动重试。
+3. 已匹配的生成 `证据计划.json`，用 `feishu-label-evidence-build` 出规格，再 `feishu-source-sync --execute`；已有明确答案、人工值、历史未知一律只报差异不覆盖。
+4. 用户委托计划（`feishu-user-delegated-build`）对业务标签字段同样受保护：现值不是助手最后写入并读回的值，或修订历史显示有人改过/读不到，只报 `REPORT_ONLY`。
+5. 数量差异、登记错误、历史对照只进 Excel，不写云。
+
+## Excel（`register-report`）
+
+业务模块写好 `RegisterReportV1`（主清单给阅读者看的列；哈希、长行号放单独“追溯”表），`registry_cli register-report --spec … --out …`。已有同名文件时失败，不覆盖。

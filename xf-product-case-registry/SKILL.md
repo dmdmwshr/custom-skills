@@ -37,6 +37,7 @@ metadata:
 | 本地核验与归档 | `local-verify`（见下），凭证格式见本地格式的 LocalVerificationV1 |
 | 已归档案卷字段/分类修订（同一 ZIP） | [本地扩展入口](references/manual-intake.md#本地扩展入口)，source amend-archived、source abandon-amendment |
 | 按真实初查日期对账范围、剔除范围外案卷、恢复 | `ledger scope-reconcile --listing`（只读）；`ledger scope-exclude --plan`（默认只校验，`--apply` 才把案卷字节原样移到 `范围外保留/<planId>/` 并出总账）；`ledger scope-restore` 原样恢复；`ledger lifecycle --from-date` 按初查日期而非号段；云端同步剔除用 `feishu-scope-retire --plan`（绑定全字段快照，先子后主，落账读回，缺省只核对不删） |
+| 用户交来的单位清单要登记某个业务标签（如维修后灭火器）并出 Excel | [功能/业务模块](references/modules.md)，`feishu-register labels`、`register-report` |
 | 云端初查日期与本案核验清单日不同、需有据更正 | `feishu-date-correct-build`（计划逐项带旧值门禁，只读云）→ `feishu-source-sync --execute`；详见 [来源字段同步](references/source-sync.md) 末节 |
 | 自动来源字段需按证据批量维护(如统计归类)、UNKNOWN 更新意图需严格技术恢复 | `feishu-field-plan-build`(证据摘要+旧值门禁，只读云)；`feishu-source-sync --reconcile` 的 `technicalRecovery`(无 humanRelease)；详见 [来源字段同步](references/source-sync.md) 末节 |
 | 来源列有但不在 ZIP 的文书（真实可见预览补采） | source attach-supplement，随后 split 引用 `补采材料/<文件>` |
