@@ -2832,6 +2832,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_workspace_resolution_options(local_verify)
     local_verify.set_defaults(func=local_verify_command)
 
+    scan_candidates = sub.add_parser(
+        "scan-candidates",
+        help="只读：初查记录(扫描件/文字层)的识别候选 RecognitionCandidatesV1，带页码/表格行列/bbox 引用，摘要+解析器版本缓存；候选须人工确认，不写飞书、不改清单",
+    )
+    scan_candidates.add_argument("--pdf", action="append", help="PDF 路径(可重复)")
+    scan_candidates.add_argument("--project", help="项目编号：取该案最新归档代际清单里的初查记录")
+    scan_candidates.add_argument("--cache-dir", required=True, help="缓存目录：<摘要前16位>-<解析器版本>.json")
+    scan_candidates.add_argument("--work-dir", required=True, help="渲染/裁剪等中间图目录(可再生，可清理)")
+    scan_candidates.add_argument("--out", help="完整结果 JSON 输出路径；省略则只在标准输出打印摘要")
+    add_workspace_resolution_options(scan_candidates)
+    scan_candidates.set_defaults(func=scan_candidates_command)
+
     confirm_docs = sub.add_parser(
         "confirm-documents",
         help="由 split-index 与确认依据形成已确认文书子集清单；不等于全案核验或归档",
@@ -3324,6 +3336,39 @@ def local_verify_command(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False))
     if result.get("status") == "NEEDS_REVIEW":
         raise RegistryError("本地完成需复核，已保留全部证据且未改动任何文件")
+
+
+def scan_candidates_command(args: argparse.Namespace) -> None:
+    """只读：初查记录(扫描件/文字层)的识别候选，RecognitionCandidatesV1。候选须人工确认，不写任何业务数据、不上云、不调模型。"""
+    module = importlib.import_module(f"{__package__}.scan_candidates" if __package__ else "scan_candidates")
+    paths = [Path(item) for item in (args.pdf or [])]
+    if args.project:
+        workspace = workspace_api()
+        try:
+            _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
+            if not PROJECT_NO.fullmatch(args.project):
+                raise RegistryError("项目编号格式不合法")
+            case = (workspace.load_waterline(layout).get("cases") or {}).get(args.project) or {}
+            completions = (case.get("history") or {}).get("completions") or []
+            if not completions:
+                raise RegistryError("该案没有已归档的清单代际，请用 --pdf 指定文件")
+            generation_dir = layout.history_workspaces / f"{args.project}-{completions[-1]['generation']}"
+            manifest = json.loads((generation_dir / "manifest.json").read_text(encoding="utf-8"))
+        except workspace.WorkspaceStateError as error:
+            raise RegistryError(str(error)) from error
+        record, why = module.initial_record_path(manifest, generation_dir)
+        if record is None:
+            raise RegistryError(why or "找不到初查记录")
+        paths.append(record)
+    if not paths:
+        raise RegistryError("需要 --pdf 或 --project")
+    cache_dir, work_dir = Path(args.cache_dir), Path(args.work_dir)
+    items = [module.recognize_cached(path, cache_dir, work_dir) for path in paths]
+    result = {"schema": module.SCHEMA, "parser": module.VERSION, "readOnly": True, "items": items}
+    text = json.dumps(result, ensure_ascii=False, indent=1)
+    if args.out:
+        Path(args.out).write_text(text + "\n", encoding="utf-8")
+    print(json.dumps({"schema": module.SCHEMA, "parser": module.VERSION, "items": [{"file": i.get("file"), "sha256": i.get("sha256"), "route": i.get("route"), "status": i["status"], "accepted": i.get("acceptedCandidates", []), "needsReview": i.get("needsReview", []), "reused": bool(i.get("reused"))} for i in items], "out": args.out}, ensure_ascii=False))
 
 
 def confirm_documents_command(args: argparse.Namespace) -> None:

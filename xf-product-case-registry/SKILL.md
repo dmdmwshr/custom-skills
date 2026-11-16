@@ -33,6 +33,7 @@ metadata:
 | 明确要求历史年度通知书口径 | [年度执行](references/annual-unqualified.md)；保留原批次口径，不替代日常扫描 |
 | 清点、识别、拆分、字段和案卷清单 | [本地格式](references/case-data-format.md)、[文书分类](references/document-classification.md)、[字段规则](references/field-rules.md)、[清单 Schema](references/CaseImportManifestV2.schema.json) |
 | 用户手动下载 ZIP、提供详情截图，或明确按来源现有材料收口 | [手动交件](references/manual-intake.md)，source accept-manual、source resolve-manual、source acknowledge-gaps |
+| 扫描件/文字层初查记录的识别候选（带原页码、表格行列、bbox 引用，两阶段读数一致才标候选，须人工确认） | `scan-candidates`（只读，见 [识别候选](references/scan-candidates.md)） |
 | 本地核验与归档 | `local-verify`（见下），凭证格式见本地格式的 LocalVerificationV1 |
 | 已归档案卷字段/分类修订（同一 ZIP） | [本地扩展入口](references/manual-intake.md#本地扩展入口)，source amend-archived、source abandon-amendment |
 | 按真实初查日期对账范围、剔除范围外案卷、恢复 | `ledger scope-reconcile --listing`（只读）；`ledger scope-exclude --plan`（默认只校验，`--apply` 才把案卷字节原样移到 `范围外保留/<planId>/` 并出总账）；`ledger scope-restore` 原样恢复；`ledger lifecycle --from-date` 按初查日期而非号段；云端同步剔除用 `feishu-scope-retire --plan`（绑定全字段快照，先子后主，落账读回，缺省只核对不删） |

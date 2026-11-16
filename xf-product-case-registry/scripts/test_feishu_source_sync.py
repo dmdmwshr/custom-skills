@@ -3029,13 +3029,25 @@ def test_child_build_adds_only_the_inspection_the_cloud_lacks_and_holds_unpaired
     spec = json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))
     assert [c["stableKey"]["value"] for c in spec["creates"]] == [f"{CP}|复查", f"{CP}|复查|1"]
     assert spec["creates"][1]["parent"]["createRef"] == f"{CP}|复查"
-    # 只有检查行、没有产品行(或反过来)：不自动补，列出交核对
+    # 只有检查行、没有产品行，而账本里这些产品键有过创建 intent(结果未知)：不自动补，列出交核对
     sub = tmp_path / "unpaired"
     sub.mkdir()
     contract, water, transport = _child_setup(sub)
     transport.rows[(CHECK, "recCHK00000001")] = {sync.INSPECT_F["key"]: f"{CP}|初查"}
-    held = _child_build(sub, contract, water, transport)
+    ledger = sub / "child-ledger"
+    sync.Ledger(ledger, isolated_test=True).initialize()
+    sync.Ledger(ledger, isolated_test=True).append(sync.Ledger.target_key(BASE, PRODUCT, "create:" + f"{CP}|初查|1"), {"event": "intent", "kind": "create"})
+    held = _child_build(sub, contract, water, transport, ledger_dir=ledger)
     assert held["status"] == "PARTIAL" and not held["specs"] and "不成套" in json.dumps(held["blockedEntities"], ensure_ascii=False)
+    # 同一场景但账本里这些产品键从未发起过创建(上一轮在建行中途被终止)：只补产品行，不动检查行
+    sub2 = tmp_path / "never-attempted"
+    sub2.mkdir()
+    contract, water, transport = _child_setup(sub2)
+    transport.rows[(CHECK, "recCHK00000001")] = {sync.INSPECT_F["key"]: f"{CP}|初查"}
+    done = _child_build(sub2, contract, water, transport)
+    assert done["status"] == "OK" and done["counts"]["specs"] == 1 and done["counts"]["blocked"] == 0
+    spec = json.loads(Path(done["specs"][0]["path"]).read_text(encoding="utf-8"))
+    assert [c["stableKey"]["value"] for c in spec["creates"]] == [f"{CP}|初查|1", f"{CP}|初查|2"] and spec["creates"][0]["parent"]["recordId"] == "recCHK00000001"
 
 
 def test_child_build_initial_result_follows_the_one_case_level_rule(tmp_path):

@@ -3039,7 +3039,14 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
             if inspection["key"] not in inspect_keys and not has_products:
                 wanted.append(inspection["key"])
             elif inspection["key"] not in inspect_keys or not has_products:
-                unpaired.append(f"{inspection['key']} 云端检查行与产品行不成套(只有其一)：不自动补，交核对")
+                # 检查行已建、产品行一个都没有：若账本里这些产品键从来没有发起过创建(没有任何 intent，例如上一轮在建行中途被终止)，
+                # 不存在“请求可能迟到”的未知风险，只补产品行；只要有过 intent(含未知结果)就仍不自动补
+                never_attempted = (inspection["key"] in inspect_keys and ledger is not None and bool(inspection["products"])
+                                   and all(not ledger.events(Ledger.target_key(base, product_table, "create:" + p["key"])) for p in inspection["products"]))
+                if never_attempted:
+                    missing_products[inspection["key"]] = [p["key"] for p in inspection["products"]]
+                else:
+                    unpaired.append(f"{inspection['key']} 云端检查行与产品行不成套(只有其一)：不自动补，交核对")
             else:
                 lacking = [p["key"] for p in inspection["products"] if p["key"] not in product_keys]
                 if lacking:
