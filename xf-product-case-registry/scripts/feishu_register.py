@@ -382,7 +382,7 @@ def similar_cases(unit: str, cases: list[dict[str, str]]) -> list[dict[str, Any]
     for case in cases:
         ratio = difflib.SequenceMatcher(None, unit, case["unit"]).ratio()
         if ratio >= HIGH_RATIO:
-            found.append({"project": case["project"], "name": case["unit"], "brigade": case["brigade"], "ratio": round(ratio, 4), "dice": round(_dice(unit, case["unit"]), 4)})
+            found.append({"project": case["project"], "name": case["unit"], "nameRaw": case.get("name_raw", case["unit"]), "brigade": case["brigade"], "ratio": round(ratio, 4), "dice": round(_dice(unit, case["unit"]), 4)})
     return sorted(found, key=lambda c: (-c["ratio"], c["project"]))
 
 
@@ -454,28 +454,29 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
             elif brigade and case["brigade"] and brigade != case["brigade"]:
                 reason = f"清单大队({entry.get('大队')})与案卷所属大队({case['brigade']})不一致"
         else:
-            hits = [c for c in cases if c["unit"] == unit]
-            narrowed = [c for c in hits if not brigade or c["brigade"] == brigade]
-            if len(narrowed) == 1:
-                project = narrowed[0]["project"]
-            elif not hits:
-                scope = [c for c in cases if not brigade or c["brigade"] == brigade]      # 给了大队先收窄；没给就看全部
+            scope = [c for c in cases if not brigade or c["brigade"] == brigade]      # 给了大队：所有按名称的候选都先在本队内选，别队的同名不挡本队
+            hits = [c for c in scope if c["unit"] == unit]
+            if len(hits) == 1:
+                project = hits[0]["project"]
+            elif hits:
+                reason = f"单位名称对应 {len(hits)} 个案卷，需给出项目编号"
+                hints = sorted(c["project"] for c in hits)[:5]
+            else:
                 near = similar_cases(unit, scope)
                 if len(near) == 1 and near[0]["ratio"] >= AUTO_RATIO and near[0]["dice"] >= AUTO_DICE and min(len(unit), len(near[0]["name"])) >= AUTO_MIN_LEN:
                     project = near[0]["project"]
-                    similar_basis[digest] = {"how": "auto-similar", "ratio": near[0]["ratio"], "dice": near[0]["dice"], "canonicalName": near[0]["name"]}
+                    similar_basis[digest] = {"how": "auto-similar", "ratio": near[0]["ratio"], "dice": near[0]["dice"], "canonicalName": near[0]["nameRaw"]}
                 elif near:
                     reason = "相似候选需用户判断（" + ("有多个高相似候选" if len(near) > 1 else "唯一候选但未达自动阈值") + "）"
-                    hints = [f"{c['project']}|{c['name']}|{c['brigade']}|ratio {c['ratio']}|dice {c['dice']}" for c in near[:5]]
+                    hints = [f"{c['project']}|{c['nameRaw']}|{c['brigade']}|ratio {c['ratio']}|dice {c['dice']}" for c in near[:5]]
                 else:
-                    reason = "单位名称没有对应案卷"
-                    hints = sorted({c["project"] + "|" + c["unit"] + "|" + c["brigade"] for c in scope if unit and (unit in c["unit"] or c["unit"] in unit) and c["unit"]})[:5]
-            elif not narrowed:
-                reason = f"单位名称有 {len(hits)} 个案卷，但没有一个在清单大队({entry.get('大队')})下"
-                hints = sorted(c["project"] + "|" + c["brigade"] for c in hits)[:5]
-            else:
-                reason = f"单位名称对应 {len(narrowed)} 个案卷，需给出项目编号"
-                hints = sorted(c["project"] for c in narrowed)[:5]
+                    elsewhere = [c for c in cases if c["unit"] == unit]
+                    if elsewhere:
+                        reason = f"单位名称有 {len(elsewhere)} 个案卷，但没有一个在清单大队({entry.get('大队')})下"
+                        hints = sorted(c["project"] + "|" + c["brigade"] for c in elsewhere)[:5]
+                    else:
+                        reason = "单位名称没有对应案卷"
+                        hints = sorted({c["project"] + "|" + c["name_raw"] + "|" + c["brigade"] for c in scope if unit and (unit in c["unit"] or c["unit"] in unit) and c["unit"]})[:5]
         if reason:
             previous = pending["entries"].get(digest, {})
             unmatched[digest] = {"entry": entry, "evidence": proof, "label": label, "value": item_value, "reason": reason, "hints": hints, "firstSeen": previous.get("firstSeen", day), "lastTried": day}

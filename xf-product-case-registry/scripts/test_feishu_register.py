@@ -381,3 +381,22 @@ def test_a_confirmed_alias_binds_the_exact_project_and_system_name_and_nothing_e
     for bad in ({**alias, "项目编号": "P-2"}, {k: v for k, v in alias.items() if k != "确认依据"}, {**alias, "系统名称": "八方荟(无锡)茶文化交流有限公司"}):
         held = _run_labels(tmp_path, contract, rows, [bad], name="b%d.json" % len(str(bad)))
         assert held["matched"] == [] and "待核" in held["unmatched"][0]["reason"]
+
+
+def test_canonical_name_keeps_the_system_text_exactly_and_the_brigade_narrows_before_any_name_choice(tmp_path, contract):
+    spaced = "无锡市 恒达消防器材销售服务贸易发展有限公司"                      # 系统原文带空格
+    auto = _run_labels(tmp_path, contract, {(CASE, "recA00000000001"): _row("P-1", spaced)}, [{"单位名称": LONG_NEAR}], name="c1.json")
+    assert auto["matched"][0]["basis"][0]["canonicalName"] == spaced and auto["matched"][0]["basis"][0]["how"] == "auto-similar"
+    exact = _run_labels(tmp_path, contract, {(CASE, "recA00000000001"): _row("P-1", spaced)}, [{"单位名称": "无锡市恒达消防器材销售服务贸易发展有限公司"}], name="c2.json")
+    assert exact["matched"][0]["basis"][0] == {"how": "exact-name", "canonicalName": spaced}
+    alias = _run_labels(tmp_path, contract, {(CASE, "recA00000000001"): _row("P-1", spaced)}, [{"项目编号": "P-1", "单位名称": "报送名", "系统名称": "无锡市恒达消防器材销售服务贸易发展有限公司", "确认依据": "答复"}], name="c3.json")
+    assert alias["matched"][0]["basis"][0] == {"how": "alias", "canonicalName": spaced}
+    rows = {(CASE, "recA00000000001"): _row("P-1", LONG_NEAR, "锡山大队"), (CASE, "recA00000000002"): _row("P-2", LONG, "梁溪大队")}
+    narrowed = _run_labels(tmp_path, contract, rows, [{"单位名称": LONG_NEAR, "大队": "梁溪"}], name="c4.json")      # 别队的精确同名不挡本队唯一极高相似
+    assert [m["项目编号"] for m in narrowed["matched"]] == ["P-2"] and narrowed["matched"][0]["basis"][0]["how"] == "auto-similar"
+    only_elsewhere = _run_labels(tmp_path, contract, {(CASE, "recA00000000001"): _row("P-1", LONG_NEAR, "锡山大队")}, [{"单位名称": LONG_NEAR, "大队": "梁溪"}], name="c5.json")
+    assert only_elsewhere["matched"] == [] and "没有一个在清单大队" in only_elsewhere["unmatched"][0]["reason"]
+    unscoped = _run_labels(tmp_path, contract, rows, [{"单位名称": LONG_NEAR}], name="c6.json")                   # 没给大队：看全部，同名+近名同时在场只能询问
+    assert [m["项目编号"] for m in unscoped["matched"]] == ["P-1"] and unscoped["matched"][0]["basis"][0]["how"] == "exact-name"      # 没给大队：全库精确同名唯一，照旧命中
+    conflict = _run_labels(tmp_path, contract, rows, [{"项目编号": "P-2", "单位名称": LONG_NEAR, "大队": "锡山"}], name="c7.json")   # 项目号+名称/大队冲突仍待核
+    assert conflict["matched"] == [] and "不一致" in conflict["unmatched"][0]["reason"]
