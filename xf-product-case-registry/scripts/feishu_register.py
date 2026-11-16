@@ -398,12 +398,17 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
     # 每条待匹配记录带着自己当时的取值与证据；旧记录没有取值就不借用本次清单的取值。
     candidates = [(digest, item["entry"], item["evidence"], item.get("value")) for digest, item in pending["entries"].items() if item.get("label", label) == label]
     evidence = {"evidenceRef": listing["sourceRef"], "evidenceSha256": list_sha}
+    # 冲突待办跨运行保留：同一案卷收到不同取值时，双方原条目/取值/证据都落盘，之后每次运行继续阻断该案卷，
+    # 重交同一清单不是裁决；只有带“裁决依据”的条目才能解除。
+    held = pending.get("conflicts") or {}
+    held_digests = {i["digest"] for c in held.values() for i in c["items"]}
     for entry in listing["entries"]:
         sync._require(isinstance(entry, dict) and (sync._text(entry.get("项目编号")) or norm_name(entry.get("单位名称"))), "标签清单条目需要项目编号或单位名称")
         digest = sync.digest(json.dumps({"entry": entry, "value": value}, ensure_ascii=False, sort_keys=True))
-        if digest not in pending["entries"]:
+        if digest not in pending["entries"] and digest not in held_digests:
             candidates.append((digest, entry, evidence, value))
 
+    matched_items: dict[str, list[dict[str, Any]]] = {}
     matched: dict[str, dict[str, dict[str, Any]]] = {}     # 项目编号 -> 取值 -> {证据, 条目}
     unmatched: dict[str, dict[str, Any]] = {}
     for digest, entry, proof, item_value in candidates:
@@ -439,10 +444,26 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
             unmatched[digest] = {"entry": entry, "evidence": proof, "label": label, "value": item_value, "reason": reason, "hints": hints, "firstSeen": previous.get("firstSeen", day), "lastTried": day}
         else:
             matched.setdefault(project, {}).setdefault(item_value, {"entries": [], **proof})["entries"].append(entry)
+            matched_items.setdefault(project, []).append({"digest": digest, "entry": entry, "value": item_value, "evidence": proof,
+                                                 "firstSeen": pending["entries"].get(digest, {}).get("firstSeen", day)})
 
-    conflicts = [{"项目编号": p, "values": sorted(v)} for p, v in sorted(matched.items()) if len(v) > 1]
-    for item in conflicts:
-        del matched[item["项目编号"]]       # 同一案卷收到不同取值：都不写，留给人核
+    conflicts_now, resolved = {}, list(pending.get("resolved") or [])
+    for project in sorted(set(matched_items) | set(held)):
+        items = {i["digest"]: i for i in (held.get(project) or {"items": []})["items"]}
+        for hit in matched_items.get(project, []):
+            items.setdefault(hit["digest"], hit)
+        decisions = {i["value"]: i for i in items.values() if sync._text(i["entry"].get("裁决依据")) and i["digest"] in {h["digest"] for h in matched_items.get(project, [])}}
+        if len(decisions) == 1:
+            chosen = next(iter(decisions.values()))
+            matched[project] = {chosen["value"]: {"entries": [chosen["entry"]], **chosen["evidence"]}}
+            resolved.append({"项目编号": project, "value": chosen["value"], "裁决依据": chosen["entry"]["裁决依据"], "resolvedOn": day, "items": list(items.values())})
+        elif len({i["value"] for i in items.values()}) > 1 or len(decisions) > 1:
+            matched.pop(project, None)       # 同一案卷不同取值，或多个互相矛盾的裁决：都不写，留给人核
+            conflicts_now[project] = {"since": (held.get(project) or {}).get("since", day), "items": list(items.values())}
+        elif project in held:                # 之前有冲突、现在没有裁决依据：仍阻断，不因当前输入单一取值放行
+            matched.pop(project, None)
+            conflicts_now[project] = {"since": held[project]["since"], "items": list(items.values())}
+    conflicts = [{"项目编号": p, "since": c["since"], "values": sorted({i["value"] for i in c["items"]})} for p, c in conflicts_now.items()]
 
     batch = _batch(business_root, label, day, list_sha)
     plan_ref = None
@@ -460,5 +481,5 @@ def plan_label_list(*, list_path: Path, list_sha: str, contract_path: Path, cont
               "counts": {"matchedCases": len(matched), "unmatched": len(unmatched), "conflicts": len(conflicts), "retriedPending": len(pending["entries"])},
               "evidencePlan": plan_ref, "pendingFile": str(pending_path), "batchDir": str(batch), "externalCalls": "read-only"}
     _atomic(batch / "匹配结果.json", result)
-    _atomic(pending_path, {"schema": "LabelPendingV1", "label": label, "updated": day, "entries": unmatched})
+    _atomic(pending_path, {"schema": "LabelPendingV1", "label": label, "updated": day, "entries": unmatched, "conflicts": conflicts_now, "resolved": resolved})
     return result

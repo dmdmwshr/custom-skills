@@ -233,3 +233,61 @@ def test_label_list_legacy_pending_without_a_value_stays_pending_and_the_same_ca
     both = _list(tmp_path, register.LABEL_LIST, [{"项目编号": "P-2"}, {"单位名称": "乙店"}], name="both.json", label="是否网售", value="是")
     clash = register.plan_label_list(list_path=both, list_sha=_sha(both), day="2026-11-18", **kwargs)
     assert any(m["项目编号"] == "P-2" for m in clash["matched"])
+
+
+def _pending_file(tmp_path):
+    return json.loads((tmp_path / "root" / "运行记录" / register.REGISTER_DIR / "是否网售待匹配.json").read_text(encoding="utf-8"))
+
+
+def test_a_value_conflict_survives_across_runs_and_repeating_the_same_list_does_not_resolve_it(tmp_path, contract):
+    common = _label_contract(contract)
+    cloud = Cloud({(CASE, "recA00000000001"): _row("P-1", "甲店")})
+    kwargs = dict(transport=cloud, business_root=tmp_path / "root", **common)
+    first = _list(tmp_path, register.LABEL_LIST, [{"单位名称": "乙店"}], name="r1.json", label="是否网售", value="是")
+    register.plan_label_list(list_path=first, list_sha=_sha(first), day="2026-11-16", **kwargs)
+    cloud.rows[(CASE, "recA00000000002")] = _row("P-2", "乙店")
+    second = _list(tmp_path, register.LABEL_LIST, [{"项目编号": "P-2"}], name="r2.json", label="是否网售", value="否")
+    r2 = register.plan_label_list(list_path=second, list_sha=_sha(second), day="2026-11-17", **kwargs)
+    assert r2["conflicts"][0]["values"] == ["否", "是"] and r2["evidencePlan"] is None
+    saved = _pending_file(tmp_path)                                           # 重新读盘：双方条目、取值、证据都在
+    held = saved["conflicts"]["P-2"]["items"]
+    assert saved["entries"] == {} and sorted(i["value"] for i in held) == ["否", "是"]
+    assert {i["evidence"]["evidenceSha256"] for i in held} == {_sha(first), _sha(second)} and {i["firstSeen"] for i in held} == {"2026-11-16", "2026-11-17"}
+    for day in ("2026-11-18", "2026-11-19"):                                  # 同字节清单重交多次：仍阻断，不放行任何一方
+        again = register.plan_label_list(list_path=second, list_sha=_sha(second), day=day, **kwargs)
+        assert again["evidencePlan"] is None and again["matched"] == [] and again["conflicts"][0]["since"] == "2026-11-17"
+    other = _list(tmp_path, register.LABEL_LIST, [{"项目编号": "P-1"}], name="r3.json", label="是否网售", value="否")
+    third = register.plan_label_list(list_path=other, list_sha=_sha(other), day="2026-11-20", **kwargs)
+    assert [m["项目编号"] for m in third["matched"]] == ["P-1"] and third["counts"]["conflicts"] == 1      # 其他案卷不受影响
+    single = _list(tmp_path, register.LABEL_LIST, [{"项目编号": "P-2"}], name="r4.json", label="是否网售", value="是")
+    assert register.plan_label_list(list_path=single, list_sha=_sha(single), day="2026-11-21", **kwargs)["evidencePlan"] is None
+
+
+def test_only_an_entry_with_a_stated_basis_resolves_a_held_conflict_and_the_history_is_kept(tmp_path, contract):
+    common = _label_contract(contract)
+    cloud = Cloud({(CASE, "recA00000000002"): _row("P-2", "乙店")})
+    kwargs = dict(transport=cloud, business_root=tmp_path / "root", **common)
+    cloud.rows.pop((CASE, "recA00000000002"))
+    first = _list(tmp_path, register.LABEL_LIST, [{"单位名称": "乙店"}], name="a.json", label="是否网售", value="是")
+    register.plan_label_list(list_path=first, list_sha=_sha(first), day="2026-11-16", **kwargs)
+    cloud.rows[(CASE, "recA00000000002")] = _row("P-2", "乙店")
+    second = _list(tmp_path, register.LABEL_LIST, [{"项目编号": "P-2"}], name="b.json", label="是否网售", value="否")
+    report = register.plan_label_list(list_path=second, list_sha=_sha(second), day="2026-11-17", **kwargs)
+    assert report["counts"]["conflicts"] == 1
+    decided = _list(tmp_path, register.LABEL_LIST, [{"项目编号": "P-2", "裁决依据": "用户2026-11-18答复：以大队复核为准，是"}], name="c.json", label="是否网售", value="是")
+    done = register.plan_label_list(list_path=decided, list_sha=_sha(decided), day="2026-11-18", **kwargs)
+    plan = json.loads(Path(done["evidencePlan"]["path"]).read_text(encoding="utf-8"))
+    assert plan["entries"][0]["stableKey"] == "P-2" and plan["entries"][0]["fields"]["是否网售"]["new"] == "是" and done["conflicts"] == []
+    saved = _pending_file(tmp_path)
+    assert saved["conflicts"] == {} and saved["resolved"][0]["裁决依据"].startswith("用户2026-11-18") and len(saved["resolved"][0]["items"]) == 3
+
+
+def test_a_pending_file_from_before_conflict_tracking_is_still_read(tmp_path, contract):
+    common = _label_contract(contract)
+    cloud = Cloud({(CASE, "recA00000000001"): _row("P-1", "甲店")})
+    pending = tmp_path / "root" / "运行记录" / register.REGISTER_DIR / "是否网售待匹配.json"
+    pending.parent.mkdir(parents=True)
+    pending.write_text(json.dumps({"schema": "LabelPendingV1", "label": "是否网售", "entries": {}}), encoding="utf-8")
+    lst = _list(tmp_path, register.LABEL_LIST, [{"项目编号": "P-1"}], label="是否网售", value="是")
+    report = register.plan_label_list(list_path=lst, list_sha=_sha(lst), day="2026-11-16", transport=cloud, business_root=tmp_path / "root", **common)
+    assert [m["项目编号"] for m in report["matched"]] == ["P-1"] and _pending_file(tmp_path)["conflicts"] == {}
