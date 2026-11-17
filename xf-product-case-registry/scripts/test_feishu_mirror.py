@@ -213,3 +213,28 @@ def test_a_later_execution_never_uses_an_earlier_post_snapshot_as_its_baseline_a
     assert next(t for t in post_b["tables"] if t["table"] == "案卷库-案卷主表")["changes"] == 0           # B 自己没有写，写后相对 B 的写前无变化
     with pytest.raises(sync.SyncError, match="运行键"):
         _run(contract, cloud, tmp_path, "2026-11-17", ledger, tag="pre", run_key="")
+
+
+class _BadRows:
+    """Cloud rows without the stable key: unreadable for the mirror (a problem, not a confirmed read)."""
+    def list_rows(self, *args):
+        return {"rec1": {"f": ["yes"]}}
+
+
+def _table_kwargs(root, tag, key, transport):
+    return dict(base="base", table_name="案卷主表", table_id="table", fields={"f": {"name": "标签", "type": "select"}}, facts={}, transport=transport,
+                ledger=None, root=root, label="case", day="2026-11-17", observed_at="2026-11-17T10:00:00+08:00", tag=tag, run_key=key)
+
+
+def test_a_reused_snapshot_keeps_the_problems_of_its_first_read_and_an_unconfirmed_read_is_never_the_baseline(tmp_path):
+    root = tmp_path / "mirror"
+    first = mirror.mirror_table(**_table_kwargs(root, "pre", "execution-one", _BadRows()))
+    again = mirror.mirror_table(**_table_kwargs(root, "pre", "execution-one", _BadRows()))
+    assert first["problems"] and again["reused"] is True and again["problems"] == first["problems"] and again["confirmed"] is False
+    assert not (root / "当前镜像" / "case-案卷主表.json").exists()                                     # 读不清的读回不成为之后的比较基线
+    with pytest.raises(sync.SyncError, match="不是已确认读回"):
+        mirror.mirror_table(**_table_kwargs(root, "post", "execution-one", _BadRows()))
+    legacy = root / "每日快照" / "2026-11-17" / "case-案卷主表-写前-legacy.json"
+    legacy.write_text(json.dumps({"table": "x", "fields": [], "rows": {}}), encoding="utf-8")        # 没有保存检查结果的旧快照：不当作已确认
+    old = mirror.mirror_table(**_table_kwargs(root, "pre", "legacy", _BadRows()))
+    assert old["reused"] is True and old["confirmed"] is False and old["problems"]

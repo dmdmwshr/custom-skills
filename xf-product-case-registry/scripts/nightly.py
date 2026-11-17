@@ -219,7 +219,7 @@ def checkpoint(root: Path, day: str, *, stage: str, status: str, case: str | Non
     if latest is not None and status == "started" and (
             latest["status"] == "unknown" or (latest["status"] == "started" and stage in WRITE_STAGES)):
         raise NightlyError("该步骤上次的效果未知，先回读对账并记 reconciled，不能直接重新开始")
-    if latest is not None and latest["status"] == "unknown" and status not in ("unknown", "quota"):
+    if latest is not None and latest["status"] == "unknown" and status != "unknown":
         if status == "reconciled":
             if not detail.strip():
                 raise NightlyError("reconciled 需要 --detail 写明回读到的实际效果")
@@ -227,12 +227,17 @@ def checkpoint(root: Path, day: str, *, stage: str, status: str, case: str | Non
                 raise NightlyError(f"{stage} 是写阶段：reconciled 还需要 --ref 指向原回执，并以真实回读闭合")
         elif status == "skipped" and issue and detail.strip() and stage not in WRITE_STAGES:
             pass                                       # 已证实的来源问题，作为显式保留事项记录
-        else:
+        else:     # quota 也不行：它会让该项的最新状态不再是 unknown，等于间接覆盖
             raise NightlyError(f"该步骤的效果未知：不能记为 {status}，只能回读对账后记 reconciled"
                                + ("（写阶段需 --ref 原回执）" if stage in WRITE_STAGES else "；已证实的非写阶段来源问题可用 skipped --issue --detail 保留"))
     if status == "done" and not key[1] and not key[2]:
         expected = set(DISCOVER_ENTRIES) if stage == "discover" and run.get("entryKeyed") else set()
         pending = [k for k, i in all_latest.items() if k[0] == stage and (k[1] or k[2]) and i["status"] not in TERMINAL]
+        failed = [k for k, i in all_latest.items() if k[0] == stage and (k[1] or k[2]) and i["status"] == "failed"]
+        if failed:
+            names = "、".join((k[1] or k[2]) for k in failed[:4])
+            raise NightlyError(f"{stage} 有 {len(failed)} 项失败（{names}）：整阶段不能记 done；"
+                               "先重试成功，或对已证实的来源问题记 skipped --issue --detail，或整阶段记 failed 并带出")
         pending += [(stage, "", e) for e in sorted(expected) if (all_latest.get((stage, "", e)) or {}).get("status") not in TERMINAL]
         if pending:
             names = "、".join((k[1] or k[2]) for k in pending[:4])
@@ -284,7 +289,8 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", n
     finished_before = [d for d in _run_days(root) if d < day and _load(root / RUNS_DIR / d / "run.json", {}).get("status") == "FINISHED"]
     previous = {_issue_signature(i) for i in (_load(root / RUNS_DIR / finished_before[-1] / "run.json", {}).get("issues", []) if finished_before else [])}
     new_issues = [i for i in issues if _issue_signature(i) not in previous]
-    quiet = stats["changed"] == 0 and not weekly["due"] and not new_issues
+    unverified = stats["reportedChanged"] > 0 and stats["changed"] == 0      # 执行者自报有变化，却没有任何凭证：不当作“无变化”
+    quiet = stats["changed"] == 0 and not weekly["due"] and not new_issues and not unverified
     run.update(status="FINISHED", finishedAt=(now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds"),
                changed=stats["changed"], quiet=quiet, summary=summary, breakdown=stats["breakdown"], issues=issues,
                finishedWithIssues=bool(issues), reportedChanged=state_reported(root, day))
@@ -292,6 +298,8 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", n
               "issues": issues, "finishedWithIssues": bool(issues)}
     if new_issues:
         result["newIssues"] = new_issues
+    if unverified:
+        result["unverifiedReportedChanges"] = stats["reportedChanged"]
     if weekly["due"]:
         run["weeklyCoverage"] = result["weeklyCoverage"] = weekly      # 今晚试过但未完整：如实带出，下一轮仍到期
     _atomic(path, run)
@@ -498,8 +506,8 @@ def _receipt_files(evidence_dir: str) -> list[Path]:
     return sorted(base.glob("*/exec*/exec-*.json")) if evidence_dir and base.is_dir() else []
 
 
-def _ledger_events(root: Path, *, since: datetime) -> list[dict[str, Any]]:
-    """``final`` events of the cloud write ledger written at or after ``since`` (files not touched since are skipped)."""
+def _ledger_events(root: Path, *, since: datetime, kinds: tuple[str, ...] = ("final",)) -> list[dict[str, Any]]:
+    """Events of the cloud write ledger written at or after ``since`` (files not touched since are skipped)."""
     directory = root / LEDGER_DIR / "targets"
     if not directory.is_dir():
         return []
@@ -508,63 +516,103 @@ def _ledger_events(root: Path, *, since: datetime) -> list[dict[str, Any]]:
         if datetime.fromtimestamp(path.stat().st_mtime, SHANGHAI) < since:
             continue
         for line in path.read_text(encoding="utf-8").splitlines():
-            if '"final"' not in line:
+            if not any(f'"{kind}"' in line for kind in kinds):
                 continue
             event = json.loads(line)
-            if event.get("event") == "final" and _parse_time(event["at"]) >= since:
+            if event.get("event") in kinds and _parse_time(event["at"]) >= since:
                 found.append(event)
     return found
 
 
+def _ledger_by_run(root: Path, *, since: datetime) -> dict[str, dict[str, dict[str, Any]]]:
+    """runId -> intentId -> {record, kind, final}: what the unique write ledger says each intent of a run ended as."""
+    runs: dict[str, dict[str, dict[str, Any]]] = {}
+    for event in sorted(_ledger_events(root, since=since, kinds=("intent", "bound", "final")), key=lambda e: e["at"]):
+        intent = runs.setdefault(str(event.get("runId")), {}).setdefault(event["intentId"], {"record": None, "kind": "update", "final": None})
+        if event["event"] == "intent":
+            intent["record"] = (event.get("target") or {}).get("record") or intent["record"]
+            intent["kind"] = event.get("kind") or "update"
+        elif event["event"] == "bound":
+            intent["record"] = event.get("recordId") or intent["record"]
+        else:
+            intent["final"] = event.get("status")
+    return runs
+
+
 def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, Any]:
-    """Cloud writes counted once per (intent, table, record, action) from the execution receipts; the same receipt
-    copied into two folders, or a repeated listing of one record, is one write. Unknown results are counted apart."""
-    files = _receipt_files(evidence_dir)
+    """Cloud writes counted once per (intent, table, record, action). Receipts name the runs and records; the unique write
+    ledger gives each intent and how it ended (``final``). A write counts as done only if its receipt says OK **and** the
+    ledger's final for that intent is OK; anything else is unknown and listed apart. The same receipt copied to another
+    folder, or a record listed twice, is one write; two different intents on one record are two writes. Fields are counted
+    from the receipt's ``writtenFields`` (cells that really changed) of updates; created rows are counted as rows only."""
+    evidence_dir = _native(evidence_dir)
     if not evidence_dir:
         return {"source": "none", "note": "没有回执目录：云写入数不统计，只看检查点与账本"}
+    files = _receipt_files(evidence_dir)
+    ledger = _ledger_by_run(root, since=since)
     seen: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     fields: set[tuple[str, str, str]] = set()
     unknown: list[dict[str, Any]] = []
     unreadable: list[str] = []
     run_ids: set[str] = set()
-    receipts_ok = duplicates = 0
+    duplicates = unconfirmed = receipts_ok = 0
     cases: set[str] = set()
     for path in files:
-        step = path.parent.parent.name.split("-")[0]
         try:
             report = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             unreadable.append(str(path))
             continue
-        run_ids.add(str(report.get("runId") or ""))
-        if report.get("status") == "OK":
-            receipts_ok += 1
+        run_id = str(report.get("runId") or "")
+        run_ids.add(run_id)
+        run_ledger = ledger.get(run_id)
+        report_ok = report.get("status") == "OK"
+        receipts_ok += report_ok
         for record in report.get("records", []):
             state = record.get("status")
             stable = (record.get("stableKey") or {}).get("value") or record.get("recordId") or ""
             table = record.get("tableId") or ""
-            if state in CLOUD_WRITE:
-                key = (step, table, stable, CLOUD_WRITE[state])
-                if key in seen:
-                    duplicates += 1
-                else:
-                    seen[key] = {"receipt": path.name, "runId": report.get("runId")}
-                cases.add(str(stable).split("|")[0])
-                for field_id in (record.get("fieldDetail") or {}):     # 同一格只算一次，重复列出里的新格仍计入
+            if state not in CLOUD_WRITE:
+                if state in CLOUD_UNKNOWN or state in ("FAILED", "VIOLATION", "DUPLICATE_KEYS_BLOCK"):
+                    unknown.append({"receipt": path.name, "table": table, "stableKey": stable, "status": state})
+                continue
+            action = CLOUD_WRITE[state]
+            matched = [(iid, i) for iid, i in (run_ledger or {}).items()
+                       if i["record"] == record.get("recordId") and (i["kind"] == "create") == (action == "create")]
+            intent_id = record.get("intentId") or (matched[0][0] if len(matched) == 1 else run_id)
+            key = (str(intent_id), table, stable, action)
+            if key in seen:
+                duplicates += 1
+                if action == "update":
+                    for field_id in (record.get("writtenFields") if record.get("writtenFields") is not None else (record.get("fieldDetail") or {})):
+                        fields.add((table, stable, field_id))    # 重复列出里的新格仍计入（同一格只算一次）
+                continue
+            verdict = "ledger-ok"
+            if run_ledger is None:
+                verdict = "receipt-only"
+            elif not matched or any(i["final"] != "OK" for _, i in matched):
+                verdict = "ledger-not-ok"
+            if not report_ok or verdict == "ledger-not-ok":
+                unknown.append({"receipt": path.name, "table": table, "stableKey": stable, "status": state, "reportStatus": report.get("status"),
+                                "ledgerFinal": sorted({i["final"] or "NONE" for _, i in matched}) or ["NO_INTENT"]})
+                continue
+            seen[key] = {"receipt": path.name, "runId": run_id, "verdict": verdict}
+            unconfirmed += verdict == "receipt-only"
+            cases.add(str(stable).split("|")[0])
+            if action == "update":
+                for field_id in (record.get("writtenFields") if record.get("writtenFields") is not None else (record.get("fieldDetail") or {})):
                     fields.add((table, stable, field_id))
-            elif state in CLOUD_UNKNOWN or state in ("FAILED", "VIOLATION", "DUPLICATE_KEYS_BLOCK"):
-                unknown.append({"receipt": path.name, "table": table, "stableKey": stable, "status": state})
     created = {(k[1], k[2]) for k in seen if k[3] == "create"}
     updates = [k for k in seen if k[3] == "update"]
-    events = _ledger_events(root, since=since)
-    ok_runs = {str(e.get("runId")) for e in events if e.get("status") == "OK"}
+    ok_runs = {r for r, intents in ledger.items() if any(i["final"] == "OK" for i in intents.values())}
     run_ids.discard("")
-    cross = {"ledgerFinalOk": sum(1 for e in events if e.get("status") == "OK"), "receiptRunsWithoutLedgerOk": sorted(run_ids - ok_runs),
-             "ledgerOkRunsWithoutReceipt": sorted(ok_runs - run_ids)}
+    cross = {"ledgerFinalOk": sum(1 for intents in ledger.values() for i in intents.values() if i["final"] == "OK"),
+             "receiptRunsWithoutLedgerOk": sorted(run_ids - ok_runs), "ledgerOkRunsWithoutReceipt": sorted(ok_runs - run_ids)}
     cross["result"] = "MATCH" if not cross["receiptRunsWithoutLedgerOk"] and not cross["ledgerOkRunsWithoutReceipt"] else "MISMATCH"
-    return {"source": "receipts", "receiptFiles": len(files), "receiptsOk": receipts_ok, "createdRows": len(created),
+    return {"source": "receipts+ledger", "receiptFiles": len(files), "receiptsOk": receipts_ok, "createdRows": len(created),
             "updatedOperations": len(updates), "uniqueFields": len(fields), "duplicatesIgnored": duplicates, "unknown": unknown,
-            "unreadable": unreadable, "ledgerCrossCheck": cross, "cases": sorted(cases)}
+            "unreadable": unreadable, "receiptOnlyUnconfirmed": unconfirmed, "ledgerCrossCheck": cross, "cases": sorted(cases),
+            "note": "新建行只计行数，不逐格计字段；更新字段取回执 writtenFields（真正改变的格）"}
 
 
 def _observation_today(root: Path, day: str) -> dict[str, Any]:
@@ -580,30 +628,53 @@ def _observation_today(root: Path, day: str) -> dict[str, Any]:
     return {**counts, "rwids": sorted(rwids)}
 
 
+def _collected_cases(evidence_dir: str, since: datetime) -> tuple[set[str], str]:
+    """Cases whose own package-attached result (``source/r53-new-results.jsonl``) was written in this run."""
+    path = Path(_native(evidence_dir)) / "source" / "r53-new-results.jsonl" if evidence_dir else None
+    if path is None or not path.is_file():
+        return set(), "没有采集结果文件"
+    found = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        if item.get("outcome") == "NEW_PACKAGE_ATTACHED" and item.get("projectNo") and _parse_time(item["at"]) >= since:
+            found.add(item["projectNo"])
+    return found, "采集结果文件 NEW_PACKAGE_ATTACHED"
+
+
+def _archived_cases(root: Path, since: datetime) -> tuple[set[str], str]:
+    """Cases the waterline shows as completed (archived) at or after ``since``: the case ledger's own completion record."""
+    path = Path(root).parent / "案卷水位记录.json"
+    if not path.is_file():
+        return set(), "没有案卷水位记录"
+    cases = json.loads(path.read_text(encoding="utf-8")).get("cases", {})
+    return {p for p, c in cases.items() if c.get("state") == "COMPLETED" and c.get("completedAt") and _parse_time(c["completedAt"]) >= since}, "案卷水位记录 completedAt"
+
+
 def run_stats(root: Path, day: str, *, evidence_dir: str = "", now: datetime | None = None) -> dict[str, Any]:
-    """What this run changed, from its own evidence. ``changed`` = distinct cases/tasks changed (not a sum of what
-    writers reported); ``reportedChanged`` keeps that sum beside it. The coverage is stated so a number is never read wider."""
+    """What this run changed, from its own evidence. ``changed`` = distinct cases/tasks changed. Collection, archiving, cloud
+    writes and queue transitions are each counted from their own evidence (package-attached results, the waterline's completion
+    record, receipts+write ledger, queue history); what a writer reported with ``--changed`` is kept only as
+    ``reportedChanged``. The coverage is stated so a number is never read wider."""
     run = _load(_run_dir(root, day) / "run.json", {})
-    latest = _latest(checkpoints(root, day))
-    effect = {}
-    for key, item in latest.items():
-        if key[1] and item["status"] in ("done", "reconciled") and _reported(item) > 0:
-            effect.setdefault(key[0], set()).add(key[1])
     since = _parse_time(run["startedAt"]) if run.get("startedAt") else (now or now_shanghai())
     cloud = cloud_stats(root, evidence_dir, since=since)
     observation = _observation_today(root, day)
-    changed_set = set().union(*effect.values()) if effect else set()
-    changed_set |= set(cloud.get("cases", [])) | set(observation["rwids"])
+    collected, collected_basis = _collected_cases(evidence_dir, since)
+    archived, archived_basis = _archived_cases(root, since)
+    changed_set = set(collected) | set(archived) | set(cloud.get("cases", [])) | set(observation["rwids"])
     unknown_writes = [i for i in progress(root, day)["unknown"] if i["stage"] in WRITE_STAGES]
-    breakdown = {"collectedCases": len(effect.get("acquire", ())), "organizedCases": len(effect.get("organize", ())),
-                 "syncReportedCases": len(effect.get("sync", ())), "observation": {k: v for k, v in observation.items() if k != "rwids"},
+    breakdown = {"collectedCases": len(collected), "archivedCases": len(archived),
+                 "observation": {k: v for k, v in observation.items() if k != "rwids"},
                  "cloudCreatedRows": cloud.get("createdRows"), "cloudUpdatedOperations": cloud.get("updatedOperations"),
                  "cloudUniqueFields": cloud.get("uniqueFields"),
-                 "cloudUnknown": (len(cloud.get("unknown", [])) if cloud.get("source") == "receipts" else None) or 0,
+                 "cloudUnknown": len(cloud.get("unknown", [])) if cloud.get("source") == "receipts+ledger" else 0,
                  "unknownWriteCheckpoints": len(unknown_writes)}
     return {"changed": len(changed_set), "reportedChanged": state_reported(root, day), "breakdown": breakdown, "cloud": cloud,
-            "coverage": ("检查点（本运行）+ " + (f"回执 {cloud.get('receiptFiles')} 份 + 账本交叉核对" if cloud.get("source") == "receipts"
-                                                else "无回执目录") + " + 观察队列当日历史")}
+            "collectedCases": sorted(collected), "archivedCases": sorted(archived),
+            "coverage": f"采集：{collected_basis}；归档：{archived_basis}；云写入：" + ("回执+唯一账逐意图" if cloud.get("source") == "receipts+ledger" else "无回执目录")
+                        + "；观察：队列当日历史"}
 
 
 # ---------------------------------------------------------------------------------------------

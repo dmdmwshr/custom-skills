@@ -100,8 +100,12 @@ def mirror_table(*, base: str, table_name: str, table_id: str, fields: dict[str,
     run_file = _run_snapshot(root, day, name, tag, run_key) if tag != "day" else None
     if run_file is not None and run_file.is_file():
         kept = _load(run_file)
-        return {"table": name, "rows": len(kept["rows"]), "fields": len(kept["fields"]), "firstMirror": False, "changes": 0,
-                "changesByUser": 0, "changeSample": [], "factDrift": [], "problems": [], "reused": True, "tag": tag, "runKey": run_key,
+        checks = kept.get("checks")      # 第一次读取时的检查结果随快照冻结；复用不重读，也不洗掉当时的问题
+        return {"table": name, "rows": len(kept["rows"]), "fields": len(kept["fields"]), "firstMirror": False,
+                "changes": (checks or {}).get("changes", 0), "changesByUser": (checks or {}).get("changesByUser", 0),
+                "changeSample": (checks or {}).get("changeSample", []), "factDrift": (checks or {}).get("factDrift", []),
+                "problems": (checks or {}).get("problems") if checks else [{"problem": "快照没有保存当时的检查结果，不能当作已确认读回"}],
+                "confirmed": bool((checks or {}).get("confirmed", False)), "reused": True, "tag": tag, "runKey": run_key,
                 "snapshotFile": str(run_file), "snapshotSha256": sync.digest(run_file.read_text(encoding="utf-8"))}
     rows = transport.list_rows(base, table_id, [key_field, *fields, *facts])
     current: dict[str, dict[str, Any]] = {}
@@ -122,6 +126,7 @@ def mirror_table(*, base: str, table_name: str, table_id: str, fields: dict[str,
     if tag == "post":
         baseline = _load(_run_snapshot(root, day, name, "pre", run_key))
         sync._require(baseline is not None, f"{name}：没有本次执行（运行键 {run_key}）的写前快照，写后不能以其他快照作基线")
+        sync._require((baseline.get("checks") or {}).get("confirmed", True), f"{name}：本次执行的写前快照有读不清的行，不是已确认读回，不能作写后基线")
         previous = baseline
     changes: list[dict[str, Any]] = []
     if previous is not None:
@@ -157,6 +162,9 @@ def mirror_table(*, base: str, table_name: str, table_id: str, fields: dict[str,
                 if now_value != _value(meta["type"], wrote):
                     drift.append({"table": name, "stableKey": key, "field": meta["name"], "assistantLastWrote": wrote, "feishuNow": now_value})
     snapshot = {"table": name, "tableId": table_id, "readAt": observed_at, "fields": [m["name"] for m in fields.values()], "rows": current}
+    if run_file is not None:
+        snapshot["checks"] = {"changes": len(changes), "changesByUser": sum(1 for c in changes if c.get("by") == "feishu-user"),
+                              "changeSample": changes[:20], "factDrift": drift, "problems": problems, "confirmed": not problems}
     day_dir = root / "每日快照" / day
     first = day_dir / f"{name}-首次.json"
     if run_file is None and not first.is_file():
@@ -165,7 +173,8 @@ def mirror_table(*, base: str, table_name: str, table_id: str, fields: dict[str,
         snapshot_sha = _atomic(run_file, snapshot)
     else:
         snapshot_sha = _atomic(day_dir / f"{name}.json", snapshot)
-    _atomic(mirror_path, snapshot)
+    if not problems:      # 有读不清的行（无稳定键、键重复）时这次读取不是已确认的读回，不作为之后的比较基线
+        _atomic(mirror_path, snapshot)
     if changes:
         log = root / "变更记录" / f"{day}.jsonl"
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -176,7 +185,7 @@ def mirror_table(*, base: str, table_name: str, table_id: str, fields: dict[str,
             os.fsync(stream.fileno())
     return {"table": name, "rows": len(current), "fields": len(fields), "firstMirror": previous is None, "changes": len(changes),
             "changesByUser": sum(1 for c in changes if c.get("by") == "feishu-user"), "changeSample": changes[:20],
-            "factDrift": drift, "problems": problems, "snapshotSha256": snapshot_sha, "tag": tag, "runKey": run_key,
+            "factDrift": drift, "problems": problems, "confirmed": not problems, "snapshotSha256": snapshot_sha, "tag": tag, "runKey": run_key,
             "snapshotFile": str(run_file) if run_file is not None else str(day_dir / f"{name}.json")}
 
 

@@ -71,7 +71,8 @@ def test_an_interrupted_run_resumes_per_case_and_an_interrupted_write_must_be_re
     nightly.checkpoint(tmp_path, "2026-11-13", stage="organize", status="done", case="C-1")
     _all_done(tmp_path, "2026-11-13", skip=("discover",))
     done = nightly.finish(tmp_path, "2026-11-13")
-    assert (done["status"], done["changed"], done["quiet"]) == ("FINISHED", 2, False)
+    assert (done["status"], done["changed"], done["quiet"]) == ("FINISHED", 0, False)       # 自报 2 处变化但没有任何凭证：不算变更数，也不当作无变化
+    assert done["unverifiedReportedChanges"] == 2
 
 
 def test_quota_pauses_the_run_and_the_next_trigger_continues_and_lists_the_missed_night(tmp_path):
@@ -266,10 +267,10 @@ def test_unknown_closes_only_by_reconciled_and_a_write_stage_needs_the_original_
     assert kept["issue"] is True and nightly.progress(tmp_path, day)["unknown"] == []
 
 
-def _complete(tmp_path, day):
+def _complete(tmp_path, day, failed=()):
     _entries(tmp_path, day)
     for stage in nightly.STAGES:
-        nightly.checkpoint(tmp_path, day, stage=stage, status="done")
+        nightly.checkpoint(tmp_path, day, stage=stage, status="failed" if stage in failed else "done")
 
 
 def test_finish_carries_issues_without_hiding_them_and_only_new_issues_break_the_quiet(tmp_path):
@@ -277,17 +278,18 @@ def test_finish_carries_issues_without_hiding_them_and_only_new_issues_break_the
     nightly.coverage(tmp_path, _full(day), day=day)
     nightly.checkpoint(tmp_path, day, stage="organize", status="failed", case="C-5", detail="拆分失败")
     nightly.checkpoint(tmp_path, day, stage="organize", status="skipped", case="C-090", detail="混包", issue=True)
-    _complete(tmp_path, day)
+    _complete(tmp_path, day, failed=("organize",))                       # 有失败子项：整阶段只能记 failed，不能记 done
     done = nightly.finish(tmp_path, day)
     assert done["status"] == "FINISHED" and done["finishedWithIssues"] is True and done["quiet"] is False
-    assert sorted(i["kind"] for i in done["issues"]) == ["failed", "retained-issue"] and len(done["newIssues"]) == 2
+    assert sorted(i["kind"] for i in done["issues"]) == ["failed", "failed", "retained-issue"] and len(done["newIssues"]) == 3   # 子项失败、整阶段失败、保留事项
     history = [json.loads(l) for l in (tmp_path / "夜间运行" / day / "checkpoints.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [h["status"] for h in history if h.get("case") == "C-5"] == ["failed"]
     nxt = nightly.begin(tmp_path, now=T("2026-11-18T02:00:00"))
-    assert len(nxt["carryIssues"]) == 2
-    _complete(tmp_path, "2026-11-18")
+    assert len(nxt["carryIssues"]) == 3
     nightly.checkpoint(tmp_path, "2026-11-18", stage="organize", status="failed", case="C-5", detail="拆分失败")      # 同一问题仍在：不算新问题
     nightly.checkpoint(tmp_path, "2026-11-18", stage="organize", status="skipped", case="C-090", detail="混包", issue=True)
+    nightly.coverage(tmp_path, _full("2026-11-18"), day="2026-11-18") if nightly.coverage_state(tmp_path, today="2026-11-18")["due"] else None
+    _complete(tmp_path, "2026-11-18", failed=("organize",))
     again = nightly.finish(tmp_path, "2026-11-18")
     assert again["finishedWithIssues"] is True and again["quiet"] is True and "newIssues" not in again
 
@@ -298,14 +300,16 @@ def test_a_discover_entry_never_recorded_is_an_issue_and_unknown_still_blocks_fi
     nightly.checkpoint(tmp_path, day, stage="discover", status="failed", entry=nightly.DISCOVER_ENTRIES[0], detail="社会单位入口切换失败")
     for entry in nightly.DISCOVER_ENTRIES[1:]:
         nightly.checkpoint(tmp_path, day, stage="discover", status="done", entry=entry)
-    nightly.checkpoint(tmp_path, day, stage="discover", status="done")
+    with pytest.raises(nightly.NightlyError, match="整阶段不能记 done"):                      # 有入口失败：整阶段不能记 done，只能记 failed
+        nightly.checkpoint(tmp_path, day, stage="discover", status="done")
+    nightly.checkpoint(tmp_path, day, stage="discover", status="failed", detail="十个入口中 1 个没读完整")
     for stage in nightly.STAGES[1:]:
         nightly.checkpoint(tmp_path, day, stage=stage, status="done")
     nightly.checkpoint(tmp_path, day, stage="sync", status="unknown", case="C-1")
     assert nightly.finish(tmp_path, day)["status"] == "NOT_FINISHED"
     nightly.checkpoint(tmp_path, day, stage="sync", status="reconciled", case="C-1", detail="回读", ref="/r/a.json")
     done = nightly.finish(tmp_path, day)
-    assert done["status"] == "FINISHED" and [i["kind"] for i in done["issues"]] == ["failed"] and done["issues"][0]["entry"] == nightly.DISCOVER_ENTRIES[0]
+    assert done["status"] == "FINISHED" and [(i["kind"], i["entry"]) for i in done["issues"]] == [("failed", ""), ("failed", nightly.DISCOVER_ENTRIES[0])]
 
 
 def _receipt(base, step, folder, name, records, *, run_id, status="OK"):
@@ -314,28 +318,36 @@ def _receipt(base, step, folder, name, records, *, run_id, status="OK"):
     (path / name).write_text(json.dumps({"runId": run_id, "status": status, "records": records}, ensure_ascii=False), encoding="utf-8")
 
 
-def _ledger(root, run_id, *, at, status="OK"):
+def _ledger(root, run_id, record, *, intent=None, kind=None, final="OK", at="2026-11-16T18:40:00Z", table="tM"):
+    """One intent of the unique write ledger (intent [+ bound for creates] + final)."""
     folder = root / "飞书写入账本" / "targets"
     folder.mkdir(parents=True, exist_ok=True)
-    with (folder / f"{run_id}.jsonl").open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps({"event": "final", "runId": run_id, "intentId": "i", "status": status, "at": at}) + "\n")
+    intent = intent or f"i-{run_id}-{record}"
+    events = [{"event": "intent", "runId": run_id, "intentId": intent, "at": at, "target": {"table": table, "record": record}, **({"kind": kind} if kind else {})}]
+    if kind == "create":
+        events.append({"event": "bound", "runId": run_id, "intentId": intent, "at": at, "recordId": record})
+    if final:
+        events.append({"event": "final", "runId": run_id, "intentId": intent, "at": at, "status": final})
+    with (folder / f"{intent}.jsonl").open("a", encoding="utf-8") as stream:
+        for event in events:
+            stream.write(json.dumps(event) + "\n")
 
 
-def test_cloud_writes_are_counted_once_from_receipts_unknown_apart_and_reported_changed_is_not_the_count(tmp_path):
+def test_cloud_writes_are_counted_once_per_intent_from_receipts_and_ledger_unknown_apart_and_reported_changed_is_not_the_count(tmp_path):
     day = _run(tmp_path)
     evidence = tmp_path / "evidence"
     created = [{"tableId": "tM", "stableKey": {"value": "P-1"}, "status": "CREATED_VERIFIED", "recordId": "r1"},
                {"tableId": "tM", "stableKey": {"value": "P-2"}, "status": "CREATED_VERIFIED", "recordId": "r2"}]
     _receipt(evidence, "main-023551", "exec-main", "exec-create-01.json", created, run_id="run-a")
-    _receipt(evidence, "main-023709", "exec-main", "exec-create-01.json", created, run_id="run-a")        # 同一回执复制到另一个文件夹
-    update = [{"tableId": "tM", "stableKey": {"value": "P-1"}, "status": "WRITTEN", "recordId": "r1",
-               "fieldDetail": {"f1": {}, "f2": {}}}, {"tableId": "tM", "stableKey": {"value": "P-1"}, "status": "WRITTEN", "recordId": "r1",
-                                                       "fieldDetail": {"f2": {}, "f3": {}}}]                # 同一记录重复列出
+    _receipt(evidence, "renamed-folder", "exec-main", "exec-create-01.json", created, run_id="run-a")   # 同一回执复制到另一个目录（改名也不影响）
+    update = [{"tableId": "tM", "stableKey": {"value": "P-1"}, "status": "WRITTEN", "recordId": "r1", "writtenFields": ["f1", "f2"]},
+              {"tableId": "tM", "stableKey": {"value": "P-1"}, "status": "WRITTEN", "recordId": "r1", "writtenFields": ["f2", "f3"]}]   # 同一记录重复列出
     _receipt(evidence, "calibrate-023959", "exec", "exec-fp-01.json", update, run_id="run-b")
     _receipt(evidence, "qty-025233", "exec-qty", "exec-fp-01.json",
              [{"tableId": "tQ", "stableKey": {"value": "P-3|初查|1"}, "status": "UNKNOWN", "recordId": "r3"}], run_id="run-c", status="UNKNOWN")
-    for run_id in ("run-a", "run-b"):
-        _ledger(tmp_path, run_id, at="2026-11-16T18:40:00Z")
+    _ledger(tmp_path, "run-a", "r1", kind="create")
+    _ledger(tmp_path, "run-a", "r2", kind="create")
+    _ledger(tmp_path, "run-b", "r1")
     nightly.checkpoint(tmp_path, day, stage="sync", status="done", case="P-1", changed=9)
     stats = nightly.run_stats(tmp_path, day, evidence_dir=str(evidence))
     b = stats["breakdown"]
@@ -343,10 +355,72 @@ def test_cloud_writes_are_counted_once_from_receipts_unknown_apart_and_reported_
     assert stats["cloud"]["duplicatesIgnored"] == 3 and stats["cloud"]["ledgerCrossCheck"]["result"] == "MISMATCH"   # run-c 有回执无账本 OK
     assert stats["cloud"]["ledgerCrossCheck"]["receiptRunsWithoutLedgerOk"] == ["run-c"]
     assert stats["changed"] == 2 and stats["reportedChanged"] == 9          # 实际变化 P-1、P-2 两案；自报数只并排保留
-    _ledger(tmp_path, "run-c", at="2026-11-16T18:50:00Z")
-    _ledger(tmp_path, "run-x", at="2026-11-16T18:55:00Z")
+    _ledger(tmp_path, "run-c", "r3", intent="i-c")
+    _ledger(tmp_path, "run-x", "rx", intent="i-x", at="2026-11-16T18:55:00Z")
     cross = nightly.run_stats(tmp_path, day, evidence_dir=str(evidence))["cloud"]["ledgerCrossCheck"]
     assert cross["ledgerOkRunsWithoutReceipt"] == ["run-x"] and cross["result"] == "MISMATCH"
+
+
+def test_two_different_intents_on_one_record_are_two_writes_and_only_written_cells_are_counted(tmp_path):
+    day = _run(tmp_path)
+    evidence = tmp_path / "evidence"
+    for number in (1, 2):
+        record = {"status": "WRITTEN", "tableId": "table", "recordId": "record", "stableKey": {"value": "PROJECT"},
+                  "fieldDetail": {"changed": {"old": number - 1, "new": number}, "unchanged": {"old": "same", "new": "same"}}, "writtenFields": ["changed"]}
+        _receipt(evidence, f"labels-{number}", "exec", "exec-test.json", [record], run_id=f"run-{number}")
+        _ledger(tmp_path, f"run-{number}", "record", table="table")
+    cloud = nightly.cloud_stats(tmp_path, str(evidence), since=T("2026-11-16T10:00:00"))
+    assert cloud["updatedOperations"] == 2 and cloud["uniqueFields"] == 1 and cloud["receiptOnlyUnconfirmed"] == 0
+    stats = nightly.run_stats(tmp_path, day, evidence_dir=str(evidence))
+    assert stats["breakdown"]["cloudUpdatedOperations"] == 2
+
+
+def test_a_write_the_ledger_did_not_confirm_is_unknown_even_if_the_receipt_says_written(tmp_path):
+    _run(tmp_path)
+    evidence = tmp_path / "evidence"
+    record = {"status": "WRITTEN", "tableId": "tM", "recordId": "r1", "stableKey": {"value": "P-1"}, "writtenFields": ["f1"]}
+    _receipt(evidence, "calibrate-1", "exec", "exec-fp.json", [record], run_id="run-u", status="UNKNOWN")
+    _ledger(tmp_path, "run-u", "r1", final="READBACK_FAILED")
+    cloud = nightly.cloud_stats(tmp_path, str(evidence), since=T("2026-11-16T10:00:00"))
+    assert cloud["updatedOperations"] == 0 and cloud["uniqueFields"] == 0
+    assert [(u["status"], u["ledgerFinal"]) for u in cloud["unknown"]] == [("WRITTEN", ["READBACK_FAILED"])]
+    _receipt(evidence, "calibrate-2", "exec", "exec-fp.json", [{**record, "recordId": "r2", "stableKey": {"value": "P-2"}}], run_id="run-v")
+    _ledger(tmp_path, "run-v", "r2", final=None)                          # 有意图没有终态 = 没有确认
+    cloud = nightly.cloud_stats(tmp_path, str(evidence), since=T("2026-11-16T10:00:00"))
+    assert cloud["updatedOperations"] == 0 and len(cloud["unknown"]) == 2
+
+
+def test_collection_and_archiving_are_counted_from_their_own_evidence_not_from_a_reported_number(tmp_path):
+    business = tmp_path
+    tmp_path = business / "运行记录"           # 水位记录在业务根，运行记录在其下
+    day = _run(tmp_path)
+    evidence = business / "evidence"
+    nightly.checkpoint(tmp_path, day, stage="acquire", status="done", case="C-1", changed=17)
+    assert nightly.run_stats(tmp_path, day, evidence_dir=str(evidence))["breakdown"]["collectedCases"] == 0       # 只有自报，没有采集凭证
+    (evidence / "source").mkdir(parents=True)
+    (evidence / "source" / "r53-new-results.jsonl").write_text("\n".join(json.dumps(x) for x in (
+        {"projectNo": "C-1", "outcome": "NEW_PACKAGE_ATTACHED", "at": "2026-11-17T02:20:00+08:00"},
+        {"projectNo": "C-2", "outcome": "FAILED_AT_OPEN", "at": "2026-11-17T02:21:00+08:00"},
+        {"projectNo": "C-9", "outcome": "NEW_PACKAGE_ATTACHED", "at": "2026-11-10T02:20:00+08:00"})), encoding="utf-8")   # 别的夜晚的不算
+    (business / "案卷水位记录.json").write_text(json.dumps({"cases": {
+        "C-1": {"state": "COMPLETED", "completedAt": "2026-11-16T18:32:43Z"}, "C-5": {"state": "COMPLETED", "completedAt": "2026-08-25T02:44:39Z"},
+        "C-6": {"state": "PENDING_ORGANIZATION"}}}), encoding="utf-8")
+    stats = nightly.run_stats(tmp_path, day, evidence_dir=str(evidence))
+    assert stats["breakdown"]["collectedCases"] == 1 and stats["breakdown"]["archivedCases"] == 1 and stats["changed"] == 1
+    assert stats["collectedCases"] == ["C-1"] and stats["archivedCases"] == ["C-1"] and stats["reportedChanged"] == 17
+
+
+def test_unknown_cannot_be_hidden_by_a_quota_record_and_a_failed_child_blocks_stage_done(tmp_path):
+    day = _run(tmp_path)
+    nightly.checkpoint(tmp_path, day, stage="sync", status="unknown", case="C-1", detail="请求结果未知", ref="/r/original.json")
+    with pytest.raises(nightly.NightlyError, match="效果未知"):
+        nightly.checkpoint(tmp_path, day, stage="sync", status="quota", case="C-1")
+    assert nightly.progress(tmp_path, day)["unknown"][0]["case"] == "C-1"
+    nightly.checkpoint(tmp_path, day, stage="acquire", status="failed", case="C-2", detail="下载确实失败")
+    with pytest.raises(nightly.NightlyError, match="整阶段不能记 done"):
+        nightly.checkpoint(tmp_path, day, stage="acquire", status="done")
+    nightly.checkpoint(tmp_path, day, stage="acquire", status="skipped", case="C-2", detail="来源包缺件，已证实", issue=True)   # 已证实的来源问题可显式保留
+    assert nightly.checkpoint(tmp_path, day, stage="acquire", status="done")["status"] == "done"
 
 
 def test_stats_without_a_receipt_folder_say_so_instead_of_counting_zero(tmp_path):
