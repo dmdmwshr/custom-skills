@@ -270,13 +270,23 @@ def checkpoint(root: Path, day: str, *, stage: str, status: str, case: str | Non
     return item
 
 
-def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", now: datetime | None = None) -> dict[str, Any]:
+def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", refresh_stats: bool = False,
+           now: datetime | None = None) -> dict[str, Any]:
     path = _run_dir(root, day) / "run.json"
     run = _load(path, None)
     if run is None:
         raise NightlyError("该日期没有运行记录")
     if run.get("status") == "FINISHED":
-        return {"status": "ALREADY_FINISHED", "date": day, "wrote": False}
+        if not refresh_stats:
+            return {"status": "ALREADY_FINISHED", "date": day, "wrote": False}
+        # 已收尾的运行只允许按证据重算统计并留下修订记录；状态、收尾时间和检查点不动
+        stats = run_stats(root, day, evidence_dir=evidence_dir or run.get("evidenceDir", ""), now=now)
+        run.setdefault("statsRevisions", []).append({"at": (now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds"),
+                                                     "previous": {"changed": run.get("changed"), "breakdown": run.get("breakdown")},
+                                                     "changed": stats["changed"], "breakdown": stats["breakdown"]})
+        run.update(changed=stats["changed"], breakdown=stats["breakdown"], reportedChanged=stats["reportedChanged"])
+        _atomic(path, run)
+        return {"status": "STATS_REFRESHED", "date": day, "changed": stats["changed"], "breakdown": stats["breakdown"], "wrote": True}
     state = progress(root, day)
     weekly = coverage_state(root, today=day)
     if state["unknown"] or state["quota"] or state["resumable"] or state["nextStage"] is not None:
@@ -624,7 +634,7 @@ def _observation_today(root: Path, day: str) -> dict[str, Any]:
             if event.get("on") == day and event.get("outcome") in names:
                 counts[names[event["outcome"]]] += 1
                 if event["outcome"] != "KEPT":
-                    rwids.add("观察:" + rwid)
+                    rwids.add(item.get("projectNo") or "观察:" + rwid)      # 同一任务已按项目编号计过的不重复
     return {**counts, "rwids": sorted(rwids)}
 
 

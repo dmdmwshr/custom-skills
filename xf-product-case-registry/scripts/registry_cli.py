@@ -2685,6 +2685,7 @@ def build_parser() -> argparse.ArgumentParser:
     nightly.add_argument("--items", help="observe：本次来源观察到的任务 JSON 文件")
     nightly.add_argument("--entry", help="checkpoint：同一阶段内的入口（如“日常监督任务/创建时间”）；observe：来源入口名称")
     nightly.add_argument("--runner-alive", choices=["yes", "no"], help="progress：监督者在 WSL 里看到的派发进程是否存活（Windows 副本读不到 /proc 时必传）")
+    nightly.add_argument("--refresh-stats", action="store_true", help="finish：已收尾的运行按证据重算变更数与分项并留下修订记录（状态、收尾时间、检查点不变）")
     nightly.add_argument("--issue", action="store_true", help="checkpoint：该项记为显式保留事项（已证实的来源问题），随 finish 带出")
     nightly.add_argument("--evidence-dir", default="", help="begin/finish/status：当晚回执目录（缺省取环境变量 NIGHT_RUN）")
     nightly.add_argument("--report", help="coverage：全范围检查日期核对的结果 JSON 文件")
@@ -3124,7 +3125,8 @@ def nightly_command(args: argparse.Namespace) -> None:
             result = module.checkpoint(root, args.date or today, stage=args.stage, status=args.status, case=args.case,
                                        detail=args.detail, ref=args.ref, changed=args.changed, entry=args.entry or "", issue=args.issue)
         elif args.action == "finish":
-            result = module.finish(root, args.date or today, summary=args.summary, evidence_dir=_evidence_dir(args, args.date or today))
+            result = module.finish(root, args.date or today, summary=args.summary, evidence_dir=_evidence_dir(args, args.date or today),
+                                   refresh_stats=args.refresh_stats)
         elif args.action == "status":
             result = module.status(root, args.date, evidence_dir=_evidence_dir(args, args.date or today))
             result["observationQueue"] = module.queue_summary(root, today=today)

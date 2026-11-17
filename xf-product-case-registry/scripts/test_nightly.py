@@ -539,3 +539,26 @@ def test_evidence_paths_are_read_in_the_form_the_interpreter_understands_and_unk
     _bound_run(tmp_path, day)
     info = nightly.progress_info(tmp_path, day, T(day + "T02:10:00"), alive=lambda pid, runner: None)
     assert info["runnerAlive"] is None and info["needsInspection"] is False
+
+
+def test_a_task_that_is_both_a_case_and_a_queue_transition_counts_once_and_a_finished_run_can_refresh_its_stats(tmp_path):
+    root = tmp_path / "运行记录"
+    day = _run(root)
+    nightly.coverage(root, _full(day), day=day)
+    nightly.observe(root, [{"rwid": "R-1", "state": "IN_PROGRESS", "projectNo": "P-1", "unitName": "甲", "brigade": "梁溪"}], observed_on="2026-11-10", entry="x")
+    nightly.observe(root, [{"rwid": "R-1", "state": "IN_PROGRESS", "projectNo": "P-1", "inspectionDate": "2026-11-17", "productEvidence": True}],
+                    observed_on=day, entry="x")
+    evidence = tmp_path / "evidence"
+    (evidence / "source").mkdir(parents=True)
+    (evidence / "source" / "r53-new-results.jsonl").write_text(json.dumps({"projectNo": "P-1", "outcome": "NEW_PACKAGE_ATTACHED", "at": day + "T03:00:00+08:00"}) + "\n", encoding="utf-8")
+    _complete(root, day)
+    done = nightly.finish(root, day, evidence_dir=str(evidence))
+    assert done["changed"] == 1 and done["breakdown"]["collectedCases"] == 1 and done["breakdown"]["observation"]["enterScope"] == 1
+    assert nightly.finish(root, day)["status"] == "ALREADY_FINISHED"
+    run_file = root / "夜间运行" / day / "run.json"
+    run = json.loads(run_file.read_text(encoding="utf-8")); run["changed"] = 2; run["breakdown"] = {"old": True}
+    run_file.write_text(json.dumps(run), encoding="utf-8")                                           # 模拟旧版本算错的记录
+    refreshed = nightly.finish(root, day, evidence_dir=str(evidence), refresh_stats=True)
+    after = json.loads(run_file.read_text(encoding="utf-8"))
+    assert refreshed["status"] == "STATS_REFRESHED" and after["changed"] == 1 and after["status"] == "FINISHED"
+    assert after["statsRevisions"][0]["previous"] == {"changed": 2, "breakdown": {"old": True}} and after["finishedAt"] == run["finishedAt"]
