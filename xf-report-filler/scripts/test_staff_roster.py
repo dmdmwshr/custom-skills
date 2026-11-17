@@ -174,14 +174,54 @@ class FeishuSnapshotRosterTests(unittest.TestCase):
         late = roster.read_feishu_roster(self.snapshot(self.full()), date(2027, 1, 25))
         self.assertEqual(len(late["blockers"]), len(BRIGADES))
 
-    def test_duplicate_or_blank_ids_and_a_short_export_block(self):
+    def test_blank_ids_and_a_short_export_block(self):
         rows = self.full()
-        rows[1] = dict(rows[0])
-        self.assertIn("staff_roster_duplicate_ids", [b["code"] for b in roster.read_feishu_roster(self.snapshot(rows), date(2026, 5, 25))["blockers"]])
+        rows[0] = dict(rows[0], 人员ID="")
+        self.assertIn("staff_roster_blank_id", [b["code"] for b in roster.read_feishu_roster(self.snapshot(rows), date(2026, 5, 25))["blockers"]])
         with self.assertRaises(roster.RosterError):
             roster.read_feishu_roster(self.snapshot(self.full(), manifest_records=99), date(2026, 5, 25))
         with self.assertRaises(roster.RosterError):
             roster.read_feishu_roster(Path(tempfile.gettempdir()) / "no-such-snapshot-dir", date(2026, 5, 25))
+
+    def transfer(self, from_brigade="梁溪大队", to_brigade="锡山大队", last="2026-06-25", first="2026-06-26"):
+        """One stable person ID, two assignments: the old brigade up to ``last``, the new one from ``first``."""
+        one = dict(self.person(1, from_brigade, start="2026-01-01", end=last), 人员ID="RY-TRANSFER-001")
+        two = dict(self.person(1, to_brigade, start=first, end="2026-12-31"), 人员ID="RY-TRANSFER-001")
+        return [one, two]
+
+    def test_one_person_who_moves_from_one_brigade_to_another_counts_once_on_every_day(self):
+        rows = self.full() + self.transfer()
+        before = roster.read_feishu_roster(self.snapshot(rows), date(2026, 6, 25))
+        after = roster.read_feishu_roster(self.snapshot(rows), date(2026, 6, 26))
+        self.assertEqual(before["blockers"], [])
+        self.assertEqual(after["blockers"], [])
+        self.assertEqual((before["counts"]["梁溪大队"], before["counts"]["锡山大队"]), (3, 2))
+        self.assertEqual((after["counts"]["梁溪大队"], after["counts"]["锡山大队"]), (2, 3))
+        self.assertEqual(sum(before["counts"].values()), sum(after["counts"].values()))          # 全市合计不因调动变化
+        self.assertEqual(before["info"][0]["code"], "staff_roster_assignment_history")
+        july = roster.read_feishu_roster(self.snapshot(rows), date(2026, 7, 25))
+        self.assertEqual((july["counts"]["梁溪大队"], july["counts"]["锡山大队"]), (2, 3))
+
+    def test_a_person_may_return_to_the_same_brigade_after_a_gap(self):
+        away = dict(self.person(7, "惠山大队", start="2026-01-01", end="2026-03-31"), 人员ID="RY-RETURN-001")
+        back = dict(self.person(7, "惠山大队", start="2026-09-01", end="2026-12-31"), 人员ID="RY-RETURN-001")
+        rows = self.full() + [away, back]
+        self.assertEqual(roster.read_feishu_roster(self.snapshot(rows), date(2026, 2, 25))["counts"]["惠山大队"], 3)
+        self.assertEqual(roster.read_feishu_roster(self.snapshot(rows), date(2026, 6, 25))["counts"]["惠山大队"], 2)
+        self.assertEqual(roster.read_feishu_roster(self.snapshot(rows), date(2026, 10, 25))["counts"]["惠山大队"], 3)
+
+    def test_overlapping_assignments_of_one_id_block_whether_across_brigades_or_in_the_same_one(self):
+        for rows, case in ((self.full() + self.transfer(last="2026-06-26", first="2026-06-26"), "共用一天"),
+                           (self.full() + self.transfer(last="2026-07-31", first="2026-06-26"), "跨队重叠"),
+                           (self.full() + self.transfer(from_brigade="梁溪大队", to_brigade="梁溪大队", last="2026-12-31", first="2026-06-26"), "同队重叠"),
+                           (self.full() + [self.full()[0]], "完全重复的行")):
+            with self.subTest(case):
+                result = roster.read_feishu_roster(self.snapshot(rows), date(2026, 6, 25))
+                codes = [b["code"] for b in result["blockers"]]
+                self.assertEqual(codes, ["staff_roster_overlapping_assignments"])
+                self.assertNotIn("姓名", json.dumps(result["blockers"], ensure_ascii=False))
+        open_ended = self.full() + [dict(self.person(1, "梁溪大队", start="2026-01-01", end=None), 人员ID="RY-OPEN-001"), dict(self.person(1, "锡山大队", start="2026-09-01"), 人员ID="RY-OPEN-001")]
+        self.assertEqual([b["code"] for b in roster.read_feishu_roster(self.snapshot(open_ended), date(2026, 6, 25))["blockers"]], ["staff_roster_overlapping_assignments"])
 
     def test_load_roster_uses_the_snapshot_on_the_25th_of_the_bulletin_month_unless_a_file_is_given(self):
         root = self.snapshot(self.full())

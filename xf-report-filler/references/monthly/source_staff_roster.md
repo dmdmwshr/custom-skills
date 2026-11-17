@@ -32,7 +32,7 @@ R02 `消防产品监督统计表` B 列括号里的“要求数”（实际开�
 ## Warning/Blocker
 
 - 快照里没有名录文件、清单与行数不符、JSON 损坏：blocker（`staff_roster_unreadable`），不写 B 列，不兜底。
-- 人员ID 重复或为空：blocker（`staff_roster_duplicate_ids`/`staff_roster_blank_id`）。
+- 人员ID 为空：blocker（`staff_roster_blank_id`）。同一人员ID 可以有多行，只要各行有效期互不重叠（调动：梁溪行止于 6 月 25 日、锡山行起于 6 月 26 日；有效止日为空＝长期有效，起止日含当天）；有效期重叠（同队或跨队）是 blocker（`staff_roster_overlapping_assignments`，只列人员ID与重叠区间，不含姓名）。多段任职的人员ID 记一条信息提示（`staff_roster_assignment_history`），人数按统计截止日当天有效的行数计，同一人当天只在一个大队有效。人员ID 不因调动改变。
 - 八个大队中某队在该统计月 25 日没有有效人员：该大队 blocker（`staff_roster_no_names`），整体不写，不写 0。
 - 某行缺大队或有效期止早于起：warning（`staff_roster_row_invalid`），按无效不计。
 - 名录大队不在八队之内：信息（`roster_outside_table`），只报告。

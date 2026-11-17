@@ -149,6 +149,30 @@ def _day(value):
     return str(value)[:10] if value not in (None, "") else None
 
 
+def assignment_overlaps(rows):
+    """Stable person IDs whose assignment periods (``有效起日``..``有效止日``, both days inclusive, a blank end = open) overlap, same brigade or not.
+
+    One person may hold several assignments (a transfer is the old brigade up to the 25th and the new one from the 26th); two
+    assignments that share a day would count the person twice. Rows with a blank ID, no brigade or an end before the start are not
+    assignments here (the first is a blocker of its own, the others are reported as invalid rows)."""
+    by_id = {}
+    for row in rows:
+        person = _first(row.get(ROSTER_FIELDS["id"]))
+        brigade = BRIGADE_ALIASES.get(_first(row.get(ROSTER_FIELDS["brigade"])), _first(row.get(ROSTER_FIELDS["brigade"])))
+        start, end = _day(row.get(ROSTER_FIELDS["start"])), _day(row.get(ROSTER_FIELDS["end"]))
+        if not person or not brigade or (start and end and start > end):
+            continue
+        by_id.setdefault(person, []).append({"brigade": brigade, "start": start or "0000-00-00", "end": end or "9999-12-31"})
+    found = []
+    for person, periods in sorted(by_id.items()):
+        ordered = sorted(periods, key=lambda p: (p["start"], p["end"]))
+        for earlier, later in zip(ordered, ordered[1:]):
+            if later["start"] <= earlier["end"]:
+                found.append({"id": person, "periods": [{"brigade": p["brigade"], "start": p["start"], "end": p["end"]} for p in (earlier, later)]})
+                break
+    return found
+
+
 def read_feishu_roster(snapshot_dir, as_of, required=BRIGADE_ORDER):
     """Count the people valid on ``as_of`` (a ``date``) per brigade from the Feishu roster snapshot of ``snapshot_dir``.
 
@@ -180,11 +204,15 @@ def read_feishu_roster(snapshot_dir, as_of, required=BRIGADE_ORDER):
     day = as_of.isoformat()
     ids = [_first(row.get(ROSTER_FIELDS["id"])) for row in rows]
     blockers, warnings, info = [], [], []
-    duplicated = sorted({i for i in ids if i and ids.count(i) > 1})
-    if duplicated:
-        blockers.append({"code": "staff_roster_duplicate_ids", "message": f"名录里人员ID重复：{duplicated[:5]}，无法确定人数"})
     if any(not i for i in ids):
         blockers.append({"code": "staff_roster_blank_id", "message": "名录里有没有人员ID的行，无法确定人数"})
+    overlaps = assignment_overlaps(rows)
+    if overlaps:
+        blockers.append({"code": "staff_roster_overlapping_assignments", "ids": [o["id"] for o in overlaps[:5]], "overlaps": overlaps[:5],
+                         "message": f"名录里同一人员ID的任职有效期重叠：{[o['id'] for o in overlaps[:5]]}，同一天只能在一个大队任职一次，无法确定人数"})
+    transfers = sorted({i for i in ids if i and ids.count(i) > 1})
+    if transfers and not overlaps:
+        info.append({"code": "staff_roster_assignment_history", "ids": transfers[:5], "message": f"{len(transfers)} 人有多段不重叠的任职（调动或再任），按各段有效期分别计入当日所在大队"})
     by_brigade, outside = {}, {}
     for row in rows:
         brigade = BRIGADE_ALIASES.get(_first(row.get(ROSTER_FIELDS["brigade"])), _first(row.get(ROSTER_FIELDS["brigade"])))
