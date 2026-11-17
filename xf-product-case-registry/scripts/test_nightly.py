@@ -221,7 +221,7 @@ def test_checkpoints_are_keyed_by_entry_and_old_records_without_entry_still_read
     with (tmp_path / "夜间运行" / day / "checkpoints.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(old, ensure_ascii=False) + "\n")
     state = nightly.progress(tmp_path, day)
-    assert ["acquire", "C-9"] in state["finishedSteps"] and state["changed"] == 1
+    assert ["acquire", "C-9"] in state["finishedSteps"] and state["reportedChanged"] == 2 and "changed" not in state     # 进度只带自报值，变更数由证据出口给
 
 
 def test_a_stage_cannot_be_closed_while_its_cases_or_entries_are_open_and_discover_needs_all_ten_entries(tmp_path):
@@ -596,3 +596,60 @@ def test_without_a_ledger_a_verified_creation_counts_but_an_update_needs_a_passe
     cloud = nightly.cloud_stats(tmp_path, str(evidence), since=since)
     assert cloud["createdRows"] == 1 and cloud["receiptOnlyUnconfirmed"] == 1 and cloud["updatedOperations"] == 0
     assert [u["stableKey"] for u in cloud["unknown"]] == ["P3"]
+
+
+def _evidence_with(root, day, cases):
+    """A run evidence dir whose package-attached results name ``cases``; returns its path."""
+    evidence = root / "evidence"
+    (evidence / "source").mkdir(parents=True, exist_ok=True)
+    (evidence / "source" / "r53-new-results.jsonl").write_text("".join(
+        json.dumps({"projectNo": case, "outcome": "NEW_PACKAGE_ATTACHED", "at": day + "T03:00:00+08:00"}) + "\n" for case in cases), encoding="utf-8")
+    return str(evidence)
+
+
+def test_every_aggregate_output_counts_changed_from_evidence_and_keeps_the_self_reported_number_apart(tmp_path):
+    root = tmp_path / "运行记录"
+    day = _run(root)
+    nightly.coverage(root, _full(day), day=day)
+    evidence = _evidence_with(root, day, ["C-1", "C-2", "C-3"])
+    nightly.checkpoint(root, day, stage="acquire", status="done", case="C-1", changed=1)       # 自报 2 处，凭证 3 案
+    nightly.checkpoint(root, day, stage="sync", status="done", case="C-2", changed=1)
+    status = nightly.status(root, day, evidence_dir=evidence)
+    assert status["changed"] == status["stats"]["changed"] == 3 and status["reportedChanged"] == 2
+    assert status["breakdown"]["collectedCases"] == 3 and "unverifiedReportedChanges" not in status
+    resumed = nightly.begin(root, now=T(day + "T03:30:00"), evidence_dir=evidence)             # 同一晚再次触发
+    assert resumed["status"] == "RESUME" and resumed["changed"] == 3 and resumed["reportedChanged"] == 2
+    assert resumed["breakdown"] == status["breakdown"]
+    unfinished = nightly.finish(root, day, evidence_dir=evidence)
+    assert unfinished["status"] == "NOT_FINISHED" and unfinished["changed"] == 3 and unfinished["reportedChanged"] == 2
+    _complete(root, day)
+    done = nightly.finish(root, day, evidence_dir=evidence)
+    assert done["status"] == "FINISHED" and done["changed"] == 3
+    again = nightly.begin(root, now=T(day + "T04:00:00"))
+    assert again["status"] == "ALREADY_FINISHED" and again["changed"] == 3 and again["reportedChanged"] == 2 and again["breakdown"]["collectedCases"] == 3
+    final = nightly.status(root, day)                                                          # 不再传证据目录：用运行记录里的
+    assert final["changed"] == final["stats"]["changed"] == final["run"]["changed"] == 3
+
+
+def test_a_self_reported_change_without_evidence_is_flagged_not_counted_in_status_and_begin_and_old_records_still_read(tmp_path):
+    root = tmp_path / "运行记录"
+    day = _run(root)
+    nightly.checkpoint(root, day, stage="acquire", status="done", case="C-1", changed=4)
+    status = nightly.status(root, day)
+    assert status["changed"] == status["stats"]["changed"] == 0 and status["reportedChanged"] == 4 and status["unverifiedReportedChanges"] == 4
+    resumed = nightly.begin(root, now=T(day + "T03:00:00"))
+    assert resumed["changed"] == 0 and resumed["unverifiedReportedChanges"] == 4
+    old = {"at": day + "T02:05:00+08:00", "stage": "acquire", "status": "done", "case": "C-9", "changed": 2}   # 旧格式：只有 changed
+    with (root / "夜间运行" / day / "checkpoints.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(old, ensure_ascii=False) + "\n")
+    assert nightly.status(root, day)["reportedChanged"] == 6
+    evidence = _evidence_with(root, day, ["C-9"])
+    assert nightly.status(root, day, evidence_dir=evidence)["changed"] == 1
+
+
+def test_unknown_writes_stay_visible_in_status_and_begin_next_to_the_evidence_based_count(tmp_path):
+    root = tmp_path / "运行记录"
+    day = _run(root)
+    nightly.checkpoint(root, day, stage="sync", status="started", case="C-1")
+    for result in (nightly.status(root, day), nightly.begin(root, now=T(day + "T03:00:00"))):
+        assert [u["case"] for u in result["unknown"]] == ["C-1"] and result["breakdown"]["unknownWriteCheckpoints"] == 1 and result["changed"] == 0

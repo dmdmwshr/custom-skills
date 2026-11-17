@@ -129,9 +129,20 @@ def progress(root: Path, day: str) -> dict[str, Any]:
     done_steps = sorted([key[0], key[1]] for key, item in latest.items() if key[1] and not key[2] and item["status"] in TERMINAL)
     done_entries = sorted(list(key) for key, item in latest.items() if key[2] and item["status"] in TERMINAL)
     next_stage = next((stage for stage in STAGES if stage_state[stage] not in TERMINAL), None)
-    changed = len({key[1] or key[2] for key, item in latest.items() if (key[1] or key[2]) and _reported(item) > 0})
     return {"stages": stage_state, "nextStage": next_stage, "unknown": unknown, "quota": quota, "resumable": resumable,
-            "finishedSteps": done_steps, "finishedEntries": done_entries, "changed": changed}
+            "finishedSteps": done_steps, "finishedEntries": done_entries, "reportedChanged": sum(_reported(i) for i in latest.values())}
+
+
+def with_stats(root: Path, day: str, state: dict[str, Any], *, evidence_dir: str = "") -> dict[str, Any]:
+    """``state`` (from ``progress``) plus the evidence-based ``changed``/``breakdown`` of ``run_stats``, so every aggregate output
+    counts the same way. ``reportedChanged`` stays what the checkpoint writers said; a self-reported change with no evidence
+    is flagged as ``unverifiedReportedChanges`` rather than read as no change."""
+    run = _load(_run_dir(root, day) / "run.json", {})
+    stats = run_stats(root, day, evidence_dir=evidence_dir or run.get("evidenceDir", ""))
+    result = {**state, "changed": stats["changed"], "breakdown": stats["breakdown"], "reportedChanged": stats["reportedChanged"]}
+    if stats["reportedChanged"] > 0 and stats["changed"] == 0:
+        result["unverifiedReportedChanges"] = stats["reportedChanged"]
+    return result
 
 
 def issues_of(root: Path, day: str) -> list[dict[str, Any]]:
@@ -184,7 +195,8 @@ def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled"
             cursor += timedelta(days=1)
     run = _load(path, None)
     if run is not None and run.get("status") == "FINISHED":
-        return {"status": "ALREADY_FINISHED", "date": day, "finishedAt": run.get("finishedAt"), "wrote": False}
+        return {"status": "ALREADY_FINISHED", "date": day, "finishedAt": run.get("finishedAt"), "wrote": False,
+                "changed": run.get("changed"), "breakdown": run.get("breakdown"), "reportedChanged": run.get("reportedChanged")}
     if run is None:
         run = {"schemaVersion": "NightlyRunV1", "date": day, "status": "RUNNING", "startedAt": now.isoformat(timespec="seconds"),
                "triggers": [], "missedDates": missed, "entryKeyed": True}
@@ -197,7 +209,7 @@ def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled"
     run["triggers"].append({"at": now.isoformat(timespec="seconds"), "kind": trigger, "actor": actor})
     _atomic(path, run)
     carried = _load(root / RUNS_DIR / finished[-1] / "run.json", {}).get("issues", []) if finished else []
-    return {"status": outcome, "date": day, "missedDates": missed, "earlierUnfinished": earlier, **progress(root, day),
+    return {"status": outcome, "date": day, "missedDates": missed, "earlierUnfinished": earlier, **with_stats(root, day, progress(root, day), evidence_dir=evidence_dir),
             "weeklyCoverage": coverage_state(root, today=day), "lastFinishedDate": finished[-1] if finished else None,
             "openExecutions": open_executions(root), "carryIssues": carried,
             "rule": "先对账 unknown（回读，不重放）；到期事项按绝对到期日处理，错过的夜晚不单独补跑"}
@@ -290,9 +302,9 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", r
     state = progress(root, day)
     weekly = coverage_state(root, today=day)
     if state["unknown"] or state["quota"] or state["resumable"] or state["nextStage"] is not None:
-        return {"status": "NOT_FINISHED", "date": day, "wrote": False, **state}
+        return {"status": "NOT_FINISHED", "date": day, "wrote": False, **with_stats(root, day, state, evidence_dir=evidence_dir)}
     if weekly["due"] and not weekly["attemptedToday"]:
-        return {"status": "NOT_FINISHED", "date": day, "wrote": False, **state, "coverageDue": weekly,
+        return {"status": "NOT_FINISHED", "date": day, "wrote": False, **with_stats(root, day, state, evidence_dir=evidence_dir), "coverageDue": weekly,
                 "rule": "全范围检查日期核对已到期且今晚未做：先做并用 nightly coverage 登记（来源不可用也要登记这次尝试）"}
     stats = run_stats(root, day, evidence_dir=evidence_dir or run.get("evidenceDir", ""), now=now)
     issues = issues_of(root, day)
@@ -329,9 +341,13 @@ def status(root: Path, day: str | None = None, *, evidence_dir: str = "") -> dic
     run = _load(_run_dir(root, day) / "run.json", None)
     if run is None:
         return {"status": "NO_RUN", "date": day, "runs": len(days)}
-    result = {"date": day, "run": run, "runs": len(days), **progress(root, day),
+    stats = run_stats(root, day, evidence_dir=evidence_dir or run.get("evidenceDir", ""))
+    result = {"date": day, "run": run, "runs": len(days), **progress(root, day), "changed": stats["changed"],
+              "breakdown": stats["breakdown"], "reportedChanged": stats["reportedChanged"],
               "weeklyCoverage": coverage_state(root, today=now_shanghai().date().isoformat()), "openExecutions": open_executions(root)}
-    result["stats"] = run_stats(root, day, evidence_dir=evidence_dir or run.get("evidenceDir", ""))
+    result["stats"] = stats
+    if stats["reportedChanged"] > 0 and stats["changed"] == 0:
+        result["unverifiedReportedChanges"] = stats["reportedChanged"]
     result["issues"] = issues_of(root, day)
     return result
 
