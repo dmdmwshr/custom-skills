@@ -72,6 +72,8 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(dub.choose_mode(design, {"direction": "轻声"}), "design")
         self.assertEqual(dub.choose_mode(locked, {"direction": "轻声"}), "direction")
         self.assertEqual(dub.choose_mode(locked, {}), "clone")
+        self.assertEqual(dub.choose_mode(locked, {"direction": "轻声", "mode": "clone"}), "clone")
+        self.assertEqual(dub.choose_mode(design, {"direction": "轻声", "mode": "clone"}), "design")  # 无参考时不能强制克隆
 
     def test_take_dir_keeps_failed_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,6 +140,26 @@ class BatchTests(unittest.TestCase):
             runner = fake_runner()
             self.run_batch(project, runner, cues, voices, seeds=(11,))
             self.assertEqual(runner.calls[0][1], "direction")
+
+
+class CfgTests(unittest.TestCase):
+    def test_direction_uses_low_cfg_by_default_and_cue_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = make_project(Path(tmp))
+            base = dub.dub_dir(project)
+            ref = base / "voices" / "甲" / "ref.flac"
+            ref.parent.mkdir(parents=True)
+            ref.write_bytes(b"ref")
+            voices = {"甲": {"instruction": "温柔", "locked": True, "reference": {"path": "voices/甲/ref.flac", "text": "参考"}}}
+            seen = []
+            def runner(b, workflow, run_dir, **kw):
+                seen.append(next(n for n in workflow.values() if n["class_type"] == "BreezeTTS2VoiceDirection")["inputs"]["cfg_scale"]
+                            if any(n["class_type"] == "BreezeTTS2VoiceDirection" for n in workflow.values()) else None)
+                return fake_runner()(b, workflow, run_dir, **kw)
+            cues = [{"id": "C1", "character": "甲", "text": "好", "direction": "轻声"},
+                    {"id": "C2", "character": "甲", "text": "好", "direction": "轻声", "cfg": 3.0}]
+            BatchTests().run_batch(project, runner, cues, voices, seeds=(11,))
+            self.assertEqual(seen, [dub.DIRECTION_CFG, 3.0])
 
 
 class SelectionTests(unittest.TestCase):
@@ -208,6 +230,34 @@ def write_wav(path: Path, seconds: float, amp: int = 3000):
         handle.setsampwidth(3)
         handle.setframerate(48000)
         handle.writeframes((int(amp).to_bytes(3, "little", signed=True)) * int(48000 * seconds))
+
+
+class VoiceSimTests(unittest.TestCase):
+    def test_flag_and_rank_prefer_close_voice(self):
+        close = {"take": "s11", "cer": 0.0, "voice_sim": 0.85, "flags": []}
+        drift = {"take": "s23", "cer": 0.0, "voice_sim": 0.55, "flags": ["声线偏离0.55"]}
+        self.assertIn("声线偏离0.55", dub.flags_for({"voice_sim": 0.55}, {}))
+        self.assertNotIn("声线偏离", "".join(dub.flags_for({"voice_sim": 0.80}, {})))
+        self.assertLess(dub.rank_key(close), dub.rank_key(drift))
+        worse_text = {"take": "s37", "cer": 0.4, "voice_sim": 0.95, "flags": ["转写差异0.4"]}
+        self.assertLess(dub.rank_key(drift), dub.rank_key(worse_text))  # 转写超限比声线偏离更靠后
+
+    def test_consistency_report_lists_selected_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = make_project(Path(tmp))
+            cues = dub.load_json(dub.dub_dir(project) / "cues.json")["cues"]
+            voices = dub.load_json(dub.dub_dir(project) / "voices.json")["voices"]
+            BatchTests().run_batch(project, fake_runner(), cues, voices, seeds=(11, 23))
+            path = dub.dub_dir(project) / "takes.json"
+            index = dub.load_json(path)
+            for t in index["takes"]:
+                if t["cue"] == "C1":
+                    t["voice_sim"] = 0.9 if t["take"] == "s11" else 0.5
+            dub.save_json(path, index)
+            dub.select_take(project, "C1", "s23", "", "用户试听")
+            report = dub.consistency_report(project, {c["id"]: c for c in cues})
+            self.assertEqual(report["voices"]["甲"]["selected_below_threshold"], ["C1"])
+            self.assertEqual(report["voices"]["甲"]["sim_min"], 0.5)
 
 
 class AutoMixTests(unittest.TestCase):

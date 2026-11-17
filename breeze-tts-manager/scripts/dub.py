@@ -35,6 +35,8 @@ CER_LIMIT = 0.15
 QUIET_PEAK_DB = -9.0
 QUIET_MEAN_DB = -25.0
 TAIL_SILENCE_S = 0.4
+DIRECTION_CFG = 1.5   # 指令方向默认引导强度：实测 4.0 时与锚点相似度均值 0.71、最低 0.43；1.5 时均值 0.84、最低 0.78
+SIM_WARN = 0.70   # 与锁定参考的声纹相似度低于它就标“声线偏离”（本机实测：克隆均值约 0.82，不同角色最高约 0.64）
 DIRECTION_ONLY_NOTE = "本脚本只生成候选，不批准音色；选定与锁定声线必须来自用户试听。"
 
 
@@ -132,6 +134,8 @@ def flags_for(take: dict, cue: dict) -> list[str]:
             flags.append(f"比期望{pace}更快")
     if take.get("cer") is not None and take["cer"] > CER_LIMIT:
         flags.append(f"转写差异{take['cer']}")
+    if take.get("voice_sim") is not None and take["voice_sim"] < SIM_WARN:
+        flags.append(f"声线偏离{take['voice_sim']}")
     return flags
 
 
@@ -169,6 +173,9 @@ def measure(audio: Path, text: str, ffmpeg: str) -> dict:
 
 
 def choose_mode(voice: dict, cue: dict) -> str:
+    forced = cue.get("mode")
+    if forced in ("clone", "direction") and (voice.get("reference") or {}).get("path"):
+        return forced  # 例如很短的句子用纯克隆更稳；没有参考时忽略
     if voice.get("reference") and voice["reference"].get("path"):
         return "direction" if cue.get("direction") else "clone"
     return "design"
@@ -237,13 +244,14 @@ def run_batch(project: Path, *, cues: list[dict], voices: dict, seeds: list[int]
                 instruction = f"{instruction} 本句表演要求：{cue['direction']}".strip()
             elif mode == "direction":
                 instruction = cue["direction"]
+            cfg = cue.get("cfg") or (voice.get("direction_cfg") or DIRECTION_CFG if mode == "direction" else None)
             workflow = bt.build_workflow(
                 mode, text=cue["text"], instruction=instruction, reference_name=reference_name,
                 reference_text=(voice.get("reference") or {}).get("text", ""), model=model, seed=seed,
-                prefix=f"audio/breeze/dub/{cue['id']}")
+                cfg_scale=cfg, prefix=f"audio/breeze/dub/{cue['id']}")
             run_dir = take_dir(base, cue["id"], seed)
             run_dir.parent.mkdir(parents=True, exist_ok=True)
-            entry = {"cue": cue["id"], "take": run_dir.name, "seed": seed, "mode": mode, "dir": str(run_dir),
+            entry = {"cue": cue["id"], "take": run_dir.name, "seed": seed, "mode": mode, "cfg": cfg, "dir": str(run_dir),
                      "created_at": now()}
             try:
                 receipt = runner(base_url, workflow, run_dir, purpose=purpose, timeout_s=timeout_s,
@@ -306,6 +314,58 @@ def asr_check(project: Path, cues: dict[str, dict], *, ffmpeg: str, funasr_py: s
     return len(todo)
 
 
+def voice_sim_check(project: Path, cues: dict[str, dict]) -> dict:
+    """已锁定参考声线的角色：计算每条候选与参考的声纹相似度，写入 voice_sim 并刷新标记。"""
+    base = dub_dir(project)
+    voices = load_json(base / "voices.json")["voices"]
+    index = load_json(base / "takes.json")
+    try:
+        import speaker_sim as ss
+    except Exception as exc:  # noqa: BLE001 - 缺 onnxruntime/torchaudio 时只跳过
+        return {"skipped": f"声纹模块不可用：{exc}"}
+    if not Path(ss.DEFAULT_MODEL).is_file():
+        return {"skipped": f"找不到声纹模型 {ss.DEFAULT_MODEL}"}
+    refs = {}
+    for name, v in voices.items():
+        ref = v.get("reference")
+        if ref and ref.get("path"):
+            refs[name] = ss.embed_file(str(base / ref["path"]))
+    done = 0
+    for t in index["takes"]:
+        if t["status"] != "succeeded_pending_listening" or t.get("voice_sim") is not None:
+            continue
+        cue = cues.get(t["cue"])
+        if not cue or cue["character"] not in refs:
+            continue
+        t["voice_sim"] = round(ss.cosine(ss.embed_file(t["audio"]), refs[cue["character"]]), 3)
+        t["flags"] = flags_for(t, cue)
+        done += 1
+    save_json(base / "takes.json", index)
+    return {"computed": done, "voices_with_reference": sorted(refs)}
+
+
+def consistency_report(project: Path, cues: dict[str, dict]) -> dict:
+    """每个角色：锁定参考、候选相似度分布、选定候选是否偏离。"""
+    base = dub_dir(project)
+    voices = load_json(base / "voices.json")["voices"]
+    index = load_json(base / "takes.json")["takes"]
+    selection = load_json(base / "selection.json", {})
+    report = {}
+    for name, v in voices.items():
+        ts = [t for t in index if cues.get(t["cue"], {}).get("character") == name and t.get("voice_sim") is not None]
+        chosen = {c: next((t for t in index if t["cue"] == c and t["take"] == sel["take"]), None) for c, sel in selection.items()
+                  if cues.get(c, {}).get("character") == name}
+        report[name] = {
+            "locked": bool(v.get("locked")),
+            "takes_scored": len(ts),
+            "sim_mean": round(sum(t["voice_sim"] for t in ts) / len(ts), 3) if ts else None,
+            "sim_min": round(min(t["voice_sim"] for t in ts), 3) if ts else None,
+            "selected_below_threshold": [c for c, t in chosen.items() if t and t.get("voice_sim") is not None and t["voice_sim"] < SIM_WARN],
+            "selected_without_reference": [c for c, t in chosen.items() if t and t.get("voice_sim") is None],
+        }
+    return {"threshold": SIM_WARN, "voices": report}
+
+
 def write_review(project: Path, cues: dict[str, dict]) -> Path:
     base = dub_dir(project)
     index = load_json(base / "takes.json", {"takes": []})
@@ -320,12 +380,12 @@ def write_review(project: Path, cues: dict[str, dict]) -> Path:
         picked = selection.get(cue_id, {}).get("take")
         lines += [f"## {cue_id}（{cue.get('character', '?')}）{cue.get('text', '')}", "",
                   f"表演要求：{cue.get('direction') or '无'}；期望语速：{cue.get('pace') or '未设'}；已选：{picked or '未选'}", "",
-                  "| 候选 | 模式 | 时长 s | 峰值 dB | 均值 dB | 尾静音 s | 字/秒 | 转写 | 标记 | 文件 |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+                  "| 候选 | 模式 | 时长 s | 峰值 dB | 均值 dB | 尾静音 s | 字/秒 | 声线相似 | 转写 | 标记 | 文件 |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
         for t in sorted(takes, key=lambda x: (len(x.get("flags") or []), x["take"])):
-            lines.append("| {take} | {mode} | {dur} | {peak} | {mean} | {tail} | {cps} | {asr} | {flags} | `{audio}` |".format(
+            lines.append("| {take} | {mode} | {dur} | {peak} | {mean} | {tail} | {cps} | {sim} | {asr} | {flags} | `{audio}` |".format(
                 take=t["take"] + (" ✔" if t["take"] == picked else ""), mode=t["mode"], dur=t.get("duration", "-"),
                 peak=t.get("peak_db", "-"), mean=t.get("mean_db", "-"), tail=t.get("trailing_silence", "-"),
-                cps=t.get("cps", "-"), asr=(t.get("asr") or "未转写").replace("|", "/"),
+                cps=t.get("cps", "-"), sim=t.get("voice_sim", "-"), asr=(t.get("asr") or "未转写").replace("|", "/"),
                 flags="、".join(t.get("flags") or []) or "无" if t["status"] == "succeeded_pending_listening" else t["status"],
                 audio=t.get("audio", "")))
         lines.append("")
@@ -418,7 +478,9 @@ def ingest_selected(project: Path, media_center_root: Path, out_dir: Path, role:
 def rank_key(take: dict) -> tuple:
     """预检评分：转写没超限的优先，其次标记少、字错率低；同分取先生成的。只用于用户明确授权的自动选定。"""
     value = take.get("cer") if take.get("cer") is not None else 0.5
-    return (value > CER_LIMIT, len(take.get("flags") or []), value, take["take"])
+    sim = take.get("voice_sim")
+    drifted = sim is not None and sim < SIM_WARN
+    return (value > CER_LIMIT, drifted, len(take.get("flags") or []), -(sim or 0.0), value, take["take"])
 
 
 def auto_select(project: Path, decided_by: str) -> dict:
@@ -438,7 +500,7 @@ def auto_select(project: Path, decided_by: str) -> dict:
             continue
         best = min(takes, key=rank_key)
         selection[cue_id] = {"take": best["take"], "audio": best["audio"], "audio_sha256": best["audio_sha256"],
-                             "by": decided_by, "auto": True, "score": list(rank_key(best))[:3],
+                             "by": decided_by, "auto": True, "score": [bool(rank_key(best)[0]), bool(rank_key(best)[1]), rank_key(best)[2]],
                              "note": "未试听，按预检评分自动选定", "at": now()}
         added[cue_id] = best["take"]
     save_json(base / "selection.json", selection)
@@ -584,6 +646,7 @@ def main(argv: list[str] | None = None) -> int:
     mx.add_argument("--target-mean-db", type=float, default=-20.0)
     mx.add_argument("--gap", type=float, default=0.5, help="同一场景内台词间隔秒")
     mx.add_argument("--scene-gap", type=float, default=1.1, help="换场景间隔秒")
+    sub.add_parser("consistency", help="按角色汇报与锁定参考的声纹相似度，列出偏离的选定候选")
     sub.add_parser("status", help="汇总进度")
     args = p.parse_args(argv)
     project = Path(args.project)
@@ -617,7 +680,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "check":
             n = 0 if args.no_asr else asr_check(project, cues_by_id, ffmpeg=args.ffmpeg, funasr_py=args.funasr_python,
                                                 model_dir=args.sensevoice_dir)
-            print(f"转写 {n} 条；候选表：{write_review(project, cues_by_id)}")
+            sim = voice_sim_check(project, cues_by_id)
+            print(f"转写 {n} 条；声纹：{json.dumps(sim, ensure_ascii=False)}；候选表：{write_review(project, cues_by_id)}")
+            return 0
+        if args.cmd == "consistency":
+            print(json.dumps(consistency_report(project, cues_by_id), ensure_ascii=False, indent=2))
             return 0
         if args.cmd == "select":
             print(json.dumps(select_take(project, args.cue, args.take, args.note, args.decided_by), ensure_ascii=False, indent=2))
