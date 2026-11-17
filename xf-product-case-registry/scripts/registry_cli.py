@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import json
 import mimetypes
+import os
 import re
 import shutil
 import sys
@@ -2670,7 +2671,7 @@ def build_parser() -> argparse.ArgumentParser:
     child_build.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     child_build.set_defaults(func=feishu_child_build_command)
     nightly = sub.add_parser("nightly", help="夜间运行记录与检查点、观察队列（定时与人工触发共用；只写业务根“运行记录”，不联网）")
-    nightly.add_argument("action", choices=["begin", "checkpoint", "finish", "status", "observe", "due", "coverage", "bind", "bind-end", "executions"])
+    nightly.add_argument("action", choices=["begin", "checkpoint", "finish", "status", "progress", "observe", "due", "coverage", "bind", "bind-end", "executions"])
     nightly.add_argument("--date", help="运行日期 YYYY-MM-DD；begin 取当前上海日期")
     nightly.add_argument("--trigger", default="manual", choices=["scheduled", "manual"])
     nightly.add_argument("--actor", default="")
@@ -2682,7 +2683,10 @@ def build_parser() -> argparse.ArgumentParser:
     nightly.add_argument("--changed", type=int, default=0)
     nightly.add_argument("--summary", default="")
     nightly.add_argument("--items", help="observe：本次来源观察到的任务 JSON 文件")
-    nightly.add_argument("--entry", help="observe：来源入口名称")
+    nightly.add_argument("--entry", help="checkpoint：同一阶段内的入口（如“日常监督任务/创建时间”）；observe：来源入口名称")
+    nightly.add_argument("--runner-alive", choices=["yes", "no"], help="progress：监督者在 WSL 里看到的派发进程是否存活（Windows 副本读不到 /proc 时必传）")
+    nightly.add_argument("--issue", action="store_true", help="checkpoint：该项记为显式保留事项（已证实的来源问题），随 finish 带出")
+    nightly.add_argument("--evidence-dir", default="", help="begin/finish/status：当晚回执目录（缺省取环境变量 NIGHT_RUN）")
     nightly.add_argument("--report", help="coverage：全范围检查日期核对的结果 JSON 文件")
     nightly.add_argument("--session-id", help="bind：执行本轮的模型会话标识")
     nightly.add_argument("--receipt", help="bind/bind-end：派发入口为这次执行写的回执路径")
@@ -2752,6 +2756,9 @@ def build_parser() -> argparse.ArgumentParser:
     mirror.add_argument("--maintenance-base-token", help="维修企业台账 Base；给出时一并镜像合同 maintenanceBase 子库")
     mirror.add_argument("--identity", default="user", choices=["user", "bot"])
     mirror.add_argument("--date", help="运行日期 YYYY-MM-DD；省略取当前上海日期")
+    mirror.add_argument("--tag", default="day", choices=["day", "pre", "post"],
+                        help="day=当日快照(原行为)；pre/post=本次执行独立的写前/写后快照，不覆盖、同键复用，需 --run-key；post 以本次写前快照为基线")
+    mirror.add_argument("--run-key", default="", help="pre/post 的运行键（本次执行的稳定标识，如 a27-20261117）")
     mirror.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     mirror.set_defaults(func=feishu_mirror_command)
     recount = sub.add_parser(
@@ -3111,16 +3118,19 @@ def nightly_command(args: argparse.Namespace) -> None:
         root = module.runtime_root(layout.root)
         today = module.now_shanghai().date().isoformat()
         if args.action == "begin":
-            result = module.begin(root, trigger=args.trigger, actor=args.actor)
+            result = module.begin(root, trigger=args.trigger, actor=args.actor, evidence_dir=_evidence_dir(args, today))
             result["observationQueue"] = module.queue_summary(root, today=today)
         elif args.action == "checkpoint":
             result = module.checkpoint(root, args.date or today, stage=args.stage, status=args.status, case=args.case,
-                                       detail=args.detail, ref=args.ref, changed=args.changed)
+                                       detail=args.detail, ref=args.ref, changed=args.changed, entry=args.entry or "", issue=args.issue)
         elif args.action == "finish":
-            result = module.finish(root, args.date or today, summary=args.summary)
+            result = module.finish(root, args.date or today, summary=args.summary, evidence_dir=_evidence_dir(args, args.date or today))
         elif args.action == "status":
-            result = module.status(root, args.date)
+            result = module.status(root, args.date, evidence_dir=_evidence_dir(args, args.date or today))
             result["observationQueue"] = module.queue_summary(root, today=today)
+        elif args.action == "progress":
+            seen = {"yes": True, "no": False}.get(args.runner_alive)
+            result = module.progress_info(root, args.date or today, alive=(lambda pid, runner: seen) if seen is not None else module._pid_alive)
         elif args.action == "observe":
             if not args.items or not args.entry:
                 raise RegistryError("observe 需要 --items 与 --entry")
@@ -3148,6 +3158,14 @@ def nightly_command(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def _evidence_dir(args: argparse.Namespace, day: str) -> str:
+    """当晚回执目录：显式参数优先；环境变量 NIGHT_RUN 只在它属于同一运行日期时采用，避免把别的夜晚的回执算进来。"""
+    if args.evidence_dir:
+        return args.evidence_dir
+    candidate = os.environ.get("NIGHT_RUN", "")
+    return candidate if candidate and day.replace("-", "") in Path(candidate).name else ""
+
+
 def _feishu_read(args: argparse.Namespace, label: str, work) -> dict[str, Any]:
     """只读云的命令共用：建官方 CLI 通道，拒绝与读取失败分开报。"""
     sync = importlib.import_module(f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync")
@@ -3172,7 +3190,12 @@ def feishu_mirror_command(args: argparse.Namespace) -> None:
         targets["maintenanceBase"] = {"baseToken": args.maintenance_base_token, "profile": args.profile, "identity": args.identity}
     report = _feishu_read(args, "飞书镜像", lambda sync, transport: module.mirror(
         contract_path=Path(args.contract), contract_sha=args.contract_sha, sections=list(targets), targets=targets, transport=transport,
-        business_root=Path(args.business_root), ledger_dir=Path(args.ledger_dir), day=_run_day(args)))
+        business_root=Path(args.business_root), ledger_dir=Path(args.ledger_dir), day=_run_day(args), tag=args.tag, run_key=args.run_key))
+    if args.tag != "day":
+        nightly = importlib.import_module(f"{__package__}.nightly" if __package__ else "nightly")
+        report["runRecord"] = nightly.record_snapshot(Path(args.business_root) / nightly.RUNTIME_DIR, _run_day(args), tag=args.tag,
+                                                      run_key=args.run_key, files={t["table"]: {"file": t["snapshotFile"], "sha256": t["snapshotSha256"]}
+                                                                                    for t in report["tables"]})
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["status"] != "OK":
         print("WARNING: 来源事实被改动或有读不清的行(ATTENTION)；退出码 4", file=sys.stderr)

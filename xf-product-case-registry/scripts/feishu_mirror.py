@@ -23,6 +23,7 @@ Layout under ``<业务根>/运行记录/飞书镜像``::
 
     当前镜像/<库>-<表>.json      current mirror (stable key -> field -> value)
     每日快照/<日期>/<库>-<表>.json one snapshot per Asia/Shanghai date (first read of the day is kept as -首次)
+    每日快照/<日期>/<库>-<表>-写前-<运行键>.json / -写后-<运行键>.json  one immutable pair per execution (see ``mirror(tag=...)``)
     变更记录/<日期>.jsonl         appended changes
 
 Standard library only.
@@ -77,10 +78,31 @@ def _value(field_type: str, cell: Any) -> Any:
     return None if sync.cell_is_empty(cell) else cell
 
 
+TAGS = {"day": "", "pre": "写前", "post": "写后"}
+
+
+def _run_snapshot(root: Path, day: str, name: str, tag: str, run_key: str) -> Path:
+    return root / "每日快照" / day / f"{name}-{TAGS[tag]}-{run_key}.json"
+
+
 def mirror_table(*, base: str, table_name: str, table_id: str, fields: dict[str, dict[str, Any]], facts: dict[str, dict[str, Any]],
-                 transport: Any, ledger: sync.Ledger | None, root: Path, label: str, day: str, observed_at: str) -> dict[str, Any]:
-    """Mirror one table; returns its part of the report. Reads Feishu once; writes only under ``root``."""
+                 transport: Any, ledger: sync.Ledger | None, root: Path, label: str, day: str, observed_at: str,
+                 tag: str = "day", run_key: str = "") -> dict[str, Any]:
+    """Mirror one table; returns its part of the report. Reads Feishu once; writes only under ``root``.
+
+    ``tag`` ``pre`` / ``post`` write an independent snapshot for this execution (``run_key``) that is never overwritten: a
+    second call for the same key reuses the file and reads nothing. ``post`` is compared with this execution's own ``pre``
+    snapshot, never with the latest mirror or an earlier run's ``post``; ``pre`` and ``day`` are compared with the last
+    confirmed mirror, so what happened in between (daytime assistant writes, people's saves) is attributed there.
+    """
     key_field = sync.STABLE_KEYS[table_name]
+    name = f"{label}-{table_name}"
+    run_file = _run_snapshot(root, day, name, tag, run_key) if tag != "day" else None
+    if run_file is not None and run_file.is_file():
+        kept = _load(run_file)
+        return {"table": name, "rows": len(kept["rows"]), "fields": len(kept["fields"]), "firstMirror": False, "changes": 0,
+                "changesByUser": 0, "changeSample": [], "factDrift": [], "problems": [], "reused": True, "tag": tag, "runKey": run_key,
+                "snapshotFile": str(run_file), "snapshotSha256": sync.digest(run_file.read_text(encoding="utf-8"))}
     rows = transport.list_rows(base, table_id, [key_field, *fields, *facts])
     current: dict[str, dict[str, Any]] = {}
     record_of: dict[str, str] = {}
@@ -95,9 +117,12 @@ def mirror_table(*, base: str, table_name: str, table_id: str, fields: dict[str,
             continue
         current[key] = {meta["name"]: _value(meta["type"], row.get(fid)) for fid, meta in fields.items()}
         record_of[key] = record_id
-    name = f"{label}-{table_name}"
     mirror_path = root / "当前镜像" / f"{name}.json"
     previous = _load(mirror_path)
+    if tag == "post":
+        baseline = _load(_run_snapshot(root, day, name, "pre", run_key))
+        sync._require(baseline is not None, f"{name}：没有本次执行（运行键 {run_key}）的写前快照，写后不能以其他快照作基线")
+        previous = baseline
     changes: list[dict[str, Any]] = []
     if previous is not None:
         old_rows = previous["rows"]
@@ -134,9 +159,12 @@ def mirror_table(*, base: str, table_name: str, table_id: str, fields: dict[str,
     snapshot = {"table": name, "tableId": table_id, "readAt": observed_at, "fields": [m["name"] for m in fields.values()], "rows": current}
     day_dir = root / "每日快照" / day
     first = day_dir / f"{name}-首次.json"
-    if not first.is_file():
+    if run_file is None and not first.is_file():
         _atomic(first, snapshot)
-    snapshot_sha = _atomic(day_dir / f"{name}.json", snapshot)
+    if run_file is not None:
+        snapshot_sha = _atomic(run_file, snapshot)
+    else:
+        snapshot_sha = _atomic(day_dir / f"{name}.json", snapshot)
     _atomic(mirror_path, snapshot)
     if changes:
         log = root / "变更记录" / f"{day}.jsonl"
@@ -148,12 +176,18 @@ def mirror_table(*, base: str, table_name: str, table_id: str, fields: dict[str,
             os.fsync(stream.fileno())
     return {"table": name, "rows": len(current), "fields": len(fields), "firstMirror": previous is None, "changes": len(changes),
             "changesByUser": sum(1 for c in changes if c.get("by") == "feishu-user"), "changeSample": changes[:20],
-            "factDrift": drift, "problems": problems, "snapshotSha256": snapshot_sha}
+            "factDrift": drift, "problems": problems, "snapshotSha256": snapshot_sha, "tag": tag, "runKey": run_key,
+            "snapshotFile": str(run_file) if run_file is not None else str(day_dir / f"{name}.json")}
 
 
 def mirror(*, contract_path: Path, contract_sha: str, sections: list[str | None], targets: dict[str | None, dict[str, str]], transport: Any,
-           business_root: Path, ledger_dir: Path | None, day: str, isolated_test_ledger: bool = False) -> dict[str, Any]:
-    """Mirror every table that has a stable key and brigade-maintained fields, in each listed contract section."""
+           business_root: Path, ledger_dir: Path | None, day: str, isolated_test_ledger: bool = False,
+           tag: str = "day", run_key: str = "") -> dict[str, Any]:
+    """Mirror every table that has a stable key and brigade-maintained fields, in each listed contract section.
+
+    ``tag`` is ``day`` (the legacy daily snapshot), ``pre`` or ``post`` (one immutable snapshot per execution, ``run_key`` required)."""
+    sync._require(tag in TAGS, "tag 必须是 day/pre/post")
+    sync._require(tag == "day" or bool(re.fullmatch(r"[0-9A-Za-z._-]{3,60}", run_key or "")), "写前/写后快照需要运行键（3–60 位字母数字或 ._-）")
     ledger = None
     if ledger_dir is not None:
         ledger = sync.Ledger(ledger_dir, isolated_test=isolated_test_ledger)
@@ -177,10 +211,10 @@ def mirror(*, contract_path: Path, contract_sha: str, sections: list[str | None]
                 continue
             tables.append(mirror_table(base=target["baseToken"], table_name=table_name, table_id=table_id, fields=fields, facts=facts,
                                        transport=transport, ledger=ledger, root=root, label=SECTION_NAMES.get(section, section or MAIN),
-                                       day=day, observed_at=observed_at))
+                                       day=day, observed_at=observed_at, tag=tag, run_key=run_key))
     quiet = not any(t["changes"] or t["factDrift"] or t["problems"] for t in tables)
-    return {"schema": MIRROR_SCHEMA, "day": day, "readAt": observed_at, "externalCalls": "read-only", "mirrorRoot": str(root),
-            "tables": tables, "quiet": quiet, "status": "OK" if not any(t["factDrift"] or t["problems"] for t in tables) else "ATTENTION"}
+    return {"schema": MIRROR_SCHEMA, "day": day, "tag": tag, "runKey": run_key, "readAt": observed_at, "externalCalls": "read-only",
+            "mirrorRoot": str(root), "reusedAll": bool(tables) and all(t.get("reused") for t in tables), "tables": tables, "quiet": quiet, "status": "OK" if not any(t["factDrift"] or t["problems"] for t in tables) else "ATTENTION"}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -354,4 +388,6 @@ def recount(*, contract_path: Path, contract_sha: str, target: dict[str, str], t
             "notInFeishu": [c for c in (*RECOUNT_COLUMNS, QUANTITY_TEXT_COLUMN) if c not in month_index], "totals": totals,
             "physicalQuantity": physical, "quantityByUnit": {k: dict(v) for k, v in sorted(quantity.items())},
             "quantityWithoutUnit": {k: dict(v) for k, v in sorted(unitless.items())}, "productAttributionGaps": sorted(unlocated),
+            "productAttributionPending": {"cases": sorted(unlocated), "count": len(unlocated),
+                                          "meaning": "案卷标签为“是”但没有任何产品行为“是”：产品层待确认，单独一轴；不是运行未知，也不因标签归属而视为已解释"},
             "bucketsWithoutMonthlyRow": uncovered, "diffs": diffs, "status": "OK" if not diffs else "DIFF"}

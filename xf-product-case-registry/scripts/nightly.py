@@ -17,6 +17,9 @@ root's fixed runtime folder ``运行记录``; nothing here reads the network or 
   read again by inspection date and compared with the ledger; each check is one line in a fixed log. A
   check that is due and was not even attempted blocks ``finish``; an attempted but incomplete one stays
   due, so a missed or failed weekly check is made up by the next run.
+- Checkpoints are keyed by (stage, case, entry). A step whose effect is unknown is closed only by ``reconciled`` (a write
+  stage also needs the original receipt as ``ref``); ``finish`` carries failed and explicitly retained items as ``issues``.
+  Counts come from evidence (receipts, ledger, queue history), not from what a writer reported.
 - Executions: the model session that works on a run binds itself (session id, runner receipt, runner pid)
   into that run's record, so a supervisor asks about exactly that execution and never about "the latest
   receipt" of some other project.
@@ -51,6 +54,8 @@ STAGES = ("discover", "acquire", "organize", "validate", "sync", "mirror", "reco
 WRITE_STAGES = frozenset({"acquire", "sync"})
 TERMINAL = frozenset({"done", "failed", "skipped", "reconciled"})
 STATUSES = frozenset({"started", "unknown", "quota", *TERMINAL})
+# 夜间发现的十个入口：五类任务列表 × 两个窗口（创建时间、检查日期）；discover 阶段按入口各记一条检查点。
+DISCOVER_ENTRIES = tuple(f"{name}/{window}" for name in COVERAGE_ENTRIES for window in ("创建时间", "检查日期"))
 WAITING = ("NOT_INSPECTED", "IN_PROGRESS", "SAMPLE_PENDING", "RECHECK_PENDING", "SOURCE_GAP")
 
 
@@ -95,22 +100,62 @@ def checkpoints(root: Path, day: str) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _item_key(item: dict[str, Any]) -> tuple[str, str, str]:
+    """A checkpoint's identity: (stage, case, entry). Records written before ``entry`` existed have no entry."""
+    return (item["stage"], item.get("case") or "", item.get("entry") or "")
+
+
+def _reported(item: dict[str, Any]) -> int:
+    """What the writer of a checkpoint said it changed (``changed`` in records written before 2026-11-17)."""
+    return int(item.get("reportedChanged", item.get("changed")) or 0)
+
+
+def _latest(items: list[dict[str, Any]]) -> dict[tuple[str, str, str], dict[str, Any]]:
+    latest: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in items:
+        latest[_item_key(item)] = item
+    return latest
+
+
 def progress(root: Path, day: str) -> dict[str, Any]:
-    """Latest state per (stage, case) and what follows from it."""
-    latest: dict[tuple[str, str], dict[str, Any]] = {}
-    for item in checkpoints(root, day):
-        latest[(item["stage"], item.get("case") or "")] = item
-    stage_state = {stage: (latest.get((stage, "")) or {}).get("status") for stage in STAGES}
+    """Latest state per (stage, case, entry) and what follows from it."""
+    latest = _latest(checkpoints(root, day))
+    stage_state = {stage: (latest.get((stage, "", "")) or {}).get("status") for stage in STAGES}
     open_items = [item for item in latest.values() if item["status"] not in TERMINAL]
     unknown = [item for item in open_items
                if item["status"] == "unknown" or (item["status"] == "started" and item["stage"] in WRITE_STAGES)]
     quota = [item for item in open_items if item["status"] == "quota"]
     resumable = [item for item in open_items if item not in unknown and item not in quota]
-    done_steps = sorted([key[0], key[1]] for key, item in latest.items() if key[1] and item["status"] in TERMINAL)
+    done_steps = sorted([key[0], key[1]] for key, item in latest.items() if key[1] and not key[2] and item["status"] in TERMINAL)
+    done_entries = sorted(list(key) for key, item in latest.items() if key[2] and item["status"] in TERMINAL)
     next_stage = next((stage for stage in STAGES if stage_state[stage] not in TERMINAL), None)
-    changed = sum(int(item.get("changed") or 0) for item in latest.values())
+    changed = len({key[1] or key[2] for key, item in latest.items() if (key[1] or key[2]) and _reported(item) > 0})
     return {"stages": stage_state, "nextStage": next_stage, "unknown": unknown, "quota": quota, "resumable": resumable,
-            "finishedSteps": done_steps, "changed": changed}
+            "finishedSteps": done_steps, "finishedEntries": done_entries, "changed": changed}
+
+
+def issues_of(root: Path, day: str) -> list[dict[str, Any]]:
+    """What a finished run still carries: failed items, items kept as an explicit issue, discover entries never recorded.
+
+    Current view = latest state per item; the failed history stays in ``checkpoints.jsonl``."""
+    items = checkpoints(root, day)
+    latest = _latest(items)
+    found = []
+    for key, item in sorted(latest.items()):
+        if item["status"] == "failed" or item.get("issue"):
+            found.append({"kind": "failed" if item["status"] == "failed" else "retained-issue", "stage": key[0], "case": key[1],
+                          "entry": key[2], "status": item["status"], "detail": item.get("detail", ""), "ref": item.get("ref", "")})
+    run = _load(_run_dir(root, day) / "run.json", {})
+    if run.get("entryKeyed"):
+        for entry in DISCOVER_ENTRIES:
+            if (latest.get(("discover", "", entry)) or {}).get("status") not in TERMINAL:
+                found.append({"kind": "entry-incomplete", "stage": "discover", "case": "", "entry": entry,
+                              "status": (latest.get(("discover", "", entry)) or {}).get("status"), "detail": "入口没有终态检查点", "ref": ""})
+    return found
+
+
+def _issue_signature(issue: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (issue["kind"], issue["stage"], issue.get("case") or "", issue.get("entry") or "")
 
 
 def _run_days(root: Path) -> list[str]:
@@ -118,7 +163,8 @@ def _run_days(root: Path) -> list[str]:
     return sorted(p.name for p in directory.iterdir() if p.is_dir() and (p / "run.json").is_file()) if directory.is_dir() else []
 
 
-def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled", actor: str = "") -> dict[str, Any]:
+def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled", actor: str = "",
+          evidence_dir: str = "") -> dict[str, Any]:
     """Open today's run, resume it, or report that it is already finished (no write in that case)."""
     now = (now or now_shanghai()).astimezone(SHANGHAI)
     day = now.date().isoformat()
@@ -141,21 +187,24 @@ def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled"
         return {"status": "ALREADY_FINISHED", "date": day, "finishedAt": run.get("finishedAt"), "wrote": False}
     if run is None:
         run = {"schemaVersion": "NightlyRunV1", "date": day, "status": "RUNNING", "startedAt": now.isoformat(timespec="seconds"),
-               "triggers": [], "missedDates": missed}
+               "triggers": [], "missedDates": missed, "entryKeyed": True}
         outcome = "STARTED"
     else:
         outcome = "RESUME"
         run["status"] = "RUNNING"
+    if evidence_dir:
+        run["evidenceDir"] = evidence_dir
     run["triggers"].append({"at": now.isoformat(timespec="seconds"), "kind": trigger, "actor": actor})
     _atomic(path, run)
+    carried = _load(root / RUNS_DIR / finished[-1] / "run.json", {}).get("issues", []) if finished else []
     return {"status": outcome, "date": day, "missedDates": missed, "earlierUnfinished": earlier, **progress(root, day),
             "weeklyCoverage": coverage_state(root, today=day), "lastFinishedDate": finished[-1] if finished else None,
-            "openExecutions": open_executions(root),
+            "openExecutions": open_executions(root), "carryIssues": carried,
             "rule": "先对账 unknown（回读，不重放）；到期事项按绝对到期日处理，错过的夜晚不单独补跑"}
 
 
 def checkpoint(root: Path, day: str, *, stage: str, status: str, case: str | None = None, detail: str = "",
-               ref: str = "", changed: int = 0, now: datetime | None = None) -> dict[str, Any]:
+               ref: str = "", changed: int = 0, entry: str = "", issue: bool = False, now: datetime | None = None) -> dict[str, Any]:
     if stage not in STAGES or status not in STATUSES:
         raise NightlyError(f"stage 必须是 {'/'.join(STAGES)}；status 必须是 {'/'.join(sorted(STATUSES))}")
     path = _run_dir(root, day) / "run.json"
@@ -164,30 +213,59 @@ def checkpoint(root: Path, day: str, *, stage: str, status: str, case: str | Non
         raise NightlyError("该日期没有运行记录，先 begin")
     if run.get("status") == "FINISHED":
         raise NightlyError("该日期的运行已结束，不能再追加检查点")
-    latest = {(i["stage"], i.get("case") or ""): i for i in checkpoints(root, day)}.get((stage, case or ""))
+    all_latest = _latest(checkpoints(root, day))
+    key = (stage, case or "", entry or "")
+    latest = all_latest.get(key)
     if latest is not None and status == "started" and (
             latest["status"] == "unknown" or (latest["status"] == "started" and stage in WRITE_STAGES)):
         raise NightlyError("该步骤上次的效果未知，先回读对账并记 reconciled，不能直接重新开始")
+    if latest is not None and latest["status"] == "unknown" and status not in ("unknown", "quota"):
+        if status == "reconciled":
+            if not detail.strip():
+                raise NightlyError("reconciled 需要 --detail 写明回读到的实际效果")
+            if stage in WRITE_STAGES and not ref.strip():
+                raise NightlyError(f"{stage} 是写阶段：reconciled 还需要 --ref 指向原回执，并以真实回读闭合")
+        elif status == "skipped" and issue and detail.strip() and stage not in WRITE_STAGES:
+            pass                                       # 已证实的来源问题，作为显式保留事项记录
+        else:
+            raise NightlyError(f"该步骤的效果未知：不能记为 {status}，只能回读对账后记 reconciled"
+                               + ("（写阶段需 --ref 原回执）" if stage in WRITE_STAGES else "；已证实的非写阶段来源问题可用 skipped --issue --detail 保留"))
+    if status == "done" and not key[1] and not key[2]:
+        expected = set(DISCOVER_ENTRIES) if stage == "discover" and run.get("entryKeyed") else set()
+        pending = [k for k, i in all_latest.items() if k[0] == stage and (k[1] or k[2]) and i["status"] not in TERMINAL]
+        pending += [(stage, "", e) for e in sorted(expected) if (all_latest.get((stage, "", e)) or {}).get("status") not in TERMINAL]
+        if pending:
+            names = "、".join((k[1] or k[2]) for k in pending[:4])
+            raise NightlyError(f"{stage} 还有 {len(pending)} 项没到终态（{names}）：整阶段不能记 done")
     item = {"at": (now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds"), "stage": stage, "status": status}
     if case:
         item["case"] = case
+    if entry:
+        item["entry"] = entry
     if detail:
         item["detail"] = detail
     if ref:
         item["ref"] = ref
     if changed:
-        item["changed"] = changed
+        item["reportedChanged"] = changed
+    if issue:
+        item["issue"] = True
     with (_run_dir(root, day) / "checkpoints.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
         stream.flush()
         os.fsync(stream.fileno())
+    dirty = False
+    if entry and not run.get("entryKeyed"):
+        run["entryKeyed"] = dirty = True
     if status == "quota" and run.get("status") != "PAUSED_QUOTA":
         run["status"] = "PAUSED_QUOTA"
+        dirty = True
+    if dirty:
         _atomic(path, run)
     return item
 
 
-def finish(root: Path, day: str, *, summary: str = "", now: datetime | None = None) -> dict[str, Any]:
+def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", now: datetime | None = None) -> dict[str, Any]:
     path = _run_dir(root, day) / "run.json"
     run = _load(path, None)
     if run is None:
@@ -201,17 +279,31 @@ def finish(root: Path, day: str, *, summary: str = "", now: datetime | None = No
     if weekly["due"] and not weekly["attemptedToday"]:
         return {"status": "NOT_FINISHED", "date": day, "wrote": False, **state, "coverageDue": weekly,
                 "rule": "全范围检查日期核对已到期且今晚未做：先做并用 nightly coverage 登记（来源不可用也要登记这次尝试）"}
-    quiet = state["changed"] == 0 and not weekly["due"]
+    stats = run_stats(root, day, evidence_dir=evidence_dir or run.get("evidenceDir", ""), now=now)
+    issues = issues_of(root, day)
+    finished_before = [d for d in _run_days(root) if d < day and _load(root / RUNS_DIR / d / "run.json", {}).get("status") == "FINISHED"]
+    previous = {_issue_signature(i) for i in (_load(root / RUNS_DIR / finished_before[-1] / "run.json", {}).get("issues", []) if finished_before else [])}
+    new_issues = [i for i in issues if _issue_signature(i) not in previous]
+    quiet = stats["changed"] == 0 and not weekly["due"] and not new_issues
     run.update(status="FINISHED", finishedAt=(now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds"),
-               changed=state["changed"], quiet=quiet, summary=summary)
-    result = {"status": "FINISHED", "date": day, "changed": state["changed"], "quiet": quiet}
+               changed=stats["changed"], quiet=quiet, summary=summary, breakdown=stats["breakdown"], issues=issues,
+               finishedWithIssues=bool(issues), reportedChanged=state_reported(root, day))
+    result = {"status": "FINISHED", "date": day, "changed": stats["changed"], "quiet": quiet, "breakdown": stats["breakdown"],
+              "issues": issues, "finishedWithIssues": bool(issues)}
+    if new_issues:
+        result["newIssues"] = new_issues
     if weekly["due"]:
         run["weeklyCoverage"] = result["weeklyCoverage"] = weekly      # 今晚试过但未完整：如实带出，下一轮仍到期
     _atomic(path, run)
     return result
 
 
-def status(root: Path, day: str | None = None) -> dict[str, Any]:
+def state_reported(root: Path, day: str) -> int:
+    """Sum of what checkpoint writers said they changed. Not evidence: kept beside the evidence-based counts."""
+    return sum(_reported(item) for item in _latest(checkpoints(root, day)).values())
+
+
+def status(root: Path, day: str | None = None, *, evidence_dir: str = "") -> dict[str, Any]:
     days = _run_days(root)
     day = day or (days[-1] if days else None)
     if day is None:
@@ -219,8 +311,11 @@ def status(root: Path, day: str | None = None) -> dict[str, Any]:
     run = _load(_run_dir(root, day) / "run.json", None)
     if run is None:
         return {"status": "NO_RUN", "date": day, "runs": len(days)}
-    return {"date": day, "run": run, "runs": len(days), **progress(root, day),
-            "weeklyCoverage": coverage_state(root, today=now_shanghai().date().isoformat()), "openExecutions": open_executions(root)}
+    result = {"date": day, "run": run, "runs": len(days), **progress(root, day),
+              "weeklyCoverage": coverage_state(root, today=now_shanghai().date().isoformat()), "openExecutions": open_executions(root)}
+    result["stats"] = run_stats(root, day, evidence_dir=evidence_dir or run.get("evidenceDir", ""))
+    result["issues"] = issues_of(root, day)
+    return result
 
 
 # ---------------------------------------------------------------------------------------------
@@ -345,6 +440,24 @@ def bind_end(root: Path, day: str, *, receipt: str, state: str, detail: str = ""
     return {"status": "RECORDED", "date": day, "execution": item}
 
 
+def record_snapshot(root: Path, day: str, *, tag: str, run_key: str, files: dict[str, dict[str, str]],
+                    now: datetime | None = None) -> dict[str, Any]:
+    """Record where this execution's independent ``pre`` / ``post`` mirror snapshots are (file and sha per table).
+    The first record for a (tag, run key) stays; a later call only reports it."""
+    if tag not in ("pre", "post"):
+        raise NightlyError("tag 必须是 pre/post")
+    path = _run_dir(root, day) / "run.json"
+    run = _load(path, None)
+    if run is None:
+        return {"status": "NO_RUN_RECORD", "date": day, "wrote": False}
+    recorded = run.setdefault("mirrorSnapshots", {}).setdefault(tag, {})
+    if run_key in recorded:
+        return {"status": "ALREADY_RECORDED", "date": day, "wrote": False, "snapshot": recorded[run_key]}
+    recorded[run_key] = {"at": (now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds"), "tables": files}
+    _atomic(path, run)
+    return {"status": "RECORDED", "date": day, "snapshot": recorded[run_key]}
+
+
 def open_executions(root: Path) -> list[dict[str, Any]]:
     """Bound executions with no recorded end, over all runs: what a supervisor checks before dispatching again."""
     found = []
@@ -352,6 +465,246 @@ def open_executions(root: Path) -> list[dict[str, Any]]:
         run = _load(root / RUNS_DIR / day / "run.json", {})
         found += [{"date": day, "runStatus": run.get("status"), **item} for item in run.get("executions", []) if not item.get("endedAt")]
     return found
+
+
+# ---------------------------------------------------------------------------------------------
+# Evidence-based counts: what was really changed tonight
+# ---------------------------------------------------------------------------------------------
+
+CLOUD_WRITE = {"CREATED_VERIFIED": "create", "WRITTEN": "update"}
+CLOUD_UNKNOWN = frozenset({"UNKNOWN", "UNKNOWN_SCAN", "FAILED_OR_UNKNOWN", "RUNNING", "PARTIAL"})
+LEDGER_DIR = "飞书写入账本"
+
+
+def _parse_time(text: str) -> datetime:
+    value = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    return value.replace(tzinfo=SHANGHAI) if value.tzinfo is None else value.astimezone(SHANGHAI)
+
+
+def _native(path: str) -> str:
+    """The same folder as this interpreter sees it: the nightly tools hand over WSL paths (``/mnt/d/...``) while the
+    published copy may run under Windows Python (``D:/...``), and the other way round."""
+    text = str(path or "")
+    if os.name == "nt" and text.startswith("/mnt/") and len(text) > 6 and text[6] == "/":
+        return f"{text[5].upper()}:/{text[7:]}"
+    if os.name != "nt" and len(text) > 2 and text[1] == ":" and text[2] in "/\\":
+        return f"/mnt/{text[0].lower()}/{text[3:].replace(chr(92), '/')}"
+    return text
+
+
+def _receipt_files(evidence_dir: str) -> list[Path]:
+    evidence_dir = _native(evidence_dir)
+    base = Path(evidence_dir) / "sync"
+    return sorted(base.glob("*/exec*/exec-*.json")) if evidence_dir and base.is_dir() else []
+
+
+def _ledger_events(root: Path, *, since: datetime) -> list[dict[str, Any]]:
+    """``final`` events of the cloud write ledger written at or after ``since`` (files not touched since are skipped)."""
+    directory = root / LEDGER_DIR / "targets"
+    if not directory.is_dir():
+        return []
+    found = []
+    for path in directory.glob("*.jsonl"):
+        if datetime.fromtimestamp(path.stat().st_mtime, SHANGHAI) < since:
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if '"final"' not in line:
+                continue
+            event = json.loads(line)
+            if event.get("event") == "final" and _parse_time(event["at"]) >= since:
+                found.append(event)
+    return found
+
+
+def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, Any]:
+    """Cloud writes counted once per (intent, table, record, action) from the execution receipts; the same receipt
+    copied into two folders, or a repeated listing of one record, is one write. Unknown results are counted apart."""
+    files = _receipt_files(evidence_dir)
+    if not evidence_dir:
+        return {"source": "none", "note": "没有回执目录：云写入数不统计，只看检查点与账本"}
+    seen: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    fields: set[tuple[str, str, str]] = set()
+    unknown: list[dict[str, Any]] = []
+    unreadable: list[str] = []
+    run_ids: set[str] = set()
+    receipts_ok = duplicates = 0
+    cases: set[str] = set()
+    for path in files:
+        step = path.parent.parent.name.split("-")[0]
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            unreadable.append(str(path))
+            continue
+        run_ids.add(str(report.get("runId") or ""))
+        if report.get("status") == "OK":
+            receipts_ok += 1
+        for record in report.get("records", []):
+            state = record.get("status")
+            stable = (record.get("stableKey") or {}).get("value") or record.get("recordId") or ""
+            table = record.get("tableId") or ""
+            if state in CLOUD_WRITE:
+                key = (step, table, stable, CLOUD_WRITE[state])
+                if key in seen:
+                    duplicates += 1
+                else:
+                    seen[key] = {"receipt": path.name, "runId": report.get("runId")}
+                cases.add(str(stable).split("|")[0])
+                for field_id in (record.get("fieldDetail") or {}):     # 同一格只算一次，重复列出里的新格仍计入
+                    fields.add((table, stable, field_id))
+            elif state in CLOUD_UNKNOWN or state in ("FAILED", "VIOLATION", "DUPLICATE_KEYS_BLOCK"):
+                unknown.append({"receipt": path.name, "table": table, "stableKey": stable, "status": state})
+    created = {(k[1], k[2]) for k in seen if k[3] == "create"}
+    updates = [k for k in seen if k[3] == "update"]
+    events = _ledger_events(root, since=since)
+    ok_runs = {str(e.get("runId")) for e in events if e.get("status") == "OK"}
+    run_ids.discard("")
+    cross = {"ledgerFinalOk": sum(1 for e in events if e.get("status") == "OK"), "receiptRunsWithoutLedgerOk": sorted(run_ids - ok_runs),
+             "ledgerOkRunsWithoutReceipt": sorted(ok_runs - run_ids)}
+    cross["result"] = "MATCH" if not cross["receiptRunsWithoutLedgerOk"] and not cross["ledgerOkRunsWithoutReceipt"] else "MISMATCH"
+    return {"source": "receipts", "receiptFiles": len(files), "receiptsOk": receipts_ok, "createdRows": len(created),
+            "updatedOperations": len(updates), "uniqueFields": len(fields), "duplicatesIgnored": duplicates, "unknown": unknown,
+            "unreadable": unreadable, "ledgerCrossCheck": cross, "cases": sorted(cases)}
+
+
+def _observation_today(root: Path, day: str) -> dict[str, Any]:
+    counts = {"added": 0, "kept": 0, "enterScope": 0, "outOfScope": 0}
+    names = {"ADDED": "added", "KEPT": "kept", "ENTER_SCOPE": "enterScope", "OUT_OF_SCOPE": "outOfScope"}
+    rwids: set[str] = set()
+    for rwid, item in _queue(root)["items"].items():
+        for event in item.get("history", []):
+            if event.get("on") == day and event.get("outcome") in names:
+                counts[names[event["outcome"]]] += 1
+                if event["outcome"] != "KEPT":
+                    rwids.add("观察:" + rwid)
+    return {**counts, "rwids": sorted(rwids)}
+
+
+def run_stats(root: Path, day: str, *, evidence_dir: str = "", now: datetime | None = None) -> dict[str, Any]:
+    """What this run changed, from its own evidence. ``changed`` = distinct cases/tasks changed (not a sum of what
+    writers reported); ``reportedChanged`` keeps that sum beside it. The coverage is stated so a number is never read wider."""
+    run = _load(_run_dir(root, day) / "run.json", {})
+    latest = _latest(checkpoints(root, day))
+    effect = {}
+    for key, item in latest.items():
+        if key[1] and item["status"] in ("done", "reconciled") and _reported(item) > 0:
+            effect.setdefault(key[0], set()).add(key[1])
+    since = _parse_time(run["startedAt"]) if run.get("startedAt") else (now or now_shanghai())
+    cloud = cloud_stats(root, evidence_dir, since=since)
+    observation = _observation_today(root, day)
+    changed_set = set().union(*effect.values()) if effect else set()
+    changed_set |= set(cloud.get("cases", [])) | set(observation["rwids"])
+    unknown_writes = [i for i in progress(root, day)["unknown"] if i["stage"] in WRITE_STAGES]
+    breakdown = {"collectedCases": len(effect.get("acquire", ())), "organizedCases": len(effect.get("organize", ())),
+                 "syncReportedCases": len(effect.get("sync", ())), "observation": {k: v for k, v in observation.items() if k != "rwids"},
+                 "cloudCreatedRows": cloud.get("createdRows"), "cloudUpdatedOperations": cloud.get("updatedOperations"),
+                 "cloudUniqueFields": cloud.get("uniqueFields"),
+                 "cloudUnknown": (len(cloud.get("unknown", [])) if cloud.get("source") == "receipts" else None) or 0,
+                 "unknownWriteCheckpoints": len(unknown_writes)}
+    return {"changed": len(changed_set), "reportedChanged": state_reported(root, day), "breakdown": breakdown, "cloud": cloud,
+            "coverage": ("检查点（本运行）+ " + (f"回执 {cloud.get('receiptFiles')} 份 + 账本交叉核对" if cloud.get("source") == "receipts"
+                                                else "无回执目录") + " + 观察队列当日历史")}
+
+
+# ---------------------------------------------------------------------------------------------
+# Supervision progress: how long a running execution has made no progress
+# ---------------------------------------------------------------------------------------------
+
+DEFAULT_SILENCE_MINUTES = 30
+MIN_SILENCE_MINUTES = 30
+MAX_SILENCE_MINUTES = 60
+SILENCE_SAMPLES = 5
+
+
+def _pid_alive(pid: int, runner: str = "claude-exec") -> bool | None:
+    """None when this interpreter cannot look (no /proc, e.g. Windows Python): the supervisor then passes what it saw."""
+    if not Path("/proc").is_dir():
+        return None
+    try:
+        os.kill(int(pid), 0)
+        return runner in Path(f"/proc/{int(pid)}/cmdline").read_bytes().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return False
+
+
+def progress_times(root: Path, day: str, *, evidence_dir: str, start: datetime, end: datetime | None = None) -> list[datetime]:
+    """When this run made progress inside ``[start, end]``: checkpoints, receipts/specs written under the evidence folder,
+    cloud-ledger final events. Neither the runner process being alive nor the model session's own events count."""
+    stop = end or datetime.max.replace(tzinfo=SHANGHAI)
+    found = [_parse_time(i["at"]) for i in checkpoints(root, day)]
+    evidence_dir = _native(evidence_dir)
+    if evidence_dir and Path(evidence_dir).is_dir():
+        for folder, _dirs, names in os.walk(evidence_dir):
+            for name in names:
+                if name.endswith((".json", ".jsonl")):
+                    found.append(datetime.fromtimestamp((Path(folder) / name).stat().st_mtime, SHANGHAI))
+    found += [_parse_time(e["at"]) for e in _ledger_events(root, since=start)]
+    return sorted(t for t in found if start <= t <= stop)
+
+
+def _p95(values: list[float]) -> float:
+    ordered = sorted(values)
+    return ordered[max(0, -(-95 * len(ordered) // 100) - 1)]
+
+
+def silence_threshold(root: Path, current_start: datetime) -> dict[str, Any]:
+    """p95 of the gaps between progress events over the last ``SILENCE_SAMPLES`` ended executions before this one,
+    clamped to 30–60 minutes; 30 while fewer samples exist. The silence of the running execution never enters it."""
+    samples: list[tuple[datetime, list[float]]] = []
+    for day in _run_days(root):
+        run = _load(root / RUNS_DIR / day / "run.json", {})
+        for execution in run.get("executions", []):
+            if execution.get("endState") != "ENDED" or not execution.get("endedAt"):
+                continue
+            began = _parse_time(execution["boundAt"])
+            if began >= current_start:
+                continue
+            times = progress_times(root, day, evidence_dir=run.get("evidenceDir", ""), start=began, end=_parse_time(execution["endedAt"]))
+            points = [began, *times]
+            gaps = [(b - a).total_seconds() / 60 for a, b in zip(points, points[1:])]
+            if gaps:
+                samples.append((began, gaps))
+    samples.sort(key=lambda item: item[0])
+    recent = samples[-SILENCE_SAMPLES:]
+    if len(recent) < SILENCE_SAMPLES:
+        return {"minutes": DEFAULT_SILENCE_MINUTES, "samples": len(recent), "basis": "样本不足 5 次，用默认 30 分钟"}
+    value = _p95([gap for _, gaps in recent for gap in gaps])
+    return {"minutes": min(MAX_SILENCE_MINUTES, max(MIN_SILENCE_MINUTES, round(value))), "samples": len(recent),
+            "basis": f"最近 5 次成功执行的进展间隔 p95={value:.1f} 分钟，夹在 30–60 之间"}
+
+
+def _session_activity(session_id: str, session_root: Path | None) -> datetime | None:
+    base = session_root or Path.home() / ".claude" / "projects"
+    hits = list(base.glob(f"*/{session_id}.jsonl")) if session_id and base.is_dir() else []
+    return datetime.fromtimestamp(max(p.stat().st_mtime for p in hits), SHANGHAI) if hits else None
+
+
+def progress_info(root: Path, day: str, now: datetime | None = None, *, alive: Any = _pid_alive,
+                  session_root: Path | None = None) -> dict[str, Any]:
+    """Read-only supervision view of a run's current execution. Over the threshold it only sets ``needsInspection``;
+    nothing is killed or dispatched from here."""
+    now = (now or now_shanghai()).astimezone(SHANGHAI)
+    run = _load(_run_dir(root, day) / "run.json", None)
+    if run is None:
+        raise NightlyError("该日期没有运行记录")
+    executions = run.get("executions", [])
+    current = next((e for e in reversed(executions) if not e.get("endedAt")), None)
+    if current is None:
+        return {"date": day, "execution": None, "runnerAlive": False, "needsInspection": False,
+                "note": "没有未结束的绑定执行"}
+    began = _parse_time(current["boundAt"])
+    times = progress_times(root, day, evidence_dir=run.get("evidenceDir", ""), start=began, end=now)
+    last = times[-1] if times else None
+    threshold = silence_threshold(root, began)
+    silent = (now - (last or began)).total_seconds() / 60
+    activity = _session_activity(current["sessionId"], session_root)
+    return {"date": day, "execution": {"sessionId": current["sessionId"], "receipt": current["receipt"], "runnerPid": current["runnerPid"]},
+            "runnerAlive": alive(current["runnerPid"], current.get("runner", "claude-exec")),
+            "elapsedMinutes": round((now - began).total_seconds() / 60, 1),
+            "lastProgressAt": last.isoformat(timespec="seconds") if last else None,
+            "lastActivityAt": activity.isoformat(timespec="seconds") if activity else None,
+            "silentMinutes": round(silent, 1), "thresholdMinutes": threshold["minutes"], "threshold": threshold,
+            "needsInspection": silent > threshold["minutes"]}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -367,19 +720,29 @@ def _queue(root: Path) -> dict[str, Any]:
     return _load(_queue_path(root), {"schemaVersion": "ObservationQueueV1", "items": {}})
 
 
-def observe(root: Path, items: list[dict[str, Any]], *, observed_on: str, entry: str, days: int = FOLLOW_UP_DAYS) -> dict[str, Any]:
-    """Record what one source look saw. ``items``: ``{rwid, state, projectNo?, unitName?, brigade?, inspectionDate?, awaitingProduct?}``.
+IDENTITY_FIELDS = ("projectNo", "unitName", "brigade")
 
-    A task with a confirmed inspection date in range leaves the queue as ``ENTER_SCOPE`` (the caller then
-    registers it through the normal source entry); one confirmed out of range leaves as ``OUT_OF_SCOPE``.
-    Anything else stays and is due again ``days`` later, counted from this look.
+
+def _norm_identity(value: Any) -> str:
+    return "".join(str(value or "").split())
+
+
+def observe(root: Path, items: list[dict[str, Any]], *, observed_on: str, entry: str, days: int = FOLLOW_UP_DAYS) -> dict[str, Any]:
+    """Record what one source look saw. ``items``: ``{rwid, state, projectNo?, unitName?, brigade?, inspectionDate?, productEvidence?, awaitingProduct?}``.
+
+    A queued task (any waiting state) leaves the queue as ``ENTER_SCOPE`` / ``OUT_OF_SCOPE`` only when all four identities
+    (项目编号, RWID, 单位, 大队), the inspection date and the product evidence are present and agree with what the queue
+    already holds; otherwise it stays, due again ``days`` later, and the history says what is missing. Tasks are linked by
+    RWID only: the same project number or unit under another RWID is another task. Nothing is overwritten: every look
+    appends to ``history``. A task not in the queue that already shows an inspection date goes straight to the normal source
+    entry (which does its own four-identity check) and is not queued.
     """
     try:
         seen = date.fromisoformat(observed_on)
     except ValueError as error:
         raise NightlyError("observed_on 必须是 YYYY-MM-DD") from error
     queue = _queue(root)
-    result = {"added": 0, "kept": 0, "enterScope": [], "outOfScope": []}
+    result: dict[str, Any] = {"added": 0, "kept": 0, "enterScope": [], "outOfScope": [], "blocked": [], "identityConflicts": [], "alreadyClosed": []}
     for item in items:
         rwid, state = str(item.get("rwid") or "").strip(), item.get("state")
         if not rwid or state not in WAITING:
@@ -390,30 +753,60 @@ def observe(root: Path, items: list[dict[str, Any]], *, observed_on: str, entry:
             date.fromisoformat(inspected)
             if state == "NOT_INSPECTED":
                 raise NightlyError("有检查日期的任务不是未检查")
-        if inspected and inspected < SCOPE_FROM:
-            if current is not None:
-                current.update(status="OUT_OF_SCOPE", closedOn=observed_on, inspectionDate=inspected)
-            result["outOfScope"].append(rwid)
-            continue
-        awaiting = bool(inspected) and bool(item.get("awaitingProduct"))   # 已检查但详情尚无产品行：未入总账，继续观察
-        if inspected and not awaiting and current is not None and current["status"] == "WAITING" \
-                and (current["state"] == "NOT_INSPECTED" or current.get("awaitingProduct")):
-            current.update(status="ENTER_SCOPE", closedOn=observed_on, inspectionDate=inspected, state=state, awaitingProduct=False)
-            result["enterScope"].append(rwid)
-            continue
-        if inspected and not awaiting and current is None:
-            result["enterScope"].append(rwid)      # 已有检查日期且在范围内：直接走正常来源登记，不入观察队列
-            continue
+        awaiting = bool(inspected) and (bool(item.get("awaitingProduct")) or item.get("productEvidence") is False)
+        event: dict[str, Any] = {"on": observed_on, "entry": entry, "state": state}
+        for field in ("inspectionDate", "productEvidence", "awaitingProduct"):
+            if item.get(field) not in (None, ""):
+                event[field] = item[field]
+        incoming = {k: item[k] for k in IDENTITY_FIELDS if item.get(k)}
         if current is None:
-            queue["items"][rwid] = current = {"rwid": rwid, "firstSeenOn": observed_on, "entry": entry, "looks": 0, "status": "WAITING"}
+            if inspected and inspected < SCOPE_FROM:
+                result["outOfScope"].append(rwid)
+                continue
+            if inspected and not awaiting:
+                result["enterScope"].append(rwid)      # 已有检查日期且在范围内：直接走正常来源登记，不入观察队列
+                continue
+            queue["items"][rwid] = current = {"rwid": rwid, "firstSeenOn": observed_on, "entry": entry, "looks": 0, "status": "WAITING",
+                                              "history": []}
+            event["outcome"] = "ADDED"
             result["added"] += 1
+        elif current["status"] != "WAITING":
+            result["alreadyClosed"].append(rwid)
+            continue
         else:
+            event["outcome"] = "KEPT"
             result["kept"] += 1
-        current.update({k: item[k] for k in ("projectNo", "unitName", "brigade") if item.get(k)})
-        if awaiting:
-            current.update(awaitingProduct=True, inspectionDate=inspected)
-        current.update(state=state, status="WAITING", lastSeenOn=observed_on, looks=current["looks"] + 1,
-                       nextDueOn=(seen + timedelta(days=days)).isoformat())
+        conflicts = {k: {"queue": current[k], "now": v} for k, v in incoming.items()
+                     if current.get(k) and _norm_identity(current[k]) != _norm_identity(v)}
+        if conflicts:
+            event.update(outcome="IDENTITY_CONFLICT", conflicts=conflicts)
+            result["identityConflicts"].append({"rwid": rwid, "conflicts": conflicts})
+        for key, value in incoming.items():
+            current.setdefault(key, value)               # 已有的身份项不被覆盖
+        known = {k: current.get(k) for k in IDENTITY_FIELDS}
+        missing = [name for name, value in (("项目编号", known["projectNo"]), ("单位", known["unitName"]), ("大队", known["brigade"]),
+                                             ("检查日期", inspected), ("产品证据", item.get("productEvidence") is True and not awaiting))
+                   if not value]
+        close = None
+        if inspected and not conflicts:
+            if missing:
+                event["closeBlocked"] = missing
+                result["blocked"].append({"rwid": rwid, "missing": missing})
+            else:
+                close = "OUT_OF_SCOPE" if inspected < SCOPE_FROM else "ENTER_SCOPE"
+        current.setdefault("history", [])
+        current["looks"] = current.get("looks", 0) + 1
+        current.update(state=state, lastSeenOn=observed_on)
+        if inspected:
+            current["inspectionDate"] = inspected
+        if close:
+            event["outcome"] = close
+            current.update(status=close, closedOn=observed_on, awaitingProduct=False)
+            current.pop("nextDueOn", None)
+            result["enterScope" if close == "ENTER_SCOPE" else "outOfScope"].append(rwid)
+        else:
+            current.update(status="WAITING", awaitingProduct=awaiting, nextDueOn=(seen + timedelta(days=days)).isoformat())
+        current["history"].append(event)
     _atomic(_queue_path(root), queue)
     return result
 

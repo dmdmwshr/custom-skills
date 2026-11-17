@@ -57,9 +57,9 @@ def _rows():
     }
 
 
-def _run(contract, cloud, tmp_path, day, ledger=None):
+def _run(contract, cloud, tmp_path, day, ledger=None, **extra):
     return mirror.mirror(contract_path=contract, contract_sha=_sha(contract), sections=[None, "maintenanceBase"], targets=TARGETS, transport=cloud,
-                         business_root=tmp_path / "root", ledger_dir=ledger, day=day, isolated_test_ledger=True)
+                         business_root=tmp_path / "root", ledger_dir=ledger, day=day, isolated_test_ledger=True, **extra)
 
 
 def test_mirror_is_read_only_quiet_when_nothing_changed_and_tells_assistant_from_brigade(tmp_path, contract):
@@ -144,6 +144,8 @@ def test_recount_counts_cases_items_gaps_and_units_separately_and_never_fills_a_
     assert report["physicalQuantity"]["status"] == "BY_UNIT" and report["physicalQuantity"]["itemsWithoutUnit"] == 1
     assert "合计" not in "".join(report["totals"]) and 5 not in report["physicalQuantity"]["byMeaningAndUnit"].values()
     assert report["productAttributionGaps"] == ["A" * 18]
+    pending = report["productAttributionPending"]                                                 # 产品层待确认：单独一轴，原缺项列表不变
+    assert pending["cases"] == report["productAttributionGaps"] and pending["count"] == 1 and "不是运行未知" in pending["meaning"]
     wrong = {**right, ("2026-03", "梁溪"): {**right[("2026-03", "梁溪")], "R02_初查产品项数": 5, mirror.QUANTITY_TEXT_COLUMN: "7"}}
     report = mirror.recount(contract_path=contract, contract_sha=_sha(contract), target={"baseToken": BASE}, transport=Cloud(_stat_rows(wrong)))
     assert report["status"] == "DIFF" and report["diffs"] == [
@@ -165,3 +167,49 @@ def test_quantities_without_any_unit_give_no_physical_total_and_are_not_zero(tmp
     assert report["quantityByUnit"] == {} and report["quantityWithoutUnit"] == {"2026-03|梁溪": {"抽样数量": 1, "现场检查数量": 2}}
     assert mirror.quantity_text({}, {}, 0) == "无数量记录"
     assert mirror.quantity_text({"具": 3, "箱": 4}, {"具": 2, "箱": 1}, 0) == "3具；其他单位1项见产品明细；"
+
+
+def _write_labels(contract, cloud, ledger, tmp_path):
+    built = plans.build_label_initial_specs(
+        contract_path=contract, contract_sha=_sha(contract), table_name="案卷主表", target={"baseToken": BASE, "profile": "offline", "identity": "user"},
+        transport=cloud, out_dir=tmp_path / "out", log_root=tmp_path / "log", ledger_dir=ledger, source_ref="规则", isolated_test_ledger=True)
+    for spec in built["specs"]:
+        sync.run(Path(spec["path"]), execute_flag=True, reconcile_flag=False, cli="unused", transport=cloud, ledger_dir=ledger, isolated_test_ledger=True)
+
+
+def test_each_execution_has_its_own_immutable_pre_and_post_snapshot_and_post_is_compared_with_its_own_pre(tmp_path, contract):
+    cloud, ledger = Cloud(_rows()), _ledger(tmp_path)
+    _run(contract, cloud, tmp_path, "2026-11-16", ledger)                                             # 前一天最后确认的镜像
+    cloud.rows[(CASE, "recA00000000002")][GAS] = ["是"]                                               # 白天有人在飞书保存
+    pre = _run(contract, cloud, tmp_path, "2026-11-17", ledger, tag="pre", run_key="run-a")
+    case_pre = next(t for t in pre["tables"] if t["table"] == "案卷库-案卷主表")
+    assert case_pre["changesByUser"] == 1 and case_pre["tag"] == "pre" and case_pre["snapshotFile"].endswith("案卷库-案卷主表-写前-run-a.json")
+    _write_labels(contract, cloud, ledger, tmp_path)                                                  # 本次执行的写入
+    post = _run(contract, cloud, tmp_path, "2026-11-17", ledger, tag="post", run_key="run-a")
+    case_post = next(t for t in post["tables"] if t["table"] == "案卷库-案卷主表")
+    assert case_post["changes"] == 2 and case_post["changesByUser"] == 0                             # 只有本次写入，且都归属助手；白天人工修改不混进来
+    day_dir = tmp_path / "root" / "运行记录" / "飞书镜像" / "每日快照" / "2026-11-17"
+    pre_file, post_file = day_dir / "案卷库-案卷主表-写前-run-a.json", day_dir / "案卷库-案卷主表-写后-run-a.json"
+    assert pre_file.is_file() and post_file.is_file() and not (day_dir / "案卷库-案卷主表-首次.json").exists()
+    kept = (pre_file.read_bytes(), post_file.read_bytes())
+    cloud.rows[(CASE, "recA00000000001")][GAS] = ["是"]                                               # 之后又有人改：同键重复调用不覆盖、不重读
+    again = _run(contract, cloud, tmp_path, "2026-11-17", ledger, tag="post", run_key="run-a")
+    assert again["reusedAll"] is True and kept == (pre_file.read_bytes(), post_file.read_bytes())
+    assert json.loads(pre_file.read_text(encoding="utf-8"))["rows"]["P-1"]["是否网售"] is None
+    assert json.loads(post_file.read_text(encoding="utf-8"))["rows"]["P-1"]["是否网售"] == "否"
+
+
+def test_a_later_execution_never_uses_an_earlier_post_snapshot_as_its_baseline_and_post_needs_its_own_pre(tmp_path, contract):
+    cloud, ledger = Cloud(_rows()), _ledger(tmp_path)
+    _run(contract, cloud, tmp_path, "2026-11-16", ledger)
+    with pytest.raises(sync.SyncError, match="没有本次执行"):
+        _run(contract, cloud, tmp_path, "2026-11-17", ledger, tag="post", run_key="run-b")
+    _run(contract, cloud, tmp_path, "2026-11-17", ledger, tag="pre", run_key="run-a")
+    _run(contract, cloud, tmp_path, "2026-11-17", ledger, tag="post", run_key="run-a")
+    cloud.rows[(CASE, "recA00000000002")][GAS] = ["是"]
+    pre_b = _run(contract, cloud, tmp_path, "2026-11-17", ledger, tag="pre", run_key="run-b")
+    assert next(t for t in pre_b["tables"] if t["table"] == "案卷库-案卷主表")["changesByUser"] == 1     # 变化出现在 B 的写前，归属“写前以前”的人工修改
+    post_b = _run(contract, cloud, tmp_path, "2026-11-17", ledger, tag="post", run_key="run-b")
+    assert next(t for t in post_b["tables"] if t["table"] == "案卷库-案卷主表")["changes"] == 0           # B 自己没有写，写后相对 B 的写前无变化
+    with pytest.raises(sync.SyncError, match="运行键"):
+        _run(contract, cloud, tmp_path, "2026-11-17", ledger, tag="pre", run_key="")

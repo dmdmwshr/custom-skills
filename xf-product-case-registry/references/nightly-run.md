@@ -7,8 +7,12 @@
 1. `nightly begin [--trigger scheduled|manual]`：按上海日期开或续当天运行。返回 `STARTED`、`RESUME`（给出下一阶段、可直接续的步骤、须先对账的未知写入、额度暂停点）或 `ALREADY_FINISHED`（不写任何文件，重复触发到此为止）；同时列出错过的日期、更早未完成的运行、上次完成日期 `lastFinishedDate`、每周全范围核对是否到期 `weeklyCoverage` 和尚未记终态的执行 `openExecutions`。
 2. 执行者随即 `nightly bind --session-id <会话> --receipt <回执路径> --runner-pid <进程号>`，把这一次执行登记进当天 `run.json` 的 `executions`。监督者只凭这里登记的会话和回执判断上一回合是否结束，不看其他项目的回执。
 3. 按阶段执行：`discover` 来源发现 → `acquire` 详情与打包 → `organize` 清点识别整理 → `validate` 字段校验与本地核验归档 → `sync` 飞书写入 → `mirror` 大队字段镜像与快照 → `reconcile` 统计对账 → `report`。
-4. 每阶段、每案用 `nightly checkpoint --stage <阶段> --status <状态> [--case <项目编号>] [--changed N] [--detail …] [--ref 回执路径]` 记录：`started`、`done`、`skipped`、`failed`、`unknown`、`quota`、`reconciled`。
-5. `nightly finish`：仍有未知写入、额度暂停或未完阶段时返回 `NOT_FINISHED`，不得当作完成；每周全范围核对已到期而当天没有做过时同样返回 `NOT_FINISHED`（`coverageDue`）。全部结束且变更数为 0 时 `quiet=true`，不发任何提醒；当天核对做了但没能证明完整时可以结束，`quiet=false` 并带出原因，次晚继续到期。
+4. 每阶段、每案、每入口用 `nightly checkpoint --stage <阶段> --status <状态> [--case <项目编号>] [--entry <入口>] [--changed N] [--detail …] [--ref 回执路径] [--issue]` 记录：`started`、`done`、`skipped`、`failed`、`unknown`、`quota`、`reconciled`。检查点身份是（阶段，案卷，入口），没有入口的旧记录照常读取；`--changed` 只存为自报的 `reportedChanged`，不是变更数。
+   - **unknown 防覆盖**：效果未知的步骤只能回读对账后记 `reconciled`，不能改记 `done`/`failed`/`skipped`/`started`。写阶段（`acquire`、`sync`）的 `reconciled` 必须带 `--ref`（原回执）和 `--detail`（回读到的实际效果）。非写阶段已证实的来源问题可记 `skipped --issue --detail 原因` 作为显式保留事项，但不能清除云写入未知。
+   - **整阶段收口**：某阶段下仍有未到终态的案卷或入口时，整阶段 `done` 被拒；`discover` 须十个入口（五类任务 × 创建时间/检查日期）都到终态。
+5. `nightly finish`：仍有未知写入、额度暂停或未完阶段时返回 `NOT_FINISHED`，不得当作完成；每周全范围核对已到期而当天没有做过时同样返回 `NOT_FINISHED`（`coverageDue`）。有失败、显式保留事项或缺入口时仍收尾为 `FINISHED`，但 `finishedWithIssues=true`、`quiet=false`，`issues` 逐项列出，下一晚 `begin` 的 `carryIssues` 带出；失败历史留在 `checkpoints.jsonl`，当前视图取各项最新状态。只有没有变化、也没有新增或加重问题时 `quiet=true`，不发任何提醒；当天核对做了但没能证明完整时可以结束，`quiet=false` 并带出原因，次晚继续到期。
+6. 变更数与明细：`finish`/`status` 的 `changed` 是证据重算的“变化的案卷/任务个数”，`breakdown` 分项：云写入按（说明、表、记录、动作）从 `$NIGHT_RUN/sync/*/exec*/exec-*.json` 成功回执去重，给出新建行数、更新操作数、唯一字段数，并与写入账本按 runId 交叉核对（`ledgerCrossCheck`）；结果未知的回执单列 `cloudUnknown`；采集、整理、观察队列各按自己的证据计数。回执目录由 `begin --evidence-dir` 记入当天运行（缺省取环境变量 `NIGHT_RUN`，且须属于同一运行日期），未记录时云写入数不统计并明示。覆盖范围写在 `coverage`，不预设期望数。
+7. 监督进展 `nightly progress [--runner-alive yes|no]`（只读）：`lastProgressAt` 取本运行检查点、回执目录里新写的回执/说明、云写入账本终态的最近时间；不含派发进程存活和会话自身事件（后者只作 `lastActivityAt` 展示）。`thresholdMinutes` 为最近 5 次成功（ENDED）执行的进展间隔 p95，夹在 30–60 分钟，样本不足 5 次取 30，当前执行的静默不进入计算。超过阈值只置 `needsInspection=true`，不结束、不重派、不新增状态；同日已确认失败的运行用既有 `begin`（RESUME）和 `claude-exec --resume` 续做，不按日历补跑。
 
 ## 来源发现的两类入口与每周核对
 
@@ -46,7 +50,8 @@
 
 ## 观察队列与 7 天到期
 
-- 来源里未检查、检查中、抽样待结果、复查待结果、来源缺件的任务用 `nightly observe --items <文件> --entry <入口>` 登记（`items` 为 `[{rwid,state,unitName?,brigade?,projectNo?,inspectionDate?,awaitingProduct?}]`），每 7 天到期一次；等待多久都不降频。
+- 来源里未检查、检查中、抽样待结果、复查待结果、来源缺件的任务用 `nightly observe --items <文件> --entry <入口>` 登记（`items` 为 `[{rwid,state,unitName?,brigade?,projectNo?,inspectionDate?,productEvidence?,awaitingProduct?}]`），每 7 天到期一次；等待多久都不降频。
+- 队列里任何等待状态（NOT_INSPECTED、IN_PROGRESS、SAMPLE_PENDING、RECHECK_PENDING、SOURCE_GAP）转为 `ENTER_SCOPE`/`OUT_OF_SCOPE`，都要求项目编号、RWID、单位、大队四项齐全且与队列已有记录一致，检查日期落定，并有产品证据（`productEvidence: true`）；缺项留在队列并在 `history` 记 `closeBlocked`，身份冲突记 `IDENTITY_CONFLICT` 且不覆盖原值。每次观察向 `history` 追加一条（ADDED/KEPT/ENTER_SCOPE/OUT_OF_SCOPE/IDENTITY_CONFLICT）。任务只按 RWID 关联：同项目编号或同单位名但 RWID 不同的是另一项任务，不并入。
 - 已有检查日期但详情尚无产品行的任务（未能确认是产品案）带 `awaitingProduct: true` 登记，继续留在队列按 7 天复看；详情出现产品行后不带该标记再登记一次即 `ENTER_SCOPE`。
 - 只有来源给出检查日期（真实初查日）且不早于 2026-01-01 才 `ENTER_SCOPE`，随后按正常详情确认进入总账；早于边界记 `OUT_OF_SCOPE`；没有检查日期的只观察，不建案、不下载。
 - 已入总账案卷的到期重取由 `source scan-plan` 的包决策给出，同为 7 天；文书叶集合未证完整时不自动打包，材料未齐不标归档完成，可信事实仍先本地后飞书。
@@ -61,8 +66,8 @@
 | `sync` | 依次 `feishu-source-build`（新案主行）→ `feishu-child-build`（检查与产品子行）→ `feishu-calibrate-plan`（按已核验本地清单补三表监督事实空格；云端与证据不同的只列差异，带 `--resolutions` 校准裁决文件时才按逐格裁决处理；创建时一次写入的名称类字段默认不改写；合同登记 `evidenceCorrection` 的产品名称与两表“数据来源”只能在校准入口带本地已核验证据和精确旧值更正：`--correct-facts`、`--max-corrections N`（超限即停，防批量误改），检查记录里“检查形式”“单位类别”的勾选框由 `record_forms` 解析成 `--form-evidence` 证据，详情页与电子记录勾选互相矛盾时不写、只列差异；手动交件没有结构化详情时可用 `--visual-evidence`（VisualDetailEvidenceV1：逐图人工视觉确认的单位类别，带截图路径与摘要，只补云端空格、不更正已有值、与记录勾选矛盾时同样只列差异）；`feishu-child-build` 对已有子行的案卷也会按稳定键只补缺失的产品行，已有行不动）→ `feishu-label-initial-build`（标签初值）→ `record_quantities.py scan`（受管文档环境）→ `feishu-quantity-plan` → `feishu-field-plan-build`；每份说明用 `feishu-source-sync --execute` 写入。新案主行写入后子行的父记录才存在，所以整串在同一晚跑两遍：第二遍补上第一遍因父行未建而跳过的子行和数量。合同与路由取业务根 `运行记录/字段合同/`，用法见该目录“说明.md” | 每份说明读回一致；规划器退出 4 表示有案被保护挡住，其余照写；UNKNOWN 记 `unknown` 并只封锁该目标 |
 
 单位类别来源优先级：详情与初查记录勾选冲突时以监督系统详情为准并在校准报告 `sourcePriority` 逐案记录，不再列为待选差异；检查形式在“其他形式消防监督检查适用”模板下取被勾选项的来源原文（合同登记的选项才写）。
-| `mirror` | `feishu-mirror` | 镜像、当日快照、变更记录已写 |
-| `reconcile` | `feishu-recount --out` | 退出 0；退出 4 记 `failed` 并保留差异文件。数量只对同一含义、同一单位相加；没有单位的数值只记项数，`physicalQuantity.status` 为 `NO_UNIT_BASIS` 时没有实物合计，不是 0 |
+| `mirror` | `feishu-mirror`；写入前后各一次 `--tag pre`/`--tag post --run-key <本次执行标识>`（独立、不覆盖，同键复用；写后以本次写前为基线，写前以最近确认的镜像为基线，路径与摘要记入 `run.json` 的 `mirrorSnapshots`） | 写前、写后快照与变更记录已写；变更按写入账本区分助手写入与人工修改 |
+| `reconcile` | `feishu-recount --out` | 只接受退出 0 或 4，且结果可解析、四张表都读到（否则 `RECOUNT_INCOMPLETE`，不得记 done）；退出 4 记 `failed` 并保留差异文件。`productAttributionPending`（产品层待确认案卷，保留原 `productAttributionGaps`）是单独一轴，不是运行未知，也不因标签归属视为已解释。数量只对同一含义、同一单位相加；没有单位的数值只记项数，`physicalQuantity.status` 为 `NO_UNIT_BASIS` 时没有实物合计，不是 0 |
 | `report` | 汇总本轮变更、缺项、未知与到期 | 无变化时安静结束 |
 
 ## 写入结果未知（UNKNOWN）的处理
