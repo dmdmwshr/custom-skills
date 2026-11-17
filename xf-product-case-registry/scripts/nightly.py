@@ -566,6 +566,8 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, 
     unreadable: list[str] = []
     run_ids: set[str] = set()
     duplicates = unconfirmed = receipts_ok = 0
+    held: dict[str, int] = {}
+    held_keys: list[dict[str, Any]] = []
     cases: set[str] = set()
     for path in files:
         try:
@@ -585,6 +587,10 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, 
             if state not in CLOUD_WRITE:
                 if state in CLOUD_UNKNOWN or state in ("FAILED", "VIOLATION", "DUPLICATE_KEYS_BLOCK"):
                     unknown.append({"receipt": path.name, "table": table, "stableKey": stable, "status": state})
+                else:      # 被挡、未改变、已存在等：没有写入，也不是未知；分别留存，不并入成功
+                    held[str(state)] = held.get(str(state), 0) + 1
+                    if len(held_keys) < 20:
+                        held_keys.append({"receipt": path.name, "table": table, "stableKey": stable, "status": state})
                 continue
             action = CLOUD_WRITE[state]
             matched = [(iid, i) for iid, i in (run_ledger or {}).items()
@@ -597,12 +603,15 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, 
                     for field_id in (record.get("writtenFields") if record.get("writtenFields") is not None else (record.get("fieldDetail") or {})):
                         fields.add((table, stable, field_id))    # 重复列出里的新格仍计入（同一格只算一次）
                 continue
+            # 成功按逐意图证据判定，不看整批报告的 status（一批里可以既有已核实的写入，又有被挡/失败/未知的条目）：
+            #   有账本：该记录的意图都有 final=OK；没有账本：新建要记录自身为 CREATED_VERIFIED（创建时已回读核实），
+            #   更新的 WRITTEN 只有整批回读通过（报告 OK）才算核实。
             verdict = "ledger-ok"
             if run_ledger is None:
-                verdict = "receipt-only"
+                verdict = "receipt-only" if (action == "create" or report_ok) else "ledger-not-ok"
             elif not matched or any(i["final"] != "OK" for _, i in matched):
                 verdict = "ledger-not-ok"
-            if not report_ok or verdict == "ledger-not-ok":
+            if verdict == "ledger-not-ok":
                 unknown.append({"receipt": path.name, "table": table, "stableKey": stable, "status": state, "reportStatus": report.get("status"),
                                 "ledgerFinal": sorted({i["final"] or "NONE" for _, i in matched}) or ["NO_INTENT"]})
                 continue
@@ -621,7 +630,7 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, 
     cross["result"] = "MATCH" if not cross["receiptRunsWithoutLedgerOk"] and not cross["ledgerOkRunsWithoutReceipt"] else "MISMATCH"
     return {"source": "receipts+ledger", "receiptFiles": len(files), "receiptsOk": receipts_ok, "createdRows": len(created),
             "updatedOperations": len(updates), "uniqueFields": len(fields), "duplicatesIgnored": duplicates, "unknown": unknown,
-            "unreadable": unreadable, "receiptOnlyUnconfirmed": unconfirmed, "ledgerCrossCheck": cross, "cases": sorted(cases),
+            "unreadable": unreadable, "receiptOnlyUnconfirmed": unconfirmed, "heldOrNotWritten": held, "heldSample": held_keys, "ledgerCrossCheck": cross, "cases": sorted(cases),
             "note": "新建行只计行数，不逐格计字段；更新字段取回执 writtenFields（真正改变的格）"}
 
 

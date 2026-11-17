@@ -562,3 +562,37 @@ def test_a_task_that_is_both_a_case_and_a_queue_transition_counts_once_and_a_fin
     after = json.loads(run_file.read_text(encoding="utf-8"))
     assert refreshed["status"] == "STATS_REFRESHED" and after["changed"] == 1 and after["status"] == "FINISHED"
     assert after["statsRevisions"][0]["previous"] == {"changed": 2, "breakdown": {"old": True}} and after["finishedAt"] == run["finishedAt"]
+
+
+def test_a_mixed_batch_counts_each_intent_by_its_own_evidence_not_by_the_batch_status(tmp_path):
+    since = T("2026-11-16T10:00:00")
+    evidence = tmp_path / "evidence"
+    # 整批创建报告 PARTIAL：一条已核实创建，一条被挡（不是写入、不是未知）
+    _receipt(evidence, "main-1", "exec-main", "exec-create.json", [
+        {"status": "CREATED_VERIFIED", "tableId": "T", "recordId": "R1", "stableKey": {"value": "P1"}},
+        {"status": "BLOCKED_ENTITY", "tableId": "T", "stableKey": {"value": "P2"}}], run_id="run-create", status="PARTIAL")
+    _ledger(tmp_path, "run-create", "R1", kind="create", table="T")
+    # 整批更新报告 FAILED：一条意图 OK，一条回读违规；另一条 WRITTEN 在账本里没有意图
+    _receipt(evidence, "fp-1", "exec", "exec-fp.json", [
+        {"status": "WRITTEN", "tableId": "T", "recordId": "U1", "stableKey": {"value": "P3"}, "writtenFields": ["a"]},
+        {"status": "WRITTEN", "tableId": "T", "recordId": "U2", "stableKey": {"value": "P4"}, "writtenFields": ["b"]},
+        {"status": "WRITTEN", "tableId": "T", "recordId": "U3", "stableKey": {"value": "P5"}, "writtenFields": ["c"]}], run_id="run-update", status="FAILED")
+    _ledger(tmp_path, "run-update", "U1")
+    _ledger(tmp_path, "run-update", "U2", final="VIOLATION")
+    cloud = nightly.cloud_stats(tmp_path, str(evidence), since=since)
+    assert (cloud["createdRows"], cloud["updatedOperations"], cloud["uniqueFields"]) == (1, 1, 1)
+    assert cloud["heldOrNotWritten"] == {"BLOCKED_ENTITY": 1} and cloud["heldSample"][0]["stableKey"] == "P2"
+    assert sorted((u["stableKey"], u["ledgerFinal"][0]) for u in cloud["unknown"]) == [("P4", "VIOLATION"), ("P5", "NO_INTENT")]
+    assert cloud["ledgerCrossCheck"]["result"] == "MATCH" and cloud["cases"] == ["P1", "P3"]
+
+
+def test_without_a_ledger_a_verified_creation_counts_but_an_update_needs_a_passed_batch(tmp_path):
+    since = T("2026-11-16T10:00:00")
+    evidence = tmp_path / "evidence"
+    _receipt(evidence, "main-1", "exec", "exec-create.json", [
+        {"status": "CREATED_VERIFIED", "tableId": "T", "recordId": "R1", "stableKey": {"value": "P1"}}], run_id="r-c", status="PARTIAL")
+    _receipt(evidence, "fp-1", "exec", "exec-fp.json", [
+        {"status": "WRITTEN", "tableId": "T", "recordId": "U1", "stableKey": {"value": "P3"}, "writtenFields": ["a"]}], run_id="r-u", status="UNKNOWN")
+    cloud = nightly.cloud_stats(tmp_path, str(evidence), since=since)
+    assert cloud["createdRows"] == 1 and cloud["receiptOnlyUnconfirmed"] == 1 and cloud["updatedOperations"] == 0
+    assert [u["stableKey"] for u in cloud["unknown"]] == ["P3"]
