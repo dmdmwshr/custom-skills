@@ -59,10 +59,12 @@ def assert_read_only(argv):
         raise ExportError(f"命令含写入或登录动词，拒绝：{sorted(forbidden)}")
 
 
-def record_list_argv(lark_cli, profile, base_token, table_id, limit, offset, output):
+def record_list_argv(lark_cli, profile, base_token, table_id, limit, offset, output, fields=()):
     argv = [lark_cli, "--profile", profile, "base", "+record-list", "--as", "user",
             "--base-token", base_token, "--table-id", table_id,
             "--limit", str(limit), "--format", "ndjson", "--output", output]
+    for field in fields:  # projection: the roster is exported without names
+        argv += ["--field-id", field]
     if offset:
         argv += ["--offset", str(offset)]
     assert_read_only(argv)
@@ -108,14 +110,14 @@ def _count_lines(path):
         return sum(1 for line in stream if line.strip())
 
 
-def export_table(role, table_id, cfg, lark_cli, work, run, limit):
+def export_table(role, table_id, cfg, lark_cli, work, run, limit, fields=()):
     """Fetch every page of one table; returns (records_path, manifest_dict)."""
     pages, offset, last_rev = [], 0, None
     while True:
         if len(pages) >= MAX_PAGES:
             raise ExportError(f"{role} 超过 {MAX_PAGES} 页仍未取完，停止")
         name = f"{role}-p{len(pages) + 1:02d}.ndjson"
-        argv = record_list_argv(lark_cli, cfg["profile"], cfg["base_token"], table_id, limit, offset, f"./{name}")
+        argv = record_list_argv(lark_cli, cfg["profile"], cfg["base_token"], table_id, limit, offset, f"./{name}", fields)
         result = run(argv, work)
         for _ in range(RETRIES):  # a read-only page can be fetched again; transient network errors (EOF, timeout) are common
             if result.returncode == 0:
@@ -233,9 +235,12 @@ def run_export(year, month, out_dir, cfg, lark_cli=None, runner=None, contract_d
         for role in source.SNAPSHOT_FILES:
             _, table = export_table(role, cfg["tables"][role], cfg, lark, work, run, page_limit or cfg.get("page_limit", 2000))
             tables[role] = table
+        roster_cfg = cfg["tables"].get("staff_roster")
+        if roster_cfg:  # 执法监督人员名录：只取稳定ID、大队、有效期；姓名不进快照
+            _, tables["staff_roster"] = export_table("staff_roster", roster_cfg, cfg, lark, work, run, page_limit or cfg.get("page_limit", 2000), tuple(cfg["roster_fields"]))
         stage = work / "final"
         stage.mkdir()
-        for role in source.SNAPSHOT_FILES:
+        for role in list(source.SNAPSHOT_FILES) + (["staff_roster"] if roster_cfg else []):
             shutil.copy2(work / f"{role}.ndjson", stage / f"{role}.ndjson")
             shutil.copy2(work / f"{role}.manifest.json", stage / f"{role}.manifest.json")
         try:

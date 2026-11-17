@@ -159,16 +159,16 @@ def skeleton_path(template_dir, item):
     return workflow.bulletin_skeleton_dir(config=CONFIG, template_dir=template_dir) / item["skeleton"]
 
 
-def load_staff_counts(roster_path, year, blockers, warnings):
+def load_staff_counts(roster_path, year, blockers, warnings, month=None, snapshot_dir=None):
     """Headcounts for R02 column B from the annual enforcement-staff roster (actual names, not the label number).
 
     Roster problems are reported, never replaced with the work plan or an old template value.
     Returns (counts, summary); counts only holds brigades whose roster group is clean.
     """
     entry = CONFIG["data_sources"]["staff_roster"]
-    path = Path(roster_path) if roster_path else staff_roster.resolve_path(entry["path"], year)
+    path = Path(roster_path) if roster_path else Path(snapshot_dir or ".") / staff_roster.ROSTER_SNAPSHOT_FILE
     try:
-        roster = staff_roster.read_roster(path, entry.get("sheet", "Sheet1"), entry.get("group_label_pattern", staff_roster.DEFAULT_LABEL_PATTERN), BRIGADE_ORDER)
+        roster = staff_roster.load_roster(roster_path, snapshot_dir, year, month, entry, BRIGADE_ORDER)
     except staff_roster.RosterError as error:
         add_blocker(blockers, str(error), code="staff_roster_unreadable", path=path)
         return {}, {"source": str(path), "readable": False}
@@ -177,7 +177,7 @@ def load_staff_counts(roster_path, year, blockers, warnings):
     warnings.extend({"type": item["code"], **{k: v for k, v in item.items() if k != "code"}} for item in roster["warnings"])
     warnings.extend({"type": item["code"], **{k: v for k, v in item.items() if k != "code"}} for item in roster["info"])
     if not roster["stable_during_read"]:
-        add_blocker(blockers, "人员总表在读取过程中被修改，请重试", code="staff_roster_changed_during_read", path=path)
+        add_blocker(blockers, "人员名录来源在读取过程中被修改，请重试", code="staff_roster_changed_during_read", path=path)
     summary = {"source": str(path), "sha256": roster["sha256"], "sheet": roster["sheet"], "counts": roster["counts"],
                "outside_table": roster["outside_table"], "label_counts": {b: v["label_count"] for b, v in roster["groups"].items()}}
     return roster["counts"], summary
@@ -1118,7 +1118,7 @@ def run(args):
 
     # R02 column B headcounts are written only in pending mode; final-audit never needs the roster.
     staff_counts, staff_summary = (
-        load_staff_counts(getattr(args, "roster", None), args.year, blockers, warnings) if args.mode == "pending" else ({}, None)
+        load_staff_counts(getattr(args, "roster", None), args.year, blockers, warnings, args.month, None if case_data == UNCONFIGURED_CASE_DATA else case_data) if args.mode == "pending" else ({}, None)
     )
     month_overrides_loaded = None
     if getattr(args, "overrides", None):
@@ -1196,7 +1196,7 @@ def main():
         help="飞书统计快照目录；缺省依次读环境变量 XF_FEISHU_SNAPSHOT_DIR、本机配置文件，均无则提示未配置。也可指向历史 产品案卷数据.xlsx 作兼容查询。",
     )
     parser.add_argument("--template-dir", default=str(DEFAULT_TEMPLATE_DIR))
-    parser.add_argument("--roster", help="大队执法人员总表；缺省按 monthly_workflow.json 的 staff_roster 配置和年份推导。R02 B 列人数只来自它的姓名数。")
+    parser.add_argument("--roster", help="显式的旧版大队执法人员总表（xlsx）；缺省读 --case-data 快照里的执法监督人员名录（按本月 25 日有效人数）。R02 B 列人数只来自名录。")
     parser.add_argument("--overrides", help="本月显式覆盖文件（见 references/monthly/monthly_overrides.md），只更正成品文字，不改源表。")
     parser.add_argument("--score-dir", help="成绩月份巡查目录，用于预填根层科室月考核情况记录表的产品/联网核查行。")
     parser.add_argument("--score-year", type=int, help="成绩月份年份；默认与通报年份一致。")

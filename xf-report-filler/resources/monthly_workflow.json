@@ -15,14 +15,16 @@
       ]
     },
     "staff_roster": {
-      "path": "D:\\工作备份\\移动硬盘\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\2、产品监督\\2、{yy}年大队执法人员收集\\执法人员信息\\{year}大队执法人员总表.xlsx",
+      "source": "feishu_snapshot",
+      "snapshot_file": "staff_roster.ndjson",
+      "legacy_path": "D:\\工作备份\\移动硬盘\\1、工作\\9、知识库（物料，模板，依据文件，教学文件，名单清单）\\2、产品监督\\2、{yy}年大队执法人员收集\\执法人员信息\\{year}大队执法人员总表.xlsx",
       "sheet": "Sheet1",
       "group_label_pattern": "^(.+?大队)\\s*(\\d+)\\s*人$",
       "required_for": [
         "bulletin_root_pending",
         "bulletin_root_final_audit"
       ],
-      "note": "R02 B 列“（N人）”的唯一人数来源：每个大队分组下 B 列实际姓名数（标签数字只作核对，C 列“未上报”不是人数）。不再从工作计划或旧模板推导；缺失/重名/无法读取按缺口报告，不用旧值兜底。"
+      "note": "R02 B 列“（N人）”的唯一人数来源：飞书统计快照里的执法监督人员名录（staff_roster.ndjson，只含人员ID、大队、有效起日、有效止日，不含姓名），按统计月 25 日有效人数计。2026-11-17 起取代原人员总表 xlsx；legacy_path 只在 --roster 显式指定旧表时作兼容读取。缺失/重复ID/某队无有效人员按缺口报告，不用旧值兜底，水上大队名册待补不补 0。"
     },
     "case_data": {
       "path": "D:\\工作备份\\移动硬盘\\1、工作\\2、产品科技联网\\1、产品监督\\26年\\2、案卷信息采集\\产品案卷数据.xlsx",
@@ -57,8 +59,10 @@
           "cases": "tbl30eWyoeTZqxmU",
           "checks": "tbl6cARXeBhjWunC",
           "products": "tbl6jr76MIVK1xXi",
-          "monthly": "tblrl7HCLDLAnlUi"
+          "monthly": "tblrl7HCLDLAnlUi",
+          "staff_roster": "tblQHJeuJ0TGnISy"
         },
+        "roster_fields": ["人员ID", "大队", "有效起日", "有效止日"],
         "contract_dir": "D:\\工作备份\\移动硬盘\\1、工作\\2、产品科技联网\\1、产品监督\\案卷汇总\\运行记录\\字段合同",
         "contract_glob": "字段合同-*.json",
         "page_limit": 2000,

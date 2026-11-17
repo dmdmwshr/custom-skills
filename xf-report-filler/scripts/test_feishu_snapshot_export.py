@@ -16,13 +16,15 @@ from test_feishu_case_source import Builder, standard
 
 CFG = {"profile": "p", "base_token": "BASE", "page_limit": 2000,
        "tables": {"cases": "tblC", "checks": "tblK", "products": "tblP", "monthly": "tblM"}}
+ROSTER_CFG = {**CFG, "tables": {**CFG["tables"], "staff_roster": "tblR"}, "roster_fields": ["人员ID", "大队", "有效起日", "有效止日"]}
+ROSTER_ROWS = [{"人员ID": f"RY-{i}", "大队": ["梁溪大队"], "有效起日": "2026-01-01T00:00:00.000+08:00", "有效止日": "2026-12-31T00:00:00.000+08:00"} for i in range(3)]
 
 
 class FakeCli:
     """Stands in for lark-cli: serves the rows of a Builder snapshot page by page and records every argv."""
 
     def __init__(self, builder, break_rev=False, bad_next_offset=False):
-        self.rows = {"tblC": builder.cases, "tblK": builder.checks, "tblP": builder.products, "tblM": builder.monthly}
+        self.rows = {"tblC": builder.cases, "tblK": builder.checks, "tblP": builder.products, "tblM": builder.monthly, "tblR": ROSTER_ROWS}
         self.calls, self.break_rev, self.bad_next_offset = [], break_rev, bad_next_offset
 
     def __call__(self, argv, cwd):
@@ -70,6 +72,18 @@ class ExportTests(unittest.TestCase):
         loaded = source.load_snapshot(self.base / "paged")
         self.assertTrue(loaded["provenance"]["declared"])
         self.assertEqual(loaded["provenance"]["windowStatus"], "before_window_end")
+
+    def test_the_roster_is_exported_with_projected_fields_only_and_stays_beside_the_four_tables(self):
+        cli = FakeCli(self.builder)
+        result = export.run_export(2026, 1, self.base / "with-roster", ROSTER_CFG, "lark-cli", runner=cli, contract_dir=self.base / "no-contract", today=date(2026, 1, 20))
+        roster_calls = [c for c in cli.calls if "tblR" in c]
+        self.assertTrue(roster_calls)
+        for call in roster_calls:
+            self.assertEqual([call[i + 1] for i, a in enumerate(call) if a == "--field-id"], ROSTER_CFG["roster_fields"])
+        self.assertTrue(all("--field-id" not in c for c in cli.calls if "tblR" not in c))
+        self.assertEqual(result["info"]["tables"]["staff_roster"]["records"], 3)
+        self.assertEqual(len((self.base / "with-roster" / "staff_roster.ndjson").read_text(encoding="utf-8").splitlines()), 3)
+        source.load_snapshot(self.base / "with-roster")
 
     def test_after_window_end_is_stated_but_final_confirmation_stays_false(self):
         result = self.run_export(FakeCli(self.builder), today=date(2026, 1, 26))

@@ -26,6 +26,7 @@ from pathlib import Path
 import feishu_case_source as source
 import host_paths
 import monthly_workflow as workflow
+import staff_roster
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 SCRIPTS = Path(__file__).resolve().parent
@@ -90,14 +91,15 @@ def locate(year, month, args):
     bulletin_dir = Path(args.bulletin_dir) if getattr(args, "bulletin_dir", None) else host_path(run_cfg["bulletin_root"], year) / run_cfg["bulletin_dir_pattern"].format(yy=str(year)[-2:], month=month, year=year)
     score_dir = bulletin_dir / workflow.score_dir_name(score_month, config)
     snapshot = Path(args.snapshot) if getattr(args, "snapshot", None) else workflow.case_source_path(config)
-    roster = Path(args.roster) if getattr(args, "roster", None) else host_path(config["data_sources"]["staff_roster"]["path"], year)
+    explicit_roster = Path(args.roster) if getattr(args, "roster", None) else None   # 旧版 xlsx 只在显式指定时使用；默认人数源是快照里的名录
+    roster = explicit_roster or (Path(snapshot) / staff_roster.ROSTER_SNAPSHOT_FILE if snapshot else Path("(未配置飞书统计快照)") / staff_roster.ROSTER_SNAPSHOT_FILE)
     if getattr(args, "overrides", None):
         overrides = Path(args.overrides)
     else:
         found = host_path(run_cfg["overrides_dir"], year) / run_cfg["overrides_pattern"].format(year=year, month=month)
         overrides = found if found.is_file() else None
     return {"config": config, "bulletin_dir": bulletin_dir, "score_dir": score_dir, "score_year": score_year,
-            "score_month": score_month, "snapshot": snapshot, "roster": roster, "overrides": overrides}
+            "score_month": score_month, "snapshot": snapshot, "roster": roster, "explicit_roster": explicit_roster, "overrides": overrides}
 
 
 def read_info(snapshot):
@@ -126,9 +128,9 @@ def plan(year, month, args, today=None):
 
     check("通报月份目录", where["bulletin_dir"])
     check("成绩月份巡查目录", where["score_dir"])
-    roster_ok = check("大队执法人员总表", where["roster"])
     snapshot_ok = bool(where["snapshot"]) and Path(where["snapshot"]).is_dir()
     checks.append({"name": "飞书统计快照", "path": str(where["snapshot"]) if where["snapshot"] else None, "status": "ok" if snapshot_ok else "missing"})
+    roster_ok = check("大队执法人员名录（旧版人员总表）" if where["explicit_roster"] else "大队执法人员名录（快照内）", where["roster"]) if snapshot_ok or where["explicit_roster"] else False
     if not snapshot_ok:
         blockers.append({"code": "snapshot_missing", "message": "没有飞书统计快照：按 next 里的 snapshot 命令导出（WSL 直接运行，Windows 经 wsl.exe），或用 --snapshot 指向已导出目录；根层两表和 R02 核对依赖它，成绩月份材料生成不依赖它。"})
     info = read_info(where["snapshot"]) if snapshot_ok else None
@@ -167,7 +169,7 @@ def plan(year, month, args, today=None):
     planned_snapshot = task_dir / f"snapshot-{today:%Y%m%d}"
     chosen = planned_snapshot if needs_export else where["snapshot"]
     # Every later step carries the context chosen for this run, so the printed commands can be pasted as they are.
-    context = ["--bulletin-dir", str(where["bulletin_dir"]), "--snapshot", str(chosen), "--roster", str(where["roster"])]
+    context = ["--bulletin-dir", str(where["bulletin_dir"]), "--snapshot", str(chosen)] + (["--roster", str(where["explicit_roster"])] if where["explicit_roster"] else [])
     if where["overrides"]:
         context += ["--overrides", str(where["overrides"])]
     qa_dir = task_dir / "qa"
@@ -212,7 +214,7 @@ def plan(year, month, args, today=None):
         "finalBlockers": final_blockers, "platform": "windows" if os.name == "nt" else "wsl/linux",
         "interactiveOfficeSession": interactive_session(),
         "paths": {"bulletin_dir": str(where["bulletin_dir"]), "score_dir": str(where["score_dir"]), "snapshot": str(where["snapshot"]) if where["snapshot"] else None, "snapshotForNextSteps": str(chosen), "qa_dir": str(qa_dir),
-                  "roster": str(where["roster"]), "overrides": str(where["overrides"]) if where["overrides"] else None},
+                  "roster": str(where["roster"]), "roster_source": "explicit_xlsx" if where["explicit_roster"] else "feishu_snapshot", "overrides": str(where["overrides"]) if where["overrides"] else None},
         "checks": checks, "snapshot": info, "blockers": blockers, "warnings": warnings, "next": nxt, "ok": not blockers,
     }
 
@@ -237,7 +239,9 @@ def stage_command(stage, year, month, args, apply):
     else:
         cmd = [py, "-B", str(script), "--bulletin-dir", str(where["bulletin_dir"]), "--year", str(year), "--month", str(month),
                "--score-dir", str(where["score_dir"]), "--score-year", str(score_year), "--score-month", str(score_month),
-               "--mode", args.mode, "--roster", str(where["roster"]), "--apply" if apply else "--dry-run"]
+               "--mode", args.mode, "--apply" if apply else "--dry-run"]
+        if where["explicit_roster"]:
+            cmd += ["--roster", str(where["explicit_roster"])]
         if where["snapshot"]:
             cmd += ["--case-data", str(where["snapshot"])]
         if where["overrides"]:
@@ -288,10 +292,12 @@ def common_sources(year, month, args):
     if network is not None:
         found += sorted(Path(network).glob("联网监测统计表.xls"))
     sources = [p for p in found]
-    if where["roster"].is_file():
-        sources.append(where["roster"])
+    if where["explicit_roster"] and where["explicit_roster"].is_file():
+        sources.append(where["explicit_roster"])
     if where["snapshot"] and Path(where["snapshot"]).is_dir():
         sources += [Path(where["snapshot"]) / name for name in list(source.SNAPSHOT_FILES.values())]
+        if (Path(where["snapshot"]) / staff_roster.ROSTER_SNAPSHOT_FILE).is_file():
+            sources.append(Path(where["snapshot"]) / staff_roster.ROSTER_SNAPSHOT_FILE)
     return sources
 
 
@@ -403,7 +409,7 @@ def main():
         p.add_argument("--month", type=int, required=True, help="通报月份（成绩月份为上一个月）")
         p.add_argument("--bulletin-dir", help="通报月份目录；缺省按配置推导")
         p.add_argument("--snapshot", help="飞书统计快照目录；缺省读环境变量/本机配置")
-        p.add_argument("--roster", help="大队执法人员总表")
+        p.add_argument("--roster", help="旧版大队执法人员总表（xlsx，显式指定才用）；缺省读快照里的执法监督人员名录")
         p.add_argument("--overrides", help="本月覆盖文件；缺省自动发现执行记录/覆盖/YYYYMM.overrides.json")
 
     p_plan = sub.add_parser("plan", help="只读：判定模式、检查输入、打印下一步")

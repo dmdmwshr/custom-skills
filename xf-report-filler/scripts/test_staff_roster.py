@@ -1,6 +1,8 @@
+import json
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -131,6 +133,62 @@ class RosterTests(unittest.TestCase):
                                              "惠山大队": 11, "滨湖大队": 8, "新吴大队": 7, "经开大队": 6})
         self.assertEqual(sum(result["counts"].values()), 75)
         self.assertEqual(result["outside_table"], {"轨道交通大队": 5})
+
+
+class FeishuSnapshotRosterTests(unittest.TestCase):
+    def snapshot(self, rows, manifest_records=None):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / roster.ROSTER_SNAPSHOT_FILE).write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+        (root / roster.ROSTER_SNAPSHOT_MANIFEST).write_text(json.dumps({"records_count": len(rows) if manifest_records is None else manifest_records, "has_more": False}), encoding="utf-8")
+        return root
+
+    @staticmethod
+    def person(number, brigade, start="2026-01-01", end="2026-12-31"):
+        return {"人员ID": f"RY-{brigade[:2]}-{number:03d}", "大队": [brigade], "有效起日": f"{start}T00:00:00.000+08:00", "有效止日": f"{end}T00:00:00.000+08:00" if end else None}
+
+    def full(self):
+        return [self.person(i, b) for b in BRIGADES for i in range(1, 3)]
+
+    def test_people_valid_on_the_25th_are_counted_per_brigade_and_names_are_not_part_of_the_snapshot(self):
+        root = self.snapshot(self.full() + [self.person(9, "轨道交通大队")])
+        result = roster.read_feishu_roster(root, date(2026, 5, 25))
+        self.assertEqual(result["counts"], {b: 2 for b in BRIGADES})
+        self.assertEqual(result["outside_table"], {"轨道交通大队": 1})
+        self.assertEqual(result["blockers"], [])
+        self.assertNotIn("姓名", json.dumps(result, ensure_ascii=False))
+        self.assertTrue(result["stable_during_read"])
+
+    def test_validity_edges_inclusive_and_open_ended(self):
+        rows = self.full() + [self.person(5, "梁溪大队", start="2026-06-01", end="2026-06-25"), self.person(6, "梁溪大队", start="2026-06-26", end=None)]
+        self.assertEqual(roster.read_feishu_roster(self.snapshot(rows), date(2026, 6, 25))["counts"]["梁溪大队"], 3)
+        self.assertEqual(roster.read_feishu_roster(self.snapshot(rows), date(2026, 6, 26))["counts"]["梁溪大队"], 3)
+        self.assertEqual(roster.read_feishu_roster(self.snapshot(rows), date(2026, 5, 25))["counts"]["梁溪大队"], 2)
+
+    def test_a_brigade_without_valid_people_is_a_blocker_and_not_zero(self):
+        rows = [r for r in self.full() if r["大队"] != ["江阴大队"]]
+        result = roster.read_feishu_roster(self.snapshot(rows), date(2026, 5, 25))
+        self.assertNotIn("江阴大队", result["counts"])
+        self.assertEqual([b["brigade"] for b in result["blockers"]], ["江阴大队"])
+        late = roster.read_feishu_roster(self.snapshot(self.full()), date(2027, 1, 25))
+        self.assertEqual(len(late["blockers"]), len(BRIGADES))
+
+    def test_duplicate_or_blank_ids_and_a_short_export_block(self):
+        rows = self.full()
+        rows[1] = dict(rows[0])
+        self.assertIn("staff_roster_duplicate_ids", [b["code"] for b in roster.read_feishu_roster(self.snapshot(rows), date(2026, 5, 25))["blockers"]])
+        with self.assertRaises(roster.RosterError):
+            roster.read_feishu_roster(self.snapshot(self.full(), manifest_records=99), date(2026, 5, 25))
+        with self.assertRaises(roster.RosterError):
+            roster.read_feishu_roster(Path(tempfile.gettempdir()) / "no-such-snapshot-dir", date(2026, 5, 25))
+
+    def test_load_roster_uses_the_snapshot_on_the_25th_of_the_bulletin_month_unless_a_file_is_given(self):
+        root = self.snapshot(self.full())
+        entry = {"sheet": "Sheet1"}
+        self.assertEqual(roster.load_roster(None, root, 2026, 7, entry)["as_of"], "2026-07-25")
+        with self.assertRaises(roster.RosterError):
+            roster.load_roster(None, None, 2026, 7, entry)
 
 
 if __name__ == "__main__":

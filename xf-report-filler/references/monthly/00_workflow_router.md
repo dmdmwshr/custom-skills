@@ -20,7 +20,7 @@
 
 - `monthly_workflow_audit.py`：目录模型、模板策略、统一校验。
 - `monthly_file_organizer.py`：目录模型、模板策略。
-- `monthly_bulletin_root.py`：R01-R02、工作计划、大队执法人员总表（`staff_roster.py`）、飞书统计快照（`feishu_case_source.py`）、联网源表。
+- `monthly_bulletin_root.py`：R01-R02、工作计划、飞书执法监督人员名录（`staff_roster.py`，随快照导出）、飞书统计快照（`feishu_case_source.py`）、联网源表。
 - `monthly_run.py`（统一入口 plan/run/qa）与 `feishu_snapshot_export.py`（只读导出四表）：`runbook.md`、`source_feishu_case_snapshot.md`。
 - `overrides.py`（本月显式覆盖）：`monthly_overrides.md`。
 - `monthly_grade_register.py`：产品底册、联网源表、G01-G06。

@@ -123,9 +123,10 @@ def staff_roster_consistency(args, config, template_result, bulletin_dir):
     roster, so a difference there is not an error of that month.
     """
     entry = config["data_sources"]["staff_roster"]
-    roster_path = Path(args.roster) if getattr(args, "roster", None) else staff_roster.resolve_path(entry["path"], args.bulletin_year)
+    snapshot_dir = getattr(args, "case_data", None) or workflow.case_source_path(config)
+    roster_path = Path(args.roster) if getattr(args, "roster", None) else Path(snapshot_dir or ".") / staff_roster.ROSTER_SNAPSHOT_FILE
     try:
-        roster = staff_roster.read_roster(roster_path, entry.get("sheet", "Sheet1"), entry.get("group_label_pattern", staff_roster.DEFAULT_LABEL_PATTERN))
+        roster = staff_roster.load_roster(getattr(args, "roster", None), snapshot_dir, args.bulletin_year, args.bulletin_month, entry)
     except staff_roster.RosterError as error:
         return {"ok": False, "error": str(error)}, [{"code": "staff_roster_unreadable", "message": str(error), "path": str(roster_path)}], []
     blockers = [{"code": item["code"], "message": item["message"], "brigade": item.get("brigade")} for item in roster["blockers"]]
