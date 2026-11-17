@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from pypdf import PdfReader, PdfWriter
 
 if __package__:
-    from . import image_pdf, initial_scope, ledger_views, normalized_sources, office_normalized
+    from . import image_pdf, initial_scope, ledger_views, normalized_sources, office_normalized, recheck_rounds
     from .ocr_runtime import OcrError, adopt_existing_results, run_ocr
     from .workflow_reporting import ReportingError, record_timing, render_report, write_report
 else:
@@ -27,6 +27,7 @@ else:
     import ledger_views
     import normalized_sources
     import office_normalized
+    import recheck_rounds
     from ocr_runtime import OcrError, adopt_existing_results, run_ocr
     from workflow_reporting import ReportingError, record_timing, render_report, write_report
 
@@ -848,6 +849,7 @@ def validate_manifest(
             "case",
             "initialInspection",
             "recheckInspection",
+            "laterRecheckInspections",
             "files",
             "documentSlots",
             "otherAttachments",
@@ -922,7 +924,13 @@ def validate_manifest(
     products: dict[str, tuple[str, dict[str, Any]]] = {}
 
     def inspect(value: Any, stage: str, label: str) -> None:
-        item = only_keys(value, {"clientRef", "stage", "inspectionDate", "products"}, label, errors)
+        item = only_keys(
+            value,
+            {"clientRef", "stage", "inspectionDate", "products"}
+            | ({"round"} if label.startswith("laterRecheckInspections") else set()),
+            label,
+            errors,
+        )
         item_ref = item.get("clientRef")
         if not ref(item_ref) or item_ref in inspections:
             errors.append(f"{label}.clientRef 重复或不合法")
@@ -1036,6 +1044,9 @@ def validate_manifest(
     inspect(root.get("initialInspection"), "INITIAL_CHECK", "initialInspection")
     if "recheckInspection" in root:
         inspect(root["recheckInspection"], "RECHECK", "recheckInspection")
+    errors.extend(recheck_rounds.check(root))
+    for index, later in enumerate(root.get("laterRecheckInspections") or []):
+        inspect(later, "RECHECK", f"laterRecheckInspections[{index}]")
     for product_ref, (product_stage, product) in products.items():
         target = product.get("initialProductRef")
         if target is None:
@@ -2784,6 +2795,9 @@ def build_parser() -> argparse.ArgumentParser:
     period.add_argument("--execute", action="store_true", help="按计划写入；省略只出计划")
     period.add_argument("--stamp", action="store_true", help="对账一致后登记结期行的回算更新时间（需先通过 feishu-recount）")
     period.add_argument("--first-month", default="2026-01", help="最早统计月，缺省 2026-01")
+    period.add_argument("--reconcile", action="store_true", help="对账一个未决写入意图并在满足严格条件时解封（需 --intent-id）；不创建、不更新任何行")
+    period.add_argument("--intent-id", help="--reconcile 的精确意图（月度统计账里的 intentId，旧事件用 feishu-period 报告里的 legacy-… 编号）")
+    period.add_argument("--min-quiet-seconds", type=int, default=3600, help="--reconcile 的静默期，不得少于 3600")
     period.add_argument("--out", help="把完整结果写到该文件")
     period.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     period.set_defaults(func=feishu_period_command)
@@ -3248,6 +3262,21 @@ def feishu_period_command(args: argparse.Namespace) -> None:
     if contract["baseId"] != args.base_token:
         raise RegistryError("月度统计行已拒绝：目标 Base 与合同不一致")
     today = date.fromisoformat(args.date) if args.date else module.today_shanghai()
+    if args.reconcile:
+        if not args.intent_id or args.execute or args.stamp:
+            raise RegistryError("月度统计行已拒绝：--reconcile 只与 --intent-id 同用，不与 --execute/--stamp 同用")
+        try:
+            report = _feishu_read(args, "月度统计行对账", lambda sync_, transport: module.reconcile(
+                contract=contract, base=args.base_token, transport=transport, business_root=Path(args.business_root), intent_id=args.intent_id,
+                now=datetime.now(module.SHANGHAI), min_quiet_seconds=args.min_quiet_seconds))
+        except module.PeriodError as error:
+            raise RegistryError(f"月度统计行对账已拒绝：{error}") from error
+        if args.out:
+            Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=1, default=str) + "\n", encoding="utf-8")
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        if report.get("status") not in ("NOT_APPLIED_PROVEN", "APPLIED_PROVEN", "READBACK_OK", "ALREADY_RECONCILED", "NOT_BLOCKED"):
+            raise SystemExit(4)
+        return
     try:
         report = _feishu_read(args, "月度统计行", lambda sync_, transport: module.run(
             contract=contract, base=args.base_token, transport=transport, business_root=Path(args.business_root), today=today,

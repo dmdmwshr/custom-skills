@@ -19,11 +19,12 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from . import local_validity
+    from . import local_validity, recheck_rounds
     from . import source_intake as source
     from . import workspace_state as ws
 else:
     import local_validity
+    import recheck_rounds
     import source_intake as source
     import workspace_state as ws
 
@@ -304,13 +305,14 @@ def summarize_changes(parent_manifest: dict[str, Any], manifest: dict[str, Any])
 
     def index(value: dict[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {}
-        for section in ("initialInspection", "recheckInspection"):
-            inspection = value.get(section)
+        sections = [("initialInspection", value.get("initialInspection"))]
+        sections += [(path, block) for _round, path, block in recheck_rounds.rounds(value)]   # 第 1 轮 recheckInspection 与后续轮
+        for section, inspection in sections:
             if inspection is not None:  # own fields (date, stage, ref), not only products
                 result[f"inspection:{section}"] = {
                     k: v for k, v in inspection.items() if k != "products"
                 }
-            for product in (value.get(section) or {}).get("products") or []:
+            for product in (inspection or {}).get("products") or []:
                 result[f"product:{section}:{product.get('clientRef')}"] = product
         for slot in value.get("documentSlots") or []:
             owner = (

@@ -20,9 +20,11 @@ Standard library only.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -107,17 +109,21 @@ def year_key(year: int, brigade: str) -> str:
     return f"{year}年度|{brigade}"
 
 
-def staff_date_for_year(year: int, today: date) -> date:
-    """The day whose roster counts for a year row: the 25th of the latest statistics month of that year that has started."""
+def staff_date_for_year(year: int, today: date, generated: Any = ()) -> date:
+    """The day whose roster counts for a year row: the 25th of the latest statistics month of that year that has been generated.
+
+    A month counts as generated when its row already exists (``generated``) or when it has started (``today``); the later of
+    the two decides, so a December row that already exists fixes the year at 25 December even in November."""
+    months = [m for m in generated if isinstance(m, str) and m.startswith(f"{year}-") and _MONTH.match(m)]
     current = stat_month(today)
     last_month = f"{year}-12"
-    chosen = min(current, last_month)
+    chosen = max([min(current, last_month), *months])
     if chosen < f"{year}-01":
         chosen = f"{year}-01"
     return month_bounds(chosen)[1]
 
 
-def desired_rows(today: date, first_month: str = FIRST_MONTH) -> list[dict[str, Any]]:
+def desired_rows(today: date, first_month: str = FIRST_MONTH, generated: Any = ()) -> list[dict[str, Any]]:
     """Every row that must exist on ``today``: nine brigades for each month from ``first_month`` to the current statistics
     month, and nine brigades plus the city for each statistics year that has started."""
     current = stat_month(today)
@@ -130,7 +136,7 @@ def desired_rows(today: date, first_month: str = FIRST_MONTH) -> list[dict[str, 
         start, end = year_bounds(year)
         for brigade in (*BRIGADES, CITY):
             rows.append({"key": year_key(year, brigade), "月份": f"{year}年度", "大队": brigade, "层级": LEVEL_YEAR, "起": start, "止": end,
-                         "人数截止日": staff_date_for_year(year, today)})
+                         "人数截止日": staff_date_for_year(year, today, generated)})
     return rows
 
 
@@ -186,9 +192,13 @@ def classify(row: dict[str, Any]) -> tuple[str, Any]:
 # ---------------------------------------------------------------------------------------------
 
 
-def plan(rows: dict[str, dict[str, Any]], today: date, now: datetime, first_month: str = FIRST_MONTH) -> dict[str, Any]:
-    """``rows``: record id -> {field name: raw cell} for ``PERIOD_FIELDS``. Pure."""
-    wanted = {item["key"]: item for item in desired_rows(today, first_month)}
+def plan(rows: dict[str, dict[str, Any]], today: date, now: datetime, first_month: str = FIRST_MONTH,
+         blocked: dict[str, list[dict[str, Any]]] | None = None) -> dict[str, Any]:
+    """``rows``: record id -> {field name: raw cell} for ``PERIOD_FIELDS``; ``blocked``: key -> open ledger reasons. Pure.
+
+    A key with an open ledger block, duplicate rows or a field that disagrees is left out of the writes; every other key proceeds."""
+    existing_months = {parsed[1] for kind, parsed in (classify(row) for row in rows.values()) if kind == "month"}
+    wanted = {item["key"]: item for item in desired_rows(today, first_month, existing_months)}
     present: dict[str, list[str]] = {}
     legacy: list[dict[str, Any]] = []
     unrecognized: list[dict[str, Any]] = []
@@ -202,7 +212,7 @@ def plan(rows: dict[str, dict[str, Any]], today: date, now: datetime, first_mont
         elif kind == "year":
             key, year, brigade = parsed
             start, end = year_bounds(year)
-            meta[key] = {"月份": f"{year}年度", "大队": brigade, "层级": LEVEL_YEAR, "起": start, "止": end, "人数截止日": staff_date_for_year(year, today)}
+            meta[key] = {"月份": f"{year}年度", "大队": brigade, "层级": LEVEL_YEAR, "起": start, "止": end, "人数截止日": staff_date_for_year(year, today, existing_months)}
         elif kind == "history":
             legacy.append({"recordId": record_id, "key": parsed, "现层级": one(row.get("统计层级"))})
             continue
@@ -249,10 +259,15 @@ def plan(rows: dict[str, dict[str, Any]], today: date, now: datetime, first_mont
     for item in legacy:
         if item["现层级"] in (None, ""):
             updates.append({"recordId": item["recordId"], "key": item["key"], "fields": {"统计层级": LEVEL_HISTORY}, "old": {"统计层级": None}})
+    blocked = blocked or {}
+    held = [{"key": key, "reasons": reasons} for key, reasons in sorted(blocked.items())]
+    held_keys = set(blocked) | {c["key"] for c in conflicts}
+    creates = [c for c in creates if c["key"] not in held_keys]
+    updates = [u for u in updates if u["key"] not in held_keys]
     return {"schema": SCHEMA, "today": today.isoformat(), "currentStatMonth": stat_month(today), "creates": creates, "updates": updates, "conflicts": conflicts,
-            "duplicates": duplicates, "legacy": [i["key"] for i in legacy], "unrecognized": unrecognized,
-            "counts": {"existing": len(rows), "creates": len(creates), "updates": len(updates), "conflicts": len(conflicts), "duplicates": len(duplicates)},
-            "status": "OK" if not (conflicts or duplicates or unrecognized) else "ATTENTION"}
+            "duplicates": duplicates, "legacy": [i["key"] for i in legacy], "unrecognized": unrecognized, "blocked": held,
+            "counts": {"existing": len(rows), "creates": len(creates), "updates": len(updates), "conflicts": len(conflicts), "duplicates": len(duplicates), "blocked": len(held)},
+            "status": "OK" if not (conflicts or duplicates or unrecognized or held) else "ATTENTION"}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -277,59 +292,222 @@ def _create_fields(item: dict[str, Any], now: datetime, today: date) -> dict[str
     return fields
 
 
-class _Ledger:
-    def __init__(self, directory: Path, day: str):
-        self.path = Path(directory) / f"{day}.jsonl"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+# ---------------------------------------------------------------------------------------------
+# Ledger: one append-only JSONL file per day; the state is read from every file on every run
+# ---------------------------------------------------------------------------------------------
 
-    def add(self, event: dict[str, Any]) -> None:
-        with self.path.open("a", encoding="utf-8") as stream:
+RECONCILED_OK = ("NOT_APPLIED_PROVEN", "APPLIED_PROVEN", "READBACK_OK")
+MIN_QUIET_SECONDS = 3600
+CREATE_WINDOW_BEFORE, CREATE_WINDOW_AFTER = 5, 120
+MAX_UNKNOWN_PER_RUN = 3
+
+
+def _canonical(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _stamp(moment: datetime) -> str:
+    return moment.astimezone(SHANGHAI).isoformat(timespec="seconds")
+
+
+def _epoch(text: str) -> float:
+    return datetime.fromisoformat(text).timestamp()
+
+
+class Ledger:
+    """Append-only intent / terminal / reconciliation events for period writes.
+
+    Events: ``intent`` (op create|update, key, fields, old, intentId), ``result`` (recordId), ``unknown`` (error), ``readback``
+    (written, problems), ``reconciled`` (intentId, status, evidence). Events written before intent ids existed (the first a31 run)
+    are read as they are: an id is derived from the line, and a terminal belongs to the last open intent of the same op and key in
+    the same file. Nothing is ever rewritten or removed; a block is lifted only by appending a ``reconciled`` event."""
+
+    def __init__(self, directory: Path, clock: Any = None):
+        self.directory = Path(directory)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.clock = clock or (lambda: datetime.now(SHANGHAI))
+
+    def add(self, event: dict[str, Any]) -> dict[str, Any]:
+        moment = self.clock()
+        event = {"at": _stamp(moment), **event}
+        path = self.directory / f"{moment.astimezone(SHANGHAI).date().isoformat()}.jsonl"
+        with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
+        return event
+
+    def state(self) -> dict[str, Any]:
+        intents: dict[str, dict[str, Any]] = {}
+        corrupt: list[str] = []
+        for path in sorted(self.directory.glob("*.jsonl")):
+            open_by_target: dict[tuple[Any, Any], str] = {}
+            last_result: dict[Any, str] = {}
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                    kind = event["event"]
+                except (ValueError, KeyError, TypeError):
+                    corrupt.append(f"{path.name}:{number}")
+                    continue
+                if kind == "intent":
+                    iid = event.get("intentId") or "legacy-" + hashlib.sha256(f"{path.name}:{number}:{_canonical(event)}".encode()).hexdigest()[:16]
+                    intents[iid] = {"intentId": iid, "op": event.get("op"), "key": event.get("key"), "recordId": event.get("recordId"), "fields": event.get("fields") or {},
+                                    "old": event.get("old") or {}, "intentAt": event.get("at"), "status": "PENDING", "terminalAt": None, "resultRecordId": None,
+                                    "error": None, "reconciled": None, "readbackProblem": None, "file": path.name, "line": number}
+                    open_by_target[(event.get("op"), event.get("key"))] = iid
+                elif kind in ("result", "unknown"):
+                    iid = event.get("intentId") or open_by_target.get((event.get("op"), event.get("key")))
+                    item = intents.get(iid or "")
+                    if item is not None and item["status"] == "PENDING":
+                        item.update(status="RESULT" if kind == "result" else "UNKNOWN", terminalAt=event.get("at"), resultRecordId=event.get("recordId"), error=event.get("error"))
+                        last_result[item["key"]] = item["intentId"]
+                elif kind == "reconciled":
+                    item = intents.get(event.get("intentId") or "")
+                    if item is not None:
+                        item["reconciled"] = event
+                elif kind == "readback":
+                    for problem in event.get("problems") or []:
+                        iid = problem.get("intentId") or last_result.get(problem.get("key"))
+                        if iid in intents:
+                            intents[iid]["readbackProblem"] = problem
+        return {"intents": intents, "corrupt": corrupt}
+
+    def blocked(self, state: dict[str, Any] | None = None) -> dict[str, list[dict[str, Any]]]:
+        """key -> open reasons. A key stays blocked until every one of its open intents has a ``reconciled`` event."""
+        state = state or self.state()
+        out: dict[str, list[dict[str, Any]]] = {}
+        for item in state["intents"].values():
+            reconciled = item["reconciled"]
+            if reconciled and reconciled.get("status") in RECONCILED_OK:
+                continue
+            kind = None
+            if item["status"] == "PENDING":
+                kind = "PENDING"
+            elif item["status"] == "UNKNOWN":
+                kind = "UNKNOWN"
+            elif item["status"] == "RESULT" and item["op"] == "create" and not item["resultRecordId"]:
+                kind = "MISSING_RECORD_ID"
+            elif item["status"] == "RESULT" and item["readbackProblem"]:
+                kind = "READBACK_PROBLEM"
+            if kind:
+                out.setdefault(item["key"], []).append({"intentId": item["intentId"], "op": item["op"], "kind": kind, "since": item["terminalAt"] or item["intentAt"],
+                                                        "detail": (item["error"] or item["readbackProblem"] or "")})
+        return out
 
 
-def apply(planned: dict[str, Any], *, transport: Any, base: str, table_id: str, field_ids: dict[str, str], ledger_dir: Path, now: datetime, today: date) -> dict[str, Any]:
-    """Write the creates and updates of ``planned``. Intent line first, result line after; read-back at the end.
+def _named(raw: dict[str, dict[str, Any]], field_ids: dict[str, str]) -> dict[str, dict[str, Any]]:
+    return {rid: {n: row.get(field_ids[n]) for n in PERIOD_FIELDS} for rid, row in raw.items()}
 
-    Stops at the first write whose outcome is unknown: nothing after it is attempted and nothing is repeated; the next run reads the
-    key first and decides from what is there."""
-    if planned["conflicts"] or planned["duplicates"] or planned["unrecognized"]:
-        raise PeriodError("计划里有冲突、重复键或不认识的行，先核对，不写")
+
+def _key_of(row: dict[str, Any]) -> str | None:
+    kind, parsed = classify(row)
+    if kind in ("month", "year"):
+        return parsed[0]
+    return parsed if kind == "history" and isinstance(parsed, str) else None
+
+
+def _receipt_record_id(body: Any) -> str | None:
+    record = (((body or {}).get("data") or {}).get("record") or {}) if isinstance(body, dict) else {}
+    rid = record.get("record_id") if isinstance(record, dict) else None
+    return rid if isinstance(rid, str) and rid.startswith("rec") else None
+
+
+def _cell_value(name: str, cell: Any) -> Any:
+    """A cell in the form it is compared in: dates as ``YYYY-MM-DD``, time stamps as ``YYYY-MM-DD HH:MM:SS`` (the read-back carries an
+    ISO string with milliseconds and an offset), everything else as the single value."""
+    if name in ("统计起日", "统计止日", "人数截止日"):
+        return day_of(cell)
+    value = one(cell)
+    if name in ("结期时间", "回算更新时间") and isinstance(value, str):
+        return value.replace("T", " ")[:19]
+    return None if value == "" else value
+
+
+def apply(planned: dict[str, Any], *, transport: Any, base: str, table_id: str, field_ids: dict[str, str], ledger: Ledger, now: datetime, today: date,
+          run_id: str | None = None) -> dict[str, Any]:
+    """Write the creates and updates of ``planned`` (blocked, duplicate and conflicting keys were already left out by ``plan``).
+
+    Before every write the live state is read again: a create happens only while the key still has no row and no open ledger
+    block, an update only while the row still holds exactly the planned old values. An intent line comes first; a write whose
+    outcome is unknown (transport failure, receipt without record id) is recorded as UNKNOWN and its key stays blocked on every later
+    run until a ``reconciled`` event proves what happened; unrelated keys carry on (at most ``MAX_UNKNOWN_PER_RUN`` unknowns per run).
+    A read-back problem is stored as a ledger event as well and blocks its key the same way."""
     missing = [n for n in PERIOD_FIELDS if n not in field_ids]
     if missing:
         raise PeriodError(f"合同里月度表缺少字段：{'、'.join(missing)}")
-    ledger = _Ledger(ledger_dir, now.astimezone(SHANGHAI).date().isoformat())
+    run_id = run_id or uuid.uuid4().hex
+    operator = {"pid": os.getpid(), "runId": run_id}
     written: list[dict[str, Any]] = []
-    stamp = now.astimezone(SHANGHAI).isoformat(timespec="seconds")
+    skipped: list[dict[str, Any]] = []
+    unknown: list[dict[str, Any]] = []
 
     def wire(fields: dict[str, Any]) -> dict[str, Any]:
         return {field_ids[name]: _wire(name, value) for name, value in fields.items()}
 
+    def stop() -> bool:
+        return len(unknown) >= MAX_UNKNOWN_PER_RUN
+
     for create in planned["creates"]:
+        key = create["key"]
+        if stop():
+            skipped.append({"key": key, "reason": "本次已有多个未知结果，其余留到下次"})
+            continue
+        if key in ledger.blocked():
+            skipped.append({"key": key, "reason": "账本里该键仍有未决写入"})
+            continue
+        fresh = _named(transport.list_rows(base, table_id, [field_ids[n] for n in PERIOD_FIELDS]), field_ids)
+        if any(_key_of(row) == key for row in fresh.values()):
+            skipped.append({"key": key, "reason": "写前新鲜读取发现该键已有行，不再创建"})
+            continue
         fields = _create_fields(create["item"], now, today)
-        ledger.add({"event": "intent", "at": stamp, "op": "create", "key": create["key"], "fields": fields})
+        intent_id = uuid.uuid4().hex
+        ledger.add({"event": "intent", "intentId": intent_id, "runId": run_id, "operator": operator, "op": "create", "key": key, "fields": fields})
         try:
             body = transport.create_record(base, table_id, wire(fields))
-        except Exception as error:   # the transport raises RuntimeSyncError; any failure leaves the outcome open
-            ledger.add({"event": "unknown", "at": stamp, "op": "create", "key": create["key"], "error": str(error)[:300]})
-            raise PeriodRuntimeError(f"UNKNOWN: 创建 {create['key']} 结果未知，已记账；下次运行先读该键再决定，不重放") from error
-        record_id = (((body or {}).get("data") or {}).get("record") or {}).get("record_id")
-        ledger.add({"event": "result", "at": stamp, "op": "create", "key": create["key"], "recordId": record_id})
-        written.append({"op": "create", "key": create["key"], "recordId": record_id, "fields": fields})
+        except Exception as error:   # any failure leaves the outcome open
+            ledger.add({"event": "unknown", "intentId": intent_id, "op": "create", "key": key, "error": str(error)[:300]})
+            unknown.append({"key": key, "intentId": intent_id, "op": "create"})
+            continue
+        record_id = _receipt_record_id(body)
+        if record_id is None:
+            ledger.add({"event": "unknown", "intentId": intent_id, "op": "create", "key": key, "error": "创建回执缺少 record_id，效果未知"})
+            unknown.append({"key": key, "intentId": intent_id, "op": "create"})
+            continue
+        ledger.add({"event": "result", "intentId": intent_id, "op": "create", "key": key, "recordId": record_id})
+        written.append({"op": "create", "key": key, "recordId": record_id, "fields": fields, "intentId": intent_id})
     for update in planned["updates"]:
-        ledger.add({"event": "intent", "at": stamp, "op": "update", "key": update["key"], "recordId": update["recordId"], "fields": update["fields"], "old": update["old"]})
+        key, record_id = update["key"], update["recordId"]
+        if stop():
+            skipped.append({"key": key, "reason": "本次已有多个未知结果，其余留到下次"})
+            continue
+        if key in ledger.blocked():
+            skipped.append({"key": key, "reason": "账本里该键仍有未决写入"})
+            continue
+        live = _named(transport.get_records(base, table_id, [record_id]), field_ids).get(record_id)
+        if live is None or any(_cell_value(name, live.get(name)) != _cell_value(name, old) for name, old in update["old"].items()):
+            skipped.append({"key": key, "reason": "写前新鲜读取的旧值与计划不符，不覆盖", "live": live})
+            continue
+        intent_id = uuid.uuid4().hex
+        ledger.add({"event": "intent", "intentId": intent_id, "runId": run_id, "operator": operator, "op": "update", "key": key, "recordId": record_id,
+                    "fields": update["fields"], "old": update["old"]})
         try:
-            transport.upsert(base, table_id, update["recordId"], wire(update["fields"]))
+            transport.upsert(base, table_id, record_id, wire(update["fields"]))
         except Exception as error:
-            ledger.add({"event": "unknown", "at": stamp, "op": "update", "key": update["key"], "recordId": update["recordId"], "error": str(error)[:300]})
-            raise PeriodRuntimeError(f"UNKNOWN: 更新 {update['key']} 结果未知，已记账；下次运行先读该行再决定，不重放") from error
-        ledger.add({"event": "result", "at": stamp, "op": "update", "key": update["key"], "recordId": update["recordId"]})
-        written.append({"op": "update", "key": update["key"], "recordId": update["recordId"], "fields": update["fields"]})
+            ledger.add({"event": "unknown", "intentId": intent_id, "op": "update", "key": key, "recordId": record_id, "error": str(error)[:300]})
+            unknown.append({"key": key, "intentId": intent_id, "op": "update"})
+            continue
+        ledger.add({"event": "result", "intentId": intent_id, "op": "update", "key": key, "recordId": record_id})
+        written.append({"op": "update", "key": key, "recordId": record_id, "fields": update["fields"], "intentId": intent_id})
     problems = verify(transport, base, table_id, field_ids, written, today)
-    ledger.add({"event": "readback", "at": stamp, "written": len(written), "problems": problems})
-    return {"schema": SCHEMA, "written": written, "readbackProblems": problems, "ledger": str(ledger.path),
-            "status": "OK" if not problems else "READBACK_PROBLEM"}
+    by_key = {w["key"]: w["intentId"] for w in written}
+    for problem in problems:
+        problem["intentId"] = by_key.get(problem.get("key"))
+    ledger.add({"event": "readback", "runId": run_id, "written": len(written), "problems": problems})
+    status = "UNKNOWN" if unknown else ("READBACK_PROBLEM" if problems else "OK")
+    return {"schema": SCHEMA, "written": written, "skipped": skipped, "unknown": unknown, "readbackProblems": problems, "ledger": str(ledger.directory), "status": status}
 
 
 def verify(transport: Any, base: str, table_id: str, field_ids: dict[str, str], written: list[dict[str, Any]], today: date) -> list[dict[str, Any]]:
@@ -429,35 +607,145 @@ def resolve_fields(contract: dict[str, Any], table_name: str = "月度") -> tupl
 
 
 def run(*, contract: dict[str, Any], base: str, transport: Any, business_root: Path, today: date, now: datetime, execute: bool, do_stamp: bool = False,
-        first_month: str = FIRST_MONTH) -> dict[str, Any]:
-    """One night's pass. Plan from live rows; with ``execute`` write the plan; with ``do_stamp`` also record recalculation times."""
+        first_month: str = FIRST_MONTH, clock: Any = None) -> dict[str, Any]:
+    """One night's pass. Plan from live rows and the ledger's open blocks; with ``execute`` write the plan; with ``do_stamp`` also record recalculation times."""
     table_id, ids = resolve_fields(contract)
-    ledger_dir = Path(business_root) / "运行记录" / LEDGER_DIR
+    ledger = Ledger(Path(business_root) / "运行记录" / LEDGER_DIR, clock)
+    state = ledger.state()
+    if state["corrupt"]:
+        raise PeriodRuntimeError("月度统计账有无法解析的行，先人工核对，不写：" + "、".join(state["corrupt"][:5]))
     read = [ids[n] for n in (*PERIOD_FIELDS, *INDICATORS, *GAPS)]
     raw = transport.list_rows(base, table_id, read)
     rows = {rid: {n: row.get(ids[n]) for n in (*PERIOD_FIELDS, *INDICATORS, *GAPS)} for rid, row in raw.items()}
-    planned = plan(rows, today, now, first_month)
+    planned = plan(rows, today, now, first_month, ledger.blocked(state))
     report: dict[str, Any] = {"schema": SCHEMA, "plan": planned, "executed": False}
     if execute:
-        if planned["status"] != "OK":
-            report["status"] = "ATTENTION"
-            return report
-        result = apply(planned, transport=transport, base=base, table_id=table_id, field_ids=ids, ledger_dir=ledger_dir, now=now, today=today)
-        report.update(executed=True, apply=result, status=result["status"])
+        result = apply(planned, transport=transport, base=base, table_id=table_id, field_ids=ids, ledger=ledger, now=now, today=today)
+        report.update(executed=True, apply=result, status=result["status"] if result["status"] != "OK" else planned["status"])
     else:
         report["status"] = planned["status"]
     if do_stamp:
         if planned["creates"] or planned["updates"]:
             report["stamp"] = {"skipped": "本次还有行要建或补，公式数字未稳定；下次对账通过后再登记"}
         else:
-            outcome = stamp(rows, load_baseline(ledger_dir), now)
+            baseline_dir = ledger.directory
+            outcome = stamp(rows, load_baseline(baseline_dir), now)
             if execute and outcome["updates"]:
-                writes = {"schema": SCHEMA, "creates": [], "updates": outcome["updates"], "conflicts": [], "duplicates": {}, "unrecognized": []}
-                result = apply(writes, transport=transport, base=base, table_id=table_id, field_ids=ids, ledger_dir=ledger_dir, now=now, today=today)
+                writes = {"schema": SCHEMA, "creates": [], "updates": outcome["updates"]}
+                result = apply(writes, transport=transport, base=base, table_id=table_id, field_ids=ids, ledger=ledger, now=now, today=today)
                 report["stamp"] = {"stamped": [u["key"] for u in outcome["updates"]], "changed": {u["key"]: u["changed"] for u in outcome["updates"]},
                                    "status": result["status"]}
             else:
                 report["stamp"] = {"wouldStamp": [u["key"] for u in outcome["updates"]]}
             if execute:
-                save_baseline(ledger_dir, outcome["baseline"])
+                save_baseline(baseline_dir, outcome["baseline"])
     return report
+
+
+# ---------------------------------------------------------------------------------------------
+# Technical recovery of an open ledger block (same strictness as feishu_source_sync's)
+# ---------------------------------------------------------------------------------------------
+
+
+def reconcile(*, contract: dict[str, Any], base: str, transport: Any, business_root: Path, intent_id: str, now: datetime,
+              min_quiet_seconds: int = MIN_QUIET_SECONDS, clock: Any = None) -> dict[str, Any]:
+    """Prove what an UNKNOWN (or read-back-problem / receipt-without-id) intent did, then append a ``reconciled`` event.
+
+    Never rewrites an event and never invents a human release. Evidence that is not enough ends in ``RECOVERY_REFUSED`` and the key
+    stays blocked. Create: quiet period over, fresh full scan, no row of the same content under another key; zero matches prove
+    ``NOT_APPLIED``; one match is accepted only when it is the exact row a later intent of the same key returned (so this
+    request created nothing), or when the row's first server revision falls inside this request's own window and no other create
+    intent shares that window (``APPLIED``). Update: the row still holds every old value (and the server history shows no revision of
+    those fields after the intent) = ``NOT_APPLIED``; every new value present and a revision inside the window = ``APPLIED``."""
+    if min_quiet_seconds < MIN_QUIET_SECONDS:
+        raise PeriodError(f"静默期不得少于 {MIN_QUIET_SECONDS} 秒")
+    table_id, ids = resolve_fields(contract)
+    ledger = Ledger(Path(business_root) / "运行记录" / LEDGER_DIR, clock)
+    state = ledger.state()
+    item = state["intents"].get(intent_id)
+    if item is None:
+        raise PeriodError("账本里没有这个 intentId")
+    report: dict[str, Any] = {"schema": SCHEMA, "intentId": intent_id, "key": item["key"], "op": item["op"], "wasStatus": item["status"]}
+
+    def refuse(reason: str) -> dict[str, Any]:
+        ledger.add({"event": "reconcile-refused", "intentId": intent_id, "reason": reason})
+        report.update(status="RECOVERY_REFUSED", reason=reason)
+        return report
+
+    def prove(status: str, evidence: dict[str, Any]) -> dict[str, Any]:
+        ledger.add({"event": "reconciled", "intentId": intent_id, "status": status, "evidence": evidence})
+        report.update(status=status, evidence=evidence)
+        return report
+
+    if item["reconciled"] and item["reconciled"].get("status") in RECONCILED_OK:
+        report["status"] = "ALREADY_RECONCILED"
+        return report
+    if item["status"] == "PENDING":
+        return refuse("意图没有终态记录，进程是否结束不可证明，不能恢复")
+    blocked_kind = next((r["kind"] for r in ledger.blocked(state).get(item["key"], []) if r["intentId"] == intent_id), None)
+    if blocked_kind is None:
+        report["status"] = "NOT_BLOCKED"
+        return report
+    quiet = now.timestamp() - _epoch(item["terminalAt"] or item["intentAt"])
+    if quiet < min_quiet_seconds:
+        return refuse(f"距终态仅 {int(quiet)} 秒，未满静默期 {min_quiet_seconds} 秒")
+    if blocked_kind == "READBACK_PROBLEM":
+        problems = verify(transport, base, table_id, ids, [{"key": item["key"], "fields": item["fields"]}], now.date())
+        if problems:
+            return refuse("重新读回仍与写入值不符：" + json.dumps(problems[:2], ensure_ascii=False))
+        return prove("READBACK_OK", {"quietSeconds": int(quiet), "readback": "写入值与当前读回一致"})
+    fresh = _named(transport.list_rows(base, table_id, [ids[n] for n in PERIOD_FIELDS]), ids)
+    matches = [rid for rid, row in fresh.items() if _key_of(row) == item["key"]]
+    if item["op"] == "create":
+        fields = item["fields"]
+        twins = [rid for rid, row in fresh.items() if _key_of(row) != item["key"] and one(row.get("月份")) == fields.get("月份") and one(row.get("大队")) == fields.get("大队")
+                 and one(row.get("统计层级")) == fields.get("统计层级")]
+        if twins:
+            return refuse("整表有内容相同但键不同的行：" + "、".join(twins[:5]))
+        evidence = {"freshRows": len(fresh), "matches": matches, "quietSeconds": int(quiet)}
+        if not matches:
+            return prove("NOT_APPLIED_PROVEN", evidence)
+        if len(matches) > 1:
+            return refuse("该键有多行，先按重复键处理")
+        rid = matches[0]
+        owners = [o for o in state["intents"].values() if o["key"] == item["key"] and o["intentId"] != intent_id and o["op"] == "create" and o["status"] == "RESULT"
+                  and o["resultRecordId"] == rid and (o["intentAt"] or "") >= (item["intentAt"] or "")]
+        history = sorted(transport.get_record_history(base, table_id, rid), key=lambda i: i["rev"])
+        first = history[0] if history else None
+        if first is None or first.get("activity") != "create":
+            return refuse("服务端历史缺少创建修订，不能证明该行的创建时间")
+        evidence.update(recordId=rid, firstRevisionAt=first["createTime"])
+        if owners:
+            owner = owners[0]
+            low, high = _epoch(owner["intentAt"]) - CREATE_WINDOW_BEFORE, _epoch(owner["terminalAt"]) + CREATE_WINDOW_AFTER
+            if not (low <= first["createTime"] <= high):
+                return refuse("唯一行的创建时间不在后一次创建意图的窗口内，不能归属于它")
+            evidence.update(basis="single-row-returned-by-later-result", ownerIntentId=owner["intentId"])
+            return prove("NOT_APPLIED_PROVEN", evidence)
+        low, high = _epoch(item["intentAt"]) - CREATE_WINDOW_BEFORE, _epoch(item["terminalAt"] or item["intentAt"]) + CREATE_WINDOW_AFTER
+        rivals = [o["intentId"] for o in state["intents"].values() if o["key"] == item["key"] and o["intentId"] != intent_id and o["op"] == "create"
+                  and low <= _epoch(o["intentAt"]) <= high]
+        if rivals:
+            return refuse("窗口内还有同键的其他创建意图：" + "、".join(rivals[:3]))
+        if not (low <= first["createTime"] <= high):
+            return refuse("唯一行的创建时间不在本次请求窗口内")
+        evidence.update(basis="creation-revision-in-own-window")
+        return prove("APPLIED_PROVEN", evidence)
+    # update intent
+    record_id = item["recordId"]
+    live = _named(transport.get_records(base, table_id, [record_id]), ids).get(record_id)
+    if live is None:
+        return refuse("该记录读不到")
+    if _key_of(live) != item["key"]:
+        return refuse("该记录的键与意图不符")
+    equal_old = all(_cell_value(n, live.get(n)) == _cell_value(n, v) for n, v in item["old"].items())
+    equal_new = all(_cell_value(n, live.get(n)) == _cell_value(n, v) for n, v in item["fields"].items())
+    touched = {ids[n] for n in item["fields"]}
+    since = _epoch(item["intentAt"]) - CREATE_WINDOW_BEFORE
+    revisions = [h for h in transport.get_record_history(base, table_id, record_id) if h["createTime"] >= since and (not h["fieldIds"] or touched & set(h["fieldIds"]))]
+    evidence = {"recordId": record_id, "quietSeconds": int(quiet), "revisionsAfterIntent": len(revisions)}
+    if equal_old and not revisions:
+        return prove("NOT_APPLIED_PROVEN", evidence)
+    if equal_new and revisions and all(h["createTime"] <= _epoch(item["terminalAt"] or item["intentAt"]) + CREATE_WINDOW_AFTER for h in revisions):
+        return prove("APPLIED_PROVEN", evidence)
+    return refuse("读回值与历史不足以证明该更新是否生效")

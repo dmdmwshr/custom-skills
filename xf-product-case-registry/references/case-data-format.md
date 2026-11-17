@@ -156,6 +156,7 @@ Excel 至少展示项目编号、单位、大队、标签、来源进度、本�
 
 - `packageSha256` 来自原始 ZIP 或目录清点；同一包重试时保持不变。
 - `case`、`initialInspection`、可选 `recheckInspection` 和产品字段优先使用详情页结构化采集值；同一文书电子版与手写或扫描版不一致时使用电子版字段。存在差异但已按该顺序裁决时，把全部候选和决定保存在 `field-resolution.json`，manifest 只接收裁决后的单值。
+- **多轮复查**（2026-11-17）：`recheckInspection` 永远是第 1 轮，旧清单与旧键不变。第 2 轮及以后写在可选数组 `laterRecheckInspections`，每项是一次普通复查检查外加整数 `round`（2、3…，从 2 起连续、不重复）；各轮按自己的 `inspectionDate` 计，后一轮不得早于前一轮；产品用 `initialProductRef` 对应初查产品（沿用现有规则，不凭名称或位置）。文书槽位的 `inspectionRef` 指向对应那一轮的 `clientRef`。抽样送检的复检（`reinspectionApplied/Result`）仍写在原产品上，不新增轮次。没有来源依据时不写第 2 轮，不补造。飞书键：第 1 轮 `项目编号|复查`、`项目编号|复查|n`，第 N 轮 `项目编号|复查N`、`项目编号|复查N|n`，“检查序次”写轮次，“阶段”仍是“复查”。
 - `files` 只列案卷的规范 PDF，包含稳定 `clientRef`、规范相对路径（逻辑路径，不代表上传）、SHA-256、PDF MIME 类型和页数。
 - `documentSlots` 使用现有 51 个固定槽位；`otherAttachments` 只接收明确不属于固定槽位的独立 PDF。
 - 供 `compose` 使用的 `case-data.json` 允许 `files[]` 额外使用 `sourceRelativePath` 指向 inventory 或 split 的真实 PDF；`relativePath` 是规范相对路径。`compose` 重新校验 PDF、页数与哈希，并删除本地辅助字段后生成正式 manifest。

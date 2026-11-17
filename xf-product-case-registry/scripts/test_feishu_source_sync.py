@@ -2879,13 +2879,15 @@ def make_child_contract(tmp_path: Path) -> Path:
     return path
 
 
-def _child_setup(tmp_path, *, initial=None, recheck=None, brigade="LIANGXI", cloud_team="梁溪大队", cloud_day="2026-06-17", state="COMPLETED", tamper=False, classification=None):
+def _child_setup(tmp_path, *, initial=None, recheck=None, later=None, brigade="LIANGXI", cloud_team="梁溪大队", cloud_day="2026-06-17", state="COMPLETED", tamper=False, classification=None):
     contract = make_child_contract(tmp_path)
     products = initial or [{"clientRef": "p1", "name": "手提式干粉灭火器", "method": "ONSITE", "result": "QUALIFIED", "modelSpec": "MFZ/ABC4", "nominalProducer": "某厂", "location": "大厅"},
                            {"clientRef": "p2", "name": "洒水喷头", "method": "SAMPLING", "result": "UNQUALIFIED", "problemDescription": "标志不符合"}]
     manifest_doc = {"case": {"projectNo": CP, "brigadeCode": brigade}, "initialInspection": {"clientRef": "initial", "stage": "INITIAL_CHECK", "inspectionDate": "2026-06-17", "products": products}}
     if recheck is not None:
         manifest_doc["recheckInspection"] = recheck
+    if later is not None:
+        manifest_doc["laterRecheckInspections"] = later
     manifest_dir = tmp_path / "工作区" / "历史工作区" / f"{CP}-G1"
     manifest_dir.mkdir(parents=True)
     manifest = manifest_dir / "manifest.json"

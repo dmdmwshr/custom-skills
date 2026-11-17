@@ -179,7 +179,8 @@ python scripts/registry_cli.py feishu-source-build --capture 采集批次.json -
   原误写事件永久保留，另记修复意图/终态；不构造 humanRelease。`feishu-field-plan-build` 的条目带 `restore` 时需 `--ledger-dir`。
 - **创建时一次写入的字段**：合同里 `syncWrite` 以 `create-once` 开头的字段只能随新行创建写入，V2 更新说明一律拒绝。
 - **子行创建说明 `feishu-child-build`**：由本案已核验清单(总账完成记录摘要相符)为“云端还没有任何子行”的案卷生成检查明细与产品明细的 V3 创建说明(同案同份，先检查后产品，子行只设置子端父关联)。
-  稳定键 `项目编号|阶段(|序号)` 由本地按清单位置生成；来源清单未提供原生检查/产品标识，原生标识留空，并写入每个字段的 `sourceRef`。
+  稳定键 `项目编号|阶段(|序号)` 由本地按清单位置生成；多轮复查（清单 `laterRecheckInspections`）第 N 轮（N≥2）用 `项目编号|复查N(|序号)`、检查序次写 N，第 1 轮仍是旧键；按检查键增量补行，云端已有的轮次不动，各轮检查日不得早于前一轮，缺第 1 轮时不生成后续轮；校准与产品链（`对应初查产品键`）、统计按同一键规则；
+  来源清单未提供原生检查/产品标识，原生标识留空，并写入每个字段的 `sourceRef`。
   检查结果按产品逐项汇总(任一不合格→不合格；全部合格→合格；其余待核实；产品都没有结果时才取带原件摘要的总账分类)，缺失值省略不兜底；
   初查日须等于云端主行初查日、大队须与清单管辖一致，否则只保留该案并列出原因。复查产品的“同产品”关系按 `initialProductRef` 是否对应初查产品逐条记入报告(`recheckRelations`)，不写入云端。
 - **只读调用的网络层重试**：官方 CLI 在网络层失败(stdout 为空、stderr 为 `error.type=network`，没有服务端回执)时，只读调用(`+record-get/+record-list/+record-history-list`)最多尝试 5 次、间隔递增；
@@ -216,6 +217,8 @@ python scripts/registry_cli.py feishu-source-build --capture 采集批次.json -
   案卷标签为“是”而产品未定位的列为独立缺项，不按案卷数顶替产品数。
   **15 项指标（2026-11-17 起，合同含月度新列时启用）**：另按月度统计表每行的起止日与大队（含年度行、全市行）从案卷主表、检查明细、产品明细独立重算 15 项并与公式逐格比较（`fifteen`、`diffs` 里 scope=fifteen/administrative），年度=十二个统计月合计、全市=九队合计作关系核对；缺项分列“初查结果待出、检查方式缺项、送检批次缺项、缺所属大队、缺初查日期”并给出定位清单。
 - **`feishu-period`**：月度统计行的幂等维护。九队月行与九队加全市年度行按统计月（上月 26 日至本月 25 日）建立；每月 26 日结前一统计月；漏跑的夜晚补建；结期后数字因后补结果、标签或归属调整变化时，公式即时更新原月与年度，`--stamp --execute` 在对账通过后登记“回算更新时间”。默认只出计划，`--execute` 才写；写入留 `运行记录/月度统计账/<日期>.jsonl`（intent/result/unknown/readback）；UNKNOWN 先回读，不重放。
+  - **未知与封锁（2026-11-17 a32）**：每次真实写前写 intent；创建先做新鲜全表扫描，该键已有行则不再发送；更新先回读旧值，与计划旧值不同则不写。创建/更新结果未知（异常、回执没有 recordId、写后读回对不上）一律写 `unknown` 事件，账本里**未结的 intent、未知、缺 recordId 的创建结果、读回问题**都会持续封锁该精确键（跨运行），其余键照常处理，单次最多 3 个新未知后停手；账本坏行拒绝运行。封锁只能由 `--reconcile --intent-id <id>`（只读对账，静默期默认且至少 3600 秒）追加 `reconciled` 事件解除：新鲜扫描 0 行＝`NOT_APPLIED_PROVEN`；恰好 1 行且其服务端创建时间落在本意图窗口内（或为后一次创建意图返回的同一 recordId）＝`APPLIED_PROVEN`/`NOT_APPLIED_PROVEN`；多行、同月同大队同层级的另键孪生行、窗口外创建一律拒绝并留 `reconcile-refused`。对账只追加事件、不改写原事件、不做 humanRelease。夜间 `period` 步骤：只因封锁而 ATTENTION（无冲突/重复键/未识别行）时放行后续 recount，结果有冲突、读回问题、新未知或账本损坏仍停。
+  - **年度人数截止日**：年度行的“人数截止日”＝该年度内已生成的最后一个统计月的 25 日（12 月行已存在时为 12 月 25 日），随生成月份推进，更新时间一并更新；人数公式按截止日当天有效的名录行计。
 - **`feishu-chain-plan`**：同产品链补空。按本地已归档清单的 `initialProductRef`（含已审核的 ProductLinkReviewV1）给产品明细“对应初查产品键”生成 FieldPlan，只补空白，名称不一致或已有不同值不写；历史 E 端路径无法在当前平台解析时按固定尾部 `工作区/历史工作区/<项目>-<代际>` 映射到当前业务根；计划再交 `feishu-field-plan-build` 与 `feishu-source-sync --execute`。
 - **新增只读新列的标签初值**：`feishu-label-initial-build --fresh-field <新标签>` 对全空的新建标签列跳过逐格修订读取（有任何已有值或不是标签字段即拒绝）。创建修订（`activity_type=create`）由合同登记的工具账号完成时不算人工答复，之后每次保存仍按字段修订逐条判断。
 - **`feishu-register enterprises --list <清单> --list-sha <摘要>`**：清单 `EnterpriseListV1`。按统一社会信用代码（校验位）与规范化名称匹配企业主表；已有企业只补空格，

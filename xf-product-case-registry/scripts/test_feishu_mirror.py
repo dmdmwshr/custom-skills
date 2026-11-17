@@ -238,3 +238,16 @@ def test_a_reused_snapshot_keeps_the_problems_of_its_first_read_and_an_unconfirm
     legacy.write_text(json.dumps({"table": "x", "fields": [], "rows": {}}), encoding="utf-8")        # 没有保存检查结果的旧快照：不当作已确认
     old = mirror.mirror_table(**_table_kwargs(root, "pre", "legacy", _BadRows()))
     assert old["reused"] is True and old["confirmed"] is False and old["problems"]
+
+
+def test_a_violated_relation_or_overlapping_roster_assignment_makes_the_recount_fail(tmp_path, contract, monkeypatch):
+    right = {("2026-03", "梁溪"): {"R02_初查次数": 2, "R02_初查合格": 1, "R02_初查不合格": 1, "R02_初查案卷数": 2, "R02_初查产品项数": 4,
+                                 "R02_初查产品数量缺项数": 2, "R02_初查产品数量缺数值项数": 1, "R02_初查现场检查数量有单位项数": 1,
+                                 "R02_初查现场检查数量缺单位项数": 1, "R02_产品归属缺项案卷数": 1,
+                                 mirror.QUANTITY_TEXT_COLUMN: "2.0米；另1项未载明单位未计入；"},
+             ("2026-04", "梁溪"): {"R02_复查次数": 1}}
+    overlap = {"relation": "同一人员ID的任职有效期不得重叠", "id": "P3", "periods": []}
+    monkeypatch.setattr(mirror.feishu_stats, "available", lambda _c: True)
+    monkeypatch.setattr(mirror.feishu_stats, "recount_periods", lambda **_k: {"diffs": [], "administrativeDiffs": [], "relations": [overlap]})
+    report = mirror.recount(contract_path=contract, contract_sha=_sha(contract), target={"baseToken": BASE}, transport=Cloud(_stat_rows(right)))
+    assert report["status"] == "DIFF" and [d["scope"] for d in report["diffs"]] == ["relation"] and report["diffs"][0]["id"] == "P3"

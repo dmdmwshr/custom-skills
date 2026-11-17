@@ -55,6 +55,7 @@ if __package__:
     from . import field_validation as fv
     from . import initial_scope
     from . import ledger_views as _views
+    from . import recheck_rounds
     from . import workspace_state as _ws
 else:
     import case_lifecycle
@@ -62,6 +63,7 @@ else:
     import field_validation as fv
     import initial_scope
     import ledger_views as _views
+    import recheck_rounds
     import workspace_state as _ws
 
 SPEC_SCHEMA = "FeishuSourceSyncSpecV2"
@@ -2910,26 +2912,40 @@ def _verified_manifest(root: Path, project: str, waterline_case: Any) -> tuple[t
     return (manifest, relative.as_posix(), recorded, _text(last.get("verifiedAt")) or now()), None
 
 
-def _child_inspection(project: str, stage_key: str, stage_name: str, stage_tag: str, inspection: Any, scope_from: str) -> tuple[dict[str, Any] | None, str | None]:
-    """清单里一次检查的事实：日、产品逐项(来源值+映射结果)。缺日期/产品/产品名称整次检查保留(不猜)。"""
+def child_facts(project: str, manifest: dict[str, Any], scope_from: str) -> list[tuple[dict[str, Any] | None, str | None]]:
+    """清单里各次检查的事实，顺序：初查、复查第 1 轮、第 2 轮…。第 1 轮用旧键(项目编号|复查)，第 N 轮(N≥2)用 项目编号|复查N。
+    清单没有的轮次不出现；存在后续轮次却没有第 1 轮时，只给出一条不可用说明，后续轮次不生成。"""
+    facts = [_child_inspection(project, "initialInspection", "初查", "initial", manifest.get("initialInspection"), scope_from)]
+    if manifest.get(recheck_rounds.FIRST_KEY) is None and manifest.get(recheck_rounds.LATER_KEY):
+        facts.append((None, f"存在第 2 轮及以后复查但缺少第 1 轮 {recheck_rounds.FIRST_KEY}：不生成复查检查行"))
+        return facts
+    for round_no, path, block in recheck_rounds.rounds(manifest):
+        facts.append(_child_inspection(project, path, "复查", "recheck", block, scope_from, round_no=round_no))
+    return facts
+
+
+def _child_inspection(project: str, stage_key: str, stage_name: str, stage_tag: str, inspection: Any, scope_from: str, *, round_no: int = 1) -> tuple[dict[str, Any] | None, str | None]:
+    """清单里一次检查的事实：日、产品逐项(来源值+映射结果)。缺日期/产品/产品名称整次检查保留(不猜)。
+    键里的阶段在复查第 N 轮(N≥2)时写成 复查N；“阶段”字段始终是 初查/复查，轮次另记在 round。"""
+    label = recheck_rounds.stage_label(round_no) if stage_tag == "recheck" else stage_name
     if not isinstance(inspection, dict):
-        return None, f"{stage_name}检查缺失或格式无效"
+        return None, f"{label}检查缺失或格式无效"
     day = _text(inspection.get("inspectionDate"))
     if ISO_DAY.match(day) is None:
-        return None, f"{stage_name}检查日期无效或缺失"
+        return None, f"{label}检查日期无效或缺失"
     if day < scope_from:
-        return None, f"{stage_name}检查日 {day} 早于范围起点 {scope_from}"
+        return None, f"{label}检查日 {day} 早于范围起点 {scope_from}"
     raw_products = inspection.get("products")
     if not isinstance(raw_products, list) or not raw_products or not all(isinstance(p, dict) and _text(p.get("name")) for p in raw_products):
-        return None, f"{stage_name}检查没有产品或产品名称缺失"
+        return None, f"{label}检查没有产品或产品名称缺失"
     products = []
     for number, raw in enumerate(raw_products, start=1):
         method, result = raw.get("method"), raw.get("result")
         if (method is not None and method not in PRODUCT_METHOD) or (result is not None and result not in PRODUCT_RESULT):
-            return None, f"{stage_name}产品 {number} 的方式/结果取值不在已知映射内：{method!r}/{result!r}"
-        products.append({"seq": number, "key": f"{project}|{stage_name}|{number}", "clientRef": _text(raw.get("clientRef")), "raw": raw,
+            return None, f"{label}产品 {number} 的方式/结果取值不在已知映射内：{method!r}/{result!r}"
+        products.append({"seq": number, "key": f"{project}|{label}|{number}", "clientRef": _text(raw.get("clientRef")), "raw": raw,
                          "method": PRODUCT_METHOD.get(method), "result": PRODUCT_RESULT.get(result), "initialProductRef": _text(raw.get("initialProductRef"))})
-    return {"stageKey": stage_key, "stage": stage_name, "tag": stage_tag, "day": day, "key": f"{project}|{stage_name}", "products": products}, None
+    return {"stageKey": stage_key, "stage": stage_name, "tag": stage_tag, "round": round_no, "day": day, "key": f"{project}|{label}", "products": products}, None
 
 
 def _inspection_result(products: list[dict[str, Any]], unified: dict[str, Any] | None, initial: bool) -> tuple[str | None, str]:
@@ -3025,7 +3041,7 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
             blocked.append({"projectNo": project, "recordId": record_id, "reasons": [why or "没有可用的已核验清单"]})
             continue
         manifest, relative, recorded, verified_at = found
-        facts = [_child_inspection(project, key, name, tag, manifest.get(key), scope_from) for key, name, tag in CHILD_STAGES if key == "initialInspection" or manifest.get(key) is not None]
+        facts = child_facts(project, manifest, scope_from)
         inspections = [f for f, _ in facts if f is not None]
         reasons += [w for f, w in facts if f is None and w]
         if not inspections or inspections[0]["stageKey"] != "initialInspection":
@@ -3067,8 +3083,9 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
             team = None   # 不在九队名录的管辖(含无法识别的代码)：主行也不写所属大队，子行同样留空
         elif team is None or team != cloud_team:
             reasons.append(f"清单管辖 {code!r} 与云端所属大队 {cloud_team!r} 不一致")
-        if len(inspections) > 1 and inspections[1]["day"] < initial["day"]:
-            reasons.append("复查日早于初查日")
+        for earlier, later in zip(inspections, inspections[1:]):
+            if later["day"] < earlier["day"]:   # 各轮按自己的检查日计；后一次不得早于前一次
+                reasons.append("复查日早于初查日" if earlier is initial else f"{later['key'].split('|', 1)[1]}检查日早于{earlier['key'].split('|', 1)[1]}")
         if reasons:
             blocked.append({"projectNo": project, "recordId": record_id, "reasons": reasons})
             continue
@@ -3128,7 +3145,7 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
                     bad = sum(1 for p in products if p["result"] == "不合格")
                     fields[INSPECT_F["bad"]] = {"new": bad, "basis": basis(f"{stage_path}.products[*].result", "产品均有明确结果，按不合格产品计数", negative=(bad == 0))}
                 if inspection["tag"] == "recheck":
-                    fields[INSPECT_F["round"]] = {"new": 1, "basis": basis(stage_path, "本案第 1 次复查")}
+                    fields[INSPECT_F["round"]] = {"new": inspection["round"], "basis": basis(stage_path, f"本案第 {inspection['round']} 次复查")}
                 for fid in fields:
                     source_counts[fid] = source_counts.get(fid, 0) + 1
                 items.append({"tableId": inspect_table, "stableKey": {"fieldId": INSPECT_F["key"], "value": inspection["key"]}, "fields": fields,

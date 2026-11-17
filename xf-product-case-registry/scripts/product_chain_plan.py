@@ -18,10 +18,11 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from . import product_links
+    from . import product_links, recheck_rounds
     from . import workspace_state as ws
 else:
     import product_links
+    import recheck_rounds
     import workspace_state as ws
 
 PLAN_SCHEMA = "FeishuFieldPlanV1"
@@ -83,15 +84,16 @@ def local_chains(layout: ws.BusinessLayout, waterline_cases: dict[str, dict[str,
             continue
         effective = product_links.apply(layout, project, record, manifest) or manifest
         initials = [p for p in (effective.get("initialInspection") or {}).get("products") or [] if isinstance(p, dict)]
-        rechecks = [p for p in (effective.get("recheckInspection") or {}).get("products") or [] if isinstance(p, dict)]
         by_ref = {p.get("clientRef"): (index, p) for index, p in enumerate(initials, start=1) if p.get("clientRef")}
         links = []
-        for number, product in enumerate(rechecks, start=1):
-            ref = product.get("initialProductRef")
-            if isinstance(ref, str) and ref in by_ref:
-                index, target = by_ref[ref]
-                links.append({"recheckSeq": number, "initialSeq": index, "recheckName": product.get("name"), "initialName": target.get("name"),
-                              "initialRef": ref, "recheckRef": product.get("clientRef")})
+        for round_no, _path, block in recheck_rounds.rounds(effective):   # 第 1 轮保持旧键 |复查|n；后续轮 |复查2|n
+            rechecks = [p for p in (block or {}).get("products") or [] if isinstance(p, dict)]
+            for number, product in enumerate(rechecks, start=1):
+                ref = product.get("initialProductRef")
+                if isinstance(ref, str) and ref in by_ref:
+                    index, target = by_ref[ref]
+                    links.append({"recheckSeq": number, "recheckRound": round_no, "initialSeq": index, "recheckName": product.get("name"),
+                                  "initialName": target.get("name"), "initialRef": ref, "recheckRef": product.get("clientRef")})
         if links:
             manifest_path = Path(workspace) / "manifest.json"
             chains[project] = {"manifest": {"path": manifest_path.relative_to(business_root).as_posix(), "sha256": _sha(manifest_path)}, "links": links,
@@ -112,7 +114,8 @@ def build_plan(*, chains: dict[str, dict[str, Any]], cloud_rows: dict[str, dict[
     for project in sorted(chains):
         info = chains[project]
         for link in info["links"]:
-            initial_key, recheck_key = f"{project}|初查|{link['initialSeq']}", f"{project}|复查|{link['recheckSeq']}"
+            initial_key = f"{project}|初查|{link['initialSeq']}"
+            recheck_key = f"{project}|{recheck_rounds.stage_label(link.get('recheckRound', 1))}|{link['recheckSeq']}"
             initial, recheck = by_key.get(initial_key), by_key.get(recheck_key)
             reason = None
             if recheck is None or initial is None:

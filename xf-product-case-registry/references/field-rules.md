@@ -5,7 +5,7 @@
 ## 稳定键与阶段
 
 - 一行 = 一个（项目编号 `project_no`，检查阶段 `inspection_phase`，轮次 `inspection_round`）。阶段只有 `初查`、`复查`，缺省按 `初查`，轮次缺省为 1（只在校验时局部缺省，不回写输入）；多次复查用不重复的 `inspection_round`，以最后一轮结果判定行案。
-- 同一项目编号最多两行；存在 `复查` 行必须有 `初查` 行且初查 `qualified=不合格`（人工裁决 `manual_fields` 含 `qualified` 的除外）。
+- 同一项目编号默认最多两行（初查、复查）；出现更多行必须逐行写不重复的 `inspection_round`，清单里对应 `laterRecheckInspections`（见 case-data-format.md“多轮复查”），以最后一轮有效结果判定。存在 `复查` 行必须有 `初查` 行且初查 `qualified=不合格`（人工裁决 `manual_fields` 含 `qualified` 的除外）。
 - 项目编号格式 `\d{8}[A-Z]\d{9}`，不用截图名、行号或飞书记录号代替项目身份。
 
 ## JSON 字段

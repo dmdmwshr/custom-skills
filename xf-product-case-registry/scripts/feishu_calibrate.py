@@ -271,16 +271,18 @@ def build_calibration_plan(*, waterline_path: Path, contract_path: Path, contrac
             continue
         manifest, relative, recorded, verified_at = found
         manifest_ev = plan.evidence(relative, recorded)
-        facts = [sync._child_inspection(project, key, name, tag, manifest.get(key), scope_from) for key, name, tag in sync.CHILD_STAGES
-                 if key == "initialInspection" or manifest.get(key) is not None]
+        facts = sync.child_facts(project, manifest, scope_from)
         if facts[0][0] is None:
             plan.skipped.append({"projectNo": project, "recordId": record_id, "reason": facts[0][1] or "清单没有可用的初查"})
             continue
         counts["casesCompared"] += 1
         initial = facts[0][0]
-        recheck = facts[1][0] if len(facts) > 1 else None
-        if len(facts) > 1 and recheck is None:
-            plan.diff(project, "案卷主表", project, None, None, facts[1][1], "清单复查记录不可用", "复查相关字段不写；先核对清单")
+        recheck = facts[-1][0] if len(facts) > 1 else None   # 多轮复查：主行复查两项取最后一轮
+        for _fact, why in facts[1:]:
+            if _fact is None:
+                plan.diff(project, "案卷主表", project, None, None, why, "清单复查记录不可用", "复查相关字段不写；先核对清单")
+        if len(facts) > 2 and any(f is None for f, _ in facts[1:]):
+            recheck = None   # 有一轮读不出时最后一轮是否真的是最后一轮无法确定，不写主行复查项
         unified = sync.unified_initial_result(root, project, record, manifest_found=found)
         ref = f"{relative} | 本地核验清单 manifestSha256={recorded} | projectNo={project}"
 
@@ -518,7 +520,7 @@ def build_calibration_plan(*, waterline_path: Path, contract_path: Path, contrac
             elif ival("team") is not None and cloud_team is not None and ival("team") != cloud_team:
                 plan.diff(project, "检查明细", inspection["key"], I["team"], ival("team"), cloud_team, "检查行大队与主行所属大队不同")
             if not is_initial and ival("round") is None and not any("|复查" in key for key in extra_keys):
-                iput("round", None, 1, "本案清单内唯一一次复查，序次 1")
+                iput("round", None, inspection["round"], f"清单内本案第 {inspection['round']} 次复查，序次 {inspection['round']}")
             if not all_present:
                 continue
             for product in products:

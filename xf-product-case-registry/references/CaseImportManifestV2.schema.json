@@ -51,6 +51,12 @@
     "recheckInspection": {
       "$ref": "#/$defs/recheckInspection"
     },
+    "laterRecheckInspections": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/laterRecheckInspection"
+      }
+    },
     "files": {
       "type": "array",
       "items": {
@@ -875,6 +881,38 @@
         "RECHECK_REINSPECTION_QUALITY_RESULT_RECEIPT",
         "OTHER_ATTACHMENT"
       ]
+    },
+    "laterRecheckInspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clientRef",
+        "stage",
+        "round",
+        "products"
+      ],
+      "properties": {
+        "clientRef": {
+          "$ref": "#/$defs/clientRef"
+        },
+        "stage": {
+          "const": "RECHECK"
+        },
+        "inspectionDate": {
+          "$ref": "#/$defs/date"
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "products": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/inspectionProduct"
+          }
+        }
+      },
+      "description": "第 2 轮及以后的复查（第 1 轮仍是 recheckInspection，旧键不变）；轮次从 2 起连续，各轮按自己的 inspectionDate 计。"
     }
   }
 }

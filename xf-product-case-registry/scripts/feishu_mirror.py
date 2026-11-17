@@ -390,6 +390,7 @@ def recount(*, contract_path: Path, contract_sha: str, target: dict[str, str], t
         fifteen = feishu_stats.recount_periods(contract=contract, base=base, transport=transport)
         diffs.extend({"scope": "fifteen", **item} for item in fifteen["diffs"])
         diffs.extend({"scope": "administrative", **item} for item in fifteen["administrativeDiffs"])
+        diffs.extend({"scope": "relation", **item} for item in fifteen["relations"])   # 指标间关系与名录有效期重叠/缺人员ID：违反即对账失败(退出 4)，不只是列表
     totals = {column: sum(counts[column].values()) for column in RECOUNT_COLUMNS}
     by_unit: Counter = Counter()
     for values in quantity.values():

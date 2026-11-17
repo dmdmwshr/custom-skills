@@ -158,6 +158,22 @@ def build_roster(roster_rows: dict[str, dict[str, Any]]) -> list[dict[str, Any]]
     return [{"id": _one(row.get("人员ID")), "brigade": _one(row.get("大队")), "start": _day(row.get("有效起日")), "end": _day(row.get("有效止日"))} for row in roster_rows.values()]
 
 
+def roster_overlaps(roster: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stable person IDs with two assignments that share a day (same brigade or not); a transfer is the old brigade up to the 25th and the new one from the 26th."""
+    by_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for person in roster:
+        if person["id"] and person["brigade"]:
+            by_id[person["id"]].append({"brigade": person["brigade"], "start": person["start"] or "0000-00-00", "end": person["end"] or "9999-12-31"})
+    found = []
+    for person_id, periods in sorted(by_id.items()):
+        ordered = sorted(periods, key=lambda p: (p["start"], p["end"]))
+        for earlier, later in zip(ordered, ordered[1:]):
+            if later["start"] <= earlier["end"]:
+                found.append({"id": person_id, "periods": [earlier, later]})
+                break
+    return found
+
+
 def expected_row(cases: dict[str, dict[str, Any]], rechecks: list[dict[str, Any]], roster: list[dict[str, Any]], pending_brigades: set[str],
                  *, start: str, end: str, brigade: str, staff_day: str) -> dict[str, Any]:
     """The fifteen indicators plus the gap counts of one period row, by plain code."""
@@ -231,6 +247,11 @@ def compare(rows: dict[str, dict[str, Any]], cases: dict[str, dict[str, Any]], r
                 diffs.append({"key": key, "indicator": name, "feishu": cell, "independent": want})
         detail.append({"key": key, **{name: want for name, want in expected.items()}})
     relations = _relations(by_key)
+    for overlap in roster_overlaps(roster):
+        relations.append({"relation": "同一人员ID的任职有效期不得重叠", **overlap})
+    blank = sum(1 for person in roster if not person["id"])
+    if blank:
+        relations.append({"relation": "名录每行必须有人员ID", "rows": blank})
     return {"rowsCompared": len(by_key), "diffs": diffs, "relations": relations, "detail": detail}
 
 

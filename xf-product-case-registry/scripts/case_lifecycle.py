@@ -19,8 +19,10 @@ from zoneinfo import ZoneInfo
 
 if __package__:
     from . import field_validation as fv
+    from . import recheck_rounds
 else:  # script-style import (scripts/ on sys.path)
     import field_validation as fv
+    import recheck_rounds
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -157,7 +159,7 @@ def _manifest_products(manifest: dict[str, Any] | None) -> tuple[list[dict[str, 
     manifest = manifest or {}
     initial = [p for p in (manifest.get("initialInspection") or {}).get("products") or [] if isinstance(p, dict)]
     recheck_block = manifest.get("recheckInspection")
-    recheck = [p for p in (recheck_block or {}).get("products") or [] if isinstance(p, dict)]
+    recheck = [p for _round, p in recheck_rounds.round_products(manifest)]   # 各轮复查产品，轮次升序
     return initial, recheck, isinstance(recheck_block, dict)
 
 
@@ -228,7 +230,8 @@ def _chains_and_state(
                              "reason": "复查产品未经 initialProductRef 对应到同一初查产品，不按数量/名称/位置推断"})
             continue
         initial_result = chain.get("initialResult")
-        recheck_result = next((r for r in chain.get("recheckResults") or [] if r in fv.INITIAL_RESULTS), None)
+        # 多轮复查：本产品链上最后一轮有终局结果的复查决定（清单按轮次升序）
+        recheck_result = next((r for r in reversed(chain.get("recheckResults") or []) if r in fv.INITIAL_RESULTS), None)
         if has_unlinked and initial_result == "不合格" and not chain.get("recheckRefs"):
             detailed.append({"linked": True, "initialRef": chain["initialRef"], "initial_result": initial_result, "recheck_state": "待核实",
                              "recheck_result": None, "reasonCode": "LINK_UNPROVEN",

@@ -151,3 +151,24 @@ def test_a_project_number_that_is_not_eighteen_characters_still_ties_its_checks_
     checks = [check(short + "|初查", "初查", "2026-03-30", "现场判定")]
     row = expected(cases, checks)
     assert (row["现场判定不合格案卷数"], row["方式缺项不合格案卷数"]) == (1, 0)
+
+
+def _person(person_id, brigade, start, end):
+    return {"人员ID": person_id, "大队": [brigade], "有效起日": f"{start}T00:00:00.000+08:00", "有效止日": f"{end}T00:00:00.000+08:00" if end else None}
+
+
+def test_a_person_who_moves_between_brigades_counts_once_per_day_and_the_city_total_does_not_change():
+    people = [_person("P0", "梁溪大队", "2026-01-01", "2026-12-31"), _person("P1", "梁溪大队", "2026-01-01", "2026-06-25"), _person("P1", "锡山大队", "2026-06-26", "2026-12-31")]
+    june = dict(start="2026-05-26", end="2026-06-25"), dict(start="2026-06-26", end="2026-07-25")
+    first, second = ([expected([], roster=people, brigade=b, **window)["大队执法监督员人数"] for b in ("梁溪大队", "锡山大队", "全市")] for window in june)
+    assert first == [2, 0, 2] and second == [1, 1, 2]
+
+
+def test_open_ended_assignment_counts_and_overlapping_assignments_of_one_id_are_reported():
+    open_ended = [_person("P2", "锡山大队", "2026-01-01", None)]
+    assert expected([], roster=open_ended, brigade="锡山大队", start="2026-06-26", end="2026-07-25")["大队执法监督员人数"] == 1
+    roster = stats.build_roster({"a": _person("P3", "梁溪大队", "2026-01-01", "2026-06-26"), "b": _person("P3", "锡山大队", "2026-06-26", "2026-12-31"),
+                                 "c": _person("P4", "梁溪大队", "2026-01-01", "2026-06-25"), "d": _person("P4", "锡山大队", "2026-06-26", "2026-12-31")})
+    assert [o["id"] for o in stats.roster_overlaps(roster)] == ["P3"]
+    result = stats.compare({}, {}, [], roster, set())
+    assert [r["relation"] for r in result["relations"]] == ["同一人员ID的任职有效期不得重叠"] and result["relations"][0]["id"] == "P3"

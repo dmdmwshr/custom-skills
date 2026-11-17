@@ -24,8 +24,10 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
+    from . import recheck_rounds
     from . import workspace_state as ws
 else:
+    import recheck_rounds
     import workspace_state as ws
 
 SCHEMA_VERSION = "ProductLinkReviewV1"
@@ -67,7 +69,10 @@ def _load_manifest(path: Path, project: str) -> dict[str, Any]:
 
 
 def _products(manifest: dict[str, Any], block: str) -> dict[str, dict[str, Any]]:
-    items = (manifest.get(block) or {}).get("products") or []
+    if block == "recheckInspection":  # every recheck round (round 1 plus laterRecheckInspections)
+        items = [p for _round, p in recheck_rounds.round_products(manifest)]
+    else:
+        items = (manifest.get(block) or {}).get("products") or []
     return {
         p["clientRef"]: p
         for p in items
