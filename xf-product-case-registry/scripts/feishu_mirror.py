@@ -41,10 +41,12 @@ from typing import Any
 if __package__:
     from . import feishu_plans as plans
     from . import feishu_source_sync as sync
+    from . import feishu_stats
     from . import field_policy
 else:
     import feishu_plans as plans
     import feishu_source_sync as sync
+    import feishu_stats
     import field_policy
 
 MIRROR_DIR = "飞书镜像"
@@ -383,6 +385,11 @@ def recount(*, contract_path: Path, contract_sha: str, target: dict[str, str], t
             if not _same_text(cloud, expected):
                 diffs.append({"month": bucket[0], "brigade": bucket[1], "column": column, "feishu": cloud, "independent": expected})
     uncovered = sorted(f"{m}|{b}" for (m, b) in set(case_sets) - seen)
+    fifteen = None
+    if feishu_stats.available(contract):
+        fifteen = feishu_stats.recount_periods(contract=contract, base=base, transport=transport)
+        diffs.extend({"scope": "fifteen", **item} for item in fifteen["diffs"])
+        diffs.extend({"scope": "administrative", **item} for item in fifteen["administrativeDiffs"])
     totals = {column: sum(counts[column].values()) for column in RECOUNT_COLUMNS}
     by_unit: Counter = Counter()
     for values in quantity.values():
@@ -399,4 +406,4 @@ def recount(*, contract_path: Path, contract_sha: str, target: dict[str, str], t
             "quantityWithoutUnit": {k: dict(v) for k, v in sorted(unitless.items())}, "productAttributionGaps": sorted(unlocated),
             "productAttributionPending": {"cases": sorted(unlocated), "count": len(unlocated),
                                           "meaning": "案卷标签为“是”但没有任何产品行为“是”：产品层待确认，单独一轴；不是运行未知，也不因标签归属而视为已解释"},
-            "bucketsWithoutMonthlyRow": uncovered, "diffs": diffs, "status": "OK" if not diffs else "DIFF"}
+            "bucketsWithoutMonthlyRow": uncovered, "fifteen": fifteen, "diffs": diffs, "status": "OK" if not diffs else "DIFF"}

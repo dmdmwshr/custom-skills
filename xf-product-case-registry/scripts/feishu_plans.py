@@ -95,8 +95,12 @@ def _plain(field_type: str, cell: Any) -> Any:
 def build_label_initial_specs(*, contract_path: Path, contract_sha: str, table_name: str, target: dict[str, str], transport: Any,
                               out_dir: Path, log_root: Path, ledger_dir: Path | None, source_ref: str, section: str | None = None,
                               batch_size: int = sync.HARD_CAP_RECORDS, only_keys: frozenset[str] | None = None,
-                              isolated_test_ledger: bool = False) -> dict[str, Any]:
-    """Specs that set every unidentified label of one table to the rule default "否"."""
+                              isolated_test_ledger: bool = False, fresh_fields: frozenset[str] = frozenset()) -> dict[str, Any]:
+    """Specs that set every unidentified label of one table to the rule default "否".
+
+    ``fresh_fields`` names labels created in this very change whose cells are still all empty: nobody could have answered
+    them, so their revision history is not read (one service call per record). A fresh field that already holds any value
+    in any row is refused: it is then not fresh and the normal history check applies."""
     sync._require(1 <= batch_size <= sync.HARD_CAP_RECORDS, f"batch_size 必须是 1..{sync.HARD_CAP_RECORDS}")
     sync._require(bool(source_ref.strip()), "需要 source_ref（规则依据）")
     contract, index = _contract(contract_path, contract_sha, section, target)
@@ -109,11 +113,16 @@ def build_label_initial_specs(*, contract_path: Path, contract_sha: str, table_n
         sync._require(meta["type"] == "select" and field_policy.LABEL_DEFAULT in (meta["options"] or []), f"标签字段必须是含“否”的单选：{meta['name']}")
     ledger = _ledger(ledger_dir, isolated_test_ledger)
     rows = transport.list_rows(target["baseToken"], table_id, [key_field, *labels])
+    fresh_ids = {fid for fid, meta in labels.items() if meta["name"] in fresh_fields}
+    sync._require({meta["name"] for fid, meta in labels.items() if fid in fresh_ids} == set(fresh_fields), "fresh_fields 里有不是该表标签字段的名称")
+    for fid in fresh_ids:
+        used = sorted(rid for rid, row in rows.items() if _plain("select", row.get(fid)) is not None)
+        sync._require(not used, f"{labels[fid]['name']} 已有值（{len(used)} 行），不是全新空字段，不能跳过修订历史检查")
     observed_at = sync.now()
     updates: list[dict[str, Any]] = []
     previous: list[dict[str, Any]] = []
     held: list[dict[str, Any]] = []
-    counts = {"rows": len(rows), "explicit": 0, "empty": 0, "placeholder": 0, "protected": 0}
+    counts = {"rows": len(rows), "explicit": 0, "empty": 0, "placeholder": 0, "protected": 0, "freshSkippedHistory": 0}
     operators = _assistant_operators(contract)
     for record_id, row in sorted(rows.items()):
         key = row.get(key_field)
@@ -130,7 +139,11 @@ def build_label_initial_specs(*, contract_path: Path, contract_sha: str, table_n
             if old not in field_policy.LABEL_REPLACEABLE:
                 held.append({"recordId": record_id, "stableKey": key, "field": meta["name"], "current": old, "problem": "不是空白/待核实/是/否，保留原值"})
                 continue
-            state, why = person_history(transport, ledger, target["baseToken"], table_id, record_id, key, fid, operators)
+            if fid in fresh_ids:
+                state, why = HISTORY_TOOL, ""
+                counts["freshSkippedHistory"] += 1
+            else:
+                state, why = person_history(transport, ledger, target["baseToken"], table_id, record_id, key, fid, operators)
             if state != HISTORY_TOOL:
                 counts["protected"] += 1
                 held.append({"recordId": record_id, "stableKey": key, "field": meta["name"], "current": old, "history": state,
@@ -383,6 +396,9 @@ def person_history(transport: Any, ledger: sync.Ledger, base: str, table_id: str
                 windows.append((opened[event["intentId"]] - sync.HISTORY_CREATE_SLACK_BEFORE, at + sync.HISTORY_CREATE_SLACK_AFTER))
     for revision in history:
         if not revision["fieldIds"]:
+            # 记录创建修订本来就不列字段：由工具账号创建的行，创建动作不是任何人对这一格的回答；之后的每次保存都有自己的字段修订，仍逐条判断
+            if revision.get("activity") == "create" and assistant_operators is not None and sync._text(revision.get("operator")) in assistant_operators:
+                continue
             return HISTORY_UNKNOWN, f"修订 {revision['rev']} 没有列出改了哪些字段，不能确定有没有人工填过"
         change = next((c for c in revision.get("changes") or [] if c["fieldId"] == field_id), None)
         if field_id not in revision["fieldIds"] or any(low <= revision["createTime"] <= high for low, high in windows):

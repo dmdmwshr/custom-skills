@@ -127,7 +127,7 @@ def test_label_default_fills_only_empty_and_placeholder_cells_and_keeps_explicit
     report = plans.build_label_initial_specs(
         contract_path=contract, contract_sha=_sha(contract), table_name="案卷主表", target={"baseToken": BASE, "profile": "offline", "identity": "user"},
         transport=cloud, out_dir=tmp_path / "out", log_root=tmp_path / "log", ledger_dir=ledger, source_ref="规则", isolated_test_ledger=True)
-    assert report["status"] == "OK" and report["counts"] == {"rows": 3, "explicit": 3, "empty": 2, "placeholder": 1, "protected": 0, "recordsToWrite": 2, "held": 0}
+    assert report["status"] == "OK" and report["counts"] == {"rows": 3, "explicit": 3, "empty": 2, "placeholder": 1, "protected": 0, "freshSkippedHistory": 0, "recordsToWrite": 2, "held": 0}
     saved = json.loads(Path(report["previousValues"]["path"]).read_text(encoding="utf-8"))["values"]
     assert {(v["stableKey"], v["field"], v["old"]) for v in saved} == {("P-1", "是否网售", None), ("P-1", "是否加油加气站", "待核实"), ("P-3", "是否网售", None)}
     assert not cloud.writes                                                          # 规划只读
@@ -415,3 +415,46 @@ def test_a_bad_authorization_file_is_refused_whole(tmp_path, contract):
             _build_auth(tmp_path, contract, cloud, ledger, plan, _authorization(tmp_path, bad, name="bad.json"))
     with pytest.raises(sync.SyncError, match="answerSha256"):
         _build_auth(tmp_path, contract, cloud, ledger, plan, _authorization(tmp_path, [good], name="short.json", answer="abc"))
+
+
+def test_a_fresh_empty_label_field_skips_the_history_read_but_a_field_with_any_value_does_not(tmp_path, contract):
+    target = {"baseToken": BASE, "profile": "offline", "identity": "user"}
+    cloud, ledger = Cloud(_case_rows()), _ledger(tmp_path)
+    cloud.history_fails = True                                        # 历史接口不可用：普通路径会把不能确认的格保护起来
+    held = plans.build_label_initial_specs(contract_path=contract, contract_sha=_sha(contract), table_name="案卷主表", target=target, transport=cloud,
+                                           out_dir=tmp_path / "o1", log_root=tmp_path / "l1", ledger_dir=ledger, source_ref="规则", isolated_test_ledger=True)
+    assert held["counts"]["recordsToWrite"] == 0 and held["counts"]["protected"] == 3
+    for record in ("recA00000000001", "recA00000000003"):             # 把 是否网售 变成全新空字段：只剩真正空白的两行
+        cloud.rows[(CASE, record)][GAS] = ["否"]
+    cloud.rows[(CASE, "recA00000000002")][NET] = None
+    report = plans.build_label_initial_specs(contract_path=contract, contract_sha=_sha(contract), table_name="案卷主表", target=target, transport=cloud,
+                                             out_dir=tmp_path / "o2", log_root=tmp_path / "l2", ledger_dir=ledger, source_ref="规则", isolated_test_ledger=True,
+                                             fresh_fields=frozenset({"是否网售"}))
+    assert report["counts"]["recordsToWrite"] == 3 and report["counts"]["freshSkippedHistory"] == 3 and not report["held"]
+    cloud.rows[(CASE, "recA00000000002")][NET] = ["是"]                # 已有一个值：不再是全新空字段
+    with pytest.raises(sync.SyncError, match="不是全新空字段"):
+        plans.build_label_initial_specs(contract_path=contract, contract_sha=_sha(contract), table_name="案卷主表", target=target, transport=cloud,
+                                        out_dir=tmp_path / "o3", log_root=tmp_path / "l3", ledger_dir=ledger, source_ref="规则", isolated_test_ledger=True,
+                                        fresh_fields=frozenset({"是否网售"}))
+    with pytest.raises(sync.SyncError, match="不是该表标签字段"):
+        plans.build_label_initial_specs(contract_path=contract, contract_sha=_sha(contract), table_name="案卷主表", target=target, transport=cloud,
+                                        out_dir=tmp_path / "o4", log_root=tmp_path / "l4", ledger_dir=ledger, source_ref="规则", isolated_test_ledger=True,
+                                        fresh_fields=frozenset({"单位名称"}))
+
+
+def test_a_creation_revision_by_the_tool_account_is_not_a_persons_answer_but_any_other_unlisted_revision_still_blocks(tmp_path):
+    class History:
+        def __init__(self, items):
+            self.items = items
+
+        def get_record_history(self, base, table, record_id):
+            return self.items
+
+    ledger = sync.Ledger(_ledger(tmp_path))
+    create = {"rev": 1, "createTime": 5.0, "operator": "管理员", "activity": "create", "fieldIds": [], "changes": []}
+    ask = lambda items, ops=frozenset({"管理员"}): plans.person_history(History(items), ledger, BASE, CASE, "recA00000000001", "P-1", GAS, ops)   # noqa: E731
+    assert ask([create])[0] == plans.HISTORY_TOOL                                                       # 只有创建修订：没有任何人答过
+    assert ask([create, {"rev": 2, "createTime": 9.0, "operator": "梁溪成员", "activity": "update", "fieldIds": [GAS], "changes": [{"fieldId": GAS, "before": "", "after": "是"}]}])[0] == plans.HISTORY_PERSON
+    assert ask([dict(create, operator="梁溪成员")])[0] == plans.HISTORY_UNKNOWN                        # 创建者不是工具账号
+    assert ask([dict(create, activity="update")])[0] == plans.HISTORY_UNKNOWN                          # 不是创建修订又不列字段
+    assert ask([create], None)[0] == plans.HISTORY_UNKNOWN                                              # 合同没声明工具账号

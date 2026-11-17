@@ -636,7 +636,7 @@ class LarkCliTransport:
             offset += limit
 
     def get_record_history(self, base: str, table: str, record_id: str) -> list[dict[str, Any]]:
-        """Service-side revisions of one record (``+record-history-list``, read-only): [{rev, createTime(epoch s), operator, fieldIds}], newest first."""
+        """Service-side revisions of one record (``+record-history-list``, read-only): [{rev, createTime(epoch s), operator, activity, fieldIds}], newest first."""
         items: list[dict[str, Any]] = []
         max_version: int | None = None
         for _ in range(40):
@@ -651,7 +651,7 @@ class LarkCliTransport:
                 if not isinstance(item, dict) or not isinstance(item.get("rev"), int) or not isinstance(item.get("create_time"), (int, float)):
                     raise RuntimeSyncError("历史条目缺少 rev/create_time")
                 changes = [c for c in (item.get("field_changes") or []) if isinstance(c, dict) and c.get("field_id")]
-                items.append({"rev": item["rev"], "createTime": float(item["create_time"]), "operator": item.get("operator"),
+                items.append({"rev": item["rev"], "createTime": float(item["create_time"]), "operator": item.get("operator"), "activity": item.get("activity_type"),
                               "fieldIds": sorted({c["field_id"] for c in changes}),
                               "changes": [{"fieldId": c["field_id"], "before": c.get("before"), "after": c.get("after")} for c in changes]})
             if not data.get("has_more"):

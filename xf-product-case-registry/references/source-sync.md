@@ -214,6 +214,10 @@ python scripts/registry_cli.py feishu-source-build --capture 采集批次.json -
 - **`feishu-recount`**：从检查明细、产品明细独立重算月度各列并与公式列比较，有差异退出码 4，`--out` 保存完整结果。口径：案卷按项目编号去重；产品项只计初查；复查不重复计数；
   数量只对同一含义、同一单位相加；原文没有单位的数值只记项数（`quantityWithoutUnit`），不进任何合计，全部缺单位时 `physicalQuantity.status=NO_UNIT_BASIS`，表示尚无可分单位的实物汇总，不是 0；月度文本列“R02_初查现场检查数量（分单位）”按同一口径比较；数值、单位、含义任一为空计入“数量缺项”，只缺数值的另计“缺数值项数”；
   案卷标签为“是”而产品未定位的列为独立缺项，不按案卷数顶替产品数。
+  **15 项指标（2026-11-17 起，合同含月度新列时启用）**：另按月度统计表每行的起止日与大队（含年度行、全市行）从案卷主表、检查明细、产品明细独立重算 15 项并与公式逐格比较（`fifteen`、`diffs` 里 scope=fifteen/administrative），年度=十二个统计月合计、全市=九队合计作关系核对；缺项分列“初查结果待出、检查方式缺项、送检批次缺项、缺所属大队、缺初查日期”并给出定位清单。
+- **`feishu-period`**：月度统计行的幂等维护。九队月行与九队加全市年度行按统计月（上月 26 日至本月 25 日）建立；每月 26 日结前一统计月；漏跑的夜晚补建；结期后数字因后补结果、标签或归属调整变化时，公式即时更新原月与年度，`--stamp --execute` 在对账通过后登记“回算更新时间”。默认只出计划，`--execute` 才写；写入留 `运行记录/月度统计账/<日期>.jsonl`（intent/result/unknown/readback）；UNKNOWN 先回读，不重放。
+- **`feishu-chain-plan`**：同产品链补空。按本地已归档清单的 `initialProductRef`（含已审核的 ProductLinkReviewV1）给产品明细“对应初查产品键”生成 FieldPlan，只补空白，名称不一致或已有不同值不写；历史 E 端路径无法在当前平台解析时按固定尾部 `工作区/历史工作区/<项目>-<代际>` 映射到当前业务根；计划再交 `feishu-field-plan-build` 与 `feishu-source-sync --execute`。
+- **新增只读新列的标签初值**：`feishu-label-initial-build --fresh-field <新标签>` 对全空的新建标签列跳过逐格修订读取（有任何已有值或不是标签字段即拒绝）。创建修订（`activity_type=create`）由合同登记的工具账号完成时不算人工答复，之后每次保存仍按字段修订逐条判断。
 - **`feishu-register enterprises --list <清单> --list-sha <摘要>`**：清单 `EnterpriseListV1`。按统一社会信用代码（校验位）与规范化名称匹配企业主表；已有企业只补空格，
   已有值不同只列 `differences`；新企业按现有最大编号续号，缺所属大队、代码异常、清单内重复的一律 `held`。产出批次目录（`匹配结果.json`、代录计划）。
   补空走 `feishu-delegated-build`；新企业用 `--create-batch <批次目录>` 逐条创建：每条先按企业编号回读，回执丢失记 `UNKNOWN` 并停止，下次先回读、已存在即确认，不重放；

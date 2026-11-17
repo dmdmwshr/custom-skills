@@ -2707,6 +2707,7 @@ def build_parser() -> argparse.ArgumentParser:
     label_initial.add_argument("--identity", default="user", choices=["user", "bot"])
     label_initial.add_argument("--batch-size", type=int, default=20)
     label_initial.add_argument("--only-key", action="append", help="只处理这些稳定键(可重复；用于小批试跑)")
+    label_initial.add_argument("--fresh-field", action="append", help="本次新建且所有行都为空的标签字段名(可重复)：不读修订历史；字段已有值则拒绝")
     label_initial.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     label_initial.set_defaults(func=feishu_label_initial_build_command)
     delegated = sub.add_parser(
@@ -2772,6 +2773,20 @@ def build_parser() -> argparse.ArgumentParser:
     recount.add_argument("--out", help="把完整结果写到该文件")
     recount.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     recount.set_defaults(func=feishu_recount_command)
+    period = sub.add_parser(
+        "feishu-period",
+        help="月度统计行：九队月行与九队加全市年行幂等存在、26 日结前一统计月、补建漏触发、结期后数字变化记回算更新时间；缺省只读出计划，--execute 才写（写入留 运行记录/月度统计账）",
+    )
+    for flag in ("--contract", "--contract-sha", "--base-token", "--profile", "--business-root"):
+        period.add_argument(flag, required=True)
+    period.add_argument("--identity", default="user", choices=["user", "bot"])
+    period.add_argument("--date", help="运行日期 YYYY-MM-DD；省略取当前上海日期")
+    period.add_argument("--execute", action="store_true", help="按计划写入；省略只出计划")
+    period.add_argument("--stamp", action="store_true", help="对账一致后登记结期行的回算更新时间（需先通过 feishu-recount）")
+    period.add_argument("--first-month", default="2026-01", help="最早统计月，缺省 2026-01")
+    period.add_argument("--out", help="把完整结果写到该文件")
+    period.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    period.set_defaults(func=feishu_period_command)
     case_find = sub.add_parser(
         "feishu-case-find",
         help="按单位名称或项目编号找案卷：忽略空格和全半角差异，结果给出系统原文(含空格)；规范化后同名的并列列出、不合并；只读云",
@@ -2811,6 +2826,15 @@ def build_parser() -> argparse.ArgumentParser:
     quantity.add_argument("--identity", default="user", choices=["user", "bot"])
     quantity.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     quantity.set_defaults(func=feishu_quantity_plan_command)
+    chain = sub.add_parser(
+        "feishu-chain-plan",
+        help="同产品链：按本地已归档清单里的 initialProductRef（含已审核的产品对应）给产品明细的“对应初查产品键”补空生成字段计划；只读，不写；计划再交 feishu-field-plan-build",
+    )
+    for flag in ("--waterline", "--contract", "--contract-sha", "--base-token", "--profile", "--out-dir"):
+        chain.add_argument(flag, required=True)
+    chain.add_argument("--identity", default="user", choices=["user", "bot"])
+    chain.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    chain.set_defaults(func=feishu_chain_plan_command)
     calibrate = sub.add_parser(
         "feishu-calibrate-plan",
         help="监督事实校准：本地已核证据(代表监督系统)对照三表 fresh 行，给可补空/可推进的格生成字段计划，云端与证据不同的列为待核对差异；"
@@ -3217,6 +3241,30 @@ def feishu_recount_command(args: argparse.Namespace) -> None:
         raise SystemExit(4)
 
 
+def feishu_period_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(f"{__package__}.feishu_period" if __package__ else "feishu_period")
+    sync = importlib.import_module(f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync")
+    contract = sync.load_contract(Path(args.contract), args.contract_sha)
+    if contract["baseId"] != args.base_token:
+        raise RegistryError("月度统计行已拒绝：目标 Base 与合同不一致")
+    today = date.fromisoformat(args.date) if args.date else module.today_shanghai()
+    try:
+        report = _feishu_read(args, "月度统计行", lambda sync_, transport: module.run(
+            contract=contract, base=args.base_token, transport=transport, business_root=Path(args.business_root), today=today,
+            now=datetime.now(module.SHANGHAI), execute=args.execute, do_stamp=args.stamp, first_month=args.first_month))
+    except module.PeriodError as error:
+        raise RegistryError(f"月度统计行已拒绝：{error}") from error
+    except module.PeriodRuntimeError as error:
+        print(f"ERROR: 月度统计行：{error}", file=sys.stderr)
+        raise SystemExit(3) from error
+    if args.out:
+        Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=1, default=str) + "\n", encoding="utf-8")
+    print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+    if report.get("status") != "OK":
+        print("WARNING: 月度统计行有冲突、重复键、读回问题或未执行；退出码 4", file=sys.stderr)
+        raise SystemExit(4)
+
+
 def feishu_case_find_command(args: argparse.Namespace) -> None:
     module = importlib.import_module(f"{__package__}.name_search" if __package__ else "name_search")
     report = _feishu_read(args, "案卷检索", lambda sync, transport: module.find_cases(
@@ -3263,6 +3311,29 @@ def feishu_quantity_plan_command(args: argparse.Namespace) -> None:
     print(json.dumps({k: v for k, v in report.items() if k != "missing"}, ensure_ascii=False, indent=2))
 
 
+def feishu_chain_plan_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(f"{__package__}.product_chain_plan" if __package__ else "product_chain_plan")
+    ws_module = importlib.import_module(f"{__package__}.workspace_state" if __package__ else "workspace_state")
+    sync = importlib.import_module(f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync")
+    contract = sync.load_contract(Path(args.contract), args.contract_sha)
+    if contract["baseId"] != args.base_token:
+        raise RegistryError("同产品链计划已拒绝：目标 Base 与合同不一致")
+    table = contract["tables"][module.PRODUCT_TABLE]
+    link_id = next((f["fieldId"] for f in table["fields"] if f["name"] == module.LINK_NAME), None)
+    if link_id is None:
+        raise RegistryError(f"同产品链计划已拒绝：合同里产品明细没有“{module.LINK_NAME}”")
+    waterline = Path(args.waterline)
+    root = waterline.parent
+    layout = ws_module.BusinessLayout.from_root(root)
+    cases = json.loads(waterline.read_text(encoding="utf-8")).get("cases", {})
+    chains, held = module.local_chains(layout, cases, root)
+    report = _feishu_read(args, "同产品链计划", lambda sync_, transport: module.build_plan(
+        chains=chains, cloud_rows=transport.list_rows(args.base_token, table["tableId"], [module.PRODUCT_KEY, module.PRODUCT_NAME, link_id]),
+        link_field_id=link_id, observed_at=sync_.now(), out_dir=Path(args.out_dir)))
+    report["manifestHeld"] = held
+    print(json.dumps({k: v for k, v in report.items() if k != "held"}, ensure_ascii=False, indent=2))
+
+
 def feishu_calibrate_plan_command(args: argparse.Namespace) -> None:
     module = importlib.import_module(f"{__package__}.feishu_calibrate" if __package__ else "feishu_calibrate")
     target = {"baseToken": args.base_token, "profile": args.profile, "identity": args.identity}
@@ -3299,7 +3370,8 @@ def feishu_label_initial_build_command(args: argparse.Namespace) -> None:
     _feishu_plan_build(args, "标签初值", lambda plans, target, transport: plans.build_label_initial_specs(
         contract_path=Path(args.contract), contract_sha=args.contract_sha, section=args.section, table_name=args.table, target=target,
         transport=transport, out_dir=Path(args.out_dir), log_root=Path(args.log_root), ledger_dir=Path(args.ledger_dir),
-        source_ref=args.source_ref, batch_size=args.batch_size, only_keys=frozenset(args.only_key) if args.only_key else None))
+        source_ref=args.source_ref, batch_size=args.batch_size, only_keys=frozenset(args.only_key) if args.only_key else None,
+        fresh_fields=frozenset(args.fresh_field) if args.fresh_field else frozenset()))
 
 
 def feishu_delegated_build_command(args: argparse.Namespace) -> None:
