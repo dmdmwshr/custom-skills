@@ -195,8 +195,8 @@ def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled"
             cursor += timedelta(days=1)
     run = _load(path, None)
     if run is not None and run.get("status") == "FINISHED":
-        return {"status": "ALREADY_FINISHED", "date": day, "finishedAt": run.get("finishedAt"), "wrote": False,
-                "changed": run.get("changed"), "breakdown": run.get("breakdown"), "reportedChanged": run.get("reportedChanged")}
+        stats = with_stats(root, day, {}, evidence_dir=evidence_dir)         # 读取同一证据口径，不回显可能是旧口径的已存值，也不写盘
+        return {"status": "ALREADY_FINISHED", "date": day, "finishedAt": run.get("finishedAt"), "wrote": False, **stats}
     if run is None:
         run = {"schemaVersion": "NightlyRunV1", "date": day, "status": "RUNNING", "startedAt": now.isoformat(timespec="seconds"),
                "triggers": [], "missedDates": missed, "entryKeyed": True}

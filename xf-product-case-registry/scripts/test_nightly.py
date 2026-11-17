@@ -653,3 +653,33 @@ def test_unknown_writes_stay_visible_in_status_and_begin_next_to_the_evidence_ba
     nightly.checkpoint(root, day, stage="sync", status="started", case="C-1")
     for result in (nightly.status(root, day), nightly.begin(root, now=T(day + "T03:00:00"))):
         assert [u["case"] for u in result["unknown"]] == ["C-1"] and result["breakdown"]["unknownWriteCheckpoints"] == 1 and result["changed"] == 0
+
+
+@pytest.mark.parametrize("saved", [{"changed": 17}, {}], ids=["legacy-reported-count", "legacy-missing-count"])
+def test_begin_on_a_finished_legacy_run_reports_the_evidence_count_without_writing_anything(tmp_path, saved):
+    root = tmp_path / "运行记录"
+    day = DAY
+    run_dir = root / "夜间运行" / day
+    run_dir.mkdir(parents=True)
+    run_file = run_dir / "run.json"
+    run_file.write_text(json.dumps({"schemaVersion": "NightlyRunV1", "date": day, "status": "FINISHED", "startedAt": day + "T02:00:00+08:00",
+                                    "finishedAt": day + "T03:00:00+08:00", **saved}), encoding="utf-8")        # 旧记录：自报数或没有统计，没有任何凭证
+    before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    again = nightly.begin(root, now=T(day + "T10:00:00"))
+    status = nightly.status(root, day)
+    assert again["status"] == "ALREADY_FINISHED" and again["wrote"] is False
+    assert again["changed"] == status["changed"] == 0 and again["breakdown"] == status["breakdown"] and again["breakdown"]["collectedCases"] == 0
+    assert again["reportedChanged"] == status["reportedChanged"] == 0 and "unverifiedReportedChanges" not in again
+    assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before          # 旧的 changed 和统计原样保留，目录里没有新文件
+    assert json.loads(run_file.read_text(encoding="utf-8")).get("changed") == saved.get("changed")
+
+
+def test_begin_on_a_finished_run_flags_self_reported_changes_that_have_no_evidence(tmp_path):
+    root = tmp_path / "运行记录"
+    day = _run(root)
+    nightly.coverage(root, _full(day), day=day)
+    nightly.checkpoint(root, day, stage="acquire", status="done", case="C-1", changed=4)
+    _complete(root, day)
+    assert nightly.finish(root, day)["status"] == "FINISHED"
+    again = nightly.begin(root, now=T(day + "T04:00:00"))
+    assert again["status"] == "ALREADY_FINISHED" and again["changed"] == 0 and again["reportedChanged"] == 4 and again["unverifiedReportedChanges"] == 4
