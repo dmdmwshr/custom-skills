@@ -118,12 +118,20 @@ def _denied(field_id: str, meta: dict[str, Any] | None) -> bool:
     """永久禁写名单仍然有效，除非最新合同把该字段明确归为标签/大队维护字段(只对非来源依据开放)。"""
     return field_id in ALWAYS_DENIED and (meta is None or meta.get("class") not in OPENED_CLASSES)
 NEGATIVE_LITERALS = {"否", "0", 0, False}
+LEDGER_APPEND_RETRY_DELAYS = (0.2, 0.5, 1.0, 2.0, 4.0)
+
+
+class LedgerAppendError(Exception):
+    """The ledger file could not be written even after retries. Raised before a request is sent (intent) or after the answer was spooled."""
+
+
 CLEAR_FINALS = {"OK", "UNCHANGED", "NOT_ATTEMPTED"}
 # APPLIED: positive evidence that the request took effect. NOT_APPLIED_PROVEN: the strict technical recovery below (the run ended, the
 # service's own revision history shows no write after the intent, and a quiet window has passed). A bare old-value readback proves nothing.
 CLEAR_RECONCILED = {"APPLIED", "NOT_APPLIED_PROVEN"}
 RECOVERY_MIN_QUIET_SECONDS = 3600
 HISTORY_CREATE_SLACK_BEFORE, HISTORY_CREATE_SLACK_AFTER = 5, 120
+RECEIPT_PAIR_INTENT_SLACK, RECEIPT_PAIR_ANSWER_WINDOW = 10, 120
 RELEASE_EVIDENCE_KINDS = {"request-terminal-proof", "service-side-record", "cli-process-log", "human-decision-record"}
 
 
@@ -747,10 +755,10 @@ class Ledger:
     def unresolved(self) -> dict[str, str]:
         """Every target that is still BLOCKED, with its reason: the blocking set of this ledger."""
         blocked: dict[str, str] = {}
-        for path in sorted((self.root / "targets").glob("*.jsonl")):
-            state = self.state(path.stem)
+        for stem in self.keys_with_events():
+            state = self.state(stem)
             if state["state"] != "CLEAR":
-                blocked[path.stem] = state["reason"]
+                blocked[stem] = state["reason"]
         return blocked
 
     @staticmethod
@@ -760,11 +768,41 @@ class Ledger:
     def _events_path(self, key: str) -> Path:
         return self.root / "targets" / f"{key}.jsonl"
 
+    def _pending_path(self, key: str) -> Path:
+        return self.root / "pending" / f"{key}.jsonl"
+
     def events(self, key: str) -> list[dict[str, Any]]:
+        """Ledger events of one target, then any event that is still waiting in the durable spool (``pending/``) because the ledger file was
+        briefly unwritable after the service had already answered. Spooled events are never lost and never hide: they count for the state."""
         path = self._events_path(key)
-        if not path.is_file():
-            return []
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.is_file() else []
+        seen = set(lines)
+        pending = self._pending_path(key)
+        if pending.is_file():
+            lines += [line for line in pending.read_text(encoding="utf-8").splitlines() if line.strip() and line not in seen]
+        return [json.loads(line) for line in lines]
+
+    def keys_with_events(self) -> list[str]:
+        stems = {p.stem for p in (self.root / "targets").glob("*.jsonl")}
+        if (self.root / "pending").is_dir():
+            stems |= {p.stem for p in (self.root / "pending").glob("*.jsonl")}
+        return sorted(stems)
+
+    def flush_pending(self, key: str) -> int:
+        """Move spooled events into the ledger file (exact lines, append-only, never rewritten, idempotent). Returns how many were moved."""
+        pending = self._pending_path(key)
+        if not pending.is_file():
+            return 0
+        path = self._events_path(key)
+        present = set(path.read_text(encoding="utf-8").splitlines()) if path.is_file() else set()
+        moved = 0
+        for line in [x for x in pending.read_text(encoding="utf-8").splitlines() if x.strip()]:
+            if line in present:
+                continue
+            self._write_line(path, line + "\n")
+            moved += 1
+        pending.unlink()
+        return moved
 
     def state(self, key: str) -> dict[str, Any]:
         """CLEAR, or BLOCKED with the unresolved intent and why."""
@@ -788,13 +826,49 @@ class Ledger:
         status["lastIntent"] = last_intent
         return status
 
-    def append(self, key: str, event: dict[str, Any]) -> None:
-        path = self._events_path(key)
+    @staticmethod
+    def _write_line(path: Path, line: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps({"at": now(), **event}, ensure_ascii=False, sort_keys=True) + "\n")
+            stream.write(line)
             stream.flush()
             os.fsync(stream.fileno())
+
+    def append(self, key: str, event: dict[str, Any], *, sleep: Any = time.sleep) -> None:
+        """Strict append (used for intents, before any service request): a short, transient file error (a lock held by another process,
+        antivirus, sync) is retried with a small back-off; if it persists the call raises LedgerAppendError and nothing was sent."""
+        self._append_line_retry(key, json.dumps({"at": now(), **event}, ensure_ascii=False, sort_keys=True) + "\n", sleep)
+
+    def append_durable(self, key: str, event: dict[str, Any], *, sleep: Any = time.sleep) -> bool:
+        """Append an event that records an answer the service ALREADY gave (bound/final/reconciled). It must never be lost and must never make the
+        caller send the request again: on a persistent file error the exact line goes to the durable spool ``pending/<key>.jsonl`` (counted by
+        events()/state(), moved into the ledger by flush_pending() later). Returns True when written to the ledger file, False when spooled;
+        raises only when neither location is writable."""
+        line = json.dumps({"at": now(), **event}, ensure_ascii=False, sort_keys=True) + "\n"
+        try:
+            self._append_line_retry(key, line, sleep)
+            return True
+        except LedgerAppendError as first:
+            try:
+                self._write_line(self._pending_path(key), line)
+            except OSError as second:
+                raise LedgerAppendError(f"{first}；暂存区也写不进：{second.__class__.__name__}：{second}") from second
+            return False
+
+    def _append_line_retry(self, key: str, line: str, sleep: Any) -> None:
+        path = self._events_path(key)
+        last: OSError | None = None
+        for delay in (0.0, *LEDGER_APPEND_RETRY_DELAYS):
+            if delay:
+                sleep(delay)
+            try:
+                if path.is_file() and path.read_text(encoding="utf-8").endswith(line):
+                    return
+                self._write_line(path, line)
+                return
+            except OSError as error:
+                last = error
+        raise LedgerAppendError(f"账本追加失败(已重试 {len(LEDGER_APPEND_RETRY_DELAYS)} 次)：{last.__class__.__name__}：{last}")
 
     @contextlib.contextmanager
     def locks(self, keys: list[str], run_id: str):
@@ -812,6 +886,9 @@ class Ledger:
                 with os.fdopen(handle, "w", encoding="utf-8") as stream:
                     stream.write(json.dumps({"runId": run_id, "pid": os.getpid(), "host": socket.gethostname(), "at": now()}))
                 held.append(path)
+            for key in sorted(set(keys)):   # 先把上次因账本短暂不可写而暂存的事件原样并回账本(只追加；写不进就留在暂存区，仍计入状态)
+                with contextlib.suppress(OSError):
+                    self.flush_pending(key)
             yield
         finally:
             for path in held:
@@ -1010,7 +1087,22 @@ def execute(spec: dict[str, Any], checked: dict[str, Any], transport: Transport,
         blocks = _all_blocks(ledger, spec, checked, accepted)  # re-check inside the lock: a concurrent run may have just finished
         if blocks:
             raise SyncError("目标在加锁后出现未对账记录，已拒绝：" + json.dumps(blocks, ensure_ascii=False))
-        return _execute_locked(spec, checked, transport, ledger, keys, log_dir, run_id, index, base)
+        try:
+            return _execute_locked(spec, checked, transport, ledger, keys, log_dir, run_id, index, base)
+        except BaseException as error:   # 任何意外中断都留下 report.json：已发请求的原生凭据在 requests/responses，终态说明为何没有正常收尾
+            _abort_report(log_dir, "execute", run_id, base, spec, ledger, error)
+            raise
+
+
+def _abort_report(log_dir: Path, mode: str, run_id: str, base: str, spec: dict[str, Any], ledger: Ledger, error: BaseException) -> None:
+    """Never leave a run without report.json. Written only when the run did not write its own; it states the interruption, never a success."""
+    path = Path(log_dir) / "report.json"
+    if path.exists():
+        return
+    with contextlib.suppress(OSError):
+        _write(Path(log_dir), "report.json", {"schema": REPORT_SCHEMA, "mode": mode, "runId": run_id, "baseToken": base, "profile": spec.get("target", {}).get("profile"),
+                                              "ledgerDir": str(ledger.root), "status": "ABORTED", "abortedAt": now(), "error": f"{error.__class__.__name__}: {error}",
+                                              "note": "进程中断，没有正常收尾；已发出的请求与服务回执在同目录 requests.jsonl/responses.jsonl，账本以意图和暂存区事件为准，未知先对账不重放"})
 
 
 def _execute_locked(spec, checked, transport, ledger, keys, log_dir, run_id, index, base) -> dict[str, Any]:
@@ -1067,14 +1159,22 @@ def _execute_locked(spec, checked, transport, ledger, keys, log_dir, run_id, ind
         if not item["changes"]:
             continue
         intent_id = digest({"base": base, "table": item["tableId"], "record": item["recordId"], "stableKey": item["stableKey"], "wire": item["changes"]})
+        try:
+            ledger.append(keys[(item["tableId"], item["recordId"])], {
+                "event": "intent", "intentId": intent_id, "runId": run_id, "operator": operator(), "logDir": str(log_dir),
+                "target": {"base": base, "table": item["tableId"], "record": item["recordId"]}, "stableKey": item["stableKey"],
+                "fields": {fid: {"name": item["writes"][fid]["name"], "type": item["writes"][fid]["type"], "old": before[item["tableId"]][item["recordId"]].get(fid), "wire": wire,
+                                 "basis": item["writes"][fid]["basis"].get("kind")}
+                           for fid, wire in item["changes"].items()},
+            })
+        except LedgerAppendError as error:   # 账本不可写：一个请求都没发。已落账的前序意图记为未尝试，避免留下无终态的 PENDING
+            for done_key, done_intent in intents.items():
+                ledger.append_durable(keys[done_key], {"event": "final", "intentId": done_intent, "runId": run_id, "status": "NOT_ATTEMPTED", "detail": f"账本不可写，未发请求：{error}"})
+            report["status"] = "REFUSED_BEFORE_WRITE"
+            report["reason"] = f"账本不可写，未发起任何外部写入：{error}"
+            _write(log_dir, "report.json", report)
+            raise RuntimeSyncError(report["reason"]) from error
         intents[(item["tableId"], item["recordId"])] = intent_id
-        ledger.append(keys[(item["tableId"], item["recordId"])], {
-            "event": "intent", "intentId": intent_id, "runId": run_id, "operator": operator(), "logDir": str(log_dir),
-            "target": {"base": base, "table": item["tableId"], "record": item["recordId"]}, "stableKey": item["stableKey"],
-            "fields": {fid: {"name": item["writes"][fid]["name"], "type": item["writes"][fid]["type"], "old": before[item["tableId"]][item["recordId"]].get(fid), "wire": wire,
-                             "basis": item["writes"][fid]["basis"].get("kind")}
-                       for fid, wire in item["changes"].items()},
-        })
     failed = False
     for item, entry in zip(plan, report["records"], strict=True):
         if not item["changes"]:
@@ -1124,7 +1224,7 @@ def _execute_locked(spec, checked, transport, ledger, keys, log_dir, run_id, ind
             final = "VIOLATION"
         else:
             final = "OK"
-        ledger.append(keys[(item["tableId"], item["recordId"])], {"event": "final", "intentId": intent_id, "runId": run_id, "status": final, "detail": entry.get("error", "")})
+        ledger.append_durable(keys[(item["tableId"], item["recordId"])], {"event": "final", "intentId": intent_id, "runId": run_id, "status": final, "detail": entry.get("error", "")})
     if report["status"] != "OK":
         raise RuntimeSyncError(report.get("reason") or "; ".join(violations) or "写入失败/结果未知，已保留回读证据，未重试，目标已在账本中封锁")
     return report
@@ -1185,7 +1285,7 @@ def reconcile(spec: dict[str, Any], checked: dict[str, Any], transport: Transpor
                 entry["outcome"] = "RELEASE_NOT_FOR_THIS_INTENT"   # 放行只对其精确 intentId 有效；其余目标保持封锁，不批量释放
                 continue
             if release is not None:
-                ledger.append(key, {"event": "human_release", "intentId": intent["intentId"], "runId": run_id, "reason": release["reason"],
+                ledger.append_durable(key, {"event": "human_release", "intentId": intent["intentId"], "runId": run_id, "reason": release["reason"],
                                     "operator": release["operator"], "evidence": release["evidence"], "acknowledgesLateWriteRisk": True,
                                     "priorState": status["reason"], "originalIntent": intent})
                 entry["outcome"] = "HUMAN_RELEASED"
@@ -1196,14 +1296,14 @@ def reconcile(spec: dict[str, Any], checked: dict[str, Any], transport: Transpor
                     entry["outcome"] = "RECOVERY_NOT_FOR_THIS_INTENT"   # 恢复只对其精确 intentId 有效，不批量
                     continue
                 outcome, observed, recovery_facts = _technical_recovery(index, item, intent, ledger.events(key), status, transport, base, recovery["minQuietSeconds"])
-                ledger.append(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome, "originalIntent": intent,
+                ledger.append_durable(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome, "originalIntent": intent,
                                     "observed": observed, "recovery": recovery_facts,
                                     "detail": "严格技术恢复：原运行已结束、服务端历史在意图之后无该字段写入、读回等于旧值且静默期已过" if outcome == "NOT_APPLIED_PROVEN"
                                     else "技术恢复证据不足，保持封锁：" + "；".join(recovery_facts.get("reasons", []))})
                 entry["outcome"], entry["observed"], entry["recovery"] = outcome, observed, recovery_facts
                 continue
             outcome, observed = _classify(index, item, intent, transport, base)
-            ledger.append(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome,
+            ledger.append_durable(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome,
                                 "originalIntent": intent, "observed": observed,
                                 "detail": "旧值仅是观察，不能证明请求未执行或不会迟到" if outcome == "OLD_VALUE_OBSERVED" else ""})
             entry["outcome"] = outcome
@@ -1600,10 +1700,15 @@ def execute_creates(spec: dict[str, Any], checked: dict[str, Any], transport: Tr
             wire = _create_wire(item, parent_record)
             intent_id = digest({"base": base, "table": item["tableId"], "stableKey": item["stableKey"], "wire": wire})
             ledger_key = _create_key(spec, item)
-            ledger.append(ledger_key, {"event": "intent", "kind": "create", "intentId": intent_id, "runId": run_id, "operator": operator(),
-                                       "logDir": str(log_dir), "target": {"base": base, "table": item["tableId"]}, "stableKey": item["stableKey"],
-                                       "parent": parent_record, "route": item["route"],
-                                       "fields": {fid: {"name": item["writes"][fid]["name"], "type": item["writes"][fid]["type"], "old": None, "wire": w} for fid, w in wire.items()}})
+            try:
+                ledger.append(ledger_key, {"event": "intent", "kind": "create", "intentId": intent_id, "runId": run_id, "operator": operator(),
+                                           "logDir": str(log_dir), "target": {"base": base, "table": item["tableId"]}, "stableKey": item["stableKey"],
+                                           "parent": parent_record, "route": item["route"],
+                                           "fields": {fid: {"name": item["writes"][fid]["name"], "type": item["writes"][fid]["type"], "old": None, "wire": w} for fid, w in wire.items()}})
+            except LedgerAppendError as error:   # 意图落不了账＝请求还没发：零外写，停止，不留 PENDING
+                entry.update(status="LEDGER_UNAVAILABLE_NOT_SENT", error=str(error))
+                stop = True
+                continue
             _append(log_dir, "requests.jsonl", {"at": now(), "op": "create", "tableId": item["tableId"], "stableKey": item["stableKey"], "fields": wire})
             try:
                 response = transport.create_record(base, item["tableId"], wire)
@@ -1611,29 +1716,32 @@ def execute_creates(spec: dict[str, Any], checked: dict[str, Any], transport: Tr
                 status = "UNKNOWN" if str(error).startswith("UNKNOWN") else "FAILED"
                 entry.update(status=status, error=str(error))
                 _append(log_dir, "responses.jsonl", {"at": now(), "stableKey": key_value, "error": str(error), "rawReceipt": getattr(transport, "last_body", None)})
-                ledger.append(ledger_key, {"event": "final", "intentId": intent_id, "runId": run_id, "status": status, "detail": str(error)})
+                ledger.append_durable(ledger_key, {"event": "final", "intentId": intent_id, "runId": run_id, "status": status, "detail": str(error)})
                 stop = True
                 continue
             record_id = _receipt_record_id(response)
             _append(log_dir, "responses.jsonl", {"at": now(), "stableKey": key_value, "recordId": record_id, "rawReceipt": response})
             if record_id is None:  # 回执没有唯一合法 id：效果未知，不回读 None、不向子层交出未核实 id
                 entry.update(status="UNKNOWN", error="UNKNOWN: 创建回执缺少唯一合法 record_id")
-                ledger.append(ledger_key, {"event": "final", "intentId": intent_id, "runId": run_id, "status": "UNKNOWN", "detail": entry["error"]})
+                ledger.append_durable(ledger_key, {"event": "final", "intentId": intent_id, "runId": run_id, "status": "UNKNOWN", "detail": entry["error"]})
                 stop = True
                 continue
             entry.update(status="CREATED", recordId=record_id)
             problems = _verify_created(index, item, record_id, parent_record, transport, base)
             if problems:
                 entry.update(status="VIOLATION", violations=problems)
-                ledger.append(ledger_key, {"event": "final", "intentId": intent_id, "runId": run_id, "status": "VIOLATION", "detail": "; ".join(problems)})
+                ledger.append_durable(ledger_key, {"event": "final", "intentId": intent_id, "runId": run_id, "status": "VIOLATION", "detail": "; ".join(problems)})
                 stop = True
                 continue
             created[key_value] = record_id
-            ledger.append(ledger_key, {"event": "bound", "intentId": intent_id, "runId": run_id, "recordId": record_id})
-            ledger.append(ledger_key, {"event": "final", "intentId": intent_id, "runId": run_id, "status": "OK", "detail": ""})
+            written = ledger.append_durable(ledger_key, {"event": "bound", "intentId": intent_id, "runId": run_id, "recordId": record_id})
+            written = ledger.append_durable(ledger_key, {"event": "final", "intentId": intent_id, "runId": run_id, "status": "OK", "detail": ""}) and written
+            if not written:   # 服务已答复、账本暂时写不进：事件在暂存区(计入状态)，本次不再发任何请求就能被下次并回账本
+                entry["ledgerSpooled"] = True
+                report.setdefault("ledgerSpooled", []).append(key_value)
             entry["status"] = "CREATED_VERIFIED"
     report["finishedAt"] = now()
-    bad = [e for e in report["records"] if e["status"] in {"UNKNOWN", "FAILED", "VIOLATION", "UNKNOWN_SCAN", "DUPLICATE_KEYS_BLOCK"}]
+    bad = [e for e in report["records"] if e["status"] in {"UNKNOWN", "FAILED", "VIOLATION", "UNKNOWN_SCAN", "DUPLICATE_KEYS_BLOCK", "LEDGER_UNAVAILABLE_NOT_SENT"}]
     held = [e for e in report["records"] if e["status"] in {"EXISTING_DIVERGED", "BLOCKED_ENTITY"}]  # 精确目标及其依赖被挡；独立对象照常继续，不是失败、不写账本封锁
     report["blockedEntities"] = [{k: e.get(k) for k in ("tableId", "stableKey", "status", "violations", "reasons")} for e in held]
     report["status"] = "FAILED" if bad else ("PARTIAL" if held else "OK")
@@ -1732,7 +1840,7 @@ def reconcile_creates(spec: dict[str, Any], checked: dict[str, Any], transport: 
                 raise SyncError("对账 spec 的稳定键与账本意图不一致，已拒绝")
             entry["intentId"] = intent["intentId"]
             if release is not None and release.get("intentId") == intent["intentId"]:  # 人工放行只作用于其精确 intent，不推广到其他目标
-                ledger.append(key, {"event": "human_release", "intentId": intent["intentId"], "runId": run_id, "reason": release["reason"], "operator": release["operator"],
+                ledger.append_durable(key, {"event": "human_release", "intentId": intent["intentId"], "runId": run_id, "reason": release["reason"], "operator": release["operator"],
                                     "evidence": release["evidence"], "acknowledgesLateWriteRisk": True, "priorState": status["reason"], "originalIntent": intent})
                 entry["outcome"] = "HUMAN_RELEASED"
                 continue
@@ -1742,14 +1850,14 @@ def reconcile_creates(spec: dict[str, Any], checked: dict[str, Any], transport: 
                     entry["outcome"] = "RECOVERY_NOT_FOR_THIS_INTENT"   # 恢复只对其精确 intentId 有效，不批量
                     continue
                 outcome, observed, recovery_facts = _create_recovery(index, item, intent, ledger.events(key), status, transport, base, recovery["minQuietSeconds"])
-                ledger.append(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome, "originalIntent": intent,
+                ledger.append_durable(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome, "originalIntent": intent,
                                     "observed": observed, "recovery": recovery_facts,
                                     "detail": "严格技术恢复：创建请求已结束并记 UNKNOWN、静默期已过、全键扫描与等价行扫描均为 0 匹配，证明未生效"
                                     if outcome == "NOT_APPLIED_PROVEN" else "技术恢复证据不足，保持封锁：" + "；".join(recovery_facts.get("reasons", []))})
                 entry["outcome"], entry["observed"], entry["recovery"] = outcome, observed, recovery_facts
                 continue
-            outcome, observed = _classify_create(index, item, intent, transport, base, proof, ledger.events(key))
-            ledger.append(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome, "originalIntent": intent,
+            outcome, observed = _classify_create(index, item, intent, transport, base, proof, ledger.events(key), ledger)
+            ledger.append_durable(key, {"event": "reconciled", "intentId": intent["intentId"], "runId": run_id, "outcome": outcome, "originalIntent": intent,
                                 "observed": observed, "terminalProof": observed.get("verifiedProof", []) if outcome == "APPLIED" else [],
                                 "detail": "0 匹配不能证明迟到请求不会执行，保持封锁" if outcome == "ZERO_MATCH" else ""})
             entry["outcome"], entry["observed"] = outcome, observed
@@ -1803,7 +1911,7 @@ def _create_recovery(index, item, intent, events, status, transport, base, min_q
     return "NOT_APPLIED_PROVEN", observed, facts
 
 
-def _classify_create(index, item, intent, transport, base, proof, events=()) -> tuple[str, dict[str, Any]]:
+def _classify_create(index, item, intent, transport, base, proof, events=(), ledger: "Ledger | None" = None) -> tuple[str, dict[str, Any]]:
     key_field, key_value = intent["stableKey"]["fieldId"], intent["stableKey"]["value"]
     try:
         matches = transport.find_records(base, item["tableId"], key_field, key_value)
@@ -1828,6 +1936,9 @@ def _classify_create(index, item, intent, transport, base, proof, events=()) -> 
     if not verified:
         verified, history_reasons = _verify_history_creation_proof(proof, item, intent, events, transport, base, matches[0])
         reasons = [*reasons, *history_reasons]
+    if not verified:
+        verified, pair_reasons = _verify_receipt_pair_proof(proof, item, intent, events, transport, base, matches[0], ledger)
+        reasons = [*reasons, *pair_reasons]
     if not verified:
         return "ONE_MATCH_NEEDS_TERMINAL_PROOF", {**observed, "proofRejected": reasons}
     return "APPLIED", {**observed, "verifiedProof": verified}
@@ -1869,6 +1980,85 @@ def _verify_history_creation_proof(proof: Any, item, intent, events, transport, 
         return [], ["该行的首个服务端修订不在原创建请求的时间窗口内"]
     return [{"kind": "record-history-creation", "intentId": intent["intentId"], "recordId": record_id, "firstRev": first["rev"],
              "firstRevCreateTime": first["createTime"], "operator": first.get("operator"), "window": [start, end]}], []
+
+
+def _verify_receipt_pair_proof(proof: Any, item, intent, events, transport, base: str, record_id: str, ledger: "Ledger | None") -> tuple[list[dict[str, Any]], list[str]]:
+    """Causal proof for an ORIGINAL run that sent the request and got the service's answer but could not finish its bookkeeping: the run left
+    ``requests.jsonl`` and ``responses.jsonl`` (the service's raw receipts) in the intent's logDir, but no ``report.json`` and no ledger terminal.
+
+    Accepted only when ALL hold (the caller already checked: exactly one stable-key match in the table and field-by-field equality with the intent):
+    the proof entry names this exact intentId and pins the SHA-256 of both logs; logDir equals the intent's logDir and report.json does not exist
+    (otherwise the stricter service-receipt-log proof applies); the ledger has this intent and no ``final``/``bound`` for it; the requests log holds
+    exactly one create for the stable key whose table and complete payload equal the intent, logged within seconds of the intent; the responses log
+    holds exactly one answer for the stable key, ok, naming exactly one record id equal to the current unique match, logged after the request and
+    within the allowed window; every other create in the same log is corroborated by its own ledger (same runId and logDir, ``bound`` record id equal
+    to its logged receipt) so the log provably belongs to that run; and the service's own revision history shows the row's FIRST revision created
+    inside the request/answer window. A free-text reference is no proof. Nothing is written here and no event is edited.
+    """
+    entries = [e for e in (proof if isinstance(proof, list) else []) if isinstance(e, dict) and e.get("kind") == "service-receipt-log-pair"]
+    if len(entries) != 1 or entries[0].get("intentId") != intent.get("intentId"):
+        return [], ["未提供针对该精确 intentId 的 service-receipt-log-pair 证明"]
+    ref = entries[0]
+    if any(e.get("event") in {"final", "bound"} and e.get("intentId") == intent["intentId"] for e in events):
+        return [], ["该意图账本里已有 bound/final，本证明只用于缺终态的意图"]
+    log_dir = Path(str(ref.get("logDir", "")))
+    if not log_dir.is_absolute() or str(log_dir) != str(intent.get("logDir")):
+        return [], ["logDir 不是原意图的 logDir"]
+    files = {name: log_dir / name for name in ("requests.jsonl", "responses.jsonl")}
+    if not all(f.is_file() for f in files.values()):
+        return [], ["原日志文件缺失"]
+    if (log_dir / "report.json").exists():
+        return [], ["原运行有 report.json，应使用 service-receipt-log 证明"]
+    if ref.get("requestsSha256") != file_sha(files["requests.jsonl"]) or ref.get("responsesSha256") != file_sha(files["responses.jsonl"]):
+        return [], ["日志摘要与登记不符"]
+    key_value = intent["stableKey"]["value"]
+    try:
+        requests_all = [r for r in _jsonl(files["requests.jsonl"]) if isinstance(r, dict) and r.get("op") == "create"]
+        responses_all = [r for r in _jsonl(files["responses.jsonl"]) if isinstance(r, dict)]
+    except (OSError, ValueError) as error:
+        return [], [f"原日志无法读取：{error}"]
+    wanted = {fid: f["wire"] for fid, f in intent["fields"].items()}
+    requests = [r for r in requests_all if r.get("stableKey") == intent["stableKey"]]
+    if len(requests) != 1 or requests[0].get("tableId") != item["tableId"] or canon(requests[0].get("fields")) != canon(wanted):
+        return [], ["原请求(表/稳定键/完整载荷)与意图不一致或不唯一"]
+    responses = [r for r in responses_all if r.get("stableKey") == key_value]
+    receipts = [r for r in responses if isinstance(r.get("rawReceipt"), dict) and r["rawReceipt"].get("ok") is True]
+    ids = {_receipt_record_id(r["rawReceipt"]) for r in receipts}
+    if len(responses) != 1 or len(receipts) != 1 or len(ids) != 1 or None in ids or ids != {record_id}:
+        return [], ["服务回执须恰好一条且成功，其 record_id 等于当前唯一匹配"]
+    req_at, res_at, intent_at = _iso_epoch(requests[0].get("at")), _iso_epoch(responses[0].get("at")), _iso_epoch(intent.get("at"))
+    if None in (req_at, res_at, intent_at):
+        return [], ["请求/回执/意图时间无法解析"]
+    if abs(req_at - intent_at) > RECEIPT_PAIR_INTENT_SLACK or not (req_at <= res_at <= req_at + RECEIPT_PAIR_ANSWER_WINDOW):
+        return [], ["请求、回执与意图的时间顺序不成立"]
+    siblings = [r for r in requests_all if r.get("stableKey") != intent["stableKey"]]
+    corroborated: list[str] = []
+    for sibling in siblings:
+        sibling_key = (sibling.get("stableKey") or {}).get("value")
+        sibling_res = [r for r in responses_all if r.get("stableKey") == sibling_key and isinstance(r.get("rawReceipt"), dict) and r["rawReceipt"].get("ok") is True]
+        if ledger is None or len(sibling_res) != 1:
+            return [], [f"同日志的另一创建 {sibling_key} 无法由本账独立印证"]
+        logged_id = _receipt_record_id(sibling_res[0]["rawReceipt"])
+        sibling_events = ledger.events(Ledger.target_key(base, sibling.get("tableId", ""), "create:" + str(sibling_key)))
+        mine = [e for e in sibling_events if e.get("event") == "intent" and e.get("runId") == intent.get("runId") and e.get("logDir") == intent.get("logDir")]
+        bound = [e for e in sibling_events if e.get("event") == "bound" and e.get("runId") == intent.get("runId") and e.get("recordId") == logged_id]
+        if not mine or not bound or logged_id is None:
+            return [], [f"同日志的另一创建 {sibling_key} 没有同 runId/logDir 的账本意图与一致的 bound"]
+        corroborated.append(str(sibling_key))
+    try:
+        history = transport.get_record_history(base, item["tableId"], record_id)
+    except (RuntimeSyncError, AttributeError) as error:
+        return [], [f"服务端历史不可读：{error}"]
+    if not history:
+        return [], ["服务端历史为空"]
+    first = min(history, key=lambda h: h["rev"])
+    low, high = req_at - HISTORY_CREATE_SLACK_BEFORE, res_at + HISTORY_CREATE_SLACK_AFTER
+    if not (low <= first["createTime"] <= high):
+        return [], ["该行的首个服务端修订不在原请求与回执的时间窗口内"]
+    return [{"kind": "service-receipt-log-pair", "logDir": str(log_dir), "runId": intent.get("runId"), "intentId": intent["intentId"], "recordId": record_id,
+             "requestsSha256": ref["requestsSha256"], "responsesSha256": ref["responsesSha256"], "requestAt": requests[0].get("at"), "responseAt": responses[0].get("at"),
+             "firstRev": first["rev"], "firstRevCreateTime": first["createTime"], "operator": first.get("operator"), "window": [low, high],
+             "corroboratedSiblings": corroborated}], []
 
 
 def _verify_terminal_proof(proof: Any, item, intent, base: str, record_id: str) -> tuple[list[dict[str, Any]], list[str]]:
@@ -2770,6 +2960,8 @@ def build_field_plan_specs(*, plan_path: Path, plan_sha: str, waterline_path: Pa
             planned[fid] = {"meta": meta, "item": item, "refs": refs}
         if ledger is not None and table_id is not None and RECORD_ID.match(record_id) and ledger.state(Ledger.target_key(target["baseToken"], table_id, record_id))["state"] == "BLOCKED":
             problems.append("该目标账本仍未决(BLOCKED)，先对账")
+        if ledger is not None and table_id is not None and _text(stable.get("value")) and ledger.state(Ledger.target_key(target["baseToken"], table_id, "create:" + _text(stable["value"])))["state"] == "BLOCKED":
+            problems.append("同案稳定键的创建仍未决(BLOCKED)，先对账")   # 与写入闸门一致：同案未决创建会让整份说明被拒，规划阶段只精确剔除这一案
         if table_id is not None and RECORD_ID.match(record_id):
             release = _pending_human_release(ledger, target["baseToken"], table_id, record_id, _text(entry.get("projectNo")))
             restore_only = all(isinstance(f, dict) and isinstance(f.get("restore"), dict) for f in (fields_in or {}).values())
@@ -3245,7 +3437,13 @@ def run(spec_path: Path, *, execute_flag: bool = False, reconcile_flag: bool = F
         _require(flag, f"{spec['mode']} 模式必须同时带 {name}")
         ledger.validate_root()
         use = transport or LarkCliTransport(cli, spec["target"]["profile"], spec["target"]["identity"])
-        return execute_creates(spec, checked, use, ledger) if spec["mode"] == "execute" else reconcile_creates(spec, checked, use, ledger)
+        if spec["mode"] != "execute":
+            return reconcile_creates(spec, checked, use, ledger)
+        try:
+            return execute_creates(spec, checked, use, ledger)
+        except BaseException as error:   # 创建运行中断也必须留下 report.json(例如账本短暂不可写)；已发请求的回执在同目录
+            _abort_report(Path(spec["logDir"]), "execute", "unknown", spec["target"]["baseToken"], spec, ledger, error)
+            raise
     contract = load_contract(Path(spec["contract"].get("path", "")), str(spec["contract"].get("sha256", "")), spec["contract"].get("section"))
     checked = validate_spec(spec, contract)
     _require(spec["mode"] == "plan" or ledger_dir is not None, f"{spec['mode']} 必须显式给出 --ledger-dir(无默认账本，避免写到别处绕过封锁)")

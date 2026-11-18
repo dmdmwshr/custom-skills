@@ -46,6 +46,8 @@ COVERAGE_LOG = "来源覆盖核对.jsonl"
 COVERAGE_DAYS = 7
 COVERAGE_FIELD = "检查日期"
 # 任务列表的五个入口；消防装备抽查入口来源侧不可用，作为已知限制随每次核对如实记录，不计入“完整”。
+SCHEDULED_TIME = "02:00"           # 夜间定时任务的约定触发时刻（上海时间）
+DELAY_NOTE_MINUTES = 30            # 实际开始晚于约定时刻超过这个分钟数，须登记原因；原因没有证据时保持 UNPROVEN
 COVERAGE_ENTRIES = ("日常监督任务", "开业前检查任务", "举报投诉核查任务", "火灾事故调查核查任务", "社会单位产品抽查任务")
 DISPOSITIONS = frozenset({"OBSERVED", "REGISTERED", "OUT_OF_SCOPE"})
 
@@ -185,7 +187,8 @@ def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled"
         if other < day:
             state = _load(root / RUNS_DIR / other / "run.json", {})
             if state.get("status") != "FINISHED":
-                earlier.append({"date": other, "status": state.get("status"), "unknown": progress(root, other)["unknown"]})
+                earlier.append({"date": other, "status": state.get("status"), "derivedStatus": run_view(root, other)["derivedStatus"],
+                                "unknown": progress(root, other)["unknown"]})
     finished = [d for d in _run_days(root) if _load(root / RUNS_DIR / d / "run.json", {}).get("status") == "FINISHED"]
     missed: list[str] = []
     if finished:
@@ -199,7 +202,7 @@ def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled"
         return {"status": "ALREADY_FINISHED", "date": day, "finishedAt": run.get("finishedAt"), "wrote": False, **stats}
     if run is None:
         run = {"schemaVersion": "NightlyRunV1", "date": day, "status": "RUNNING", "startedAt": now.isoformat(timespec="seconds"),
-               "triggers": [], "missedDates": missed, "entryKeyed": True}
+               "triggers": [], "missedDates": missed, "entryKeyed": True, "schedule": _schedule(day, now, trigger)}
         outcome = "STARTED"
     else:
         outcome = "RESUME"
@@ -213,6 +216,81 @@ def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled"
             "weeklyCoverage": coverage_state(root, today=day), "lastFinishedDate": finished[-1] if finished else None,
             "openExecutions": open_executions(root), "carryIssues": carried,
             "rule": "先对账 unknown（回读，不重放）；到期事项按绝对到期日处理，错过的夜晚不单独补跑"}
+
+
+def _schedule(day: str, started: datetime, kind: str = "scheduled") -> dict[str, Any]:
+    """Expected vs actual start of a run. A late start gets ``delayCause`` UNPROVEN until ``delay_cause`` records a cause with its
+    evidence; a cause is never guessed from the delay itself."""
+    expected = datetime.fromisoformat(f"{day}T{SCHEDULED_TIME}:00").replace(tzinfo=SHANGHAI)
+    delay = round((started.astimezone(SHANGHAI) - expected).total_seconds() / 60)
+    schedule: dict[str, Any] = {"expectedAt": expected.isoformat(timespec="seconds"), "actualAt": started.astimezone(SHANGHAI).isoformat(timespec="seconds"),
+                                "delayMinutes": delay}
+    if kind != "scheduled":
+        schedule["manualStart"] = True        # 人工发起的运行没有“应在 02:00 触发”的预期，迟起不适用
+    elif delay > DELAY_NOTE_MINUTES:
+        schedule["delayCause"] = {"status": "UNPROVEN"}
+    return schedule
+
+
+def delay_cause(root: Path, day: str, *, cause: str, evidence: str, now: datetime | None = None) -> dict[str, Any]:
+    """Record the proven cause of a late start with the evidence that proves it. Needs both; an earlier cause stays in ``history``."""
+    path = _run_dir(root, day) / "run.json"
+    run = _load(path, None)
+    if run is None:
+        raise NightlyError("该日期没有运行记录")
+    if not cause.strip() or not evidence.strip():
+        raise NightlyError("登记迟起原因需要原因（--detail）和证据位置（--ref）；没有证据时保持 UNPROVEN，不猜")
+    schedule = run.get("schedule") or _schedule_for(run)
+    if schedule.get("manualStart") or schedule.get("delayMinutes", 0) <= DELAY_NOTE_MINUTES:
+        raise NightlyError("该次运行是人工发起或没有超过迟起阈值，无需登记迟起原因")
+    previous = schedule.get("delayCause") or {"status": "UNPROVEN"}
+    entry = {"status": "PROVEN", "cause": cause.strip(), "evidence": evidence.strip(),
+             "at": (now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds")}
+    if previous.get("status") == "PROVEN":
+        entry["history"] = [*previous.get("history", []), {k: previous[k] for k in ("cause", "evidence", "at") if k in previous}]
+    schedule["delayCause"] = entry
+    run["schedule"] = schedule
+    _atomic(path, run)
+    return {"status": "RECORDED", "date": day, "schedule": schedule}
+
+
+def _schedule_for(run: dict[str, Any]) -> dict[str, Any]:
+    """Schedule of a record written before the field existed: derived from its own date and first start, flagged so."""
+    triggers = run.get("triggers") or [{}]
+    return {**_schedule(run["date"], _parse_time(run["startedAt"]), triggers[0].get("kind") or "scheduled"), "derived": True}
+
+
+def run_view(root: Path, day: str) -> dict[str, Any]:
+    """One run in one place: expected/actual start and delay with its cause, every execution (a second one is a takeover and says
+    why the earlier one ended), and a derived state that tells a finished interruption from a run that is really active. The stored
+    ``status`` is never rewritten by this view; an old run left ``RUNNING`` after its executions ended shows as INTERRUPTED_UNFINISHED."""
+    run = _load(_run_dir(root, day) / "run.json", None)
+    if run is None:
+        return {"date": day, "derivedStatus": "NO_RUN"}
+    executions = run.get("executions", [])
+    open_now = [e for e in executions if not e.get("endedAt")]
+    stored = run.get("status")
+    if stored != "RUNNING":
+        derived = stored
+    elif open_now:
+        derived = "ACTIVE"
+    elif executions:
+        derived = "INTERRUPTED_UNFINISHED"
+    else:
+        derived = "RUNNING_UNBOUND"
+    takeovers = [{"sessionId": item["sessionId"], "boundAt": item["boundAt"], "after": {"sessionId": before["sessionId"], "endState": before.get("endState"),
+                  "endedAt": before.get("endedAt"), "detail": before.get("endDetail", "")}}
+                 for before, item in zip(executions, executions[1:])]
+    last = executions[-1] if executions else None
+    return {"date": day, "storedStatus": stored, "derivedStatus": derived, "triggers": run.get("triggers", []),
+            "schedule": run.get("schedule") or (_schedule_for(run) if run.get("startedAt") else None),
+            "executions": [{k: e.get(k) for k in ("sessionId", "boundAt", "endedAt", "endState")} for e in executions], "takeovers": takeovers,
+            "finalState": {"stored": stored, "lastExecutionEnd": (last or {}).get("endState"), "finishedAt": run.get("finishedAt"),
+                           "finishedWithIssues": run.get("finishedWithIssues")}}
+
+
+def timeline(root: Path, *, since: str | None = None) -> list[dict[str, Any]]:
+    return [run_view(root, day) for day in _run_days(root) if not since or day >= since]
 
 
 def checkpoint(root: Path, day: str, *, stage: str, status: str, case: str | None = None, detail: str = "",
@@ -308,6 +386,9 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", r
                 "rule": "全范围检查日期核对已到期且今晚未做：先做并用 nightly coverage 登记（来源不可用也要登记这次尝试）"}
     stats = run_stats(root, day, evidence_dir=evidence_dir or run.get("evidenceDir", ""), now=now)
     issues = issues_of(root, day)
+    if stats["breakdown"].get("cloudUnknown"):      # 云写入证据里有未闭合的未知项：带出到下一轮，不静默写成 0
+        issues.append({"kind": "cloud-unknown", "stage": "sync", "case": "", "entry": "", "status": "unknown",
+                       "detail": f"云写入有 {stats['breakdown']['cloudUnknown']} 项没有回执与账本共同证明（读不出的回执或账本非 OK）：先回读对账，不重放", "ref": ""})
     finished_before = [d for d in _run_days(root) if d < day and _load(root / RUNS_DIR / d / "run.json", {}).get("status") == "FINISHED"]
     previous = {_issue_signature(i) for i in (_load(root / RUNS_DIR / finished_before[-1] / "run.json", {}).get("issues", []) if finished_before else [])}
     new_issues = [i for i in issues if _issue_signature(i) not in previous]
@@ -346,6 +427,7 @@ def status(root: Path, day: str | None = None, *, evidence_dir: str = "") -> dic
               "breakdown": stats["breakdown"], "reportedChanged": stats["reportedChanged"],
               "weeklyCoverage": coverage_state(root, today=now_shanghai().date().isoformat()), "openExecutions": open_executions(root)}
     result["stats"] = stats
+    result["view"] = run_view(root, day)
     if stats["reportedChanged"] > 0 and stats["changed"] == 0:
         result["unverifiedReportedChanges"] = stats["reportedChanged"]
     result["issues"] = issues_of(root, day)
@@ -558,11 +640,54 @@ def _ledger_by_run(root: Path, *, since: datetime) -> dict[str, dict[str, dict[s
         if event["event"] == "intent":
             intent["record"] = (event.get("target") or {}).get("record") or intent["record"]
             intent["kind"] = event.get("kind") or "update"
+            intent["logDir"] = event.get("logDir") or ""
+            stable = event.get("stableKey")
+            intent["stable"] = str((stable.get("value") if isinstance(stable, dict) else stable) or "")
         elif event["event"] == "bound":
             intent["record"] = event.get("recordId") or intent["record"]
         else:
             intent["final"] = event.get("status")
     return runs
+
+
+LEDGER_CLEAR_FINALS = frozenset({"OK", "UNCHANGED", "NOT_ATTEMPTED"})
+LEDGER_CLEAR_RECONCILED = frozenset({"APPLIED", "NOT_APPLIED_PROVEN"})
+
+
+def _ledger_resolutions(root: Path, *, since: datetime) -> dict[str, dict[str, Any]]:
+    """intentId -> how the unique ledger last closed it, whichever run wrote that event (a reconcile run has its own runId):
+    ``clear`` only for a verified final (OK/UNCHANGED/NOT_ATTEMPTED) or a reconciled APPLIED/NOT_APPLIED_PROVEN; a human release is
+    clear for the gate but is not a verified result, so it is reported apart."""
+    found: dict[str, dict[str, Any]] = {}
+    for event in sorted(_ledger_events(root, since=since, kinds=("final", "reconciled", "human_release")), key=lambda e: e["at"]):
+        kind = event["event"]
+        label = event.get("status") if kind == "final" else event.get("outcome") if kind == "reconciled" else "HUMAN_RELEASED"
+        verified = (kind == "final" and label in LEDGER_CLEAR_FINALS) or (kind == "reconciled" and label in LEDGER_CLEAR_RECONCILED)
+        found[event["intentId"]] = {"label": str(label), "clear": verified, "humanRelease": kind == "human_release", "at": event["at"]}
+    return found
+
+
+def _classify_unreadable_receipt(path: Path, ledger: dict[str, dict[str, dict[str, Any]]], resolutions: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """A receipt file that is empty or not JSON (the writer died, or exited with an error and printed nothing). Its meaning comes
+    from the other evidence of the same folder, never from the missing file: the error text beside it and the intents the unique
+    ledger holds for that folder's log directories. ``REFUSED_NO_CALL``: refused before any request, known not written.
+    ``RESOLVED_BY_LEDGER``: every intent in that folder is closed by a verified final/reconciliation. Anything else is unknown."""
+    folder = _native(str(path.parents[1])).rstrip("/") + "/"
+    try:
+        error_text = path.with_suffix(".err").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        error_text = ""
+    intents = [(run_id, intent_id, info) for run_id, items in ledger.items() for intent_id, info in items.items()
+               if _native(info.get("logDir") or "").startswith(folder)]
+    result: dict[str, Any] = {"receipt": str(path), "size": path.stat().st_size if path.exists() else None, "intents": len(intents)}
+    if not intents and "未发起任何外部调用" in error_text:
+        return {**result, "class": "REFUSED_NO_CALL"}
+    states = {intent_id: resolutions.get(intent_id) for _, intent_id, _ in intents}
+    if intents and all(state and state["clear"] for state in states.values()):
+        return {**result, "class": "RESOLVED_BY_LEDGER", "runs": sorted({run_id for run_id, _, _ in intents}),
+                "cases": sorted({info["stable"].split("|")[0] for _, _, info in intents if info.get("stable")}),
+                "closedBy": sorted({state["label"] for state in states.values() if state})}
+    return {**result, "class": "UNKNOWN", "ledgerStates": sorted({(state or {}).get("label", "NO_FINAL") for state in states.values()}) or ["NO_INTENT"]}
 
 
 def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, Any]:
@@ -576,10 +701,11 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, 
         return {"source": "none", "note": "没有回执目录：云写入数不统计，只看检查点与账本"}
     files = _receipt_files(evidence_dir)
     ledger = _ledger_by_run(root, since=since)
+    resolutions = _ledger_resolutions(root, since=since)
     seen: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     fields: set[tuple[str, str, str]] = set()
     unknown: list[dict[str, Any]] = []
-    unreadable: list[str] = []
+    unreadable: list[dict[str, Any]] = []
     run_ids: set[str] = set()
     duplicates = unconfirmed = receipts_ok = 0
     held: dict[str, int] = {}
@@ -589,7 +715,7 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, 
         try:
             report = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            unreadable.append(str(path))
+            unreadable.append(_classify_unreadable_receipt(path, ledger, resolutions))
             continue
         run_id = str(report.get("runId") or "")
         run_ids.add(run_id)
@@ -637,16 +763,25 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, 
             if action == "update":
                 for field_id in (record.get("writtenFields") if record.get("writtenFields") is not None else (record.get("fieldDetail") or {})):
                     fields.add((table, stable, field_id))
+    explained_runs: set[str] = set()
+    for item in unreadable:        # 读不出的回执按同目录证据分层：零调用拒绝、账本已核实对账，其余记为未知，不再静默忽略
+        if item["class"] == "RESOLVED_BY_LEDGER":
+            cases.update(item["cases"])
+            explained_runs.update(item["runs"])
+        elif item["class"] == "UNKNOWN":
+            unknown.append({"receipt": Path(item["receipt"]).name, "table": "", "stableKey": "", "status": "UNREADABLE_RECEIPT", "ledgerFinal": item["ledgerStates"]})
     created = {(k[1], k[2]) for k in seen if k[3] == "create"}
     updates = [k for k in seen if k[3] == "update"]
     ok_runs = {r for r, intents in ledger.items() if any(i["final"] == "OK" for i in intents.values())}
     run_ids.discard("")
     cross = {"ledgerFinalOk": sum(1 for intents in ledger.values() for i in intents.values() if i["final"] == "OK"),
-             "receiptRunsWithoutLedgerOk": sorted(run_ids - ok_runs), "ledgerOkRunsWithoutReceipt": sorted(ok_runs - run_ids)}
+             "receiptRunsWithoutLedgerOk": sorted(run_ids - ok_runs), "ledgerOkRunsWithoutReceipt": sorted(ok_runs - run_ids - explained_runs),
+             "explainedByUnreadableReceipt": sorted(explained_runs & ok_runs)}
     cross["result"] = "MATCH" if not cross["receiptRunsWithoutLedgerOk"] and not cross["ledgerOkRunsWithoutReceipt"] else "MISMATCH"
     return {"source": "receipts+ledger", "receiptFiles": len(files), "receiptsOk": receipts_ok, "createdRows": len(created),
             "updatedOperations": len(updates), "uniqueFields": len(fields), "duplicatesIgnored": duplicates, "unknown": unknown,
-            "unreadable": unreadable, "receiptOnlyUnconfirmed": unconfirmed, "heldOrNotWritten": held, "heldSample": held_keys, "ledgerCrossCheck": cross, "cases": sorted(cases),
+            "unreadable": unreadable, "receiptsRefusedNoCall": sum(i["class"] == "REFUSED_NO_CALL" for i in unreadable),
+            "receiptsResolvedByLedger": sum(i["class"] == "RESOLVED_BY_LEDGER" for i in unreadable), "receiptOnlyUnconfirmed": unconfirmed, "heldOrNotWritten": held, "heldSample": held_keys, "ledgerCrossCheck": cross, "cases": sorted(cases),
             "note": "新建行只计行数，不逐格计字段；更新字段取回执 writtenFields（真正改变的格）"}
 
 
@@ -705,6 +840,10 @@ def run_stats(root: Path, day: str, *, evidence_dir: str = "", now: datetime | N
                  "cloudCreatedRows": cloud.get("createdRows"), "cloudUpdatedOperations": cloud.get("updatedOperations"),
                  "cloudUniqueFields": cloud.get("uniqueFields"),
                  "cloudUnknown": len(cloud.get("unknown", [])) if cloud.get("source") == "receipts+ledger" else 0,
+                 "cloudReceiptsUnreadable": len(cloud.get("unreadable", [])),
+                 "cloudRefusedNoCall": cloud.get("receiptsRefusedNoCall", 0),
+                 "cloudResolvedByLedger": cloud.get("receiptsResolvedByLedger", 0),
+                 "ledgerCrossCheck": (cloud.get("ledgerCrossCheck") or {}).get("result", "NOT_CHECKED"),
                  "unknownWriteCheckpoints": len(unknown_writes)}
     return {"changed": len(changed_set), "reportedChanged": state_reported(root, day), "breakdown": breakdown, "cloud": cloud,
             "collectedCases": sorted(collected), "archivedCases": sorted(archived),

@@ -2682,7 +2682,7 @@ def build_parser() -> argparse.ArgumentParser:
     child_build.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     child_build.set_defaults(func=feishu_child_build_command)
     nightly = sub.add_parser("nightly", help="夜间运行记录与检查点、观察队列（定时与人工触发共用；只写业务根“运行记录”，不联网）")
-    nightly.add_argument("action", choices=["begin", "checkpoint", "finish", "status", "progress", "observe", "due", "coverage", "bind", "bind-end", "executions"])
+    nightly.add_argument("action", choices=["begin", "checkpoint", "finish", "status", "progress", "observe", "due", "coverage", "bind", "bind-end", "executions", "timeline", "delay-cause"])
     nightly.add_argument("--date", help="运行日期 YYYY-MM-DD；begin 取当前上海日期")
     nightly.add_argument("--trigger", default="manual", choices=["scheduled", "manual"])
     nightly.add_argument("--actor", default="")
@@ -2801,6 +2801,21 @@ def build_parser() -> argparse.ArgumentParser:
     period.add_argument("--out", help="把完整结果写到该文件")
     period.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     period.set_defaults(func=feishu_period_command)
+    exceptions = sub.add_parser(
+        "feishu-exception-register",
+        help="异常登记：把异常清单(ExceptionEntriesV1)幂等登记到案卷 Base 现有“数据核对”表（稳定键 X-<项目编号>-<类型>，一个对象一条当前记录，旧C开头行不动）；缺省只出计划，--execute 才写（写入留 运行记录/异常登记账）",
+    )
+    for flag in ("--registry", "--registry-sha", "--base-token", "--profile", "--business-root"):
+        exceptions.add_argument(flag, required=True)
+    exceptions.add_argument("--entries", help="异常清单 ExceptionEntriesV1（登记时必需；--reconcile 不需要）")
+    exceptions.add_argument("--identity", default="user", choices=["user", "bot"])
+    exceptions.add_argument("--execute", action="store_true", help="按计划写入；省略只出计划")
+    exceptions.add_argument("--reconcile", action="store_true", help="对账一个未决写入意图（需 --intent-id）：只读，只往写入账追加 reconciled，不写表")
+    exceptions.add_argument("--intent-id", help="--reconcile 的精确意图（异常登记账里的 intentId）")
+    exceptions.add_argument("--min-quiet-seconds", type=int, default=3600, help="--reconcile 的静默期")
+    exceptions.add_argument("--out", help="把完整结果写到该文件")
+    exceptions.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
+    exceptions.set_defaults(func=feishu_exception_register_command)
     case_find = sub.add_parser(
         "feishu-case-find",
         help="按单位名称或项目编号找案卷：忽略空格和全半角差异，结果给出系统原文(含空格)；规范化后同名的并列列出、不合并；只读云",
@@ -3191,6 +3206,12 @@ def nightly_command(args: argparse.Namespace) -> None:
             result = module.bind_end(root, args.date, receipt=args.receipt, state=args.state, detail=args.detail)
         elif args.action == "executions":
             result = {"today": today, "openExecutions": module.open_executions(root)}
+        elif args.action == "timeline":
+            result = {"today": today, "runs": module.timeline(root, since=args.date)}
+        elif args.action == "delay-cause":
+            if not (args.date and args.detail and args.ref):
+                raise RegistryError("delay-cause 需要 --date、--detail（已证实的原因）、--ref（证据位置）")
+            result = module.delay_cause(root, args.date, cause=args.detail, evidence=args.ref)
         else:
             result = {"today": today, "observationsDue": module.due(root, today=args.date or today)}
     except (module.NightlyError, workspace.WorkspaceStateError, OSError, ValueError) as error:
@@ -3291,6 +3312,38 @@ def feishu_period_command(args: argparse.Namespace) -> None:
     print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
     if report.get("status") != "OK":
         print("WARNING: 月度统计行有冲突、重复键、读回问题或未执行；退出码 4", file=sys.stderr)
+        raise SystemExit(4)
+
+
+def feishu_exception_register_command(args: argparse.Namespace) -> None:
+    module = importlib.import_module(f"{__package__}.feishu_exceptions" if __package__ else "feishu_exceptions")
+    try:
+        registry = module.load_registry(Path(args.registry), args.registry_sha, args.base_token)
+        if args.reconcile:
+            if not args.intent_id or args.execute:
+                raise RegistryError("异常登记对账已拒绝：--reconcile 只与 --intent-id 同用，不与 --execute 同用")
+            report = _feishu_read(args, "异常登记对账", lambda sync_, transport: module.reconcile(
+                registry=registry, base=args.base_token, transport=transport, business_root=Path(args.business_root), intent_id=args.intent_id,
+                min_quiet_seconds=args.min_quiet_seconds))
+            print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+            if report.get("status") not in ("NOT_APPLIED_PROVEN", "APPLIED_PROVEN", "ALREADY_RECONCILED", "NOT_BLOCKED"):
+                raise SystemExit(4)
+            return
+        if not args.entries:
+            raise RegistryError("异常登记已拒绝：需要 --entries")
+        entries = module.load_entries(Path(args.entries))
+        report = _feishu_read(args, "异常登记", lambda sync_, transport: module.run(
+            registry=registry, entries=entries, base=args.base_token, transport=transport, business_root=Path(args.business_root), execute=args.execute))
+    except module.ExceptionError as error:
+        raise RegistryError(f"异常登记已拒绝：{error}") from error
+    except module.ExceptionRuntimeError as error:
+        print(f"ERROR: 异常登记：{error}", file=sys.stderr)
+        raise SystemExit(3) from error
+    if args.out:
+        Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=1, default=str) + "\n", encoding="utf-8")
+    print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+    if report.get("status") != "OK":
+        print("WARNING: 异常登记有无效条目、重复键、被封锁键或读回问题；退出码 4", file=sys.stderr)
         raise SystemExit(4)
 
 

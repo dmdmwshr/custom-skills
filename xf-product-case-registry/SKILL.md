@@ -44,10 +44,11 @@ metadata:
 | 已归档案卷的复查产品→初查产品对应(旧式归档/不产生新代际) | [本地扩展入口](references/manual-intake.md#已归档案卷的复查产品对应复核productlinkreviewv1)，source link-products |
 | 一案已有多段详情截图（含覆盖索引）要成为永久 D 引用 | [浏览器采集](references/browser-acquisition.md)，source attach-detail-segments（首段须为已登记截图，同案/顺序/重叠/末端全证明才绑定，同索引重入 0 写） |
 | 已存详情要生成飞书基础字段（项目号、单位、地址、管辖→八队路由、有证据的初查日）说明 | [来源字段同步](references/source-sync.md)，feishu-source-build（只读云）→ feishu-source-sync；退出码 4 表示有被挡实体(PARTIAL)，不是整体完成 |
-| 五类业务标签初值、证据确定标签、用户授权代录（含维修企业库）、写入账根迁移 | [来源字段同步](references/source-sync.md) 末节“字段归属与四种写入依据”：`feishu-label-initial-build`、`feishu-label-evidence-build`、`feishu-delegated-build`、`feishu-ledger-migrate` |
+| 现行合同八项业务标签（七项专题标签与是否刑事案件）的初值、证据确定标签、用户授权代录（含维修企业库）、写入账根迁移 | [来源字段同步](references/source-sync.md) 末节“字段归属与四种写入依据”：`feishu-label-initial-build`、`feishu-label-evidence-build`、`feishu-delegated-build`、`feishu-ledger-migrate` |
 | 大队维护字段读回本地、月度统计独立对账、企业/网售清单主动登记、产品数量补空 | [来源字段同步](references/source-sync.md) 末节：`feishu-mirror`、`feishu-recount`（15 项指标逐队逐月对账，有差异退出 4）、`feishu-period`（月度统计行与年度行）、`feishu-chain-plan`（同产品链补空）、`feishu-register enterprises|online-sales`、`record_quantities.py scan` → `feishu-quantity-plan` |
 | 按单位名称找案卷而系统原文带空格或全角括号 | `feishu-case-find --name <名称或项目编号>`（只读云）：忽略空格和全半角比较，结果给系统原文；规范化后同名的并列列出不合并。名称只用于定位，身份仍核项目编号、RWID、单位、大队四项。见 [来源字段同步](references/source-sync.md) 末节 |
-| 每夜定时或人工触发的整轮运行、断点续办、未检查任务观察队列 | [夜间运行](references/nightly-run.md)，`nightly begin/bind/checkpoint/coverage/finish/status/observe/due/executions`；每晚两类入口发现、每 7 天全范围核对、执行绑定 |
+| 每夜定时或人工触发的整轮运行、断点续办、未检查任务观察队列 | [夜间运行](references/nightly-run.md)，`nightly begin/bind/checkpoint/coverage/finish/status/observe/due/executions/timeline/delay-cause`；每晚两类入口发现、每 7 天全范围核对、执行绑定、触发与接管视图、回执读不出的分层记账 |
+| 来源包混放、材料缺项等异常与受影响的关键事实（唯一异常表） | [夜间运行](references/nightly-run.md) “异常登记”节：`feishu-exception-register`（案卷 Base 现有“数据核对”表，稳定键 `X-项目编号-类型`，写前拒绝路径/证件号等内容） |
 | PNG/JPEG 原图需要进入规范成果 | `normalize-images --work-dir <工作区> --relative-path <图片>` |
 | Word(.docx/.doc) 原件需要进入规范成果 | 操作者先用本机 Office 引擎转 PDF 并逐页目视核对，再 `normalize-office --work-dir <工作区> --relative-path <Word 原件> --converted-pdf <工作区外的 PDF> --converter-name <名称> --converter-version <版本> --rendering-check <核对说明>` |
 | 来源 PDF 无法结构解析（inventory 标记 `unparseablePdf`，如重复 /Info） | 用 PDFium 等引擎能打开且逐页目视核对后，同样走 `normalize-office`（来源格式 PDF_UNPARSEABLE）；未绑定的此类成员 compose 拒绝，仍可解析的 PDF 不得走该路径 |

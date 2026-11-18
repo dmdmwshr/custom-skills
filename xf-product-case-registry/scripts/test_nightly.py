@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from datetime import datetime, timedelta
 
 import pytest
@@ -683,3 +684,77 @@ def test_begin_on_a_finished_run_flags_self_reported_changes_that_have_no_eviden
     assert nightly.finish(root, day)["status"] == "FINISHED"
     again = nightly.begin(root, now=T(day + "T04:00:00"))
     assert again["status"] == "ALREADY_FINISHED" and again["changed"] == 0 and again["reportedChanged"] == 4 and again["unverifiedReportedChanges"] == 4
+
+
+# ------------------------------------------------------------------ a33：读不出的回执分层、触发/接管视图
+
+def _unreadable(base, step, folder, name, err=""):
+    path = base / "sync" / step / folder
+    path.mkdir(parents=True, exist_ok=True)
+    (path / name).write_text("", encoding="utf-8")
+    if err:
+        (path / name).with_suffix(".err").write_text(err, encoding="utf-8")
+
+
+def _ledger_line(root, intent, events):
+    folder = root / "飞书写入账本" / "targets"
+    folder.mkdir(parents=True, exist_ok=True)
+    with (folder / f"{intent}.jsonl").open("a", encoding="utf-8") as stream:
+        for event in events:
+            stream.write(json.dumps({"intentId": intent, "at": "2026-11-16T18:40:00Z", **event}) + "\n")
+
+
+def test_a_receipt_that_cannot_be_read_is_classified_from_its_folder_evidence_and_never_silently_zero(tmp_path):
+    day = _run(tmp_path)
+    evidence = tmp_path / "evidence"
+    _unreadable(evidence, "calibrate-1", "exec", "exec-fp-01.json", "ERROR: 飞书来源同步已拒绝：目标存在未对账……已拒绝(未发起任何外部调用)")
+    log = str(evidence / "sync" / "main-1" / "logs-main" / "create-01")
+    _unreadable(evidence, "main-1", "exec-main", "exec-create-01.json", "Traceback ... PermissionError")
+    _ledger_line(tmp_path, "i-create", [{"event": "intent", "runId": "run-a", "kind": "create", "logDir": log, "target": {"table": "tM"}, "stableKey": {"value": "P-1"}},
+                                         {"event": "reconciled", "runId": "run-reconcile", "outcome": "APPLIED"}])      # 另一次对账运行关闭它
+    _unreadable(evidence, "main-2", "exec-main", "exec-fill-01.json", "Traceback ...")
+    _ledger_line(tmp_path, "i-open", [{"event": "intent", "runId": "run-b", "logDir": str(evidence / "sync" / "main-2" / "logs-main" / "fill-01"), "target": {"table": "tM", "record": "r9"}, "stableKey": {"value": "P-9"}}])
+    stats = nightly.run_stats(tmp_path, day, evidence_dir=str(evidence))
+    cloud, b = stats["cloud"], stats["breakdown"]
+    assert {Path(i["receipt"]).name: i["class"] for i in cloud["unreadable"]} == {
+        "exec-fp-01.json": "REFUSED_NO_CALL", "exec-create-01.json": "RESOLVED_BY_LEDGER", "exec-fill-01.json": "UNKNOWN"}
+    assert (b["cloudReceiptsUnreadable"], b["cloudRefusedNoCall"], b["cloudResolvedByLedger"], b["cloudUnknown"]) == (3, 1, 1, 1)
+    assert cloud["unknown"][0]["status"] == "UNREADABLE_RECEIPT" and cloud["unknown"][0]["ledgerFinal"] == ["NO_FINAL"]
+    assert "P-1" in cloud["cases"] and "P-9" not in cloud["cases"]
+    # 未知的云写入随收尾带出到下一轮，而不是写成 0
+    _all_done(tmp_path, day)
+    finished = nightly.finish(tmp_path, day, evidence_dir=str(evidence))
+    assert finished["status"] == "FINISHED" and finished["finishedWithIssues"] and not finished["quiet"]
+    assert [i["kind"] for i in finished["issues"] if i["kind"] == "cloud-unknown"] == ["cloud-unknown"]
+
+
+def test_a_late_scheduled_start_needs_a_proven_cause_and_a_manual_start_has_no_expected_time(tmp_path):
+    nightly.begin(tmp_path, now=T("2026-11-18T08:12:17"), trigger="scheduled")
+    nightly.begin(tmp_path, now=T("2026-11-19T19:00:00"), trigger="manual")
+    late = nightly.run_view(tmp_path, "2026-11-18")["schedule"]
+    assert (late["expectedAt"], late["delayMinutes"], late["delayCause"]) == ("2026-11-18T02:00:00+08:00", 372, {"status": "UNPROVEN"})
+    manual = nightly.run_view(tmp_path, "2026-11-19")["schedule"]
+    assert manual["manualStart"] is True and "delayCause" not in manual
+    with pytest.raises(nightly.NightlyError, match="证据"):
+        nightly.delay_cause(tmp_path, "2026-11-18", cause="自动化延迟", evidence="")
+    with pytest.raises(nightly.NightlyError, match="人工发起"):
+        nightly.delay_cause(tmp_path, "2026-11-19", cause="x", evidence="y")
+    nightly.delay_cause(tmp_path, "2026-11-18", cause="自动化 08:10 才触发", evidence="/r/automation.log", now=T("2026-11-18T10:00:00"))
+    again = nightly.delay_cause(tmp_path, "2026-11-18", cause="改因", evidence="/r/other", now=T("2026-11-18T11:00:00"))["schedule"]["delayCause"]
+    assert again["cause"] == "改因" and again["history"][0]["cause"] == "自动化 08:10 才触发"
+
+
+def test_a_run_left_running_after_its_executions_ended_is_shown_as_interrupted_and_a_second_execution_is_a_takeover(tmp_path):
+    day = "2026-11-13"
+    nightly.begin(tmp_path, now=T(day + "T01:56:37"), trigger="scheduled")
+    assert nightly.run_view(tmp_path, day)["derivedStatus"] == "RUNNING_UNBOUND"
+    nightly.bind(tmp_path, day, session_id="s1", receipt="/r/1.json", runner_pid=11, now=T(day + "T01:56:40"))
+    assert nightly.run_view(tmp_path, day)["derivedStatus"] == "ACTIVE"
+    nightly.bind_end(tmp_path, day, receipt="/r/1.json", state="LOST", detail="进程消失", now=T(day + "T09:14:18"))
+    view = nightly.run_view(tmp_path, day)
+    assert view["storedStatus"] == "RUNNING" and view["derivedStatus"] == "INTERRUPTED_UNFINISHED" and view["takeovers"] == []
+    assert nightly.begin(tmp_path, now=T("2026-11-14T02:05:00"), trigger="scheduled")["earlierUnfinished"][0]["derivedStatus"] == "INTERRUPTED_UNFINISHED"
+    nightly.bind(tmp_path, day, session_id="s2", receipt="/r/2.json", runner_pid=12, now=T(day + "T09:20:00"))
+    view = nightly.run_view(tmp_path, day)
+    assert view["derivedStatus"] == "ACTIVE" and view["takeovers"][0]["after"] == {"sessionId": "s1", "endState": "LOST", "endedAt": T(day + "T09:14:18").isoformat(timespec="seconds"), "detail": "进程消失"}
+    assert [v["date"] for v in nightly.timeline(tmp_path, since="2026-11-14")] == ["2026-11-14"]

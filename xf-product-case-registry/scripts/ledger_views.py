@@ -553,11 +553,22 @@ def _read(path: Path, root: Path) -> dict[str, Any]:
     return ws._read_progress_json(path, root, "总账引用证据")
 
 
+def _only_source_facts(directory: Path) -> bool:
+    try:
+        names = {entry.name for entry in directory.iterdir()}
+    except OSError:
+        return False
+    return names <= {source_facts.STORE_FILE}
+
+
 def case_inputs(layout: Any, project: str, record: dict[str, Any]) -> tuple[Path, dict, dict, list]:
-    """Only follow the exact active directory or the ledger's explicit archived generation."""
+    """Only follow the exact active directory or the ledger's explicit archived generation.
+
+    An active directory that holds nothing but the source-facts layer (``source-facts.json`` appended after the case was archived) is not a
+    workspace: it must not hide the archived generation, or every such archived case would read as unfinished (a phantom backlog)."""
     work = layout.work_case_dir(project)
     issues: list[str] = []
-    if not work.is_dir():
+    if not work.is_dir() or _only_source_facts(work):
         archive = record.get("archive") or {}
         candidate = archive.get("workspacePath")
         if candidate:
@@ -725,6 +736,12 @@ def _local_completion_valid(
         issues.extend(f"本地完成需复核：{reason}" for reason in reasons)
         return False
     return True
+
+
+def _facts_dir(layout: Any, project: str, work: Path) -> Path:
+    """Where the source-facts layer lives: the active directory when it carries one (also when it is only that), else the case's own directory."""
+    active = layout.work_case_dir(project)
+    return active if (active / source_facts.STORE_FILE).is_file() else work
 
 
 def source_facts_layer(work: Path) -> dict[str, Any]:
@@ -1191,7 +1208,7 @@ def describe(layout: Any, project: str, record: dict[str, Any], *, today: date |
         },
         "waiting": record.get("nasVerification", {}).get("status"),
         "issues": issues,
-        "sourceFacts": source_facts_layer(work),
+        "sourceFacts": source_facts_layer(_facts_dir(layout, project, work)),
     }
 
 

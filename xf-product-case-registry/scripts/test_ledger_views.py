@@ -1697,3 +1697,36 @@ def test_due_follow_up_keeps_the_same_seven_day_rhythm_however_long_the_wait():
     assert _code(initialResult="QUALIFIED", lifecycle={"stable": True, "sourceCauses": ["X"]}) == "PKG_REUSE_EXISTING"
     assert _code(sourceStatus="CLOSED", materialGapOpen=True) == "PKG_REFRESH_DUE_RECENT_UNQUALIFIED"
     assert _code(hasPackage=False, initialResult="UNKNOWN", lifecycle=waiting) == "PKG_ACQUIRE_FIRST"
+
+
+def test_an_active_directory_holding_only_source_facts_does_not_hide_the_archived_generation(layout):
+    """a33: 30 archived cases had a lone source-facts.json re-create their active directory; the ledger then read them as unfinished."""
+    from scripts import source_facts as sf
+
+    add_case(layout, A, archived=True, deep=True)
+    record = ws.load_waterline(layout)["cases"][A]
+    clean = views.describe(layout, A, record)
+    assert clean["activePending"] is False and clean["stages"]["archived"] is True
+    shell = layout.work_case_dir(A)
+    write(shell / sf.STORE_FILE, {"sourceFacts": {"observations": []}})
+    assert [p.name for p in shell.iterdir()] == [sf.STORE_FILE]
+    again = views.describe(layout, A, record)
+    assert again["activePending"] is False and again["stages"] == clean["stages"] and again["complete"] == clean["complete"]
+    assert views.scan_plan(layout, mode="annual-baseline", limit=50)["pending"] == []            # 不再列为待办
+    # a real active workspace (it has a manifest) still wins over the archived generation
+    write(shell / "manifest.json", {"case": {"projectNo": A}, "initialInspection": {"products": []}})
+    assert views.describe(layout, A, record)["stages"]["archived"] is False
+
+
+def test_the_workflow_report_workspace_also_ignores_a_directory_with_only_source_facts(layout):
+    from scripts import source_facts as sf
+    from scripts import workflow_reporting as wr
+
+    add_case(layout, A, archived=True, deep=True)
+    record = ws.load_waterline(layout)["cases"][A]
+    record["archive"] = {**record["archive"], "generation": "20990220T020000Z-aaaaaaaaaaaa"}
+    archived = wr._case_workspace(layout, A, record)
+    write(layout.work_case_dir(A) / sf.STORE_FILE, {"sourceFacts": {"observations": []}})
+    assert wr._case_workspace(layout, A, record) == archived
+    write(layout.work_case_dir(A) / "manifest.json", {"case": {"projectNo": A}})
+    assert wr._case_workspace(layout, A, record) == layout.work_case_dir(A).resolve() or wr._case_workspace(layout, A, record) == layout.work_case_dir(A)

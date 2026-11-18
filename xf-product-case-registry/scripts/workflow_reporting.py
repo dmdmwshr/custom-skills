@@ -196,9 +196,18 @@ def _recorded_path(layout: Any, value: str) -> Path:
         raise ReportingError(str(error)) from error
 
 
+def _holds_only_source_facts(directory: Path) -> bool:
+    """A directory with nothing but ``source-facts.json`` (the source-facts layer appended after archiving) is not a case workspace."""
+    try:
+        return {entry.name for entry in directory.iterdir()} <= {"source-facts.json"}
+    except OSError:
+        return False
+
+
 def _case_workspace(layout: Any, project: str, record: Mapping[str, Any]) -> Path:
     active = layout.work_case_dir(project)
-    if active.is_dir():
+    archived_record = isinstance(record.get("archive"), Mapping) and bool(record["archive"].get("workspacePath"))
+    if active.is_dir() and not (archived_record and _holds_only_source_facts(active)):
         return _safe(active, layout.root)
     archive = record.get("archive")
     if isinstance(archive, Mapping) and archive.get("workspacePath"):

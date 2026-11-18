@@ -46,6 +46,8 @@
 | `packageAcquireFirst`（`PKG_ACQUIRE_FIRST`） | 在册但还没有原包 | 按新案同样的详情核对和打包规则取包 |
 | `pending` 的 `COLLECT`、`CLASSIFY`、`LOCAL_VERIFY` | 待取材料、待确认初查结果、待本地核验归档 | 分别走采集、详情确认、核验归档 |
 
+只含 `source-facts.json` 的活动工作区目录（源事实层在案卷归档后追加产生）不算工作区，不会盖住已归档代际；案卷是否完成按已归档代际的核验判定。仍被 `scan-plan` 列出的才是真待办。
+
 `PKG_HOLD_PACKAGE_UNKNOWN` 是原包状态不明的保护，夜间不处理、不放行。带人工保护或锁的案卷（批次保护、待整理标记）照原规则被工具挡住，记 `skipped` 并写明原因，不清锁、不人工放行。
 
 ## 观察队列与 7 天到期
@@ -63,16 +65,37 @@
 | `discover` | 来源页面两类入口的可见列表 → `source scan-plan`、`nightly observe`、`nightly due`；到期时加做全范围核对并 `nightly coverage` | 分页总数与观察时间已记录；到期的核对已登记 |
 | `acquire` | 详情截图与打包（叶集合证明完整才打包）→ `source` 接件 | 原包摘要与截图已入业务根 |
 | `organize`/`validate` | 清点、拆分、字段校验、本地核验归档 | 指纹未变且已有完成证据的案卷记 `skipped` |
-| `sync` | 依次 `feishu-source-build`（新案主行）→ `feishu-child-build`（检查与产品子行）→ `feishu-calibrate-plan`（按已核验本地清单补三表监督事实空格；云端与证据不同的只列差异，带 `--resolutions` 校准裁决文件时才按逐格裁决处理；创建时一次写入的名称类字段默认不改写；合同登记 `evidenceCorrection` 的产品名称与两表“数据来源”只能在校准入口带本地已核验证据和精确旧值更正：`--correct-facts`、`--max-corrections N`（超限即停，防批量误改），检查记录里“检查形式”“单位类别”的勾选框由 `record_forms` 解析成 `--form-evidence` 证据，详情页与电子记录勾选互相矛盾时不写、只列差异；手动交件没有结构化详情时可用 `--visual-evidence`（VisualDetailEvidenceV1：逐图人工视觉确认的单位类别，带截图路径与摘要，只补云端空格、不更正已有值、与记录勾选矛盾时同样只列差异）；`feishu-child-build` 对已有子行的案卷也会按稳定键只补缺失的产品行，已有行不动）→ `feishu-chain-plan`（同产品链补空，经 `feishu-field-plan-build`）→ `feishu-label-initial-build`（标签初值）→ `record_quantities.py scan`（受管文档环境）→ `feishu-quantity-plan` → `feishu-field-plan-build` → `feishu-period`（月度统计行与年度行，26 日结前一统计月）；每份说明用 `feishu-source-sync --execute` 写入。新案主行写入后子行的父记录才存在，所以整串在同一晚跑两遍：第二遍补上第一遍因父行未建而跳过的子行和数量。合同与路由取业务根 `运行记录/字段合同/`，用法见该目录“说明.md” | 每份说明读回一致；规划器退出 4 表示有案被保护挡住，其余照写；UNKNOWN 记 `unknown` 并只封锁该目标 |
+| `sync` | 依次 `feishu-source-build`（新案主行）→ `feishu-child-build`（检查与产品子行）→ `feishu-calibrate-plan`（按已核验本地清单补三表监督事实空格；云端与证据不同的只列差异，带 `--resolutions` 校准裁决文件时才按逐格裁决处理；创建时一次写入的名称类字段默认不改写；合同登记 `evidenceCorrection` 的产品名称与两表“数据来源”只能在校准入口带本地已核验证据和精确旧值更正：`--correct-facts`、`--max-corrections N`（超限即停，防批量误改），检查记录里“检查形式”“单位类别”的勾选框由 `record_forms` 解析成 `--form-evidence` 证据，详情页与电子记录勾选互相矛盾时统一以监督系统详情为准，两侧证据留在 `sourcePriority` 逐案记录，详情无值不猜、不写；手动交件没有结构化详情时可用 `--visual-evidence`（VisualDetailEvidenceV1：逐图人工视觉确认的单位类别，带截图路径与摘要，只补云端空格、不更正已有值、与详情冲突时同样以详情为准，没有详情值才补空）；`feishu-child-build` 对已有子行的案卷也会按稳定键只补缺失的产品行，已有行不动）→ `feishu-chain-plan`（同产品链补空，经 `feishu-field-plan-build`）→ `feishu-label-initial-build`（标签初值）→ `record_quantities.py scan`（受管文档环境）→ `feishu-quantity-plan` → `feishu-field-plan-build` → `feishu-period`（月度统计行与年度行，26 日结前一统计月）；每份说明用 `feishu-source-sync --execute` 写入。新案主行写入后子行的父记录才存在：`main` 固定跑两遍（先建行，再补来源已见而云端空白的基础字段，`toCreate` 与 `toFill` 都为 0 才算完），其后 `child`→`calibrate`→`chain`→`label`→`qty`→`period` 按序各一遍；`main` 第一遍新建了行、而后续规划报告里仍有因父行未建而跳过的子行或数量时，整串在同一晚幂等再跑一遍补上，没有这类跳过就不重跑。合同与路由取业务根 `运行记录/字段合同/`，用法见该目录“说明.md” | 每份说明读回一致；规划器退出 4 表示有案被保护挡住，其余照写；UNKNOWN 记 `unknown` 并只封锁该目标 |
 
-单位类别来源优先级：详情与初查记录勾选冲突时以监督系统详情为准并在校准报告 `sourcePriority` 逐案记录，不再列为待选差异；检查形式在“其他形式消防监督检查适用”模板下取被勾选项的来源原文（合同登记的选项才写）。
 | `mirror` | `feishu-mirror`；写入前后各一次 `--tag pre`/`--tag post --run-key <本次执行标识，缺省取当晚运行里最近绑定的执行>`（独立、不覆盖，同键复用时带回第一次读取时冻结的检查结果，不洗掉当时的问题；读不清的行使该次读取不成为之后的比较基线；写后以本次写前为基线，写前以最近确认的镜像为基线，路径与摘要记入 `run.json` 的 `mirrorSnapshots`） | 写前、写后快照与变更记录已写；变更按写入账本区分助手写入与人工修改 |
 | `reconcile` | `feishu-recount --out`（含 15 项逐队逐月对账与缺项定位）；0 差异后 `feishu-period --stamp --execute` 登记回算更新时间 | 只接受退出 0 或 4，且结果可解析、四张表都读到（否则 `RECOUNT_INCOMPLETE`，不得记 done）；退出 4 记 `failed` 并保留差异文件。`productAttributionPending`（产品层待确认案卷，保留原 `productAttributionGaps`）是单独一轴，不是运行未知，也不因标签归属视为已解释。数量只对同一含义、同一单位相加；没有单位的数值只记项数，`physicalQuantity.status` 为 `NO_UNIT_BASIS` 时没有实物合计，不是 0 |
 | `report` | 汇总本轮变更、缺项、未知与到期 | 无变化时安静结束 |
+
+单位类别来源优先级（用户 2026-11-16 裁决，不再就此询问）：详情与初查记录勾选冲突时以监督系统详情为准并在校准报告 `sourcePriority` 逐案记录，不再列为待选差异；检查形式在“其他形式消防监督检查适用”模板下取被勾选项的来源原文（合同登记的选项才写）。
 
 ## 写入结果未知（UNKNOWN）的处理
 
 - 官方命令行没有返回可解析的服务端回执时，该写入记 UNKNOWN 并封锁目标，错误说明里附退出码与脱敏截断后的输出头部，用来判断是网络层失败还是别的原因。
 - 先用 `feishu-source-sync --reconcile` 只读对账：云端已是目标值为 APPLIED，账本据此解除；仍是旧值为 OLD_VALUE_OBSERVED，只是观察，不能证明请求不会迟到，目标继续封锁，解除需要用户亲自签署 UserRiskAcceptanceV1，助手不得自署。
 - 对账后用正常入口重新规划，只写剩余差异，不重放原请求；被封锁目标在规划里列为拒绝。
-- 夜间入口 `sync.sh` 写入阶段：某个说明未成功只封锁它自己的目标，同一步其余说明继续执行，累计 2 个未成功即停（疑似系统性故障），步骤末尾只要有未成功就退出 1，不静默吞掉；被封锁的目标下一晚在规划里直接列为拒绝，不再尝试。
+- 夜间入口 `sync.sh` 写入阶段：任一说明新出现非 0 退出（新 UNKNOWN/无回执、权限或鉴权拒绝、配额、合同或身份违例等）立即停止，后续说明不再尝试，先核对回执与账本，不重放；该说明的目标由账本封锁，下一晚规划阶段起被精确列为拒绝，其余安全目标照常写。已封锁的旧目标在规划/规格生成阶段按目标精确剔除（记录自身键、同案稳定键的未决创建、未获接受的人工放行三类都在规划阶段判定，与写入闸门一致），不让一个被封锁的案连累整份说明；规划退出 4 只表示有案被挡。
+
+## 账本与回执的分层记账
+
+- 写入证据分三层：已核实成功（回执 OK 且账本该意图 `final=OK`，或已由对账闭合）、已知未写（零外部调用被拒、`NOT_ATTEMPTED`）、未知（回执或账本缺一边、终态非 OK）。三层分别计数，不互相冲抵。
+- 回执文件为空或不是 JSON（写入进程异常退出、或报错后没有输出）不再被忽略：按同目录证据归类——同目录 `.err` 写明“未发起任何外部调用”且账本没有该目录的意图为 `REFUSED_NO_CALL`（已知未写）；该目录的意图都已由终态或对账 `APPLIED/NOT_APPLIED_PROVEN` 闭合为 `RESOLVED_BY_LEDGER`；其余记为未知（`UNREADABLE_RECEIPT`），计入 `cloudUnknown`，并随 `finish` 作为 `cloud-unknown` 事项带到下一轮。`breakdown` 另给 `cloudReceiptsUnreadable`、`cloudRefusedNoCall`、`cloudResolvedByLedger`、`ledgerCrossCheck`。
+- 账本追加：写意图前账本写不进（重试后仍失败）＝一个请求都没发，零外写、不留未决；服务已答复之后的 `bound/final/reconciled` 写不进账本时先落到账根 `pending/` 暂存区（计入状态、下次加锁时原样并回），绝不因此再发请求；两处都写不进才报错，并留下 `report.json`（`ABORTED`）。
+- 原写入的回执与账本缺终态时，只有同一行、同一原始意图、原生请求与回执日志逐字节固定、唯一匹配且服务端历史时间吻合时，才可经 `--reconcile` 的 `requestTerminalProof`（`service-receipt-log-pair`）闭合；不重发、不新建行，重跑为零写入。
+
+## 异常登记（唯一异常表）
+
+- 来源或材料异常（大队错传、材料缺项）和受影响的关键事实只登记在案卷 Base 现有的“数据核对”表，不另建表、不另建案卷台账。`feishu-exception-register --registry <异常登记结构-*.json> --registry-sha … --entries <清单> --base-token … --profile … --business-root …`：缺省只出计划，`--execute` 才写；夜间用 `sync.sh exceptions <清单>`。
+- 清单 `ExceptionEntriesV1`：`entries[{projectNo, type(来源包混放|来源材料缺项|关键事实待核实), affected(否|是|待核实), fields(受影响字段，无则“无”；affected 为是时必填), status(已登记保留|待核实|已解除), content(≤120字), suggestion(≤80字), source(来源详情|底册/系统|多源)}]`。
+- 稳定键 `X-<项目编号>-<类型>`（写在“核对编号”）：一个对象一条当前记录，重跑无变化零写入，内容变化原行就地更新并刷新“记录时间”，旧值留在 `运行记录/异常登记账` 与飞书修订史；不以 `X-` 开头的旧核对行（C0001…）不读不写。内容含路径、文件名、证件/手机号码、证件字样或选项不合法的条目写前拒绝；同键重复行、被账本封锁的键只报告不写；写入结果未知的键封锁，读回核实前不重放。
+- 来源事实取监督系统：错传附件不阻断本案按现有有效材料收口；关键事实真被影响时才把“关键信息是否受影响”记为是/待核实，主表对应格保持空白或合同允许的待核实状态，不强填。
+
+## 触发、接管与终态视图
+
+- `run.json` 的 `schedule` 记应触发时刻（每晚 02:00）、实际开始和迟起分钟数；定时触发迟起超过 30 分钟时 `delayCause` 初始为 `UNPROVEN`，只有 `nightly delay-cause --date <日期> --detail <原因> --ref <证据位置>` 带证据才记为 `PROVEN`（旧原因留在 `history`）；人工发起的运行没有预期时刻（`manualStart`）。旧记录没有该字段时视图按日期和首次开始推导并标 `derived`。
+- `nightly timeline [--date <起始日期>]` 和 `status` 的 `view` 给出每次运行的触发、执行、接管和终态：第二次及以后的执行是接管，写明前一次的终态与说明；存储状态仍是 `RUNNING` 但所有绑定执行都已结束的运行显示为 `INTERRUPTED_UNFINISHED`（已结束的中断，不是仍在运行），有未结束执行的显示 `ACTIVE`，没有绑定执行的显示 `RUNNING_UNBOUND`。视图只读，不改写历史记录。
+
