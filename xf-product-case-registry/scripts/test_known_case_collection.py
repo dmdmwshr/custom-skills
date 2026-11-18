@@ -2363,3 +2363,59 @@ def test_g7_cloud_builder_detail_result_is_terminal_only(case):
     pending = {"产品名称（规格型号）": "合成灭火器", "产品质量现场检查情况": "抽样送检", "市场准入检查情况": "未发现不合格现象", "检查结果": "", "检查结果标记": []}
     ledger_case = _page_detail(case, [pending], status="处理中")
     assert sync._detail_initial_result(case.layout.root, PROJECT, ledger_case, None) is None   # 待结果不是终局，不制造差异
+
+
+def _register_completion(case, info, folder, *, verification=True, source_sha=None):
+    """水位里只有历史归档登记：包摘要、原件目录、归档核验记录（没有任何正式浏览器捕获包）。"""
+    record_file = case.layout.root / "工作区" / "核验记录" / f"{PROJECT}-GEN1.json"
+    if verification:
+        record_file.parent.mkdir(parents=True, exist_ok=True)
+        record_file.write_text("{}", encoding="utf-8")
+    with ws._waterline_lock(case.layout):
+        data = ws.load_waterline(case.layout)
+        record = data.setdefault("cases", {}).setdefault(PROJECT, {"projectNo": PROJECT})
+        record.setdefault("source", {})["packageSha256"] = source_sha or info["sha256"]
+        record["source"]["packageRelativePath"] = info["relativePath"]
+        record.setdefault("history", {}).setdefault("completions", []).append(
+            {"generation": "GEN1", "verifiedAt": "2026-10-15T06:03:48Z", "packageSha256": info["sha256"], "originalPath": str(folder),
+             "verificationRecord": str(record_file)})
+        ws._save_waterline_unlocked(case.layout, data)
+        return record
+
+
+def test_a_verified_historical_archive_without_a_capture_package_is_reused_not_reacquired(case):
+    promote_and_capture(case)
+    info = _attach(case, BATCH, "a.zip", "第一代")["records"][RWID]["package"]
+    folder = _archive_package(case, info, register=False)
+    record = _register_completion(case, info, folder)
+    found, note = views._waterline_package(case.layout, PROJECT, record)
+    assert found and found["sha256"] == info["sha256"] and found["origin"] == "WATERLINE_ARCHIVE" and note["gap"] is None
+    empty = views.package_facts(case.layout, {}, PROJECT, {"initialResult": "UNKNOWN"}, record)
+    assert empty["hasPackage"] and empty["packageValid"] and empty["packageOrigin"] == "WATERLINE_ARCHIVE" and empty["attachedAt"] == "2026-10-15T06:03:48Z"
+    assert views.package_decision(empty)["action"] == "REUSE"
+    assert views.package_decision(views.package_facts(case.layout, {}, PROJECT, {"initialResult": "UNKNOWN"}, None))["action"] == "ACQUIRE_FIRST"
+
+
+@pytest.mark.parametrize("fault,gap", [("no-verification", "VERIFICATION_RECORD_MISSING"), ("sha-conflict", "SOURCE_PACKAGE_SHA_CONFLICT"),
+                                         ("file-gone", "PACKAGE_FILE_MISSING")])
+def test_a_historical_archive_without_complete_evidence_keeps_the_exact_gap_and_is_never_trusted(case, fault, gap):
+    promote_and_capture(case)
+    info = _attach(case, BATCH, "a.zip", "第一代")["records"][RWID]["package"]
+    folder = _archive_package(case, info, register=False)
+    record = _register_completion(case, info, folder, verification=fault != "no-verification",
+                                  source_sha="sha256:" + "0" * 64 if fault == "sha-conflict" else None)
+    if fault == "file-gone":
+        for item in folder.glob("*.zip"):
+            item.unlink()
+    found, note = views._waterline_package(case.layout, PROJECT, record)
+    assert found is None and note["gap"] == gap
+    assert views.package_facts(case.layout, {}, PROJECT, {"initialResult": "UNKNOWN"}, record)["hasPackage"] is False
+
+
+def test_a_capture_package_always_wins_over_the_archive_fallback(case):
+    promote_and_capture(case)
+    info = _attach(case, BATCH, "a.zip", "第一代")["records"][RWID]["package"]
+    folder = _archive_package(case, info, register=False)
+    record = _register_completion(case, info, folder)
+    facts = views.package_facts(case.layout, views._package_capture_index(case.layout), PROJECT, {"initialResult": "UNKNOWN"}, record)
+    assert facts["packageOrigin"] == "CAPTURE"

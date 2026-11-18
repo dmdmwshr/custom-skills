@@ -41,7 +41,7 @@ KEY_PREFIX = "X-"
 PROJECT_NO = re.compile(r"^\d{8}C\d{9}$")
 STATUSES = ("已登记保留", "待核实", "已解除")
 MAX_CONTENT, MAX_SUGGESTION = 120, 80
-MAX_UNKNOWN_PER_RUN = 2
+MAX_UNKNOWN_PER_RUN = 1      # 出现新的未知后，同一次里依赖它的后续提交停止；已锁定的键在规划时精确隔离，其余安全目标仍在下一次继续
 # 写前拒绝的内容：路径、文件名、证件/手机号等个人身份串、证件字样
 FORBIDDEN = (
     (re.compile(r"[A-Za-z]:[\\/]|/mnt/|\\\\|/home/|/srv/"), "文件路径"),
@@ -310,8 +310,9 @@ def reconcile(*, registry: dict[str, Any], base: str, transport: Any, business_r
     """Read-only technical recovery of one unknown create/update intent; appends a ``reconciled`` event to the write journal, never writes the table.
 
     APPLIED_PROVEN: the key has exactly one row and it holds every value the intent wrote. NOT_APPLIED_PROVEN: the key has no row and either
-    the quiet period passed (a late write could still land before) or the recorded error is the service's own structured rejection
-    (``"ok": false`` with an API error code: the request was refused, nothing accepted) and the read is at least a minute after the intent."""
+    the recorded error is the service's own structured rejection (``"ok": false`` with an API error code: the request was refused,
+    nothing accepted) and the read is at least a minute after the intent. A transport error after sending, however long ago, with no row
+    on read-back stays STILL_UNKNOWN: absence is not proof that the request was never accepted."""
     now = (now or _now()).astimezone(SHANGHAI)
     journal = Journal(Path(business_root) / "运行记录" / LEDGER_DIR, clock)
     state = journal.state()
@@ -337,10 +338,15 @@ def reconcile(*, registry: dict[str, Any], base: str, transport: Any, business_r
             return {"status": "ROW_DIFFERS", "intentId": intent_id, "recordId": rid}
     elif item["op"] == "update":
         return {"status": "UPDATE_NEEDS_MANUAL", "intentId": intent_id}
-    elif age >= min_quiet_seconds or (rejected and age >= 60):
-        status, evidence = "NOT_APPLIED_PROVEN", {"basis": "服务端结构化拒绝" if rejected and age < min_quiet_seconds else "静默期已过", "ageSeconds": round(age)}
+    elif rejected and age >= 60:
+        status, evidence = "NOT_APPLIED_PROVEN", {"basis": "服务端结构化拒绝", "ageSeconds": round(age)}
+    elif rejected:
+        return {"status": "TOO_EARLY", "intentId": intent_id, "ageSeconds": round(age), "needSeconds": 60}
     else:
-        return {"status": "TOO_EARLY", "intentId": intent_id, "ageSeconds": round(age), "needSeconds": min_quiet_seconds}
+        # 发送后传输未知：时间过去、回读仍无该行，只能说明“当前看不到”，不能证明请求没有被服务端接受；保持未决。
+        # 只有原调用留下的服务端明确结构化拒绝（或回读到唯一行且含全部写入值）才能闭合。
+        return {"status": "STILL_UNKNOWN", "intentId": intent_id, "ageSeconds": round(age),
+                "reason": "没有服务端明确拒绝；无行与静默时间都不能证明未写入，保留未决"}
     journal.add({"event": "reconciled", "intentId": intent_id, "op": item["op"], "key": item["key"], "status": status, "evidence": evidence})
     return {"status": status, "intentId": intent_id, "evidence": evidence}
 

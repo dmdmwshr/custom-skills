@@ -388,7 +388,9 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", r
     issues = issues_of(root, day)
     if stats["breakdown"].get("cloudUnknown"):      # 云写入证据里有未闭合的未知项：带出到下一轮，不静默写成 0
         issues.append({"kind": "cloud-unknown", "stage": "sync", "case": "", "entry": "", "status": "unknown",
-                       "detail": f"云写入有 {stats['breakdown']['cloudUnknown']} 项没有回执与账本共同证明（读不出的回执或账本非 OK）：先回读对账，不重放", "ref": ""})
+                       "detail": f"云写入有 {stats['breakdown']['cloudUnknown']} 项没有回执与账本共同证明（读不出的回执或账本非 OK）：先回读对账，不重放", "ref": "",
+                       "items": [{k: u.get(k) for k in ("receipt", "runId", "table", "stableKey", "status", "intentIds") if u.get(k)}
+                                 for u in stats["cloud"].get("unknown", [])][:30]})
     finished_before = [d for d in _run_days(root) if d < day and _load(root / RUNS_DIR / d / "run.json", {}).get("status") == "FINISHED"]
     previous = {_issue_signature(i) for i in (_load(root / RUNS_DIR / finished_before[-1] / "run.json", {}).get("issues", []) if finished_before else [])}
     new_issues = [i for i in issues if _issue_signature(i) not in previous]
@@ -616,26 +618,32 @@ def _receipt_files(evidence_dir: str) -> list[Path]:
 
 def _ledger_events(root: Path, *, since: datetime, kinds: tuple[str, ...] = ("final",)) -> list[dict[str, Any]]:
     """Events of the cloud write ledger written at or after ``since`` (files not touched since are skipped)."""
-    directory = root / LEDGER_DIR / "targets"
-    if not directory.is_dir():
-        return []
     found = []
-    for path in directory.glob("*.jsonl"):
-        if datetime.fromtimestamp(path.stat().st_mtime, SHANGHAI) < since:
+    seen: set[str] = set()
+    # 目标文件与耐久暂存区(pending/)同属一份账：服务已答复、账本暂时写不进的事件在暂存区，同样计入
+    for sub in ("targets", "pending"):
+        directory = root / LEDGER_DIR / sub
+        if not directory.is_dir():
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not any(f'"{kind}"' in line for kind in kinds):
+        for path in directory.glob("*.jsonl"):
+            if datetime.fromtimestamp(path.stat().st_mtime, SHANGHAI) < since:
                 continue
-            event = json.loads(line)
-            if event.get("event") in kinds and _parse_time(event["at"]) >= since:
-                found.append(event)
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not any(f'"{kind}"' in line for kind in kinds) or line in seen:
+                    continue
+                seen.add(line)
+                event = json.loads(line)
+                if event.get("event") in kinds and _parse_time(event["at"]) >= since:
+                    found.append(event)
     return found
 
 
-def _ledger_by_run(root: Path, *, since: datetime) -> dict[str, dict[str, dict[str, Any]]]:
-    """runId -> intentId -> {record, kind, final}: what the unique write ledger says each intent of a run ended as."""
+def _ledger_by_run(root: Path, *, since: datetime, until: datetime | None = None) -> dict[str, dict[str, dict[str, Any]]]:
+    """runId -> intentId -> {record, kind, final}: what the unique write ledger says each intent of a run ended as.
+    ``until`` is the night's own close: intents written after it (manual work later that day) are not that night's writes."""
     runs: dict[str, dict[str, dict[str, Any]]] = {}
-    for event in sorted(_ledger_events(root, since=since, kinds=("intent", "bound", "final")), key=lambda e: e["at"]):
+    events = [e for e in _ledger_events(root, since=since, kinds=("intent", "bound", "final")) if until is None or _parse_time(e["at"]) <= until]
+    for event in sorted(events, key=lambda e: e["at"]):
         intent = runs.setdefault(str(event.get("runId")), {}).setdefault(event["intentId"], {"record": None, "kind": "update", "final": None})
         if event["event"] == "intent":
             intent["record"] = (event.get("target") or {}).get("record") or intent["record"]
@@ -652,6 +660,7 @@ def _ledger_by_run(root: Path, *, since: datetime) -> dict[str, dict[str, dict[s
 
 LEDGER_CLEAR_FINALS = frozenset({"OK", "UNCHANGED", "NOT_ATTEMPTED"})
 LEDGER_CLEAR_RECONCILED = frozenset({"APPLIED", "NOT_APPLIED_PROVEN"})
+LEDGER_WROTE = frozenset({"OK", "APPLIED"})     # 其余闭合标签（未尝试、未改变、证明未应用）只闭合“已知零动作”，不是变更
 
 
 def _ledger_resolutions(root: Path, *, since: datetime) -> dict[str, dict[str, Any]]:
@@ -672,25 +681,51 @@ def _classify_unreadable_receipt(path: Path, ledger: dict[str, dict[str, dict[st
     from the other evidence of the same folder, never from the missing file: the error text beside it and the intents the unique
     ledger holds for that folder's log directories. ``REFUSED_NO_CALL``: refused before any request, known not written.
     ``RESOLVED_BY_LEDGER``: every intent in that folder is closed by a verified final/reconciliation. Anything else is unknown."""
-    folder = _native(str(path.parents[1])).rstrip("/") + "/"
+    folder = _native(str(path.parents[1])).rstrip("/")
+    spec_name = path.stem[len("exec-"):] if path.stem.startswith("exec-") else path.stem
     try:
         error_text = path.with_suffix(".err").read_text(encoding="utf-8", errors="replace")
     except OSError:
         error_text = ""
-    intents = [(run_id, intent_id, info) for run_id, items in ledger.items() for intent_id, info in items.items()
-               if _native(info.get("logDir") or "").startswith(folder)]
+    # 只认“同一规格”：回执 exec-<名>.json 对应本批 logs*/<名> 日志目录；同一批里相邻规格的意图不能替它作证
+    intents = []
+    for run_id, items in ledger.items():
+        for intent_id, info in items.items():
+            log_dir = _native(info.get("logDir") or "").rstrip("/")
+            parent, _, leaf = log_dir.rpartition("/")
+            if (leaf == spec_name and parent.rpartition("/")[0] == folder) or log_dir == f"{folder}/logs-{spec_name}":
+                intents.append((run_id, intent_id, info))
     result: dict[str, Any] = {"receipt": str(path), "size": path.stat().st_size if path.exists() else None, "intents": len(intents)}
     if not intents and "未发起任何外部调用" in error_text:
         return {**result, "class": "REFUSED_NO_CALL"}
     states = {intent_id: resolutions.get(intent_id) for _, intent_id, _ in intents}
     if intents and all(state and state["clear"] for state in states.values()):
-        return {**result, "class": "RESOLVED_BY_LEDGER", "runs": sorted({run_id for run_id, _, _ in intents}),
-                "cases": sorted({info["stable"].split("|")[0] for _, _, info in intents if info.get("stable")}),
-                "closedBy": sorted({state["label"] for state in states.values() if state})}
-    return {**result, "class": "UNKNOWN", "ledgerStates": sorted({(state or {}).get("label", "NO_FINAL") for state in states.values()}) or ["NO_INTENT"]}
+        wrote = [(run_id, iid, info) for run_id, iid, info in intents if states[iid]["label"] in LEDGER_WROTE]
+        base = {**result, "runs": sorted({run_id for run_id, _, _ in intents}), "closedBy": sorted({state["label"] for state in states.values() if state})}
+        if not wrote:      # 全部是未尝试/未改变/证明未应用：闭合了未知，但没有任何变更可计
+            return {**base, "class": "CLOSED_NO_WRITE", "cases": []}
+        return {**base, "class": "RESOLVED_BY_LEDGER", "cases": sorted({info["stable"].split("|")[0] for _, _, info in wrote if info.get("stable")})}
+    return {**result, "class": "UNKNOWN", "intentIds": sorted(iid for _, iid, _ in intents),
+            "ledgerStates": sorted({(state or {}).get("label", "NO_FINAL") for state in states.values()}) or ["NO_INTENT"]}
 
 
-def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, Any]:
+def _reconciled_receipt_record(run_ledger: dict[str, dict[str, Any]] | None, resolutions: dict[str, dict[str, Any]],
+                               record: dict[str, Any], stable: str) -> tuple[str, str, str] | None:
+    """One receipt record that the writer could not close (unknown/failed): if the SAME run's ledger holds exactly one intent for that
+    record (by record id or stable key) and a verified closure exists (final OK, or a reconcile APPLIED / NOT_APPLIED_PROVEN), return
+    (label, action, intentId). Adjacent specs, a missing intent or several candidates give None - never guessed."""
+    matched = [(iid, i) for iid, i in (run_ledger or {}).items()
+               if (record.get("recordId") and i["record"] == record.get("recordId")) or (stable and i.get("stable") == str(stable))]
+    if len(matched) != 1:
+        return None
+    intent_id, info = matched[0]
+    state = resolutions.get(intent_id)
+    if not state or not state["clear"]:
+        return None
+    return state["label"], "create" if info["kind"] == "create" else "update", intent_id
+
+
+def cloud_stats(root: Path, evidence_dir: str, *, since: datetime, until: datetime | None = None) -> dict[str, Any]:
     """Cloud writes counted once per (intent, table, record, action). Receipts name the runs and records; the unique write
     ledger gives each intent and how it ended (``final``). A write counts as done only if its receipt says OK **and** the
     ledger's final for that intent is OK; anything else is unknown and listed apart. The same receipt copied to another
@@ -700,8 +735,8 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, 
     if not evidence_dir:
         return {"source": "none", "note": "没有回执目录：云写入数不统计，只看检查点与账本"}
     files = _receipt_files(evidence_dir)
-    ledger = _ledger_by_run(root, since=since)
-    resolutions = _ledger_resolutions(root, since=since)
+    ledger = _ledger_by_run(root, since=since, until=until)
+    resolutions = _ledger_resolutions(root, since=since)      # 对账可以晚于该夜：它闭合的是该夜的未知，不是新增变更
     seen: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     fields: set[tuple[str, str, str]] = set()
     unknown: list[dict[str, Any]] = []
@@ -726,9 +761,28 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, 
             state = record.get("status")
             stable = (record.get("stableKey") or {}).get("value") or record.get("recordId") or ""
             table = record.get("tableId") or ""
+            reconciled = None
+            if state in CLOUD_UNKNOWN or state == "FAILED":    # 同一规格原回执里的未知，若账本已逐意图对账闭合：已写入则按原夜计一次，证明未写入则不计
+                reconciled = _reconciled_receipt_record(run_ledger, resolutions, record, stable)
+            if reconciled is not None:
+                label, action, intent_id = reconciled
+                if label in LEDGER_WROTE:
+                    key = (intent_id, table, stable, action)
+                    if key in seen:
+                        duplicates += 1
+                    else:
+                        seen[key] = {"receipt": path.name, "runId": run_id, "verdict": "reconciled"}
+                        cases.add(str(stable).split("|")[0])
+                        if action == "update":
+                            for field_id in (record.get("writtenFields") if record.get("writtenFields") is not None else (record.get("fieldDetail") or {})):
+                                fields.add((table, stable, field_id))
+                else:
+                    held[f"RECONCILED_{label}"] = held.get(f"RECONCILED_{label}", 0) + 1
+                continue
             if state not in CLOUD_WRITE:
                 if state in CLOUD_UNKNOWN or state in ("FAILED", "VIOLATION", "DUPLICATE_KEYS_BLOCK"):
-                    unknown.append({"receipt": path.name, "table": table, "stableKey": stable, "status": state})
+                    unknown.append({"receipt": path.name, "runId": run_id, "table": table, "stableKey": stable, "status": state,
+                                    "intentIds": sorted(iid for iid, i in (run_ledger or {}).items() if i.get("stable") == str(stable) or i["record"] == record.get("recordId"))})
                 else:      # 被挡、未改变、已存在等：没有写入，也不是未知；分别留存，不并入成功
                     held[str(state)] = held.get(str(state), 0) + 1
                     if len(held_keys) < 20:
@@ -754,7 +808,8 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, 
             elif not matched or any(i["final"] != "OK" for _, i in matched):
                 verdict = "ledger-not-ok"
             if verdict == "ledger-not-ok":
-                unknown.append({"receipt": path.name, "table": table, "stableKey": stable, "status": state, "reportStatus": report.get("status"),
+                unknown.append({"receipt": path.name, "runId": run_id, "table": table, "stableKey": stable, "status": state, "reportStatus": report.get("status"),
+                                "intentIds": sorted(iid for iid, _ in matched),
                                 "ledgerFinal": sorted({i["final"] or "NONE" for _, i in matched}) or ["NO_INTENT"]})
                 continue
             seen[key] = {"receipt": path.name, "runId": run_id, "verdict": verdict}
@@ -768,8 +823,11 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, 
         if item["class"] == "RESOLVED_BY_LEDGER":
             cases.update(item["cases"])
             explained_runs.update(item["runs"])
+        elif item["class"] == "CLOSED_NO_WRITE":
+            explained_runs.update(item["runs"])
         elif item["class"] == "UNKNOWN":
-            unknown.append({"receipt": Path(item["receipt"]).name, "table": "", "stableKey": "", "status": "UNREADABLE_RECEIPT", "ledgerFinal": item["ledgerStates"]})
+            unknown.append({"receipt": Path(item["receipt"]).name, "table": "", "stableKey": "", "status": "UNREADABLE_RECEIPT",
+                            "intentIds": item.get("intentIds", []), "ledgerFinal": item["ledgerStates"]})
     created = {(k[1], k[2]) for k in seen if k[3] == "create"}
     updates = [k for k in seen if k[3] == "update"]
     ok_runs = {r for r, intents in ledger.items() if any(i["final"] == "OK" for i in intents.values())}
@@ -781,7 +839,8 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime) -> dict[str, 
     return {"source": "receipts+ledger", "receiptFiles": len(files), "receiptsOk": receipts_ok, "createdRows": len(created),
             "updatedOperations": len(updates), "uniqueFields": len(fields), "duplicatesIgnored": duplicates, "unknown": unknown,
             "unreadable": unreadable, "receiptsRefusedNoCall": sum(i["class"] == "REFUSED_NO_CALL" for i in unreadable),
-            "receiptsResolvedByLedger": sum(i["class"] == "RESOLVED_BY_LEDGER" for i in unreadable), "receiptOnlyUnconfirmed": unconfirmed, "heldOrNotWritten": held, "heldSample": held_keys, "ledgerCrossCheck": cross, "cases": sorted(cases),
+            "receiptsResolvedByLedger": sum(i["class"] == "RESOLVED_BY_LEDGER" for i in unreadable),
+            "receiptsClosedNoWrite": sum(i["class"] == "CLOSED_NO_WRITE" for i in unreadable), "receiptOnlyUnconfirmed": unconfirmed, "heldOrNotWritten": held, "heldSample": held_keys, "ledgerCrossCheck": cross, "cases": sorted(cases),
             "note": "新建行只计行数，不逐格计字段；更新字段取回执 writtenFields（真正改变的格）"}
 
 
@@ -813,13 +872,16 @@ def _collected_cases(evidence_dir: str, since: datetime) -> tuple[set[str], str]
     return found, "采集结果文件 NEW_PACKAGE_ATTACHED"
 
 
-def _archived_cases(root: Path, since: datetime) -> tuple[set[str], str]:
-    """Cases the waterline shows as completed (archived) at or after ``since``: the case ledger's own completion record."""
+def _archived_cases(root: Path, since: datetime, until: datetime | None = None) -> tuple[set[str], str]:
+    """Cases the waterline shows as completed (archived) from ``since`` to the run's own close ``until`` (a case archived by hand after
+    the night closed belongs to that later work, not to the night): the case ledger's own completion record."""
     path = Path(root).parent / "案卷水位记录.json"
     if not path.is_file():
         return set(), "没有案卷水位记录"
     cases = json.loads(path.read_text(encoding="utf-8")).get("cases", {})
-    return {p for p, c in cases.items() if c.get("state") == "COMPLETED" and c.get("completedAt") and _parse_time(c["completedAt"]) >= since}, "案卷水位记录 completedAt"
+    return {p for p, c in cases.items() if c.get("state") == "COMPLETED" and c.get("completedAt")
+            and since <= _parse_time(c["completedAt"]) and (until is None or _parse_time(c["completedAt"]) <= until)}, \
+        "案卷水位记录 completedAt" + ("（截至该夜收尾时间）" if until else "")
 
 
 def run_stats(root: Path, day: str, *, evidence_dir: str = "", now: datetime | None = None) -> dict[str, Any]:
@@ -829,10 +891,11 @@ def run_stats(root: Path, day: str, *, evidence_dir: str = "", now: datetime | N
     ``reportedChanged``. The coverage is stated so a number is never read wider."""
     run = _load(_run_dir(root, day) / "run.json", {})
     since = _parse_time(run["startedAt"]) if run.get("startedAt") else (now or now_shanghai())
-    cloud = cloud_stats(root, evidence_dir, since=since)
+    closed_at = _parse_time(run["finishedAt"]) if run.get("finishedAt") else None
+    cloud = cloud_stats(root, evidence_dir, since=since, until=closed_at)
     observation = _observation_today(root, day)
     collected, collected_basis = _collected_cases(evidence_dir, since)
-    archived, archived_basis = _archived_cases(root, since)
+    archived, archived_basis = _archived_cases(root, since, closed_at)
     changed_set = set(collected) | set(archived) | set(cloud.get("cases", [])) | set(observation["rwids"])
     unknown_writes = [i for i in progress(root, day)["unknown"] if i["stage"] in WRITE_STAGES]
     breakdown = {"collectedCases": len(collected), "archivedCases": len(archived),

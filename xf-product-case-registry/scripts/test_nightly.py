@@ -758,3 +758,91 @@ def test_a_run_left_running_after_its_executions_ended_is_shown_as_interrupted_a
     view = nightly.run_view(tmp_path, day)
     assert view["derivedStatus"] == "ACTIVE" and view["takeovers"][0]["after"] == {"sessionId": "s1", "endState": "LOST", "endedAt": T(day + "T09:14:18").isoformat(timespec="seconds"), "detail": "进程消失"}
     assert [v["date"] for v in nightly.timeline(tmp_path, since="2026-11-14")] == ["2026-11-14"]
+
+
+# ------------------------------------------------------------------ a34：汇总边界（收尾后的人工归档、零动作闭合、同规格匹配、原夜对账闭合）
+
+def test_a_case_archived_by_hand_after_the_night_closed_is_not_counted_in_that_night(tmp_path):
+    root = tmp_path / "运行记录"
+    day = "2026-11-18"
+    run = root / nightly.RUNS_DIR / day
+    run.mkdir(parents=True)
+    (run / "run.json").write_text(json.dumps({"schemaVersion": "NightlyRunV1", "date": day, "status": "FINISHED",
+                                              "startedAt": day + "T02:00:00+08:00", "finishedAt": day + "T06:00:00+08:00"}), encoding="utf-8")
+    (tmp_path / "案卷水位记录.json").write_text(json.dumps({"cases": {
+        "A": {"state": "COMPLETED", "completedAt": day + "T05:55:00+08:00"}, "B": {"state": "COMPLETED", "completedAt": day + "T06:05:00+08:00"}}}), encoding="utf-8")
+    assert nightly.run_stats(root, day)["archivedCases"] == ["A"]
+
+
+def test_zero_action_closures_are_neither_changes_nor_unknown(tmp_path):
+    evidence = tmp_path / "evidence"
+    for name, label_event in (("a", {"event": "final", "status": "NOT_ATTEMPTED"}), ("b", {"event": "final", "status": "UNCHANGED"}),
+                              ("c", {"event": "reconciled", "outcome": "NOT_APPLIED_PROVEN"})):
+        _unreadable(evidence, f"s-{name}", "exec-main", "exec-main.json")
+        _ledger_line(tmp_path, f"i-{name}", [{"event": "intent", "runId": f"r-{name}", "logDir": str(evidence / "sync" / f"s-{name}" / "logs-main"),
+                                              "target": {"table": "t", "record": "r"}, "stableKey": {"value": f"P-{name}"}}, label_event])
+    cloud = nightly.cloud_stats(tmp_path, str(evidence), since=T("2026-11-16T00:00:00"))
+    assert cloud["cases"] == [] and cloud["unknown"] == [] and cloud["receiptsClosedNoWrite"] == 3
+    assert {i["class"] for i in cloud["unreadable"]} == {"CLOSED_NO_WRITE"}
+
+
+def test_an_unreadable_receipt_is_matched_only_to_the_intent_of_its_own_specification(tmp_path):
+    evidence = tmp_path / "evidence"
+    base = evidence / "sync" / "main-x"
+    _unreadable(evidence, "main-x", "exec-main", "exec-create-01.json")
+    _unreadable(evidence, "main-x", "exec-main", "exec-fill-01.json")
+    _ledger_line(tmp_path, "i-1", [{"event": "intent", "runId": "r1", "kind": "create", "logDir": str(base / "logs-main" / "create-01"),
+                                    "target": {"table": "t"}, "stableKey": {"value": "P-1"}}, {"event": "final", "status": "OK"}])
+    cloud = nightly.cloud_stats(tmp_path, str(evidence), since=T("2026-11-16T00:00:00"))
+    assert {Path(i["receipt"]).name: i["class"] for i in cloud["unreadable"]} == {"exec-create-01.json": "RESOLVED_BY_LEDGER", "exec-fill-01.json": "UNKNOWN"}
+    assert cloud["unknown"][0]["receipt"] == "exec-fill-01.json"
+
+
+def test_an_original_create_closed_by_a_later_reconcile_counts_once_in_its_own_night_and_the_reconcile_is_not_a_second_change(tmp_path):
+    evidence = tmp_path / "evidence"
+    _receipt(evidence, "main-1", "exec-main", "exec-create-01.json", [{"status": "UNKNOWN", "tableId": "tM", "stableKey": {"value": "P-132"}}], run_id="run-a", status="UNKNOWN")
+    _receipt(evidence, "main-1", "exec-main", "exec-create-02.json", [{"status": "UNKNOWN", "tableId": "tM", "stableKey": {"value": "P-133"}}], run_id="run-b", status="UNKNOWN")
+    _ledger_line(tmp_path, "i-132", [{"event": "intent", "runId": "run-a", "kind": "create", "target": {"table": "tM"}, "stableKey": {"value": "P-132"}},
+                                     {"event": "reconciled", "runId": "run-rec", "outcome": "APPLIED"}])
+    _ledger_line(tmp_path, "i-133", [{"event": "intent", "runId": "run-b", "kind": "create", "target": {"table": "tM"}, "stableKey": {"value": "P-133"}},
+                                     {"event": "reconciled", "runId": "run-rec", "outcome": "NOT_APPLIED_PROVEN"}])
+    cloud = nightly.cloud_stats(tmp_path, str(evidence), since=T("2026-11-16T00:00:00"))
+    assert cloud["cases"] == ["P-132"] and cloud["createdRows"] == 1 and cloud["unknown"] == [] and cloud["heldOrNotWritten"] == {"RECONCILED_NOT_APPLIED_PROVEN": 1}
+
+
+def test_an_open_unknown_carries_its_receipt_and_intent_so_the_next_night_can_check_exactly_that_item(tmp_path):
+    day = _run(tmp_path)
+    evidence = tmp_path / "evidence"
+    _receipt(evidence, "main-1", "exec-main", "exec-create-01.json", [{"status": "UNKNOWN", "tableId": "tM", "stableKey": {"value": "P-9"}}], run_id="run-z", status="UNKNOWN")
+    _ledger_line(tmp_path, "i-9", [{"event": "intent", "runId": "run-z", "kind": "create", "target": {"table": "tM"}, "stableKey": {"value": "P-9"}}])
+    _all_done(tmp_path, day)
+    finished = nightly.finish(tmp_path, day, evidence_dir=str(evidence))
+    item = next(i for i in finished["issues"] if i["kind"] == "cloud-unknown")["items"][0]
+    assert item["receipt"] == "exec-create-01.json" and item["runId"] == "run-z" and item["intentIds"] == ["i-9"] and item["stableKey"] == "P-9"
+
+
+def test_a_ledger_event_waiting_in_the_durable_spool_counts_like_one_in_the_ledger(tmp_path):
+    evidence = tmp_path / "evidence"
+    _unreadable(evidence, "main-s", "exec-main", "exec-main.json")
+    _ledger_line(tmp_path, "i-s", [{"event": "intent", "runId": "r-s", "logDir": str(evidence / "sync" / "main-s" / "logs-main"),
+                                    "target": {"table": "t", "record": "r"}, "stableKey": {"value": "P-S"}}])
+    spool = tmp_path / "飞书写入账本" / "pending"
+    spool.mkdir(parents=True)
+    (spool / "i-s.jsonl").write_text(json.dumps({"intentId": "i-s", "at": "2026-11-16T18:41:00Z", "event": "final", "runId": "r-s", "status": "OK"}) + "\n", encoding="utf-8")
+    cloud = nightly.cloud_stats(tmp_path, str(evidence), since=T("2026-11-16T00:00:00"))
+    assert cloud["cases"] == ["P-S"] and cloud["unknown"] == []
+
+
+def test_ledger_writes_made_after_the_night_closed_are_not_that_nights_writes_and_do_not_break_the_cross_check(tmp_path):
+    root = tmp_path / "运行记录"
+    day = "2026-11-18"
+    run = root / nightly.RUNS_DIR / day
+    run.mkdir(parents=True)
+    (run / "run.json").write_text(json.dumps({"schemaVersion": "NightlyRunV1", "date": day, "status": "FINISHED",
+                                              "startedAt": day + "T02:00:00+08:00", "finishedAt": day + "T06:00:00+08:00"}), encoding="utf-8")
+    evidence = tmp_path / "evidence"
+    _receipt(evidence, "main-1", "exec-main", "exec-fill-01.json", [{"status": "WRITTEN", "tableId": "tM", "recordId": "rec1", "stableKey": {"value": "P-N"}, "writtenFields": ["f1"]}], run_id="run-night")
+    _ledger(root, "run-night", "rec1", at="2026-11-17T21:00:00Z")           # 05:00 北京时间，夜里
+    _ledger(root, "run-later", "rec2", at="2026-11-18T03:00:00Z")           # 11:00 北京时间，收尾以后的手工同步
+    stats = nightly.run_stats(root, day, evidence_dir=str(evidence))
+    assert stats["cloud"]["ledgerCrossCheck"]["result"] == "MATCH" and stats["cloud"]["cases"] == ["P-N"]

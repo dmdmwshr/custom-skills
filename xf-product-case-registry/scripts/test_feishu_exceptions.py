@@ -171,11 +171,14 @@ def test_reconcile_proves_a_structured_service_rejection_only_after_a_minute_and
     assert again["status"] == "OK" and len(again["apply"]["written"]) == 1
 
 
-def test_reconcile_without_a_structured_rejection_needs_the_quiet_period_and_a_row_that_exists_is_applied_proven(tmp_path):
+def test_reconcile_without_a_structured_rejection_never_turns_into_not_applied_by_time_alone_and_a_row_that_exists_is_applied_proven(tmp_path):
     fake = Fake()
     intent = _unknown_create(tmp_path, fake, "timeout")
     far = datetime.now(SHANGHAI).replace(year=2027)
-    assert ex.reconcile(registry=REGISTRY, base=BASE, transport=fake, business_root=tmp_path, intent_id=intent, now=datetime.now(SHANGHAI).replace(microsecond=0))["status"] == "TOO_EARLY"
+    assert ex.reconcile(registry=REGISTRY, base=BASE, transport=fake, business_root=tmp_path, intent_id=intent, now=datetime.now(SHANGHAI).replace(microsecond=0))["status"] == "STILL_UNKNOWN"
+    # a year later with still no row: absence is not proof the request was never accepted; the key stays blocked, nothing is written
+    assert ex.reconcile(registry=REGISTRY, base=BASE, transport=fake, business_root=tmp_path, intent_id=intent, now=far)["status"] == "STILL_UNKNOWN"
+    assert "X-32002221C202600090-来源包混放" in ex.Journal(tmp_path / "运行记录" / ex.LEDGER_DIR).blocked()
     # the write actually landed
     fake.create_record(BASE, TABLE, {IDS["核对编号"]: "X-32002221C202600090-来源包混放", IDS["处理状态"]: "已登记保留", IDS["内容"]: entry()["content"], IDS["字段"]: "无",
                                      IDS["建议"]: entry()["suggestion"], IDS["项目编号"]: "32002221C202600090", IDS["类型"]: ["来源包混放"],

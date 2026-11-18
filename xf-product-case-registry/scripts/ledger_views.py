@@ -1837,12 +1837,49 @@ def _check_date(row: dict[str, Any]) -> tuple[date | None, str | None]:
         return None, "DATE_CONFLICT"
 
 
-def package_facts(layout: Any, index: dict[str, Any], project: str, row: dict[str, Any]) -> dict[str, Any]:
+def _waterline_package(layout: Any, project: str, record: dict[str, Any] | None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """历史归档或手动接件的原包：该案在水位里已登记的最新完成代（包摘要、原件目录、归档核验记录）。
+
+    只在本案登记目录内按摘要核对原包，并要求本案归档核验记录实物仍在、与水位 source 的包摘要一致；
+    返回（可当作包使用的登记, 说明）。没有这些证据（缺原包、摘要不符、核验记录缺失、路径不安全）时返回 None 与具体缺口，
+    调用方按原守卫处理（仍判无包），不兜底放行。"""
+    completions = [c for c in ((record or {}).get("history") or {}).get("completions") or [] if isinstance(c, dict) and c.get("packageSha256")]
+    if not completions:
+        return None, {"gap": "NO_COMPLETION_PACKAGE"}
+    completion = completions[-1]
+    sha = completion["packageSha256"]
+    registered = ((record or {}).get("source") or {}).get("packageSha256")
+    if registered and registered != sha:
+        return None, {"gap": "SOURCE_PACKAGE_SHA_CONFLICT"}
+    try:
+        verification = layout.resolve_recorded_path(completion["verificationRecord"]) if completion.get("verificationRecord") else None
+    except Exception as error:  # noqa: BLE001 - 路径不安全不是“没有”
+        return None, {"gap": "VERIFICATION_PATH_UNSAFE", "error": type(error).__name__}
+    if verification is None or not verification.is_file():
+        return None, {"gap": "VERIFICATION_RECORD_MISSING"}
+    if __package__:
+        from . import capture_source_case as capture
+    else:
+        import capture_source_case as capture
+    relative = ((record or {}).get("source") or {}).get("packageRelativePath")
+    located = capture.locate_package(layout, project, {"sha256": sha, "relativePath": relative}, None)
+    if located["state"] != "OK":
+        return None, {"gap": "PACKAGE_" + str(located["state"]), "reason": located.get("reason")}
+    return {"sha256": sha, "attachedAt": completion.get("verifiedAt"), "origin": "WATERLINE_ARCHIVE", "location": located.get("location")}, {"gap": None}
+
+
+def package_facts(layout: Any, index: dict[str, Any], project: str, row: dict[str, Any], record: dict[str, Any] | None = None) -> dict[str, Any]:
     entry = index.get(project) or {"status": None, "packages": {}}
     head, package_state = _package_head(layout, project, entry["packages"], entry.get("rwids"))
+    existing = None
+    if not entry["packages"]:      # 没有正式捕获包证据：复用水位里已核验的历史归档/手动接件原包；有捕获包（含冲突）时一律按原守卫
+        existing, existing_note = _waterline_package(layout, project, record)
+        if existing is not None:
+            head, package_state = existing, "OK"
     check_date, issue = _check_date(row)
     return {
-        "hasPackage": bool(entry["packages"]),
+        "hasPackage": bool(entry["packages"]) or existing is not None,
+        "packageOrigin": "WATERLINE_ARCHIVE" if existing is not None else ("CAPTURE" if entry["packages"] else None),
         "packageValid": package_state in {"OK", "NO_PACKAGE"},
         "packageIssue": package_state,
         "attachedAt": (head or {}).get("attachedAt"),
@@ -1869,7 +1906,7 @@ def package_decision_for_project(
     if not record:
         raise ws.WorkspaceStateError("总账没有该项目")
     row = describe(layout, project, record)
-    facts = package_facts(layout, _package_capture_index(layout), project, row)
+    facts = package_facts(layout, _package_capture_index(layout), project, row, record)
     return {"projectNo": project, **package_decision(facts, today=today, months=months, refresh_days=refresh_days)}
 
 
@@ -2022,7 +2059,7 @@ def scan_plan(
     for project, record in ledger["cases"].items():
         row = describe(layout, project, record)
         decision = package_decision(
-            package_facts(layout, package_index, project, row),
+            package_facts(layout, package_index, project, row, record),
             today=today, months=package_months, refresh_days=package_refresh_days,
         )
         package_decisions.append({"projectNo": project, **decision})

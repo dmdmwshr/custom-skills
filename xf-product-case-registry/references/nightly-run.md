@@ -56,7 +56,7 @@
 - 队列里任何等待状态（NOT_INSPECTED、IN_PROGRESS、SAMPLE_PENDING、RECHECK_PENDING、SOURCE_GAP）转为 `ENTER_SCOPE`/`OUT_OF_SCOPE`，都要求项目编号、RWID、单位、大队四项齐全且与队列已有记录一致，检查日期落定，并有产品证据（`productEvidence: true`）；缺项留在队列并在 `history` 记 `closeBlocked`，身份冲突记 `IDENTITY_CONFLICT` 且不覆盖原值。每次观察向 `history` 追加一条（ADDED/KEPT/ENTER_SCOPE/OUT_OF_SCOPE/IDENTITY_CONFLICT）。任务只按 RWID 关联：同项目编号或同单位名但 RWID 不同的是另一项任务，不并入。
 - 已有检查日期但详情尚无产品行的任务（未能确认是产品案）带 `awaitingProduct: true` 登记，继续留在队列按 7 天复看；详情出现产品行后不带该标记再登记一次即 `ENTER_SCOPE`。
 - 只有来源给出检查日期（真实初查日）且不早于 2026-01-01 才 `ENTER_SCOPE`，随后按正常详情确认进入总账；早于边界记 `OUT_OF_SCOPE`；没有检查日期的只观察，不建案、不下载。
-- 已入总账案卷的到期重取由 `source scan-plan` 的包决策给出，同为 7 天；文书叶集合未证完整时不自动打包，材料未齐不标归档完成，可信事实仍先本地后飞书。
+- 已入总账案卷的到期重取由 `source scan-plan` 的包决策给出，同为 7 天；文书叶集合未证完整时不自动打包，关键事实可由本案主要材料证实时，现有有效材料可以归档（大队错传、缺件按来源问题登记到唯一异常表，原包整份保留，材料完整性的实际缺口如实保留，不把材料齐全改成真）；关键事实存疑时保留原空值或合同允许的待核实值，可信事实仍先本地后飞书。
 
 ## 各阶段对应入口
 
@@ -82,12 +82,15 @@
 
 ## 账本与回执的分层记账
 
-- 写入证据分三层：已核实成功（回执 OK 且账本该意图 `final=OK`，或已由对账闭合）、已知未写（零外部调用被拒、`NOT_ATTEMPTED`）、未知（回执或账本缺一边、终态非 OK）。三层分别计数，不互相冲抵。
+- 写入证据分三层：已核实成功（回执 OK 且账本该意图 `final=OK`，或已由对账 `APPLIED` 闭合）、已知未写（零外部调用被拒、`NOT_ATTEMPTED`、`UNCHANGED`、对账 `NOT_APPLIED_PROVEN`）、未知（回执或账本缺一边、终态非 OK）。三层分别计数，不互相冲抵；只有第一层计入变更，已知未写只闭合“零动作”，不是变更也不是未知。
+- 汇总的边界：回执与账本意图只按**同一规格**对应（回执 `exec-<名>.json` 对该批 `logs*/<名>` 日志目录；单规格批次对 `logs-<名>`），相邻规格的意图不能替它作证；账本既读目标文件也读 `pending/` 暂存区；该夜的云写入和归档只算到该夜自己的收尾时间，收尾以后的手工归档、手工同步属后续工作，不并入；对账可以晚于该夜，它闭合的是该夜原来的未知（原创建、原更新按原夜计一次），对账本身不再计变更。收尾仍有云端未知时，`cloud-unknown` 事项带 `items`（回执名、运行、意图 ID、稳定键），下一晚只复核这些具体项；同一旧异常重复出现不重复提示。
 - 回执文件为空或不是 JSON（写入进程异常退出、或报错后没有输出）不再被忽略：按同目录证据归类——同目录 `.err` 写明“未发起任何外部调用”且账本没有该目录的意图为 `REFUSED_NO_CALL`（已知未写）；该目录的意图都已由终态或对账 `APPLIED/NOT_APPLIED_PROVEN` 闭合为 `RESOLVED_BY_LEDGER`；其余记为未知（`UNREADABLE_RECEIPT`），计入 `cloudUnknown`，并随 `finish` 作为 `cloud-unknown` 事项带到下一轮。`breakdown` 另给 `cloudReceiptsUnreadable`、`cloudRefusedNoCall`、`cloudResolvedByLedger`、`ledgerCrossCheck`。
 - 账本追加：写意图前账本写不进（重试后仍失败）＝一个请求都没发，零外写、不留未决；服务已答复之后的 `bound/final/reconciled` 写不进账本时先落到账根 `pending/` 暂存区（计入状态、下次加锁时原样并回），绝不因此再发请求；两处都写不进才报错，并留下 `report.json`（`ABORTED`）。
 - 原写入的回执与账本缺终态时，只有同一行、同一原始意图、原生请求与回执日志逐字节固定、唯一匹配且服务端历史时间吻合时，才可经 `--reconcile` 的 `requestTerminalProof`（`service-receipt-log-pair`）闭合；不重发、不新建行，重跑为零写入。
 
 ## 异常登记（唯一异常表）
+
+- 异常表的写入沿同一底线：发送后传输未知（无服务端答复）保持未决，静默时间过去、回读仍无该行或仍是旧值都**不能**转为“未写入”（`STILL_UNKNOWN`）；只有原调用留下的服务端明确结构化拒绝（`"ok": false` 带 API 错误码）才可证明未写，或回读到唯一行且含全部写入值才证明已写（`APPLIED_PROVEN`）。同一次出现新的未知就停止后续提交；已锁定的键在规划时精确隔离，其余安全目标在下一次继续。已登记的行与既有服务端拒绝记录不重复创建、不改旧账。
 
 - 来源或材料异常（大队错传、材料缺项）和受影响的关键事实只登记在案卷 Base 现有的“数据核对”表，不另建表、不另建案卷台账。`feishu-exception-register --registry <异常登记结构-*.json> --registry-sha … --entries <清单> --base-token … --profile … --business-root …`：缺省只出计划，`--execute` 才写；夜间用 `sync.sh exceptions <清单>`。
 - 清单 `ExceptionEntriesV1`：`entries[{projectNo, type(来源包混放|来源材料缺项|关键事实待核实), affected(否|是|待核实), fields(受影响字段，无则“无”；affected 为是时必填), status(已登记保留|待核实|已解除), content(≤120字), suggestion(≤80字), source(来源详情|底册/系统|多源)}]`。
