@@ -390,16 +390,23 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", r
     own = [_carry_item(u, day) for u in stats["cloud"].get("unknown", [])]
     carried_open = [i for issue in (carry_issues(root, finished_before[-1]) if finished_before else []) if issue["kind"] == "cloud-unknown" for i in issue.get("items", [])]
     items: list[dict[str, Any]] = []
-    for item in [*carried_open, *own]:       # 未决跨夜持续到证据闭合：前几夜仍未闭合的项与本夜新的未知合并，同一回执只留一项
-        key = item.get("receiptPath") or json.dumps(item, sort_keys=True, ensure_ascii=False)
-        if all((i.get("receiptPath") or json.dumps(i, sort_keys=True, ensure_ascii=False)) != key for i in items):
+    seen_keys: set[tuple[Any, ...]] = set()
+    for item in [*carried_open, *own]:       # 未决跨夜持续到证据闭合：前几夜仍未闭合的项与本夜新的未知合并；同一规格同一对象只留一项，不同对象各留各的
+        key = _unknown_key(item)
+        if key not in seen_keys:
+            seen_keys.add(key)
             items.append(item)
     if items:      # 云写入证据里有未闭合的未知项：带出到下一轮，不静默写成 0
         issues.append({"kind": "cloud-unknown", "stage": "sync", "case": "", "entry": "", "status": "unknown",
                        "detail": f"云写入有 {len(items)} 项没有回执与账本共同证明（读不出的回执或账本非 OK，含前几夜未闭合的）：先回读对账，不重放；每项带原业务日和回执路径", "ref": "",
-                       "items": items[:60]})
+                       "items": items})      # 持久列表不截断；展示可缩略，不影响后续动作
     previous = {_issue_signature(i) for i in (_load(root / RUNS_DIR / finished_before[-1] / "run.json", {}).get("issues", []) if finished_before else [])}
     new_issues = [i for i in issues if _issue_signature(i) not in previous]
+    prior_keys = {_unknown_key(i) for issue in (_load(root / RUNS_DIR / finished_before[-1] / "run.json", {}).get("issues", []) if finished_before else [])
+                  if issue.get("kind") == "cloud-unknown" for i in issue.get("items", [])}
+    for issue in issues:      # 同类事项已存在时，又出现的不同对象的未知仍算新增(按对象身份，不按事项类别)；同一对象重复出现保持安静
+        if issue.get("kind") == "cloud-unknown" and issue not in new_issues and any(_unknown_key(i) not in prior_keys for i in issue.get("items", [])):
+            new_issues.append(issue)
     unverified = stats["reportedChanged"] > 0 and stats["changed"] == 0      # 执行者自报有变化，却没有任何凭证：不当作“无变化”
     quiet = stats["changed"] == 0 and not weekly["due"] and not new_issues and not unverified
     run.update(status="FINISHED", finishedAt=(now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds"),
@@ -425,21 +432,38 @@ def _carry_item(unknown: dict[str, Any], day: str) -> dict[str, Any]:
     return item
 
 
-def _item_closed(root: Path, item: dict[str, Any]) -> bool:
+def _unknown_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    """Stable identity of one open unknown: its exact receipt path, original business day, run and target (stable key / table / intents).
+    Two records of one receipt differ by target; an unreadable receipt with no target is identified by the receipt alone."""
+    return (item.get("receiptPath") or item.get("receipt") or "", item.get("originDate") or "", item.get("runId") or "", item.get("table") or "",
+            item.get("stableKey") or "", tuple(item.get("intentIds") or ()))
+
+
+def _item_closed(root: Path, item: dict[str, Any], cache: dict[str, Any] | None = None) -> bool:
     """Late evidence for exactly this item: its own intents are all closed by a verified final/reconciliation, or its unreadable
     receipt now classifies as resolved / known-zero-action from the same specification's evidence. Never guessed; never unlocks anything."""
-    origin = _load(root / RUNS_DIR / str(item.get("originDate") or "") / "run.json", {})
-    if not origin.get("startedAt"):
+    cache = cache if cache is not None else {}
+    day = str(item.get("originDate") or "")
+    if day not in cache:      # 同一业务日的未决共用一次账本读取，不为每一项重读整份账本
+        origin = _load(root / RUNS_DIR / day / "run.json", {})
+        if not origin.get("startedAt"):
+            cache[day] = None
+        else:
+            since = _parse_time(origin["startedAt"])
+            until = _parse_time(origin["finishedAt"]) if origin.get("finishedAt") else None
+            cache[day] = {"since": since, "until": until, "resolutions": _ledger_resolutions(root, since=since), "ledger": None}
+    shared = cache[day]
+    if shared is None:
         return False
-    since = _parse_time(origin["startedAt"])
-    until = _parse_time(origin["finishedAt"]) if origin.get("finishedAt") else None
-    resolutions = _ledger_resolutions(root, since=since)
+    resolutions = shared["resolutions"]
     receipt = item.get("receiptPath")
     if receipt and Path(_native(receipt)).is_file():
         try:
             json.loads(Path(_native(receipt)).read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            klass = _classify_unreadable_receipt(Path(_native(receipt)), _ledger_by_run(root, since=since, until=until), resolutions)["class"]
+            if shared["ledger"] is None:
+                shared["ledger"] = _ledger_by_run(root, since=shared["since"], until=shared["until"])
+            klass = _classify_unreadable_receipt(Path(_native(receipt)), shared["ledger"], resolutions)["class"]
             return klass != "UNKNOWN"
     intents = item.get("intentIds") or []
     return bool(intents) and all((resolutions.get(i) or {}).get("clear") for i in intents)
@@ -450,6 +474,7 @@ def carry_issues(root: Path, last_day: str) -> list[dict[str, Any]]:
     again (not the whole history); an item that closed is removed alone; the original records are never rewritten."""
     run = _load(root / RUNS_DIR / last_day / "run.json", {})
     out: list[dict[str, Any]] = []
+    cache: dict[str, Any] = {}
     for issue in run.get("issues", []):
         if issue.get("kind") != "cloud-unknown":
             out.append(issue)
@@ -460,7 +485,7 @@ def carry_issues(root: Path, last_day: str) -> list[dict[str, Any]]:
             cloud = cloud_stats(root, run["evidenceDir"], since=_parse_time(run["startedAt"]),
                                 until=_parse_time(run["finishedAt"]) if run.get("finishedAt") else None)
             items = [_carry_item(u, last_day) for u in cloud.get("unknown", [])]
-        remaining = [i for i in items if not _item_closed(root, i)]
+        remaining = [i for i in items if not _item_closed(root, i, cache)]
         if remaining:
             out.append({**issue, "items": remaining, "detail": f"云写入有 {len(remaining)} 项没有回执与账本共同证明：先回读对账，不重放（每项带原业务日与回执路径）"})
     return out

@@ -915,3 +915,43 @@ def test_a_legacy_saved_cloud_unknown_without_receipt_paths_is_rederived_from_it
                                               "issues": [{"kind": "cloud-unknown", "stage": "sync", "case": "", "entry": "", "status": "unknown", "detail": "旧版", "ref": ""}]}), encoding="utf-8")
     carried = nightly.carry_issues(root, "2026-11-15")
     assert [i["receiptPath"] for i in carried[0]["items"]] == [str(receipt)] and carried[0]["items"][0]["originDate"] == "2026-11-15"
+
+
+# ------------------------------------------------------------------ a36：多目标未决结转、超出展示数不丢、新增不同对象不静默
+
+def _batch(path, run_id, stables):
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"runId": run_id, "status": "UNKNOWN", "records": [
+        {"recordId": f"rec-{s}", "tableId": "t", "stableKey": {"value": s}, "status": "UNKNOWN"} for s in stables]}), encoding="utf-8")
+
+
+def test_one_receipt_with_several_unknown_targets_keeps_every_target_beyond_any_display_limit_and_a_new_object_is_not_quiet(tmp_path):
+    root = tmp_path / "运行记录"
+    first_ev = tmp_path / "第一夜"
+    _batch(first_ev / "sync/main-a/exec-main/exec-fill-01.json", "A", ["s-1", "s-2"])
+    for n in range(61):
+        _unreadable(first_ev, f"main-o{n}", "exec-main", "exec-fill-01.json")
+    closed = _night(root, "2026-11-15", evidence=str(first_ev))
+    items = lambda issues: [i for issue in issues if issue["kind"] == "cloud-unknown" for i in issue["items"]]  # noqa: E731
+    assert len(items(closed["issues"])) == 63 and closed["breakdown"]["cloudUnknown"] == 63
+    assert sorted(i["stableKey"] for i in items(closed["issues"]) if i.get("stableKey")) == ["s-1", "s-2"]
+    second_ev = tmp_path / "第二夜"
+    _batch(second_ev / "sync/main-a/exec-main/exec-fill-01.json", "B", ["s-new"])
+    second = _night(root, "2026-11-16", evidence=str(second_ev))
+    assert len(items(second["issues"])) == 64 and not second["quiet"] and second["newIssues"]      # 同类已有，又出现不同对象：照常通知
+    third = _night(root, "2026-11-17")
+    assert len(items(third["issues"])) == 64 and "newIssues" not in third                           # 同一对象重复出现：安静
+
+
+def test_late_proof_for_one_of_several_targets_of_the_same_receipt_removes_only_that_target(tmp_path):
+    root = tmp_path / "运行记录"
+    ev = tmp_path / "证据"
+    _batch(ev / "sync/main-a/exec-main/exec-fill-01.json", "A", ["s-1", "s-2"])
+    _ledger_line(root, "i-1", [{"event": "intent", "runId": "A", "kind": "update", "target": {"table": "t", "record": "rec-s-1"}, "stableKey": {"value": "s-1"}},
+                               {"event": "final", "runId": "A", "status": "OK"}])
+    _ledger_line(root, "i-2", [{"event": "intent", "runId": "A", "kind": "update", "target": {"table": "t", "record": "rec-s-2"}, "stableKey": {"value": "s-2"}}])
+    closed = _night(root, "2026-11-15", evidence=str(ev))
+    keys = [i["stableKey"] for issue in closed["issues"] if issue["kind"] == "cloud-unknown" for i in issue["items"]]
+    assert "s-2" in keys
+    carried = [i["stableKey"] for issue in nightly.carry_issues(root, "2026-11-15") if issue["kind"] == "cloud-unknown" for i in issue["items"]]
+    assert "s-2" in carried
