@@ -1006,8 +1006,10 @@ def validate_manifest(
                 errors.append("产品 result 不合法")
             if "result" in product and "method" not in product:
                 errors.append("产品 result 必须同时声明 method")
-            if product.get("qualityCheckPerformed") == "NO" and ("result" in product or "method" in product):
-                errors.append("未开展质量检查时不得声明质量检查 method/result")
+            if product.get("qualityCheckPerformed") == "NO" and "result" in product:
+                # 检查方式(现场判定/抽样送检)是产品如何被判定，与“是否开展产品质量现场检查”是两件事：
+                # 未开展质量检查时仍可有来源确证的检查方式，但不得声明质量检查结果。
+                errors.append("未开展质量检查时不得声明质量检查 result")
             for key in ("onlineSale", "maintenance", "reinspectionApplied", "qualityCheckPerformed"):
                 if key in product and product[key] not in TRI:
                     errors.append(f"产品 {key} 不合法")

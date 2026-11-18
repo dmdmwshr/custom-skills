@@ -1069,3 +1069,19 @@ def test_scope_commands_run_through_the_normal_entry_and_default_to_validation_o
     assert cli.main(["ledger", "lifecycle", "--from-date", "2026-01-01", *common]) == 0
     assert json.loads(capsys.readouterr().out)["scopeFromDate"] == "2026-01-01"
     assert cli.main(["ledger", "lifecycle", "--from-date", "not-a-date", *common]) == 2
+
+
+def test_a_confirmed_inspection_method_may_coexist_with_no_quality_check_but_never_a_quality_result(tmp_path: Path) -> None:
+    source = tmp_path / "one.pdf"
+    pdf(source)
+    data = manifest(source)
+    product = {"clientRef": "product:a", "name": "产品", "modelSpec": "M", "location": "a", "qualityCheckPerformed": "NO", "method": "ONSITE"}
+    data["initialInspection"]["products"] = [product]
+    errors = validate_manifest(data, {"file:one": str(source)})
+    assert not any("未开展质量检查" in error for error in errors) and errors == []      # 方式与“是否开展质量检查”分开：只有方式、没有结果，通过
+    product["result"] = "UNQUALIFIED"
+    product["problemDescription"] = "x"
+    assert any("未开展质量检查时不得声明质量检查 result" in error for error in validate_manifest(data, {"file:one": str(source)}))
+    del product["result"]
+    del product["method"]
+    assert validate_manifest(data, {"file:one": str(source)}) == []

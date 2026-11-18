@@ -31,6 +31,8 @@
 2. 同参数重复运行返回 `REUSED`；不同原因在修订未结前被拒绝。
 3. 按常规 `inventory <待处理 ZIP> → 编辑 case-data/split-plan → split → compose`；工作区必须有 `field-resolution.json` 并写入 `amendmentId`、`unresolvedFields` 为空，表示已重新核对字段裁决、源页和原始证据。不合格产品的详细问题描述、跨行姓名和位置等字段必须有真实来源，缺失保持省略或 UNKNOWN，不用占位通过 validate。
 4. `local-verify`：重新核对清单、每份 PDF 摘要/页数、拆分链、原始 ZIP 摘要，并要求父代整树摘要与固定时一致、最新完成代际仍是该父代、包摘要与父代相同、清单相对父代有实质差异（含检查日期/阶段等检查自身字段、案件字段、产品、文件、槽位和附件；凭证 `amendment.changes` 列出 added/removed/changed；仅生成时间不同视为无差异而拒绝）。成功后新代际以“时间-清单摘要前 12 位”命名归档，`history.completions` 追加一条（含 `amendment.parentGeneration`），`amendment.status=COMPLETED`。任何失败都回滚，父代全文件摘要不变。
+补充（2026-11-18 用户裁决）：产品的检查方式（`method`：现场判定/抽样送检）与“是否开展产品质量现场检查”（`qualityCheckPerformed`）是两件事。未开展质量检查（`NO`）的产品，只要本案文书确证其被判定的方式，仍可声明 `method`（例如市场准入现场判定不合格）；但不得声明质量检查 `result`，也不得因此补造质量检查或数量事实。
+
 5. `source abandon-amendment --project <项目> --reason <原因>`：父代未变化时，把待处理副本移入 `原始案卷/已放弃修订/<项目>/<修订标识>`、工作区移入 `工作区/历史工作区/<项目>-amendment-abandoned-<修订标识>`（均不删除），恢复父代完成记录；重复运行返回 `REUSED`。
 
 ### 已归档案卷的复查产品对应复核（ProductLinkReviewV1）
