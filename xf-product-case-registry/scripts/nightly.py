@@ -610,6 +610,13 @@ def _native(path: str) -> str:
     return text
 
 
+def _same_path_key(path: str) -> str:
+    """Comparable form of a recorded path: the same folder whether the ledger recorded it as /mnt/d/... or D:\\..., with / separators and no
+    trailing slash (case-folded only where the filesystem is case-insensitive)."""
+    text = _native(str(path or "")).replace("\\", "/").rstrip("/")
+    return text.lower() if os.name == "nt" else text
+
+
 def _receipt_files(evidence_dir: str) -> list[Path]:
     evidence_dir = _native(evidence_dir)
     base = Path(evidence_dir) / "sync"
@@ -681,7 +688,7 @@ def _classify_unreadable_receipt(path: Path, ledger: dict[str, dict[str, dict[st
     from the other evidence of the same folder, never from the missing file: the error text beside it and the intents the unique
     ledger holds for that folder's log directories. ``REFUSED_NO_CALL``: refused before any request, known not written.
     ``RESOLVED_BY_LEDGER``: every intent in that folder is closed by a verified final/reconciliation. Anything else is unknown."""
-    folder = _native(str(path.parents[1])).rstrip("/")
+    folder = _same_path_key(str(path.parents[1]))
     spec_name = path.stem[len("exec-"):] if path.stem.startswith("exec-") else path.stem
     try:
         error_text = path.with_suffix(".err").read_text(encoding="utf-8", errors="replace")
@@ -691,9 +698,10 @@ def _classify_unreadable_receipt(path: Path, ledger: dict[str, dict[str, dict[st
     intents = []
     for run_id, items in ledger.items():
         for intent_id, info in items.items():
-            log_dir = _native(info.get("logDir") or "").rstrip("/")
+            log_dir = _same_path_key(info.get("logDir") or "")
             parent, _, leaf = log_dir.rpartition("/")
-            if (leaf == spec_name and parent.rpartition("/")[0] == folder) or log_dir == f"{folder}/logs-{spec_name}":
+            if (leaf == (spec_name.lower() if os.name == "nt" else spec_name) and parent.rpartition("/")[0] == folder) \
+                    or log_dir == f"{folder}/logs-{spec_name.lower() if os.name == 'nt' else spec_name}":
                 intents.append((run_id, intent_id, info))
     result: dict[str, Any] = {"receipt": str(path), "size": path.stat().st_size if path.exists() else None, "intents": len(intents)}
     if not intents and "未发起任何外部调用" in error_text:

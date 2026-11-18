@@ -846,3 +846,8 @@ def test_ledger_writes_made_after_the_night_closed_are_not_that_nights_writes_an
     _ledger(root, "run-later", "rec2", at="2026-11-18T03:00:00Z")           # 11:00 北京时间，收尾以后的手工同步
     stats = nightly.run_stats(root, day, evidence_dir=str(evidence))
     assert stats["cloud"]["ledgerCrossCheck"]["result"] == "MATCH" and stats["cloud"]["cases"] == ["P-N"]
+
+
+def test_a_ledger_log_directory_recorded_as_a_windows_path_matches_the_same_folder_as_the_wsl_path():
+    assert nightly._same_path_key("D:\\ws\\x\\sync\\main-1\\logs-main\\create-01\\") == nightly._same_path_key("/mnt/d/ws/x/sync/main-1/logs-main/create-01")
+    assert nightly._same_path_key("/mnt/d/ws/x/") != nightly._same_path_key("/mnt/d/ws/y")
