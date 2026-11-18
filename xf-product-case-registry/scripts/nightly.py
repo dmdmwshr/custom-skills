@@ -211,7 +211,7 @@ def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled"
         run["evidenceDir"] = evidence_dir
     run["triggers"].append({"at": now.isoformat(timespec="seconds"), "kind": trigger, "actor": actor})
     _atomic(path, run)
-    carried = _load(root / RUNS_DIR / finished[-1] / "run.json", {}).get("issues", []) if finished else []
+    carried = carry_issues(root, finished[-1]) if finished else []
     return {"status": outcome, "date": day, "missedDates": missed, "earlierUnfinished": earlier, **with_stats(root, day, progress(root, day), evidence_dir=evidence_dir),
             "weeklyCoverage": coverage_state(root, today=day), "lastFinishedDate": finished[-1] if finished else None,
             "openExecutions": open_executions(root), "carryIssues": carried,
@@ -386,12 +386,18 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", r
                 "rule": "全范围检查日期核对已到期且今晚未做：先做并用 nightly coverage 登记（来源不可用也要登记这次尝试）"}
     stats = run_stats(root, day, evidence_dir=evidence_dir or run.get("evidenceDir", ""), now=now)
     issues = issues_of(root, day)
-    if stats["breakdown"].get("cloudUnknown"):      # 云写入证据里有未闭合的未知项：带出到下一轮，不静默写成 0
-        issues.append({"kind": "cloud-unknown", "stage": "sync", "case": "", "entry": "", "status": "unknown",
-                       "detail": f"云写入有 {stats['breakdown']['cloudUnknown']} 项没有回执与账本共同证明（读不出的回执或账本非 OK）：先回读对账，不重放", "ref": "",
-                       "items": [{k: u.get(k) for k in ("receipt", "runId", "table", "stableKey", "status", "intentIds") if u.get(k)}
-                                 for u in stats["cloud"].get("unknown", [])][:30]})
     finished_before = [d for d in _run_days(root) if d < day and _load(root / RUNS_DIR / d / "run.json", {}).get("status") == "FINISHED"]
+    own = [_carry_item(u, day) for u in stats["cloud"].get("unknown", [])]
+    carried_open = [i for issue in (carry_issues(root, finished_before[-1]) if finished_before else []) if issue["kind"] == "cloud-unknown" for i in issue.get("items", [])]
+    items: list[dict[str, Any]] = []
+    for item in [*carried_open, *own]:       # 未决跨夜持续到证据闭合：前几夜仍未闭合的项与本夜新的未知合并，同一回执只留一项
+        key = item.get("receiptPath") or json.dumps(item, sort_keys=True, ensure_ascii=False)
+        if all((i.get("receiptPath") or json.dumps(i, sort_keys=True, ensure_ascii=False)) != key for i in items):
+            items.append(item)
+    if items:      # 云写入证据里有未闭合的未知项：带出到下一轮，不静默写成 0
+        issues.append({"kind": "cloud-unknown", "stage": "sync", "case": "", "entry": "", "status": "unknown",
+                       "detail": f"云写入有 {len(items)} 项没有回执与账本共同证明（读不出的回执或账本非 OK，含前几夜未闭合的）：先回读对账，不重放；每项带原业务日和回执路径", "ref": "",
+                       "items": items[:60]})
     previous = {_issue_signature(i) for i in (_load(root / RUNS_DIR / finished_before[-1] / "run.json", {}).get("issues", []) if finished_before else [])}
     new_issues = [i for i in issues if _issue_signature(i) not in previous]
     unverified = stats["reportedChanged"] > 0 and stats["changed"] == 0      # 执行者自报有变化，却没有任何凭证：不当作“无变化”
@@ -409,6 +415,55 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", r
         run["weeklyCoverage"] = result["weeklyCoverage"] = weekly      # 今晚试过但未完整：如实带出，下一轮仍到期
     _atomic(path, run)
     return result
+
+
+def _carry_item(unknown: dict[str, Any], day: str) -> dict[str, Any]:
+    """One open cloud unknown as carried to later nights: the original business day, the exact receipt path (two nights can hold
+    the same file name), and whatever run/intent/object the evidence proves."""
+    item = {k: unknown.get(k) for k in ("receipt", "receiptPath", "runId", "table", "stableKey", "status", "intentIds") if unknown.get(k)}
+    item["originDate"] = day
+    return item
+
+
+def _item_closed(root: Path, item: dict[str, Any]) -> bool:
+    """Late evidence for exactly this item: its own intents are all closed by a verified final/reconciliation, or its unreadable
+    receipt now classifies as resolved / known-zero-action from the same specification's evidence. Never guessed; never unlocks anything."""
+    origin = _load(root / RUNS_DIR / str(item.get("originDate") or "") / "run.json", {})
+    if not origin.get("startedAt"):
+        return False
+    since = _parse_time(origin["startedAt"])
+    until = _parse_time(origin["finishedAt"]) if origin.get("finishedAt") else None
+    resolutions = _ledger_resolutions(root, since=since)
+    receipt = item.get("receiptPath")
+    if receipt and Path(_native(receipt)).is_file():
+        try:
+            json.loads(Path(_native(receipt)).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            klass = _classify_unreadable_receipt(Path(_native(receipt)), _ledger_by_run(root, since=since, until=until), resolutions)["class"]
+            return klass != "UNKNOWN"
+    intents = item.get("intentIds") or []
+    return bool(intents) and all((resolutions.get(i) or {}).get("clear") for i in intents)
+
+
+def carry_issues(root: Path, last_day: str) -> list[dict[str, Any]]:
+    """What the last finished night still carries, re-checked against evidence that arrived later. Only the carried items are read
+    again (not the whole history); an item that closed is removed alone; the original records are never rewritten."""
+    run = _load(root / RUNS_DIR / last_day / "run.json", {})
+    out: list[dict[str, Any]] = []
+    for issue in run.get("issues", []):
+        if issue.get("kind") != "cloud-unknown":
+            out.append(issue)
+            continue
+        items = list(issue.get("items") or [])
+        if not any(i.get("receiptPath") for i in items) and run.get("evidenceDir") and run.get("startedAt"):
+            # 旧版记录携证不足：按原证据目录和同一对账口径只读重算，不猜、不放行
+            cloud = cloud_stats(root, run["evidenceDir"], since=_parse_time(run["startedAt"]),
+                                until=_parse_time(run["finishedAt"]) if run.get("finishedAt") else None)
+            items = [_carry_item(u, last_day) for u in cloud.get("unknown", [])]
+        remaining = [i for i in items if not _item_closed(root, i)]
+        if remaining:
+            out.append({**issue, "items": remaining, "detail": f"云写入有 {len(remaining)} 项没有回执与账本共同证明：先回读对账，不重放（每项带原业务日与回执路径）"})
+    return out
 
 
 def state_reported(root: Path, day: str) -> int:
@@ -654,6 +709,7 @@ def _ledger_by_run(root: Path, *, since: datetime, until: datetime | None = None
         intent = runs.setdefault(str(event.get("runId")), {}).setdefault(event["intentId"], {"record": None, "kind": "update", "final": None})
         if event["event"] == "intent":
             intent["record"] = (event.get("target") or {}).get("record") or intent["record"]
+            intent["table"] = (event.get("target") or {}).get("table") or ""
             intent["kind"] = event.get("kind") or "update"
             intent["logDir"] = event.get("logDir") or ""
             stable = event.get("stableKey")
@@ -679,7 +735,14 @@ def _ledger_resolutions(root: Path, *, since: datetime) -> dict[str, dict[str, A
         kind = event["event"]
         label = event.get("status") if kind == "final" else event.get("outcome") if kind == "reconciled" else "HUMAN_RELEASED"
         verified = (kind == "final" and label in LEDGER_CLEAR_FINALS) or (kind == "reconciled" and label in LEDGER_CLEAR_RECONCILED)
-        found[event["intentId"]] = {"label": str(label), "clear": verified, "humanRelease": kind == "human_release", "at": event["at"]}
+        entry = {"label": str(label), "clear": verified, "humanRelease": kind == "human_release", "at": event["at"]}
+        if kind == "reconciled" and label == "APPLIED":      # 对账证明已写入时，行 ID 来自它的证明/唯一匹配（原创建当时没有 bound 事件）
+            observed = event.get("observed") or {}
+            ids = {p.get("recordId") for p in (event.get("terminalProof") or observed.get("verifiedProof") or []) if isinstance(p, dict) and p.get("recordId")}
+            ids |= set(observed.get("matches") or [])
+            if len(ids) == 1:
+                entry["recordId"] = next(iter(ids))
+        found[event["intentId"]] = entry
     return found
 
 
@@ -712,7 +775,13 @@ def _classify_unreadable_receipt(path: Path, ledger: dict[str, dict[str, dict[st
         base = {**result, "runs": sorted({run_id for run_id, _, _ in intents}), "closedBy": sorted({state["label"] for state in states.values() if state})}
         if not wrote:      # 全部是未尝试/未改变/证明未应用：闭合了未知，但没有任何变更可计
             return {**base, "class": "CLOSED_NO_WRITE", "cases": []}
-        return {**base, "class": "RESOLVED_BY_LEDGER", "cases": sorted({info["stable"].split("|")[0] for _, _, info in wrote if info.get("stable")})}
+        creates = []
+        for run_id, iid, info in wrote:     # 已证实的创建：原意图＋表＋(bound 的或对账证明的)行 ID；缺行 ID 证据的不计行；更新没有字段级确证，不计字段
+            record = info.get("record") or states[iid].get("recordId")
+            if info.get("kind") == "create" and record and info.get("stable"):
+                creates.append({"runId": run_id, "intentId": iid, "table": info.get("table") or "", "stable": info["stable"], "record": record})
+        return {**base, "class": "RESOLVED_BY_LEDGER", "creates": creates,
+                "cases": sorted({info["stable"].split("|")[0] for _, _, info in wrote if info.get("stable")})}
     return {**result, "class": "UNKNOWN", "intentIds": sorted(iid for _, iid, _ in intents),
             "ledgerStates": sorted({(state or {}).get("label", "NO_FINAL") for state in states.values()}) or ["NO_INTENT"]}
 
@@ -789,7 +858,7 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime, until: dateti
                 continue
             if state not in CLOUD_WRITE:
                 if state in CLOUD_UNKNOWN or state in ("FAILED", "VIOLATION", "DUPLICATE_KEYS_BLOCK"):
-                    unknown.append({"receipt": path.name, "runId": run_id, "table": table, "stableKey": stable, "status": state,
+                    unknown.append({"receipt": path.name, "receiptPath": str(path), "runId": run_id, "table": table, "stableKey": stable, "status": state,
                                     "intentIds": sorted(iid for iid, i in (run_ledger or {}).items() if i.get("stable") == str(stable) or i["record"] == record.get("recordId"))})
                 else:      # 被挡、未改变、已存在等：没有写入，也不是未知；分别留存，不并入成功
                     held[str(state)] = held.get(str(state), 0) + 1
@@ -816,7 +885,7 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime, until: dateti
             elif not matched or any(i["final"] != "OK" for _, i in matched):
                 verdict = "ledger-not-ok"
             if verdict == "ledger-not-ok":
-                unknown.append({"receipt": path.name, "runId": run_id, "table": table, "stableKey": stable, "status": state, "reportStatus": report.get("status"),
+                unknown.append({"receipt": path.name, "receiptPath": str(path), "runId": run_id, "table": table, "stableKey": stable, "status": state, "reportStatus": report.get("status"),
                                 "intentIds": sorted(iid for iid, _ in matched),
                                 "ledgerFinal": sorted({i["final"] or "NONE" for _, i in matched}) or ["NO_INTENT"]})
                 continue
@@ -831,10 +900,16 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime, until: dateti
         if item["class"] == "RESOLVED_BY_LEDGER":
             cases.update(item["cases"])
             explained_runs.update(item["runs"])
+            for made in item.get("creates", []):      # 同一意图只计一次：可读回执已计过的(同意图、表、稳定键)不再重复
+                key = (made["intentId"], made["table"], made["stable"], "create")
+                if key in seen:
+                    duplicates += 1
+                else:
+                    seen[key] = {"receipt": Path(item["receipt"]).name, "runId": made["runId"], "verdict": "ledger-resolved", "record": made["record"]}
         elif item["class"] == "CLOSED_NO_WRITE":
             explained_runs.update(item["runs"])
         elif item["class"] == "UNKNOWN":
-            unknown.append({"receipt": Path(item["receipt"]).name, "table": "", "stableKey": "", "status": "UNREADABLE_RECEIPT",
+            unknown.append({"receipt": Path(item["receipt"]).name, "receiptPath": item["receipt"], "table": "", "stableKey": "", "status": "UNREADABLE_RECEIPT",
                             "intentIds": item.get("intentIds", []), "ledgerFinal": item["ledgerStates"]})
     created = {(k[1], k[2]) for k in seen if k[3] == "create"}
     updates = [k for k in seen if k[3] == "update"]

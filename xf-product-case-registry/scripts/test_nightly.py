@@ -851,3 +851,67 @@ def test_ledger_writes_made_after_the_night_closed_are_not_that_nights_writes_an
 def test_a_ledger_log_directory_recorded_as_a_windows_path_matches_the_same_folder_as_the_wsl_path():
     assert nightly._same_path_key("D:\\ws\\x\\sync\\main-1\\logs-main\\create-01\\") == nightly._same_path_key("/mnt/d/ws/x/sync/main-1/logs-main/create-01")
     assert nightly._same_path_key("/mnt/d/ws/x/") != nightly._same_path_key("/mnt/d/ws/y")
+
+
+def test_a_create_behind_an_empty_receipt_counts_once_as_a_created_row_when_the_ledger_proves_it(tmp_path):
+    evidence = tmp_path / "evidence"
+    for name in ("a", "b", "c"):
+        _unreadable(evidence, f"s-{name}", "exec-main", "exec-create-01.json")
+    def intent(name, extra, closing):
+        _ledger_line(tmp_path, f"i-{name}", [{"event": "intent", "runId": f"r-{name}", "kind": "create", "target": {"table": "tM"}, "stableKey": {"value": f"P-{name}"},
+                                              "logDir": str(evidence / "sync" / f"s-{name}" / "logs-main" / "create-01")}, *extra, closing])
+    intent("a", [{"event": "bound", "runId": "r-a", "recordId": "recA"}], {"event": "final", "runId": "r-a", "status": "OK"})                      # 132：bound＋final OK
+    intent("b", [], {"event": "reconciled", "runId": "r-rec", "outcome": "APPLIED", "observed": {"matches": ["recB"]}})                           # 133：对账证明＋唯一行
+    intent("c", [], {"event": "reconciled", "runId": "r-rec", "outcome": "APPLIED"})                                                                # 没有行 ID 证据：不计行
+    cloud = nightly.cloud_stats(tmp_path, str(evidence), since=T("2026-11-16T00:00:00"))
+    assert cloud["createdRows"] == 2 and cloud["cases"] == ["P-a", "P-b", "P-c"] and cloud["unknown"] == [] and cloud["updatedOperations"] == 0
+
+
+# ------------------------------------------------------------------ a35：未决跨夜可定位并持续到证据闭合
+
+def _night(root, day, *, evidence=None):
+    at = lambda hhmm: datetime.fromisoformat(f"{day}T{hhmm}+08:00")  # noqa: E731
+    nightly.begin(root, now=at("02:00:00"), evidence_dir=evidence or "")
+    if nightly.coverage_state(root, today=day)["due"]:
+        nightly.coverage(root, _full(day), day=day, now=at("02:15:00"))
+    for entry in nightly.DISCOVER_ENTRIES:
+        nightly.checkpoint(root, day, stage="discover", entry=entry, status="done", now=at("02:15:00"))
+    for step in nightly.STAGES:
+        nightly.checkpoint(root, day, stage=step, status="done", now=at("02:25:00"))
+    return nightly.finish(root, day, now=at("02:30:00"))
+
+
+def test_an_unresolved_receipt_is_carried_with_its_exact_path_across_healthy_nights_and_late_evidence_closes_only_that_item(tmp_path):
+    root = tmp_path / "运行记录"
+    evidence = tmp_path / "第一晚证据"
+    paths = [evidence / "sync" / name / "exec-main" / "exec-fill-01.json" for name in ("main-a", "main-b")]       # 同名回执在不同目录
+    for receipt in paths:
+        receipt.parent.mkdir(parents=True)
+        receipt.touch()
+    first = _night(root, "2026-11-15", evidence=str(evidence))
+    saved = (root / nightly.RUNS_DIR / "2026-11-15" / "run.json").read_bytes()
+    refs = lambda issues: {i["receiptPath"] for issue in issues if issue["kind"] == "cloud-unknown" for i in issue["items"]}  # noqa: E731
+    assert first["finishedWithIssues"] and refs(first["issues"]) == {str(p) for p in paths}
+    assert {i["originDate"] for issue in first["issues"] for i in issue.get("items", [])} == {"2026-11-15"}
+    second = _night(root, "2026-11-16")            # 第二晚正常收尾，没有新证据目录
+    assert second["status"] == "FINISHED" and refs(second["issues"]) == {str(p) for p in paths}
+    third = nightly.begin(root, now=datetime.fromisoformat("2026-11-17T02:00:00+08:00"))
+    assert refs(third["carryIssues"]) == {str(p) for p in paths}                    # 第三晚仍看得到，且分得清同名路径
+    paths[0].with_suffix(".err").write_text("拒绝：未发起任何外部调用\n", encoding="utf-8")        # 后到的证据只对应其中一项
+    assert refs(nightly.carry_issues(root, "2026-11-16")) == {str(paths[1])}
+    assert (root / nightly.RUNS_DIR / "2026-11-15" / "run.json").read_bytes() == saved       # 历史原始记录字节不变
+
+
+def test_a_legacy_saved_cloud_unknown_without_receipt_paths_is_rederived_from_its_own_evidence_directory(tmp_path):
+    root = tmp_path / "运行记录"
+    evidence = tmp_path / "证据"
+    receipt = evidence / "sync" / "main-a" / "exec-main" / "exec-fill-01.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.touch()
+    run = nightly._run_dir(root, "2026-11-15")
+    run.mkdir(parents=True)
+    (run / "run.json").write_text(json.dumps({"schemaVersion": "NightlyRunV1", "date": "2026-11-15", "status": "FINISHED", "startedAt": "2026-11-15T02:00:00+08:00",
+                                              "finishedAt": "2026-11-15T03:00:00+08:00", "evidenceDir": str(evidence),
+                                              "issues": [{"kind": "cloud-unknown", "stage": "sync", "case": "", "entry": "", "status": "unknown", "detail": "旧版", "ref": ""}]}), encoding="utf-8")
+    carried = nightly.carry_issues(root, "2026-11-15")
+    assert [i["receiptPath"] for i in carried[0]["items"]] == [str(receipt)] and carried[0]["items"][0]["originDate"] == "2026-11-15"
