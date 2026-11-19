@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import functools
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -247,6 +248,17 @@ def _begin_lock(root: Path):
                 msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def _under_begin_lock(function):
+    """Read-modify-write of an existing run.json under the same short lock as ``begin`` (a missing record is left to the function's own error)."""
+    @functools.wraps(function)
+    def wrapper(root: Path, day: str, *args: Any, **kwargs: Any):
+        if not (_run_dir(root, day) / "run.json").is_file():
+            return function(root, day, *args, **kwargs)
+        with _begin_lock(root):
+            return function(root, day, *args, **kwargs)
+    return wrapper
 
 
 def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled", actor: str = "",
@@ -749,6 +761,7 @@ def coverage_state(root: Path, *, today: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------------------------
 
 
+@_under_begin_lock
 def bind(root: Path, day: str, *, session_id: str, receipt: str, runner_pid: int, runner: str = "claude-exec", note: str = "",
          now: datetime | None = None) -> dict[str, Any]:
     """Bind the executing model session to this run. Same session and receipt again is a no-op; a resumed
@@ -763,6 +776,9 @@ def bind(root: Path, day: str, *, session_id: str, receipt: str, runner_pid: int
     for item in executions:
         if item["sessionId"] == session_id and item["receipt"] == receipt:
             return {"status": "ALREADY_BOUND", "date": day, "execution": item, "wrote": False}
+    live = [item for item in executions if not item.get("endedAt")]
+    if live and "@" in day:        # 同一手工运行只允许一个业务写入执行；常规夜的续办绑定保持原行为
+        raise NightlyError(f"手工运行 {day} 已有未记终态的绑定执行（会话 {live[0]['sessionId']}）：只有一个写入执行可绑定；先对账并 bind-end，再续办绑定")
     item = {"sessionId": session_id, "receipt": receipt, "runnerPid": runner_pid, "runner": runner,
             "boundAt": (now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds")}
     if note:
@@ -772,6 +788,7 @@ def bind(root: Path, day: str, *, session_id: str, receipt: str, runner_pid: int
     return {"status": "BOUND", "date": day, "execution": item}
 
 
+@_under_begin_lock
 def bind_end(root: Path, day: str, *, receipt: str, state: str, detail: str = "", now: datetime | None = None) -> dict[str, Any]:
     """Record the observed end of one bound execution: ``ENDED`` (receipt is a complete result), ``ENDED_ERROR``
     or ``LOST`` (runner gone without a readable receipt; its effects were reconciled by hand)."""
@@ -792,6 +809,7 @@ def bind_end(root: Path, day: str, *, receipt: str, state: str, detail: str = ""
     return {"status": "RECORDED", "date": day, "execution": item}
 
 
+@_under_begin_lock
 def record_snapshot(root: Path, day: str, *, tag: str, run_key: str, files: dict[str, dict[str, str]],
                     now: datetime | None = None) -> dict[str, Any]:
     """Record where this execution's independent ``pre`` / ``post`` mirror snapshots are (file and sha per table).

@@ -1168,3 +1168,42 @@ def test_an_empty_shell_directory_of_a_crashed_manual_start_is_taken_over_and_ol
     assert {entry["date"] for entry in started["earlierUnfinished"]} == {"2026-11-13", "2026-11-14"}
     assert all(p.read_bytes() == raw for p, raw in before.items())
     assert not (root / nightly.RUNS_DIR / nightly.BEGIN_LOCK).stat().st_size > 1                # 锁文件只是占位
+
+
+def _bind_attempt(root, key, idx, gate, out):
+    gate.wait(timeout=10)
+    try:
+        out.put(nightly.bind(root, key, session_id=f"s{idx}", receipt=f"r{idx}.json", runner_pid=100 + idx)["status"])
+    except nightly.NightlyError as failure:
+        out.put("REFUSED")
+
+
+def test_only_one_execution_can_bind_a_manual_run_even_when_two_processes_race_and_the_same_receipt_is_idempotent(tmp_path):
+    context, day = multiprocessing.get_context("fork"), "2026-11-19"
+    for trial in range(6):
+        root, key = tmp_path / f"b{trial}" / "运行记录", f"{day}@m1"
+        _finished_regular_day(root, day)
+        nightly.begin(root, now=T(day + "T10:00:00"), manual="m1")
+        assert nightly.begin(root, now=T(day + "T10:01:00"), manual="m1")["status"] == "RESUME"     # 绑定前同号可先后 RESUME
+        gate, out = context.Barrier(2), context.Queue()
+        children = [context.Process(target=_bind_attempt, args=(root, key, idx, gate, out)) for idx in (1, 2)]
+        for child in children:
+            child.start()
+        results = sorted(out.get(timeout=20) for _ in children)
+        for child in children:
+            child.join(timeout=20)
+        assert results == ["BOUND", "REFUSED"]
+        assert len(nightly.open_executions(root)) == 1
+    winner = nightly.open_executions(root)[0]
+    again = nightly.bind(root, key, session_id=winner["sessionId"], receipt=winner["receipt"], runner_pid=winner["runnerPid"])
+    assert again["status"] == "ALREADY_BOUND"                                                      # 同会话同回执幂等
+    nightly.bind_end(root, key, receipt=winner["receipt"], state="ENDED")
+    assert nightly.bind(root, key, session_id="s9", receipt="r9.json", runner_pid=109)["status"] == "BOUND"   # 已终态后续办可绑定新回执
+    assert len(nightly.open_executions(root)) == 1
+
+
+def test_a_regular_night_keeps_binding_a_resumed_session_with_a_new_receipt(tmp_path):
+    root, day = tmp_path / "运行记录", "2026-11-19"
+    nightly.begin(root, now=T(day + "T02:00:00"), trigger="scheduled")
+    nightly.bind(root, day, session_id="s", receipt="r1.json", runner_pid=5)
+    assert nightly.bind(root, day, session_id="s", receipt="r2.json", runner_pid=6)["status"] == "BOUND"
