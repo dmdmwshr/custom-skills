@@ -56,6 +56,7 @@ if __package__:
     from . import initial_scope
     from . import ledger_views as _views
     from . import recheck_rounds
+    from . import record_dates
     from . import workspace_state as _ws
 else:
     import case_lifecycle
@@ -64,6 +65,7 @@ else:
     import initial_scope
     import ledger_views as _views
     import recheck_rounds
+    import record_dates
     import workspace_state as _ws
 
 SPEC_SCHEMA = "FeishuSourceSyncSpecV2"
@@ -2511,7 +2513,7 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
                       v9_path: Path, v9_sha: str, routes_path: Path, routes_sha: str, target: dict[str, str],
                       transport: Any, out_dir: Path, log_root: Path, batch_size: int = HARD_CAP_RECORDS,
                       ledger_dir: Path | None = None, user_accepted_releases: Path | None = None,
-                      isolated_test_ledger: bool = False) -> dict[str, Any]:
+                      isolated_test_ledger: bool = False, record_dates_path: Path | None = None, record_dates_sha: str | None = None) -> dict[str, Any]:
     """Fresh cloud first (keys, schema fields, team base), then specs only for what the stored details prove.
 
     Creates: 2026 cases absent from the fresh key scan. Fills: existing rows whose address / initial date is empty while the stored
@@ -2525,6 +2527,13 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
     _require(file_sha(routes_path) == routes_sha, "八队路由文件摘要与固定值不一致")
     v3 = load_contract_v3(v3_path, v3_sha)
     contract = load_contract(v9_path, v9_sha)
+    record_evidence: dict[str, Any] | None = None
+    if record_dates_path is not None:      # 整理前从原包读出的电子记录日期证据；摘要固定，被改即拒绝
+        _require(bool(record_dates_sha), "电子记录日期证据必须同时给出摘要")
+        try:
+            record_evidence = record_dates.load_evidence(record_dates_path, str(record_dates_sha))
+        except ValueError as error:
+            raise SyncError(str(error)) from error
     case_table = v3["base"]["tables"]["案卷主表"]["tableId"]
     _require(target.get("baseToken") == v3["base"]["baseId"] == contract["baseId"], "目标 Base 与合同不一致")
     index = field_index(v3["base"])
@@ -2617,12 +2626,25 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
             manifest_day, _why = _manifest_initial_date(waterline_path.parent, project, waterline.get(project))
             if manifest_day is not None:
                 date, date_reason = manifest_day, None
+        record_state: dict[str, Any] | None = None
+        if date is None:      # 页面与已核验清单都没有可证日：看整理前从原包读出并核对过的电子监督检查记录（日期与产品判定、文书归类分开）
+            record_state = record_dates.state_for(record_evidence, waterline_path.parent, project, waterline.get(project))
+            if record_state["state"] == record_dates.VERIFIED:
+                ref = (f"{record_dates_path.name}#cases.{project} | 包内电子监督检查记录 {record_state['member']} memberSha256=sha256:{record_state['memberSha256']} | "
+                       f"packageSha256=sha256:{record_state['packageSha256']} | 整理前读取 | projectNo={project}")
+                date, date_reason = (record_state["date"], ref, record_state["observedAt"] or evidence["capturedAt"]), None
         if date_reason:
             dates_omitted.append({"projectNo": project, "rwid": rwid, "reason": date_reason})
         resolved = fv.resolve_initial_date(date[0] if date else None, evidence["acceptance"])
-        if date is None and resolved["value"]:  # 电子监督检查记录缺失/不可用/无法确认：受理日期后备，内部留痕，外显统一监督系统
-            date = (resolved["value"], f"{evidence['ref']('受理日期')} | 后备原因：{date_reason or '未登记可证的电子初查日'} | 受理日期原值={evidence['acceptance']}", evidence["capturedAt"])
-            date_fallbacks.append({"projectNo": project, "rwid": rwid, "value": resolved["value"], "reason": date_reason or "未登记可证的电子初查日"})
+        if date is None and resolved["value"] and record_state is not None and record_state["state"] == record_dates.ABSENT:
+            # 只有经原包核查确认“没有电子监督检查记录”才用受理日期后备：内部留痕，外显统一监督系统
+            reason = f"电子监督检查记录经原包核查确认不存在：{record_state['reason']}"
+            date = (resolved["value"], f"{evidence['ref']('受理日期')} | 后备原因：{reason} | 受理日期原值={evidence['acceptance']}", evidence["capturedAt"])
+            date_fallbacks.append({"projectNo": project, "rwid": rwid, "value": resolved["value"], "reason": reason, "recordState": record_state["state"]})
+        elif date is None and resolved["value"]:      # 记录存在但没核实/没有核查证据：不填关键字段、不用受理日顶替，保留待核实并带原因，不重复同一笼统错误
+            state = (record_state or {}).get("state", record_dates.UNKNOWN)
+            dates_omitted.append({"projectNo": project, "rwid": rwid, "recordState": state, "acceptanceDateNotUsed": resolved["value"],
+                                  "reason": f"初查日期待核实：电子监督检查记录状态 {state}（{(record_state or {}).get('reason', '')}）；受理日期不能顶替"})
         elif date is not None and resolved.get("conflict"):
             date_conflicts.append({"projectNo": project, "rwid": rwid, "electronic": resolved["value"], "acceptance": resolved["acceptanceDate"], "handling": "以电子监督检查记录为准，保留差异"})
         classification = _proven_classification(waterline.get(project), waterline_path.parent)
@@ -2727,7 +2749,8 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
     report = {"schema": BUILD_SCHEMA, "builtAt": now(), "externalCalls": "read-only fresh scan", "target": dict(target),
               "inputs": {"capture": {"path": str(capture_path), "sha256": capture_sha}, "routes": {"path": str(routes_path), "sha256": routes_sha},
                          "contractV3": {"path": str(v3_path), "sha256": v3_sha}, "contractV9": {"path": str(v9_path), "sha256": v9_sha},
-                         "waterline": {"path": str(waterline_path), "sha256": file_sha(waterline_path)}},
+                         "waterline": {"path": str(waterline_path), "sha256": file_sha(waterline_path)},
+                         "recordDates": {"path": str(record_dates_path), "sha256": record_dates_sha} if record_dates_path is not None else None},
               "fresh": {"cloudCaseRows": len(cloud), "cloudDistinctKeys": len([k for k in by_key if k]), "teamRows": len(teams), "routeProblems": route_problems},
               "counts": {"toCreate": len(creates), "toFill": len(fills), "alreadyEqualFields": already_equal, "differingNotOverwritten": len(differing), "blockedEntities": len(blocked)},
               "createdWithInitialDate": sum(1 for c in creates if BASIC_FIELDS["date"] in c["fields"]),

@@ -991,7 +991,9 @@ def test_feishu_source_build_parser_requires_every_pinned_input() -> None:
                 "--contract-v9", "v9.json", "--contract-v9-sha", "c", "--routes", "r.json", "--routes-sha", "d",
                 "--base-token", "bas", "--profile", "p", "--out-dir", "o", "--log-root", "l", "--ledger-dir", "led"]
     args = cli.build_parser().parse_args(["feishu-source-build", *required])
-    assert args.identity == "user" and args.batch_size == 20
+    assert args.identity == "user" and args.batch_size == 20 and args.record_dates is None and args.record_dates_sha is None
+    with_evidence = cli.build_parser().parse_args(["feishu-source-build", *required, "--record-dates", "rd.json", "--record-dates-sha", "e"])
+    assert with_evidence.record_dates == "rd.json" and with_evidence.record_dates_sha == "e"      # 整理前电子记录日期证据：成对给出才有任何案能用受理日后备
     for index in range(0, len(required), 2):
         trimmed = required[:index] + required[index + 2:]
         with pytest.raises(SystemExit):

@@ -1478,7 +1478,33 @@ def _add_lifecycle_fields(v3: Path, v9: Path) -> None:
     v9.write_text(json.dumps(doc["baseContract"], ensure_ascii=False), encoding="utf-8")
 
 
-def run_build(tmp_path, records, *, waterline=None, transport=None, capture_sha=None, batch=20, ledger_dir=None, lifecycle=False):
+RECORD_NAME = "消防产品监督检查记录(编号：〔2026〕第0129号).pdf"
+
+
+def _package_case(tmp_path, project, members, *, unit="单位甲", waterline=None):
+    """一个有原包的案（总账登记包与摘要），返回并入 waterline 的字典；members 里文本即电子记录第 1 页文字层。"""
+    import zipfile
+    relative = f"原始案卷/待处理案卷/{project}/{project}.zip"
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, body in members.items():
+            archive.writestr(zipfile.ZipInfo(name), body.encode("utf-8"))
+    water = dict(waterline or {})
+    water[project] = {**water.get(project, {}), "unitName": unit, "state": "PENDING_ORGANIZATION",
+                      "source": {**(water.get(project, {}).get("source") or {}), "packageRelativePath": relative, "packageSha256": "sha256:" + sha(path)}}
+    return water
+
+
+def _record_evidence(tmp_path, water):
+    """对 tmp_path 里的总账做一次电子记录日期扫描（假读取器），返回 (证据路径, 摘要)。"""
+    import scripts.record_dates as rd
+    (tmp_path / "案卷水位记录.json").write_text(json.dumps({"cases": water}, ensure_ascii=False), encoding="utf-8")
+    result = rd.scan(tmp_path, tmp_path / "record-dates.json", "2026-11-19T00:00:00Z", reader=lambda data: data.decode("utf-8"))
+    return tmp_path / "record-dates.json", result["sha256"]
+
+
+def run_build(tmp_path, records, *, waterline=None, transport=None, capture_sha=None, batch=20, ledger_dir=None, lifecycle=False, record_dates=None):
     v3, v9 = make_basic_contracts(tmp_path)
     if lifecycle:
         _add_lifecycle_fields(v3, v9)
@@ -1487,7 +1513,8 @@ def run_build(tmp_path, records, *, waterline=None, transport=None, capture_sha=
     report = sync.build_basic_specs(
         capture_path=capture, capture_sha=capture_sha or sha(capture), waterline_path=water, v3_path=v3, v3_sha=sha(v3), v9_path=v9, v9_sha=sha(v9),
         routes_path=routes, routes_sha=sha(routes), target={"baseToken": BASE, "profile": "offline-fake", "identity": "user"},
-        transport=transport, out_dir=tmp_path / "specs", log_root=tmp_path / "logs", batch_size=batch, ledger_dir=ledger_dir or tmp_path / "build-ledger")
+        transport=transport, out_dir=tmp_path / "specs", log_root=tmp_path / "logs", batch_size=batch, ledger_dir=ledger_dir or tmp_path / "build-ledger",
+        record_dates_path=record_dates[0] if record_dates else None, record_dates_sha=record_dates[1] if record_dates else None)
     return report, transport, (v3, v9)
 
 
@@ -2126,11 +2153,43 @@ def _first_create(report):
     return json.loads(Path(report["specs"][0]["path"]).read_text(encoding="utf-8"))["creates"][0]["fields"]
 
 
-def test_r35_d4_acceptance_date_is_a_recorded_fallback_when_no_electronic_initial_day_is_proven(tmp_path):
-    report, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")})
+def test_r35_d4_acceptance_date_is_a_recorded_fallback_only_when_the_package_is_confirmed_to_have_no_electronic_record(tmp_path):
+    water = _package_case(tmp_path, PN_NEW, {"卷内备考表.pdf": "x"})
+    report, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water, record_dates=_record_evidence(tmp_path, water))
     field = _first_create(report)[DATE_FIELD]
     assert field["new"] == "2026-11-04" and "受理日期" in field["basis"]["sourceRef"] and "后备原因" in field["basis"]["sourceRef"]
-    assert report["initialDateAcceptanceFallbacks"] == [{"projectNo": PN_NEW, "rwid": "1001", "value": "2026-11-04", "reason": "未登记可证的电子初查日"}]
+    assert len(report["initialDateAcceptanceFallbacks"]) == 1 and report["initialDateAcceptanceFallbacks"][0]["recordState"] == "ABSENT_CONFIRMED"
+    assert report["initialDateAcceptanceFallbacks"][0]["value"] == "2026-11-04" and "确认不存在" in report["initialDateAcceptanceFallbacks"][0]["reason"]
+
+
+def test_acceptance_date_never_stands_in_for_an_electronic_record_that_exists_but_is_unverified_or_for_a_case_nobody_checked(tmp_path):
+    water = _package_case(tmp_path, PN_NEW, {RECORD_NAME: "读不出时间栏"}, unit="单位甲")
+    evidence = _record_evidence(tmp_path, water)
+    for record_dates, state in ((evidence, "PRESENT_UNVERIFIED"), (None, "UNKNOWN")):
+        report, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water, record_dates=record_dates)
+        assert DATE_FIELD not in _first_create(report) and report["initialDateAcceptanceFallbacks"] == [] and report["createdWithInitialDate"] == 0
+        omitted = report["initialDatesOmitted"][0]
+        assert omitted["recordState"] == state and omitted["acceptanceDateNotUsed"] == "2026-11-04" and "待核实" in omitted["reason"] and "不能顶替" in omitted["reason"]
+
+
+def test_record_date_evidence_must_come_with_its_digest_and_a_changed_evidence_file_refuses_the_whole_build(tmp_path):
+    water = _package_case(tmp_path, PN_NEW, {"卷内备考表.pdf": "x"})
+    path, digest = _record_evidence(tmp_path, water)
+    with pytest.raises(sync.SyncError, match="摘要"):
+        run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water, record_dates=(path, ""))
+    path.write_text(path.read_text(encoding="utf-8").replace("ABSENT_CONFIRMED", "PRESENT_VERIFIED"), encoding="utf-8")      # 把“确认不存在”改成别的状态：摘要不符，整次构建拒绝
+    with pytest.raises(sync.SyncError, match="摘要"):
+        run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water, record_dates=(path, digest))
+
+
+def test_a_verified_electronic_record_day_is_used_before_the_package_is_organized_and_the_acceptance_difference_is_kept(tmp_path):
+    text = f"监督检查时间：2026年11月02日\n名 称：单位甲\uf052消防安全重点单位"
+    water = _package_case(tmp_path, PN_NEW, {RECORD_NAME: text}, unit="单位甲")
+    report, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water, record_dates=_record_evidence(tmp_path, water))
+    field = _first_create(report)[DATE_FIELD]
+    assert field["new"] == "2026-11-02" and "包内电子监督检查记录" in field["basis"]["sourceRef"] and "整理前读取" in field["basis"]["sourceRef"] and "memberSha256=sha256:" in field["basis"]["sourceRef"]
+    assert report["initialDateAcceptanceFallbacks"] == [] and report["initialDateConflicts"][0]["electronic"] == "2026-11-02"
+    assert report["inputs"]["recordDates"]["sha256"]
 
 
 def test_r35_d4_electronic_day_wins_over_a_different_acceptance_day_and_the_difference_is_kept(tmp_path):
@@ -2461,8 +2520,9 @@ def test_build_prefers_the_verified_manifest_initial_day_over_the_acceptance_fal
     field = _first_create(report)[DATE_FIELD]
     assert field["new"] == "2026-11-02" and "initialInspection.inspectionDate" in field["basis"]["sourceRef"] and "manifestSha256" in field["basis"]["sourceRef"]
     assert report["initialDateAcceptanceFallbacks"] == [] and report["initialDateConflicts"][0]["electronic"] == "2026-11-02"
-    manifest.write_text(manifest.read_text(encoding="utf-8").replace("2026-11-02", "2026-11-03"), encoding="utf-8")      # 清单被改：摘要不符，退回受理日期后备
-    again, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water)
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace("2026-11-02", "2026-11-03"), encoding="utf-8")      # 清单被改：摘要不符，不再用清单；原包确认没有电子记录时才退回受理日期后备
+    packaged = _package_case(tmp_path, PN_NEW, {"卷内备考表.pdf": "x"}, waterline=water)
+    again, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=packaged, record_dates=_record_evidence(tmp_path, packaged))
     assert _first_create(again)[DATE_FIELD]["new"] == "2026-11-04"
 
 
@@ -3322,3 +3382,36 @@ def test_non_json_cli_output_error_carries_a_masked_diagnostic_hint():
     assert message.startswith("UNKNOWN: 官方 CLI 输出不是 JSON")
     assert "rc=1" in message and "stdout=''" in message and "network" in message
     assert token not in message and "<tok>" in message
+
+
+def _main_fill_case():
+    """11/19 主表补空的真实形态：目标 2 个白名单 select；写后“统计缺项”“检查方式类别”两个只读公式列自然重算。"""
+    table, rec = "tblMAIN", "recMAIN"
+    target_fields = {"fldRESULT": ("初查结果", "select", "source-sync-whitelist"), "fldSRC": ("初查日期来源", "select", "source-sync-whitelist"),
+                     "fldHUMAN": ("是否网售", "select", "human"), "fldGAP": ("统计缺项", "formula", "derived-readonly"),
+                     "fldKIND": ("不合格检查方式类别", "formula", "derived-readonly")}
+    plan = [{"tableId": table, "recordId": rec, "writes": {
+        "fldRESULT": {"name": "初查结果", "type": "select", "wire": ["不合格"]}, "fldSRC": {"name": "初查日期来源", "type": "select", "wire": ["监督系统"]}}}]
+    records = [{"status": "WRITTEN"}]
+    before = {table: {rec: {"fldRESULT": None, "fldSRC": None, "fldHUMAN": ["否"], "fldGAP": "初查结果待出；", "fldKIND": ""}}}
+    after = {table: {rec: {"fldRESULT": ["不合格"], "fldSRC": ["监督系统"], "fldHUMAN": ["否"], "fldGAP": "检查方式缺项；", "fldKIND": "方式缺项"}}}
+
+    def index(registered):
+        return {table: {fid: {"name": n, "type": t, "class": c} for fid, (n, t, c) in target_fields.items() if fid in registered}}
+    return plan, records, before, after, index
+
+
+def test_main_fill_registered_readonly_formulas_recalc_naturally_but_old_contract_and_real_changes_still_block():
+    plan, records, before, after, index = _main_fill_case()
+    current = index({"fldRESULT", "fldSRC", "fldHUMAN", "fldGAP", "fldKIND"})
+    old = index({"fldRESULT", "fldSRC", "fldHUMAN"})  # 20261109：后加的两个只读公式列没登记
+    assert sync._verify(current, plan, records, before, after) == []  # 同一现行合同下只读公式自然重算不拦
+    old_violations = sync._verify(old, plan, records, before, after)
+    assert sorted(v.split("：")[0] for v in old_violations) == ["recMAIN/fldGAP", "recMAIN/fldKIND"]  # 旧合同下就是 11/19 那 7 项的同一原因
+    for bad in ({"fldHUMAN": ["是"]}, {"fldUNKNOWN": "x"}):  # 反例：人工值被改、合同未登记的字段变化，现行合同下仍拦
+        changed = copy.deepcopy(after)
+        changed["tblMAIN"]["recMAIN"].update(bad)
+        assert len(sync._verify(current, plan, records, before, changed)) == 1
+    unwritten = copy.deepcopy(after)
+    unwritten["tblMAIN"]["recMAIN"]["fldRESULT"] = None  # 目标字段回读不等于目标值仍拦
+    assert any("回读" in v for v in sync._verify(current, plan, records, before, unwritten))

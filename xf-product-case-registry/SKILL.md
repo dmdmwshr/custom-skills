@@ -38,6 +38,7 @@ metadata:
 | 已归档案卷字段/分类修订（同一 ZIP） | [本地扩展入口](references/manual-intake.md#本地扩展入口)，source amend-archived、source abandon-amendment |
 | 按真实初查日期对账范围、剔除范围外案卷、恢复 | `ledger scope-reconcile --listing`（只读）；`ledger scope-exclude --plan`（默认只校验，`--apply` 才把案卷字节原样移到 `范围外保留/<planId>/` 并出总账）；`ledger scope-restore` 原样恢复；`ledger lifecycle --from-date` 按初查日期而非号段；云端同步剔除用 `feishu-scope-retire --plan`（绑定全字段快照，先子后主，落账读回，缺省只核对不删） |
 | 用户交来的单位清单要登记某个业务标签（如维修后灭火器）并出 Excel | [功能/业务模块](references/modules.md)，`feishu-register labels`、`register-report` |
+| 整理前要知道原包里电子监督检查记录的初查日期、或确认有没有这份记录（飞书创建/补空用） | `record_dates.py scan --business-root … --out …`（受管文档环境，只读原包）→ `feishu-source-build --record-dates … --record-dates-sha …`；四种状态与后备规则见 [来源字段同步](references/source-sync.md) “电子记录日期”节 |
 | 云端初查日期与本案核验清单日不同、需有据更正 | `feishu-date-correct-build`（计划逐项带旧值门禁，只读云）→ `feishu-source-sync --execute`；详见 [来源字段同步](references/source-sync.md) 末节 |
 | 自动来源字段需按证据批量维护(如统计归类)、UNKNOWN 更新意图需严格技术恢复 | `feishu-field-plan-build`(证据摘要+旧值门禁，只读云)；`feishu-source-sync --reconcile` 的 `technicalRecovery`(无 humanRelease)；详见 [来源字段同步](references/source-sync.md) 末节 |
 | 来源列有但不在 ZIP 的文书（真实可见预览补采） | source attach-supplement，随后 split 引用 `补采材料/<文件>` |
@@ -66,6 +67,14 @@ metadata:
 6. inventory → ocr/split（图片先 `normalize-images`，外加补采先 `source attach-supplement`）→ 文书属性与本地引用（见 [文书分类](references/document-classification.md)）→ 字段整理 → compose → validate。先复用原文件摘要、电子文本和确认过的 OCR；仅处理新增或变化内容。默认逐文件 OCR，ocr --batch 仍需显式选择且关键语义一致。识别路由：有文字层的 PDF 先用本地 PDF 解析；扫描件先评估 `wps-office` 的实际命令、权益和数据去向，本次对该材料有明确云处理授权时可用已验 WPS 桌面入口，其在线 OCR 产物须独立核对；WPS 不可用或能力不足（命令不覆盖、权益不够、产物为空或不可用）、材料限本地处理、无该授权或需复杂表格时，直接用本地路径（registry `ocr` 子命令即本机 MinerU 4，官方任务接口、standard、自动、全部页，沿原任务保存和恢复断点，不启动替代容器），无需先上云试失败。`ocr` 子命令只调用 MinerU，不会自动调用 WPS；WPS 产物如何接入见本地格式的识别规则。Zerox 仅限本次已明确云端授权的专用解析，不再默认首选。字段裁决留在 field-resolution.json，保留全部原件。抽取结果先用 `fields validate <extractions.json> [--image-dir]` 只读校验（稳定键＝项目编号＋初查/复查，缺值留空并列为未知，复查日期必须有自身来源，人工裁决字段受保护，不改输入、不写表、不改名或删除图片），规则见[字段规则](references/field-rules.md)。
 7. `local-verify --project <项目编号> --check-only` 先在内存中核验（不写任何文件）；通过后 `local-verify --project <项目编号>` 重新核对清单、每份 PDF 摘要与页数、拆分链、字段裁决、原始 ZIP/材料摘要和来源映射，写 LocalVerificationV1 并归档；`--no-archive` 只写凭证。已完成案每次都深度复核归档 PDF、原始 ZIP、清单、凭证、回执和 changePending：全部有效才返回 ALREADY_COMPLETED（不产生新代际、不改任何字节）；任一损坏、缺失或变化返回 NEEDS_REVIEW（退出码 2），保留全部证据并在总账视图显示 LOCAL_COMPLETION_UNTRUSTED，来源跳过也不再认定完成。来源材料缺口默认阻止归档，用户明确按现有材料收口时按手动交件说明确认后再归档。
 8. 归档后核对实际路径、凭证与回执摘要、唯一水位和另一端同步。再次执行窗口扫描，已完成且无来源变化的案卷应零重复下载、识别、整理。日常只报变化、待办和异常；全量总账通过只读查询取得。
+
+## 汇报口径：数量与编号分开（2026-11-19 用户裁决）
+
+- 数量位只写数量，写“N 案”；项目编号、尾号、单位、大队只作定位，放在数量之后。例：“发现 1 案需更正。涉及新吴大队案卷（项目编号尾号 117）”；不写“117 号案有问题”，也不写“第 117 案”，否则读者会把编号当成案数。
+- 同一次汇报里涉及多案时逐条列出，用本次汇报内的顺序号（第 1 案、第 2 案……；这是列表位置，不是项目编号），每条再给大队/单位和项目编号尾号。
+- 尾号可能重复（不同大队、不同年份或号段）：有重复风险时写完整项目编号，或写明大队与单位；用户用某个尾号问起时，复述时带上大队或单位，确认是同一案再答。
+- 案数、产品行数、字段格数、写入次数、未知项数分别说明是哪一种计数，不混用同一个数字。
+- 夜间任务书与夜间运行的汇报同用这一条；问题清单里的 `items` 保留完整项目编号，展示给用户时按上面的口径转述。
 
 ## 身份、授权和恢复
 

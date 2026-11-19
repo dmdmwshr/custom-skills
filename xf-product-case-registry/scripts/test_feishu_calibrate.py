@@ -111,6 +111,17 @@ def test_date_difference_keeps_both_sides_and_leaves_the_source_label_alone(tmp_
     assert (CP, "初查日期来源") not in writes and (f"{CP}|初查", "日期来源") not in writes and (f"{CP}|初查", "统计月份") not in writes
 
 
+def test_a_cloud_initial_date_that_came_from_the_acceptance_fallback_is_corrected_from_the_verified_manifest_with_its_exact_old_value_only_in_correction_mode(tmp_path):
+    contract, water, transport = _setup(tmp_path, initial=ONE_OK, cloud_day="2026-06-18")      # 云端是受理日后备 06-18，清单(电子记录)是 06-17
+    transport.rows[(CASE, "recEXIST000001")].update({RESULT_F: ["合格"], DATE_SRC_F: ["监督系统"]})
+    _rows(transport, day="2026-06-18T00:00:00.000+08:00", **{I["date_source"]: ["监督系统"]})
+    _, writes, diffs = _plan(tmp_path, contract, water, transport)
+    assert (CP, "初查日期") not in writes and diffs[(CP, "初查日期")]["local"] == "2026-06-17"            # 没开更正模式：只列差异，云端不动
+    report, writes, diffs = _plan(tmp_path, contract, water, transport, correct_facts=True)
+    assert writes[(CP, "初查日期")] == ("2026-06-18", "2026-06-17") and (CP, "初查日期") not in diffs         # 更正：精确旧值＋清单证据
+    assert any(w.get("correction") and w["field"] == "初查日期" for w in report["writes"])
+
+
 def test_product_rows_are_compared_only_when_name_and_count_match(tmp_path):
     contract, water, transport = _setup(tmp_path)   # 清单两项：灭火器(合格)、洒水喷头(不合格)
     _rows(transport, result="不合格", products=(("洒水喷头", None), ("手提式干粉灭火器", None)))

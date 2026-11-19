@@ -867,6 +867,57 @@ def test_a_create_behind_an_empty_receipt_counts_once_as_a_created_row_when_the_
     assert cloud["createdRows"] == 2 and cloud["cases"] == ["P-a", "P-b", "P-c"] and cloud["unknown"] == [] and cloud["updatedOperations"] == 0
 
 
+def _fields(**cells):
+    return {fid: {"name": fid, "type": "select", "old": old, "wire": [new]} for fid, (old, new) in cells.items()}
+
+
+def test_an_original_update_behind_an_empty_receipt_counts_only_with_field_level_proof_once_and_beside_a_create(tmp_path):
+    evidence = tmp_path / "evidence"
+    since = T("2026-11-16T00:00:00")
+    def update(name, fields, closing, *, stable=None, table="tM", kind=None, record=None):
+        _unreadable(evidence, f"s-{name}", "exec-main", "exec-fill-01.json")
+        _ledger_line(tmp_path, f"i-{name}", [{"event": "intent", "runId": f"r-{name}", "kind": kind or "update", "fields": fields, "target": {"table": table, "record": record or f"rec-{name}"},
+                                              "stableKey": {"value": stable or f"P-{name}"}, "logDir": str(evidence / "sync" / f"s-{name}" / "logs-main" / "fill-01")}, *closing])
+    update("a", _fields(f1=(None, "x"), f2=(None, "y")), [{"event": "final", "runId": "r-a", "status": "OK"}])                                    # 写入进程自己的终态 OK：两格
+    update("b", _fields(f1=(None, "x"), f2=(None, "y"), f3=(["z"], "z")),
+           [{"event": "final", "runId": "r-b", "status": "VIOLATION"},
+            {"event": "reconciled", "runId": "r-rec", "outcome": "APPLIED", "observed": {"fields": {"f1": ["x"], "f2": ["y"], "f3": ["z"]}}}])      # 对账证明：f3 旧值已是目标，不算改变
+    update("c", _fields(f1=(None, "x"), f2=(None, "y")),
+           [{"event": "reconciled", "runId": "r-rec", "outcome": "APPLIED", "observed": {"fields": {"f1": ["x"]}}}])                              # 对账没读到 f2：字段说不清，不计
+    update("d", _fields(f1=(None, "x")), [{"event": "reconciled", "runId": "r-rec", "outcome": "NOT_APPLIED_PROVEN"}])                             # 证明未应用：不计
+    update("e", _fields(f1=(None, "x")), [])                                                                                                       # 没有终态：仍是未知
+    update("f", _fields(f1=(None, "x"), f9=(None, "q")), [{"event": "final", "runId": "r-f", "status": "OK"}], stable="P-a", record="rec-a")        # 同一记录的另一意图：另计一次操作，同一格只算一次
+    _unreadable(evidence, "s-g", "exec-main", "exec-create-01.json")                                                                              # 同夜的创建照旧只计行
+    _ledger_line(tmp_path, "i-g", [{"event": "intent", "runId": "r-g", "kind": "create", "target": {"table": "tM"}, "stableKey": {"value": "P-g"}, "logDir": str(evidence / "sync" / "s-g" / "logs-main" / "create-01")},
+                                   {"event": "bound", "runId": "r-g", "recordId": "rec-g"}, {"event": "final", "runId": "r-g", "status": "OK"}])
+    cloud = nightly.cloud_stats(tmp_path, str(evidence), since=since)
+    assert (cloud["createdRows"], cloud["updatedOperations"], cloud["uniqueFields"]) == (1, 3, 5)      # a:2 + b:2 + f:{f1,f9}→新增f9 ，f1 同一格不重复
+    assert cloud["updatesWithoutFieldProof"] == 1 and cloud["receiptsClosedNoWrite"] == 1
+    assert [u["intentIds"] for u in cloud["unknown"]] == [["i-e"]]
+    assert {Path(i["receipt"]).parents[1].name: i["class"] for i in cloud["unreadable"]}["s-e"] == "UNKNOWN"
+
+
+def test_an_original_update_proved_after_the_night_counts_in_the_original_night_and_never_twice_with_a_readable_receipt(tmp_path):
+    evidence = tmp_path / "evidence"
+    day = "2026-11-16"
+    fill = evidence / "sync" / "s-1" / "logs-main" / "fill-01"
+    _unreadable(evidence, "s-1", "exec-main", "exec-fill-01.json")
+    _ledger_line(tmp_path, "i-1", [{"event": "intent", "runId": "r-1", "kind": "update", "at": "2026-11-15T20:00:00Z", "fields": _fields(f1=(None, "x")), "target": {"table": "tM", "record": "rec-1"},
+                                    "stableKey": {"value": "P-1"}, "logDir": str(fill)},
+                                   {"event": "final", "runId": "r-1", "at": "2026-11-15T20:01:00Z", "status": "UNKNOWN"},
+                                   {"event": "reconciled", "runId": "r-rec", "at": "2026-11-16T10:00:00Z", "outcome": "APPLIED", "observed": {"fields": {"f1": ["x"]}}}])   # 夜后对账
+    since, until = T(f"{day}T02:00:00"), T(f"{day}T05:00:00")
+    cloud = nightly.cloud_stats(tmp_path, str(evidence), since=since, until=until)
+    assert (cloud["updatedOperations"], cloud["uniqueFields"], cloud["unknown"]) == (1, 1, [])
+    # 同一意图另有一份可读回执（复制到别处）：同意图只计一次，不同的格并入
+    _receipt(evidence, "copy", "exec-main", "exec-fill-01.json", [{"tableId": "tM", "stableKey": {"value": "P-1"}, "status": "WRITTEN", "recordId": "rec-1", "writtenFields": ["f1", "f2"],
+                                                               "intentId": "i-1"}], run_id="r-1")
+    again = nightly.cloud_stats(tmp_path, str(evidence), since=since, until=until)
+    assert again["updatedOperations"] == 1 and again["duplicatesIgnored"] >= 1 and again["uniqueFields"] == 2
+    # 旧夜的账本与回执一字节不动：重算只读
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
 # ------------------------------------------------------------------ a35：未决跨夜可定位并持续到证据闭合
 
 def _night(root, day, *, evidence=None):

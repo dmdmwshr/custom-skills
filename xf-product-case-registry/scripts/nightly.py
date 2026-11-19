@@ -737,6 +737,7 @@ def _ledger_by_run(root: Path, *, since: datetime, until: datetime | None = None
             intent["table"] = (event.get("target") or {}).get("table") or ""
             intent["kind"] = event.get("kind") or "update"
             intent["logDir"] = event.get("logDir") or ""
+            intent["fields"] = event.get("fields") if isinstance(event.get("fields"), dict) else intent.get("fields", {})
             stable = event.get("stableKey")
             intent["stable"] = str((stable.get("value") if isinstance(stable, dict) else stable) or "")
         elif event["event"] == "bound":
@@ -767,8 +768,26 @@ def _ledger_resolutions(root: Path, *, since: datetime) -> dict[str, dict[str, A
             ids |= set(observed.get("matches") or [])
             if len(ids) == 1:
                 entry["recordId"] = next(iter(ids))
+            # 更新意图的字段级证明：对账读回时这些字段都在且全部等于目标值才记 APPLIED；原意图随事件保存，窗口外的意图事件也能用
+            entry["observedFields"] = sorted(fid for fid, value in (observed.get("fields") or {}).items() if value != "__absent__")
+            original = event.get("originalIntent") or {}
+            if isinstance(original.get("fields"), dict):
+                entry["originalFields"] = original["fields"]
         found[event["intentId"]] = entry
     return found
+
+
+def _proven_update_fields(info: dict[str, Any], state: dict[str, Any]) -> list[str] | None:
+    """The record fields one update intent is proven to have written, or None when the evidence does not name them. A writer final OK read
+    every target field back; a reconcile APPLIED needs every intent field observed and equal to its target. A field whose old value was
+    already the target did not change and is not counted. Never inferred from a count or from the neighbouring spec."""
+    fields = info.get("fields") or state.get("originalFields") or {}
+    changed = sorted(fid for fid, f in fields.items() if not (isinstance(f, dict) and f.get("old") is not None and f.get("old") == f.get("wire")))
+    if not changed or not info.get("stable") or not info.get("table"):
+        return None
+    if state["label"] == "OK" or (state["label"] == "APPLIED" and set(changed) <= set(state.get("observedFields") or ())):
+        return changed
+    return None
 
 
 def _classify_unreadable_receipt(path: Path, ledger: dict[str, dict[str, dict[str, Any]]], resolutions: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -800,12 +819,18 @@ def _classify_unreadable_receipt(path: Path, ledger: dict[str, dict[str, dict[st
         base = {**result, "runs": sorted({run_id for run_id, _, _ in intents}), "closedBy": sorted({state["label"] for state in states.values() if state})}
         if not wrote:      # 全部是未尝试/未改变/证明未应用：闭合了未知，但没有任何变更可计
             return {**base, "class": "CLOSED_NO_WRITE", "cases": []}
-        creates = []
-        for run_id, iid, info in wrote:     # 已证实的创建：原意图＋表＋(bound 的或对账证明的)行 ID；缺行 ID 证据的不计行；更新没有字段级确证，不计字段
+        creates, updates, unproven = [], [], []
+        for run_id, iid, info in wrote:     # 已证实的创建：原意图＋表＋(bound 的或对账证明的)行 ID；缺行 ID 证据的不计行
             record = info.get("record") or states[iid].get("recordId")
             if info.get("kind") == "create" and record and info.get("stable"):
                 creates.append({"runId": run_id, "intentId": iid, "table": info.get("table") or "", "stable": info["stable"], "record": record})
-        return {**base, "class": "RESOLVED_BY_LEDGER", "creates": creates,
+            elif info.get("kind") != "create":      # 已证实的更新：原意图＋表＋稳定键＋逐字段证明；字段说不清的只列出，不计操作也不计字段
+                proven = _proven_update_fields(info, states[iid])
+                if proven:
+                    updates.append({"runId": run_id, "intentId": iid, "table": info["table"], "stable": info["stable"], "fields": proven})
+                else:
+                    unproven.append({"runId": run_id, "intentId": iid, "table": info.get("table") or "", "stable": info.get("stable") or ""})
+        return {**base, "class": "RESOLVED_BY_LEDGER", "creates": creates, "updates": updates, "updatesWithoutFieldProof": unproven,
                 "cases": sorted({info["stable"].split("|")[0] for _, _, info in wrote if info.get("stable")})}
     return {**result, "class": "UNKNOWN", "intentIds": sorted(iid for _, iid, _ in intents),
             "ledgerStates": sorted({(state or {}).get("label", "NO_FINAL") for state in states.values()}) or ["NO_INTENT"]}
@@ -908,7 +933,9 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime, until: dateti
             if run_ledger is None:
                 verdict = "receipt-only" if (action == "create" or report_ok) else "ledger-not-ok"
             elif not matched or any(i["final"] != "OK" for _, i in matched):
-                verdict = "ledger-not-ok"
+                # 回执写 WRITTEN 而写入进程终态不是 OK（如读回时公式自然重算被判违规）：账本之后逐意图对账为已应用的，按原夜计一次
+                reconciled_ids = [iid for iid, _ in matched if (resolutions.get(iid) or {}).get("clear") and resolutions[iid]["label"] in LEDGER_WROTE]
+                verdict = "reconciled" if matched and len(reconciled_ids) == len(matched) else "ledger-not-ok"
             if verdict == "ledger-not-ok":
                 unknown.append({"receipt": path.name, "receiptPath": str(path), "runId": run_id, "table": table, "stableKey": stable, "status": state, "reportStatus": report.get("status"),
                                 "intentIds": sorted(iid for iid, _ in matched),
@@ -931,6 +958,14 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime, until: dateti
                     duplicates += 1
                 else:
                     seen[key] = {"receipt": Path(item["receipt"]).name, "runId": made["runId"], "verdict": "ledger-resolved", "record": made["record"]}
+            for made in item.get("updates", []):      # 空回执后的原更新：同一意图只计一次，字段按（表、稳定键、字段）去重；可读回执已计的不重复
+                key = (made["intentId"], made["table"], made["stable"], "update")
+                if key in seen:
+                    duplicates += 1
+                else:
+                    seen[key] = {"receipt": Path(item["receipt"]).name, "runId": made["runId"], "verdict": "ledger-resolved"}
+                for field_id in made["fields"]:
+                    fields.add((made["table"], made["stable"], field_id))
         elif item["class"] == "CLOSED_NO_WRITE":
             explained_runs.update(item["runs"])
         elif item["class"] == "UNKNOWN":
@@ -948,8 +983,9 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime, until: dateti
             "updatedOperations": len(updates), "uniqueFields": len(fields), "duplicatesIgnored": duplicates, "unknown": unknown,
             "unreadable": unreadable, "receiptsRefusedNoCall": sum(i["class"] == "REFUSED_NO_CALL" for i in unreadable),
             "receiptsResolvedByLedger": sum(i["class"] == "RESOLVED_BY_LEDGER" for i in unreadable),
+            "updatesWithoutFieldProof": sum(len(i.get("updatesWithoutFieldProof", [])) for i in unreadable),
             "receiptsClosedNoWrite": sum(i["class"] == "CLOSED_NO_WRITE" for i in unreadable), "receiptOnlyUnconfirmed": unconfirmed, "heldOrNotWritten": held, "heldSample": held_keys, "ledgerCrossCheck": cross, "cases": sorted(cases),
-            "note": "新建行只计行数，不逐格计字段；更新字段取回执 writtenFields（真正改变的格）"}
+            "note": "新建行只计行数，不逐格计字段；更新字段取回执 writtenFields（真正改变的格）；回执为空时更新字段取账本原意图加终态/对账的逐字段证明，说不清字段的不计"}
 
 
 def _observation_today(root: Path, day: str) -> dict[str, Any]:

@@ -2646,6 +2646,8 @@ def build_parser() -> argparse.ArgumentParser:
     feishu_build.add_argument("--identity", default="user", choices=["user", "bot"])
     feishu_build.add_argument("--ledger-dir", required=True, help="唯一既有 P18 账本(必填)：未决 UNKNOWN 与未获用户接受的 human_release 的目标保留未决，不生成说明")
     feishu_build.add_argument("--user-accepted-releases", help="UserRiskAcceptanceV1：用户亲自接受的精确意图清单")
+    feishu_build.add_argument("--record-dates", help="整理前从原包读出的电子记录日期证据（record_dates.py scan 的输出）；不给就没有任何案能用受理日期后备")
+    feishu_build.add_argument("--record-dates-sha", help="电子记录日期证据摘要（与 --record-dates 成对）")
     feishu_build.add_argument("--batch-size", type=int, default=20)
     feishu_build.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     feishu_build.set_defaults(func=feishu_source_build_command)
@@ -3084,6 +3086,7 @@ def feishu_source_build_command(args: argparse.Namespace) -> None:
             batch_size=args.batch_size,
             ledger_dir=Path(args.ledger_dir) if args.ledger_dir else None,
             user_accepted_releases=Path(args.user_accepted_releases) if args.user_accepted_releases else None,
+            record_dates_path=Path(args.record_dates) if args.record_dates else None, record_dates_sha=args.record_dates_sha,
         )
     except module.SyncError as error:
         raise RegistryError(f"基础字段说明生成已拒绝：{error}") from error
