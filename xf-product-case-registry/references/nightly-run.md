@@ -17,7 +17,7 @@
 ## 同日手工运行（额外一轮，2026-11-19）
 
 默认行为不变：`nightly begin` 对已 `FINISHED` 的当天只回 `ALREADY_FINISHED`。要在同一业务日再做一轮，用 `--manual-run <编号>`（1–12 位字母数字；`--date` 也可直接写 `YYYY-MM-DD@编号`）：`begin --manual-run m1 [--date 日期] --evidence-dir <独立证据目录>` 在 `运行记录/夜间运行/手工/<日>@<编号>/` 另开 `run.json`（带 `lane`：编号、业务日、对应常规运行及其收尾时间），`checkpoint/bind/bind-end/progress/status/finish/coverage/observe` 与 `feishu-mirror` 的写前写后快照用同一个 `--manual-run`（或运行键）落到这一次，当天常规运行的 `run.json`、`checkpoints.jsonl` 一字节不动。
-- 开始前拦截：当天没有常规运行或还没 `FINISHED`；另有手工运行没收尾；任何运行有未记终态的绑定执行（`open_executions` 现在两种运行都列，`date` 是运行键，可直接给 `bind-end --date`）；更早的运行留有未知写入。只是没收尾的历史旧运行不拦，仍由 `earlierUnfinished`/`carryIssues` 列出。编号目录原子占用；同编号已结束再触发返回 `ALREADY_FINISHED`（不写），进行中则 `RESUME`。
+- 开始前拦截：当天没有常规运行或还没 `FINISHED`；另有手工运行没收尾；任何运行有未记终态的绑定执行（`open_executions` 现在两种运行都列，`date` 是运行键，可直接给 `bind-end --date`）；更早的运行留有未知写入。只是没收尾的历史旧运行不拦，仍由 `earlierUnfinished`/`carryIssues` 列出。`begin`（常规与手工）在资料根 `运行记录/夜间运行/.begin.lock` 的内核文件锁内完成检查并写启动记录，进程退出自动释放（等待最多 20 秒，不手工清锁）：同时请求不同编号只有一个 `STARTED`，另一个被拒；已 `FINISHED` 的运行只读，不取锁。同编号已结束再触发返回 `ALREADY_FINISHED`（不写）；进行中则 `RESUME`，但该运行键还有未记终态的绑定执行时拒绝，先 `bind-end`/对账再续办；启动中途退出留下的无 `run.json` 空目录由下一次启动接续。手工 `begin` 的响应带 `earlierUnfinished`（较早未收尾的运行，沿常规 `begin` 的结构，旧文件字节不动）。
 - 共享与分开：共享写入账本、`来源覆盖核对.jsonl`（手工做的覆盖核对带 `lane`，同样计入每周周期；手工运行本身不要求重做当日已验的每周核对，也不因它到期而拦收尾）、观察队列（手工的观察事件带 `lane`，当天常规的观察计数、`refresh-stats` 重算不受影响）和原始资料；云写入统计按各自的证据目录与起止时间，常规历史统计不被手工写入污染。
 - 结转：手工运行收尾时的云端未知照常带进下一夜（`originDate` 是运行键）；下一次常规 `begin`/`finish` 的“上一次收尾”在常规与手工运行之间按运行键顺序取最后一个。
 - 项目入口：`env.sh` 第 4 个参数给手工编号，`source/cli.sh` 对 `nightly`、`feishu-mirror` 自动补 `--manual-run` 和业务日；不给就是原来的常规路径。

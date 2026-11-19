@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -1110,3 +1111,60 @@ def test_an_old_unfinished_day_without_unknown_writes_does_not_block_a_manual_ru
     nightly.checkpoint(root, "2026-11-13", stage="sync", status="started")                    # 写阶段停在 started＝效果未知
     with pytest.raises(nightly.NightlyError, match="效果未知的写入"):
         nightly.begin(root, now=T(day + "T11:00:00"), manual="m2")
+
+
+def _finished_regular_day(root, day="2026-11-19"):
+    nightly.begin(root, now=T(day + "T02:00:00"), trigger="scheduled")
+    _all_done(root, day)
+    nightly.finish(root, day)
+
+
+def _manual_attempt(root, marker, gate, out, day):
+    gate.wait(timeout=10)
+    try:
+        out.put((marker, nightly.begin(root, now=T(day + "T10:00:00"), trigger="manual", manual=marker)["status"]))
+    except nightly.NightlyError as failure:
+        out.put((marker, "REFUSED:" + str(failure)))
+
+
+def test_two_processes_asking_for_different_manual_ids_at_the_same_time_let_only_one_start(tmp_path):
+    context, day = multiprocessing.get_context("fork"), "2026-11-19"
+    for trial in range(6):
+        root = tmp_path / f"probe{trial}" / "运行记录"
+        _finished_regular_day(root, day)
+        gate, out = context.Barrier(2), context.Queue()
+        children = [context.Process(target=_manual_attempt, args=(root, marker, gate, out, day)) for marker in ("m101", "m102")]
+        for child in children:
+            child.start()
+        outcomes = [out.get(timeout=20) for _ in children]
+        for child in children:
+            child.join(timeout=20)
+            assert child.exitcode == 0
+        assert sorted(status.split(":")[0] for _, status in outcomes) == ["REFUSED", "STARTED"]
+        started = [m for m, status in outcomes if status == "STARTED"][0]
+        assert [d for d in nightly._run_days(root, lanes=True) if "@" in d] == [f"{day}@{started}"]
+
+
+def test_a_manual_resume_is_refused_while_its_own_binding_is_open_and_allowed_after_the_binding_ended(tmp_path):
+    root, day, key = tmp_path / "运行记录", "2026-11-19", "2026-11-19@m1"
+    _finished_regular_day(root, day)
+    nightly.begin(root, now=T(day + "T10:00:00"), manual="m1")
+    nightly.bind(root, key, session_id="s", receipt="r.json", runner_pid=7)
+    with pytest.raises(nightly.NightlyError, match="已有未记终态的绑定执行"):
+        nightly.begin(root, now=T(day + "T10:30:00"), manual="m1")
+    nightly.bind_end(root, key, receipt="r.json", state="ENDED")                                # 进程异常退出后经对账记终态，才续办
+    assert nightly.begin(root, now=T(day + "T10:40:00"), manual="m1")["status"] == "RESUME"
+
+
+def test_an_empty_shell_directory_of_a_crashed_manual_start_is_taken_over_and_old_unfinished_days_are_listed(tmp_path):
+    root, day = tmp_path / "运行记录", "2026-11-19"
+    for old in ("2026-11-13", "2026-11-14"):                                                     # 旧的未收尾空壳日：没有执行也没有未知写入
+        nightly.begin(root, now=T(old + "T02:00:00"), trigger="scheduled")
+    _finished_regular_day(root, day)
+    before = {p: p.read_bytes() for old in ("2026-11-13", "2026-11-14") for p in (nightly._run_dir(root, old) / "run.json",)}
+    nightly._run_dir(root, day + "@m3").mkdir(parents=True)                                      # 上次启动在写 run.json 前退出
+    started = nightly.begin(root, now=T(day + "T10:20:00"), manual="m3")
+    assert started["status"] == "STARTED"
+    assert {entry["date"] for entry in started["earlierUnfinished"]} == {"2026-11-13", "2026-11-14"}
+    assert all(p.read_bytes() == raw for p, raw in before.items())
+    assert not (root / nightly.RUNS_DIR / nightly.BEGIN_LOCK).stat().st_size > 1                # 锁文件只是占位

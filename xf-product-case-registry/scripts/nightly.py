@@ -32,6 +32,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -206,8 +208,72 @@ def _run_days(root: Path, *, lanes: bool = False) -> list[str]:
     return sorted(days)
 
 
+BEGIN_LOCK = ".begin.lock"
+BEGIN_LOCK_WAIT_SECONDS = 20
+
+
+@contextmanager
+def _begin_lock(root: Path):
+    """Short kernel-owned lock on the run entry of one data root (process exit releases it, no stale-PID guessing). Every ``begin``
+    holds it from the checks until the start record is written, so two processes cannot both pass the checks."""
+    directory = root / RUNS_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / BEGIN_LOCK).open("a+b") as stream:
+        if stream.seek(0, 2) == 0:
+            stream.write(b"0")
+            stream.flush()
+        deadline = time.monotonic() + BEGIN_LOCK_WAIT_SECONDS
+        while True:
+            stream.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if time.monotonic() >= deadline:
+                    raise NightlyError("另一个夜间 begin 正在检查或写启动记录（锁 20 秒未释放）：稍后再试，不要手工清锁") from error
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+
+
 def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled", actor: str = "",
           evidence_dir: str = "", manual: str = "", day: str | None = None) -> dict[str, Any]:
+    """Locked entry (see ``_begin``). A run that is already FINISHED only reads, so it needs no lock and leaves no lock file behind."""
+    now_day = (now or now_shanghai()).astimezone(SHANGHAI).date().isoformat()
+    key = lane_key(split_run_key(day or now_day)[0], manual) if manual and MANUAL_ID.match(manual) else now_day
+    if (_load(_run_dir(root, key) / "run.json", {}) or {}).get("status") == "FINISHED":
+        return _begin(root, now=now, trigger=trigger, actor=actor, evidence_dir=evidence_dir, manual=manual, day=day)
+    with _begin_lock(root):
+        return _begin(root, now=now, trigger=trigger, actor=actor, evidence_dir=evidence_dir, manual=manual, day=day)
+
+
+def _earlier_unfinished(root: Path, before: str, *, skip: str = "") -> list[dict[str, Any]]:
+    """Runs older than ``before`` (a run key) that were never finished, with their derived status and unknown items."""
+    earlier = []
+    for other in _run_days(root, lanes=True):
+        if other < before and other != skip:
+            state = _load(_run_dir(root, other) / "run.json", {})
+            if state.get("status") != "FINISHED":
+                earlier.append({"date": other, "status": state.get("status"), "derivedStatus": run_view(root, other)["derivedStatus"],
+                                "unknown": progress(root, other)["unknown"]})
+    return earlier
+
+
+def _begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled", actor: str = "",
+           evidence_dir: str = "", manual: str = "", day: str | None = None) -> dict[str, Any]:
     """Open today's run, resume it, or report that it is already finished (no write in that case).
 
     ``manual`` opens (or resumes) an extra same-day run next to the regular one: only when the regular run of that business day is already
@@ -218,13 +284,7 @@ def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled"
         return _begin_manual(root, now=now, trigger=trigger, actor=actor, evidence_dir=evidence_dir, manual=manual, day=day or now.date().isoformat())
     day = now.date().isoformat()
     path = _run_dir(root, day) / "run.json"
-    earlier = []
-    for other in _run_days(root, lanes=True):
-        if other < day:
-            state = _load(_run_dir(root, other) / "run.json", {})
-            if state.get("status") != "FINISHED":
-                earlier.append({"date": other, "status": state.get("status"), "derivedStatus": run_view(root, other)["derivedStatus"],
-                                "unknown": progress(root, other)["unknown"]})
+    earlier = _earlier_unfinished(root, day)
     finished = [d for d in _run_days(root, lanes=True) if _load(_run_dir(root, d) / "run.json", {}).get("status") == "FINISHED"]
     missed: list[str] = []
     if finished:
@@ -285,15 +345,15 @@ def _begin_manual(root: Path, *, now: datetime, trigger: str, actor: str, eviden
         running = open_executions(root)
         if running:
             raise NightlyError(f"还有未记终态的绑定执行（{running[0]['date']} {running[0].get('sessionId', '')}）：先 bind-end 或对账，手工运行不与它交叉写入")
-        try:
-            _run_dir(root, key).mkdir(parents=True, exist_ok=False)      # 原子占住编号：同一编号只能有一次启动
-        except FileExistsError as error:
-            raise NightlyError(f"手工编号 {manual} 已被占用（目录已存在）：换一个编号，或用原编号续办") from error
+        _run_dir(root, key).mkdir(parents=True, exist_ok=True)           # 在 begin 锁内：没有 run.json 的空目录是启动中途退出的空壳，直接接续；同时启动者由锁挡住
         run = {"schemaVersion": "NightlyRunV1", "date": base, "status": "RUNNING", "startedAt": now.isoformat(timespec="seconds"),
                "triggers": [], "missedDates": [], "entryKeyed": True, "schedule": _schedule(base, now, "manual"),
                "lane": {"kind": "manual", "id": manual, "businessDate": base, "regularRun": base, "regularFinishedAt": regular.get("finishedAt")}}
         outcome = "STARTED"
     else:
+        active = [i for i in open_executions(root) if i["date"] == key]
+        if active:
+            raise NightlyError(f"手工运行 {key} 已有未记终态的绑定执行（{active[0].get('sessionId', '')}）：先 bind-end 或对账，不重复切入")
         outcome = "RESUME"
         run["status"] = "RUNNING"
     if evidence_dir:
@@ -301,7 +361,7 @@ def _begin_manual(root: Path, *, now: datetime, trigger: str, actor: str, eviden
     run["triggers"].append({"at": now.isoformat(timespec="seconds"), "kind": trigger if trigger != "scheduled" else "manual", "actor": actor})
     _atomic(path, run)
     finished = [d for d in _run_days(root, lanes=True) if d < key and _load(_run_dir(root, d) / "run.json", {}).get("status") == "FINISHED"]
-    return {"status": outcome, "date": key, "lane": run["lane"], **with_stats(root, key, progress(root, key), evidence_dir=evidence_dir),
+    return {"status": outcome, "date": key, "lane": run["lane"], "earlierUnfinished": _earlier_unfinished(root, key), **with_stats(root, key, progress(root, key), evidence_dir=evidence_dir),
             "weeklyCoverage": coverage_state(root, today=base), "lastFinishedDate": finished[-1] if finished else None,
             "openExecutions": open_executions(root), "carryIssues": carry_issues(root, finished[-1]) if finished else [],
             "rule": "手工运行是额外一轮：沿同一账本、覆盖、观察队列和原始资料，不改当天常规运行的任何记录；先对账 unknown（回读，不重放）；每周全范围核对不因手工运行重复"}
