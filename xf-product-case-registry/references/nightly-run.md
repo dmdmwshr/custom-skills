@@ -14,6 +14,14 @@
 6. 变更数与明细：`begin`（STARTED/RESUME/ALREADY_FINISHED；已收尾的历史运行也按证据重算，只读，不回显旧记录里已存的数，也不改写）、`status`（顶层与 `stats`）、`finish`（含 NOT_FINISHED）出口的 `changed` 与 `breakdown` 同一口径，都是证据重算的“变化的案卷/任务个数”（只有自报、没有任何凭证时不计，并以 `unverifiedReportedChanges` 标出、不算安静）；检查点自报的合计只在 `reportedChanged`，`progress` 内部状态也只带 `reportedChanged`。`breakdown` 各分项取各自凭证：采集 = 本运行 `source/r53-new-results.jsonl` 里 `NEW_PACKAGE_ATTACHED` 的案卷；归档 = 案卷水位记录里 `completedAt` 落在本运行内的案卷；云写入按（意图、表、记录、动作）计数——回执 `$NIGHT_RUN/sync/*/exec*/exec-*.json` 给出运行和记录，唯一写入账本给出每个意图及其 `final`，按逐意图证据判定，不看整批报告的 `status`（一批可以既有已核实的写入，又有被挡/失败/未知的条目）：该记录的意图在账本里 `final=OK` 才算成功；回执写着 WRITTEN 而账本是 READBACK_FAILED/VIOLATION/UNKNOWN、没有意图或没有终态的单列 `cloudUnknown`；被挡、未改变、已存在等没有写入的条目单列 `heldOrNotWritten`，不算成功也不算未知；没有账本时新建只认记录自身 `CREATED_VERIFIED`（创建时已回读），更新要整批回读通过（报告 OK），同一回执复制到别处或同一记录重复列出只算一次，不同意图写同一记录算两次；字段数取回执 `writtenFields`（真正改变的格），新建行只计行数；观察队列取当日历史（同一任务已按项目编号计过案卷的不重复）。已收尾的运行如发现统计口径有误，可 `nightly finish --refresh-stats --date <日期>` 按证据重算：只改 `changed`/`breakdown`，旧值留在 `run.json` 的 `statsRevisions`，状态、收尾时间和检查点不变。回执目录由 `begin --evidence-dir` 记入当天运行（缺省取环境变量 `NIGHT_RUN`，且须属于同一运行日期），未记录时云写入数不统计并明示。覆盖范围写在 `coverage`，不预设期望数。
 7. 监督进展 `nightly progress [--runner-alive yes|no]`（只读）：`lastProgressAt` 取本运行检查点、回执目录里新写的回执/说明、云写入账本终态的最近时间；不含派发进程存活和会话自身事件（后者只作 `lastActivityAt` 展示）。`thresholdMinutes` 为最近 5 次成功（ENDED）执行的进展间隔 p95，夹在 30–60 分钟，样本不足 5 次取 30，当前执行的静默不进入计算。超过阈值只置 `needsInspection=true`，不结束、不重派、不新增状态；同日已确认失败的运行用既有 `begin`（RESUME）和 `claude-exec --resume` 续做，不按日历补跑。
 
+## 同日手工运行（额外一轮，2026-11-19）
+
+默认行为不变：`nightly begin` 对已 `FINISHED` 的当天只回 `ALREADY_FINISHED`。要在同一业务日再做一轮，用 `--manual-run <编号>`（1–12 位字母数字；`--date` 也可直接写 `YYYY-MM-DD@编号`）：`begin --manual-run m1 [--date 日期] --evidence-dir <独立证据目录>` 在 `运行记录/夜间运行/手工/<日>@<编号>/` 另开 `run.json`（带 `lane`：编号、业务日、对应常规运行及其收尾时间），`checkpoint/bind/bind-end/progress/status/finish/coverage/observe` 与 `feishu-mirror` 的写前写后快照用同一个 `--manual-run`（或运行键）落到这一次，当天常规运行的 `run.json`、`checkpoints.jsonl` 一字节不动。
+- 开始前拦截：当天没有常规运行或还没 `FINISHED`；另有手工运行没收尾；任何运行有未记终态的绑定执行（`open_executions` 现在两种运行都列，`date` 是运行键，可直接给 `bind-end --date`）；更早的运行留有未知写入。只是没收尾的历史旧运行不拦，仍由 `earlierUnfinished`/`carryIssues` 列出。编号目录原子占用；同编号已结束再触发返回 `ALREADY_FINISHED`（不写），进行中则 `RESUME`。
+- 共享与分开：共享写入账本、`来源覆盖核对.jsonl`（手工做的覆盖核对带 `lane`，同样计入每周周期；手工运行本身不要求重做当日已验的每周核对，也不因它到期而拦收尾）、观察队列（手工的观察事件带 `lane`，当天常规的观察计数、`refresh-stats` 重算不受影响）和原始资料；云写入统计按各自的证据目录与起止时间，常规历史统计不被手工写入污染。
+- 结转：手工运行收尾时的云端未知照常带进下一夜（`originDate` 是运行键）；下一次常规 `begin`/`finish` 的“上一次收尾”在常规与手工运行之间按运行键顺序取最后一个。
+- 项目入口：`env.sh` 第 4 个参数给手工编号，`source/cli.sh` 对 `nightly`、`feishu-mirror` 自动补 `--manual-run` 和业务日；不给就是原来的常规路径。
+
 ## 来源发现的两类入口与每周核对
 
 - 每晚增量读两类入口，五个任务列表各读一遍：按**创建时间**取上次完成日前 3 天至今新建的任务；按**检查日期**取同一时段内发生检查的任务（创建时间放开）。后者覆盖旧任务后来才初查、补录日期和长期进行中的任务。两类结果合并后对照本地在册案卷和观察队列。

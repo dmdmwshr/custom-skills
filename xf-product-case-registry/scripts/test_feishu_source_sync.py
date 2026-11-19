@@ -2172,6 +2172,52 @@ def test_acceptance_date_never_stands_in_for_an_electronic_record_that_exists_bu
         assert omitted["recordState"] == state and omitted["acceptanceDateNotUsed"] == "2026-11-04" and "待核实" in omitted["reason"] and "不能顶替" in omitted["reason"]
 
 
+def _page_water(tmp_path, page_day, members, *, unit="单位甲"):
+    original = _original(tmp_path, PN_NEW, "1001", [_row(page_day)])
+    water = {PN_NEW: {"source": {"classification": _classification(original, page_day)}}}
+    return _package_case(tmp_path, PN_NEW, members, unit=unit, waterline=water)
+
+
+def test_the_bound_electronic_record_outranks_the_task_page_day_and_the_page_value_and_source_are_kept(tmp_path):
+    text = "监督检查时间：2026年11月02日\n名 称：单位甲\uf052消防安全重点单位"
+    water = _page_water(tmp_path, "2026-11-03", {RECORD_NAME: text})
+    report, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water, record_dates=_record_evidence(tmp_path, water))
+    assert _first_create(report)[DATE_FIELD]["new"] == "2026-11-02"
+    conflict = next(c for c in report["initialDateConflicts"] if c.get("page"))
+    assert conflict["electronic"] == "2026-11-02" and conflict["page"] == "2026-11-03" and "整理前读取" in conflict["electronicSource"] and conflict["pageSource"] and "保留任务页原值" in conflict["handling"]
+    assert report["initialDateAcceptanceFallbacks"] == []
+
+
+def test_two_trusted_electronic_sources_that_disagree_keep_the_day_pending_and_nothing_stands_in(tmp_path):
+    manifest_dir = tmp_path / "工作区" / "历史工作区" / f"{PN_NEW}-G1"
+    manifest_dir.mkdir(parents=True)
+    manifest = manifest_dir / "manifest.json"
+    manifest.write_text(json.dumps({"case": {"projectNo": PN_NEW}, "initialInspection": {"inspectionDate": "2026-11-02"}}), encoding="utf-8")
+    text = "监督检查时间：2026年11月05日\n名 称：单位甲\uf052消防安全重点单位"
+    water = _page_water(tmp_path, "2026-11-03", {RECORD_NAME: text})
+    evidence = _record_evidence(tmp_path, water)      # 原包扫描在案卷还未归档时做的（扫描只管未归档案）；之后又有了已核验清单
+    water[PN_NEW].update({"state": "COMPLETED", "local": {"status": "ARCHIVED"},
+                          "history": {"completions": [{"generation": "G1", "manifestSha256": "sha256:" + sha(manifest), "verifiedAt": "2026-11-05T10:00:00+08:00"}]}})
+    report, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water, record_dates=evidence)
+    assert DATE_FIELD not in _first_create(report) and report["initialDateAcceptanceFallbacks"] == []
+    omitted = report["initialDatesOmitted"][0]
+    assert omitted["recordState"] == "ELECTRONIC_CONFLICT" and {e["day"] for e in omitted["electronic"]} == {"2026-11-02", "2026-11-05"}
+
+
+@pytest.mark.parametrize("members", [{RECORD_NAME: "读不出时间栏"}, {"扫描件.pdf": "x"}, {"责令限期改正通知书.pdf": "x"}])
+def test_an_independently_valid_page_day_is_used_when_the_electronic_original_cannot_decide(tmp_path, members):
+    water = _page_water(tmp_path, "2026-11-03", members)
+    report, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water, record_dates=_record_evidence(tmp_path, water))
+    assert _first_create(report)[DATE_FIELD]["new"] == "2026-11-03" and report["initialDateAcceptanceFallbacks"] == []
+
+
+def test_a_generic_named_member_never_lets_the_acceptance_day_back_in(tmp_path):
+    water = _package_case(tmp_path, PN_NEW, {"扫描件.pdf": "x", "初查.pdf": "y"})
+    report, _, _ = run_build(tmp_path, {"1001": _detail_with_acceptance(PN_NEW, "1001")}, waterline=water, record_dates=_record_evidence(tmp_path, water))
+    assert DATE_FIELD not in _first_create(report) and report["initialDateAcceptanceFallbacks"] == []
+    assert report["initialDatesOmitted"][0]["recordState"] == "PRESENT_UNVERIFIED"
+
+
 def test_record_date_evidence_must_come_with_its_digest_and_a_changed_evidence_file_refuses_the_whole_build(tmp_path):
     water = _package_case(tmp_path, PN_NEW, {"卷内备考表.pdf": "x"})
     path, digest = _record_evidence(tmp_path, water)

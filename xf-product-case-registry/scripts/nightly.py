@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -87,12 +88,36 @@ def _load(path: Path, default: Any) -> Any:
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else default
 
 
-def _run_dir(root: Path, day: str) -> Path:
+MANUAL_DIR = "手工"
+MANUAL_ID = re.compile(r"^[A-Za-z0-9]{1,12}$")
+
+
+def split_run_key(key: str) -> tuple[str, str]:
+    """``2026-11-19`` -> (day, "") for the regular run; ``2026-11-19@m1`` -> (day, "m1") for a same-day manual run."""
+    day, _, manual = key.partition("@")
     try:
         date.fromisoformat(day)
     except ValueError as error:
-        raise NightlyError("运行日期必须是 YYYY-MM-DD") from error
-    return root / RUNS_DIR / day
+        raise NightlyError("运行日期必须是 YYYY-MM-DD（手工运行为 YYYY-MM-DD@编号）") from error
+    if "@" in key and not MANUAL_ID.match(manual):
+        raise NightlyError("手工运行编号只能是 1–12 位字母或数字")
+    return day, manual
+
+
+def lane_key(day: str, manual: str = "") -> str:
+    """The run key a caller means: the regular run of ``day``, or its manual lane when a manual id is given (an id already in ``day`` must agree)."""
+    base, existing = split_run_key(day)
+    if manual and not MANUAL_ID.match(manual):
+        raise NightlyError("手工运行编号只能是 1–12 位字母或数字")
+    if manual and existing and existing != manual:
+        raise NightlyError(f"--date 已带手工编号 {existing}，与 --manual-run {manual} 不一致")
+    manual = manual or existing
+    return f"{base}@{manual}" if manual else base
+
+
+def _run_dir(root: Path, day: str) -> Path:
+    base, manual = split_run_key(day)
+    return root / RUNS_DIR / MANUAL_DIR / f"{base}@{manual}" if manual else root / RUNS_DIR / base
 
 
 def checkpoints(root: Path, day: str) -> list[dict[str, Any]]:
@@ -171,35 +196,47 @@ def _issue_signature(issue: dict[str, Any]) -> tuple[str, str, str, str]:
     return (issue["kind"], issue["stage"], issue.get("case") or "", issue.get("entry") or "")
 
 
-def _run_days(root: Path) -> list[str]:
+def _run_days(root: Path, *, lanes: bool = False) -> list[str]:
+    """Regular run days; with ``lanes`` also the same-day manual runs (key ``YYYY-MM-DD@编号``, sorted right after their regular day)."""
     directory = root / RUNS_DIR
-    return sorted(p.name for p in directory.iterdir() if p.is_dir() and (p / "run.json").is_file()) if directory.is_dir() else []
+    days = [p.name for p in directory.iterdir() if p.is_dir() and p.name != MANUAL_DIR and (p / "run.json").is_file()] if directory.is_dir() else []
+    manual = directory / MANUAL_DIR
+    if lanes and manual.is_dir():
+        days += [p.name for p in manual.iterdir() if p.is_dir() and (p / "run.json").is_file()]
+    return sorted(days)
 
 
 def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled", actor: str = "",
-          evidence_dir: str = "") -> dict[str, Any]:
-    """Open today's run, resume it, or report that it is already finished (no write in that case)."""
+          evidence_dir: str = "", manual: str = "", day: str | None = None) -> dict[str, Any]:
+    """Open today's run, resume it, or report that it is already finished (no write in that case).
+
+    ``manual`` opens (or resumes) an extra same-day run next to the regular one: only when the regular run of that business day is already
+    FINISHED and nothing is running or bound anywhere, in its own record directory (``夜间运行/手工/<日>@<编号>``) with its own checkpoints,
+    bindings and snapshots. The regular run's files are never touched; both share the ledger, coverage log, observation queue and source files."""
     now = (now or now_shanghai()).astimezone(SHANGHAI)
+    if manual:
+        return _begin_manual(root, now=now, trigger=trigger, actor=actor, evidence_dir=evidence_dir, manual=manual, day=day or now.date().isoformat())
     day = now.date().isoformat()
     path = _run_dir(root, day) / "run.json"
     earlier = []
-    for other in _run_days(root):
+    for other in _run_days(root, lanes=True):
         if other < day:
-            state = _load(root / RUNS_DIR / other / "run.json", {})
+            state = _load(_run_dir(root, other) / "run.json", {})
             if state.get("status") != "FINISHED":
                 earlier.append({"date": other, "status": state.get("status"), "derivedStatus": run_view(root, other)["derivedStatus"],
                                 "unknown": progress(root, other)["unknown"]})
-    finished = [d for d in _run_days(root) if _load(root / RUNS_DIR / d / "run.json", {}).get("status") == "FINISHED"]
+    finished = [d for d in _run_days(root, lanes=True) if _load(_run_dir(root, d) / "run.json", {}).get("status") == "FINISHED"]
     missed: list[str] = []
     if finished:
-        cursor = date.fromisoformat(finished[-1]) + timedelta(days=1)
+        cursor = date.fromisoformat(split_run_key(finished[-1])[0]) + timedelta(days=1)
         while cursor.isoformat() < day:
             missed.append(cursor.isoformat())
             cursor += timedelta(days=1)
     run = _load(path, None)
     if run is not None and run.get("status") == "FINISHED":
         stats = with_stats(root, day, {}, evidence_dir=evidence_dir)         # 读取同一证据口径，不回显可能是旧口径的已存值，也不写盘
-        return {"status": "ALREADY_FINISHED", "date": day, "finishedAt": run.get("finishedAt"), "wrote": False, **stats}
+        return {"status": "ALREADY_FINISHED", "date": day, "finishedAt": run.get("finishedAt"), "wrote": False, **stats,
+                "manualRunHint": "同日要另跑一轮：--manual-run <编号>（独立记录与证据目录，不改本日运行）"}
     if run is None:
         run = {"schemaVersion": "NightlyRunV1", "date": day, "status": "RUNNING", "startedAt": now.isoformat(timespec="seconds"),
                "triggers": [], "missedDates": missed, "entryKeyed": True, "schedule": _schedule(day, now, trigger)}
@@ -216,6 +253,58 @@ def begin(root: Path, *, now: datetime | None = None, trigger: str = "scheduled"
             "weeklyCoverage": coverage_state(root, today=day), "lastFinishedDate": finished[-1] if finished else None,
             "openExecutions": open_executions(root), "carryIssues": carried,
             "rule": "先对账 unknown（回读，不重放）；到期事项按绝对到期日处理，错过的夜晚不单独补跑"}
+
+
+def _begin_manual(root: Path, *, now: datetime, trigger: str, actor: str, evidence_dir: str, manual: str, day: str) -> dict[str, Any]:
+    if not MANUAL_ID.match(manual):
+        raise NightlyError("手工运行编号只能是 1–12 位字母或数字")
+    base, existing = split_run_key(day)
+    if existing:
+        raise NightlyError("--date 不带手工编号；编号用 --manual-run 给")
+    key = f"{base}@{manual}"
+    path = _run_dir(root, key) / "run.json"
+    run = _load(path, None)
+    if run is not None and run.get("status") == "FINISHED":
+        stats = with_stats(root, key, {}, evidence_dir=evidence_dir)
+        return {"status": "ALREADY_FINISHED", "date": key, "lane": run.get("lane"), "finishedAt": run.get("finishedAt"), "wrote": False, **stats}
+    regular = _load(_run_dir(root, base) / "run.json", None)
+    if run is None:
+        if regular is None:
+            raise NightlyError(f"{base} 没有常规运行：用常规 begin，不开手工运行")
+        if regular.get("status") != "FINISHED":
+            raise NightlyError(f"{base} 的常规运行还没结束（{regular.get('status')}）：先续办常规运行，手工运行不叠加在进行中的运行上")
+        for other in _run_days(root, lanes=True):
+            state = _load(_run_dir(root, other) / "run.json", {})
+            if other == base or state.get("status") == "FINISHED":
+                continue
+            if "@" in other:
+                raise NightlyError(f"已有未结束的手工运行 {other}：先收尾或对账，手工运行不与它交叉写入")
+            if [i for i in progress(root, other)["unknown"] if i["stage"] in WRITE_STAGES]:
+                raise NightlyError(f"更早的运行 {other} 留有效果未知的写入：先回读对账（reconciled），手工运行不与它交叉写入")
+            # 更早的运行只是没收尾、也没有未知写入或绑定执行：属历史未完成事项，由 earlierUnfinished/carry 列出，不拦手工运行
+        running = open_executions(root)
+        if running:
+            raise NightlyError(f"还有未记终态的绑定执行（{running[0]['date']} {running[0].get('sessionId', '')}）：先 bind-end 或对账，手工运行不与它交叉写入")
+        try:
+            _run_dir(root, key).mkdir(parents=True, exist_ok=False)      # 原子占住编号：同一编号只能有一次启动
+        except FileExistsError as error:
+            raise NightlyError(f"手工编号 {manual} 已被占用（目录已存在）：换一个编号，或用原编号续办") from error
+        run = {"schemaVersion": "NightlyRunV1", "date": base, "status": "RUNNING", "startedAt": now.isoformat(timespec="seconds"),
+               "triggers": [], "missedDates": [], "entryKeyed": True, "schedule": _schedule(base, now, "manual"),
+               "lane": {"kind": "manual", "id": manual, "businessDate": base, "regularRun": base, "regularFinishedAt": regular.get("finishedAt")}}
+        outcome = "STARTED"
+    else:
+        outcome = "RESUME"
+        run["status"] = "RUNNING"
+    if evidence_dir:
+        run["evidenceDir"] = evidence_dir
+    run["triggers"].append({"at": now.isoformat(timespec="seconds"), "kind": trigger if trigger != "scheduled" else "manual", "actor": actor})
+    _atomic(path, run)
+    finished = [d for d in _run_days(root, lanes=True) if d < key and _load(_run_dir(root, d) / "run.json", {}).get("status") == "FINISHED"]
+    return {"status": outcome, "date": key, "lane": run["lane"], **with_stats(root, key, progress(root, key), evidence_dir=evidence_dir),
+            "weeklyCoverage": coverage_state(root, today=base), "lastFinishedDate": finished[-1] if finished else None,
+            "openExecutions": open_executions(root), "carryIssues": carry_issues(root, finished[-1]) if finished else [],
+            "rule": "手工运行是额外一轮：沿同一账本、覆盖、观察队列和原始资料，不改当天常规运行的任何记录；先对账 unknown（回读，不重放）；每周全范围核对不因手工运行重复"}
 
 
 def _schedule(day: str, started: datetime, kind: str = "scheduled") -> dict[str, Any]:
@@ -290,7 +379,7 @@ def run_view(root: Path, day: str) -> dict[str, Any]:
 
 
 def timeline(root: Path, *, since: str | None = None) -> list[dict[str, Any]]:
-    return [run_view(root, day) for day in _run_days(root) if not since or day >= since]
+    return [run_view(root, day) for day in _run_days(root, lanes=True) if not since or day >= since]
 
 
 def checkpoint(root: Path, day: str, *, stage: str, status: str, case: str | None = None, detail: str = "",
@@ -378,15 +467,17 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", r
         _atomic(path, run)
         return {"status": "STATS_REFRESHED", "date": day, "changed": stats["changed"], "breakdown": stats["breakdown"], "wrote": True}
     state = progress(root, day)
-    weekly = coverage_state(root, today=day)
+    base, manual = split_run_key(day)
+    weekly = coverage_state(root, today=base)
+    weekly_due = weekly["due"] and not manual      # 手工运行是额外一轮：每周全范围核对由常规运行负责，不因手工运行重复，也不因它到期而拦住收尾
     if state["unknown"] or state["quota"] or state["resumable"] or state["nextStage"] is not None:
         return {"status": "NOT_FINISHED", "date": day, "wrote": False, **with_stats(root, day, state, evidence_dir=evidence_dir)}
-    if weekly["due"] and not weekly["attemptedToday"]:
+    if weekly_due and not weekly["attemptedToday"]:
         return {"status": "NOT_FINISHED", "date": day, "wrote": False, **with_stats(root, day, state, evidence_dir=evidence_dir), "coverageDue": weekly,
                 "rule": "全范围检查日期核对已到期且今晚未做：先做并用 nightly coverage 登记（来源不可用也要登记这次尝试）"}
     stats = run_stats(root, day, evidence_dir=evidence_dir or run.get("evidenceDir", ""), now=now)
     issues = issues_of(root, day)
-    finished_before = [d for d in _run_days(root) if d < day and _load(root / RUNS_DIR / d / "run.json", {}).get("status") == "FINISHED"]
+    finished_before = [d for d in _run_days(root, lanes=True) if d < day and _load(_run_dir(root, d) / "run.json", {}).get("status") == "FINISHED"]
     own = [_carry_item(u, day) for u in stats["cloud"].get("unknown", [])]
     carried_open = [i for issue in (carry_issues(root, finished_before[-1]) if finished_before else []) if issue["kind"] == "cloud-unknown" for i in issue.get("items", [])]
     items: list[dict[str, Any]] = []
@@ -400,15 +491,15 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", r
         issues.append({"kind": "cloud-unknown", "stage": "sync", "case": "", "entry": "", "status": "unknown",
                        "detail": f"云写入有 {len(items)} 项没有回执与账本共同证明（读不出的回执或账本非 OK，含前几夜未闭合的）：先回读对账，不重放；每项带原业务日和回执路径", "ref": "",
                        "items": items})      # 持久列表不截断；展示可缩略，不影响后续动作
-    previous = {_issue_signature(i) for i in (_load(root / RUNS_DIR / finished_before[-1] / "run.json", {}).get("issues", []) if finished_before else [])}
+    previous = {_issue_signature(i) for i in (_load(_run_dir(root, finished_before[-1]) / "run.json", {}).get("issues", []) if finished_before else [])}
     new_issues = [i for i in issues if _issue_signature(i) not in previous]
-    prior_keys = {_unknown_key(i) for issue in (_load(root / RUNS_DIR / finished_before[-1] / "run.json", {}).get("issues", []) if finished_before else [])
+    prior_keys = {_unknown_key(i) for issue in (_load(_run_dir(root, finished_before[-1]) / "run.json", {}).get("issues", []) if finished_before else [])
                   if issue.get("kind") == "cloud-unknown" for i in issue.get("items", [])}
     for issue in issues:      # 同类事项已存在时，又出现的不同对象的未知仍算新增(按对象身份，不按事项类别)；同一对象重复出现保持安静
         if issue.get("kind") == "cloud-unknown" and issue not in new_issues and any(_unknown_key(i) not in prior_keys for i in issue.get("items", [])):
             new_issues.append(issue)
     unverified = stats["reportedChanged"] > 0 and stats["changed"] == 0      # 执行者自报有变化，却没有任何凭证：不当作“无变化”
-    quiet = stats["changed"] == 0 and not weekly["due"] and not new_issues and not unverified
+    quiet = stats["changed"] == 0 and not weekly_due and not new_issues and not unverified
     run.update(status="FINISHED", finishedAt=(now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds"),
                changed=stats["changed"], quiet=quiet, summary=summary, breakdown=stats["breakdown"], issues=issues,
                finishedWithIssues=bool(issues), reportedChanged=state_reported(root, day))
@@ -418,7 +509,7 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", r
         result["newIssues"] = new_issues
     if unverified:
         result["unverifiedReportedChanges"] = stats["reportedChanged"]
-    if weekly["due"]:
+    if weekly_due:
         run["weeklyCoverage"] = result["weeklyCoverage"] = weekly      # 今晚试过但未完整：如实带出，下一轮仍到期
     _atomic(path, run)
     return result
@@ -445,7 +536,7 @@ def _item_closed(root: Path, item: dict[str, Any], cache: dict[str, Any] | None 
     cache = cache if cache is not None else {}
     day = str(item.get("originDate") or "")
     if day not in cache:      # 同一业务日的未决共用一次账本读取，不为每一项重读整份账本
-        origin = _load(root / RUNS_DIR / day / "run.json", {})
+        origin = _load(_run_dir(root, day) / "run.json", {})
         if not origin.get("startedAt"):
             cache[day] = None
         else:
@@ -472,7 +563,7 @@ def _item_closed(root: Path, item: dict[str, Any], cache: dict[str, Any] | None 
 def carry_issues(root: Path, last_day: str) -> list[dict[str, Any]]:
     """What the last finished night still carries, re-checked against evidence that arrived later. Only the carried items are read
     again (not the whole history); an item that closed is removed alone; the original records are never rewritten."""
-    run = _load(root / RUNS_DIR / last_day / "run.json", {})
+    run = _load(_run_dir(root, last_day) / "run.json", {})
     out: list[dict[str, Any]] = []
     cache: dict[str, Any] = {}
     for issue in run.get("issues", []):
@@ -536,6 +627,7 @@ def coverage(root: Path, report: dict[str, Any], *, day: str, now: datetime | No
     day before the run, read every entry to the last page with the row count equal to the page total, and
     every task missing from the ledger has been disposed of (observed, registered or out of scope).
     """
+    day, manual = split_run_key(day)
     seen = date.fromisoformat(day)
     entries = report.get("entries")
     if not isinstance(entries, dict):
@@ -569,6 +661,8 @@ def coverage(root: Path, report: dict[str, Any], *, day: str, now: datetime | No
             "rowsTotal": sum(int(e.get("rows") or 0) for e in entries.values() if isinstance(e, dict)),
             "unregistered": unregistered, "unavailable": report.get("unavailable") or [], "ref": report.get("ref") or "",
             "sha256": report.get("sha256") or ""}
+    if manual:
+        item["lane"] = f"{day}@{manual}"      # 手工运行做的覆盖核对照常计入同一份每周覆盖记录（一次一行，只追加），标明来自哪次手工运行
     path = root / RUNS_DIR / COVERAGE_LOG
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as stream:
@@ -659,8 +753,8 @@ def record_snapshot(root: Path, day: str, *, tag: str, run_key: str, files: dict
 def open_executions(root: Path) -> list[dict[str, Any]]:
     """Bound executions with no recorded end, over all runs: what a supervisor checks before dispatching again."""
     found = []
-    for day in _run_days(root):
-        run = _load(root / RUNS_DIR / day / "run.json", {})
+    for day in _run_days(root, lanes=True):      # 常规运行与同日手工运行一并看；手工运行的 date 是运行键 YYYY-MM-DD@编号，可直接用于 --date
+        run = _load(_run_dir(root, day) / "run.json", {})
         found += [{"date": day, "runStatus": run.get("status"), **item} for item in run.get("executions", []) if not item.get("endedAt")]
     return found
 
@@ -989,12 +1083,13 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime, until: dateti
 
 
 def _observation_today(root: Path, day: str) -> dict[str, Any]:
+    day, manual = split_run_key(day)
     counts = {"added": 0, "kept": 0, "enterScope": 0, "outOfScope": 0}
     names = {"ADDED": "added", "KEPT": "kept", "ENTER_SCOPE": "enterScope", "OUT_OF_SCOPE": "outOfScope"}
     rwids: set[str] = set()
     for rwid, item in _queue(root)["items"].items():
         for event in item.get("history", []):
-            if event.get("on") == day and event.get("outcome") in names:
+            if event.get("on") == day and (event.get("lane") or "") == manual and event.get("outcome") in names:
                 counts[names[event["outcome"]]] += 1
                 if event["outcome"] != "KEPT":
                     rwids.add(item.get("projectNo") or "观察:" + rwid)      # 同一任务已按项目编号计过的不重复
@@ -1104,7 +1199,7 @@ def silence_threshold(root: Path, current_start: datetime) -> dict[str, Any]:
     clamped to 30–60 minutes; 30 while fewer samples exist. The silence of the running execution never enters it."""
     samples: list[tuple[datetime, list[float]]] = []
     for day in _run_days(root):
-        run = _load(root / RUNS_DIR / day / "run.json", {})
+        run = _load(_run_dir(root, day) / "run.json", {})
         for execution in run.get("executions", []):
             if execution.get("endState") != "ENDED" or not execution.get("endedAt"):
                 continue
@@ -1179,7 +1274,7 @@ def _norm_identity(value: Any) -> str:
     return "".join(str(value or "").split())
 
 
-def observe(root: Path, items: list[dict[str, Any]], *, observed_on: str, entry: str, days: int = FOLLOW_UP_DAYS) -> dict[str, Any]:
+def observe(root: Path, items: list[dict[str, Any]], *, observed_on: str, entry: str, days: int = FOLLOW_UP_DAYS, lane: str = "") -> dict[str, Any]:
     """Record what one source look saw. ``items``: ``{rwid, state, projectNo?, unitName?, brigade?, inspectionDate?, productEvidence?, awaitingProduct?}``.
 
     A queued task (any waiting state) leaves the queue as ``ENTER_SCOPE`` / ``OUT_OF_SCOPE`` only when all four identities
@@ -1207,6 +1302,8 @@ def observe(root: Path, items: list[dict[str, Any]], *, observed_on: str, entry:
                 raise NightlyError("有检查日期的任务不是未检查")
         awaiting = bool(inspected) and (bool(item.get("awaitingProduct")) or item.get("productEvidence") is False)
         event: dict[str, Any] = {"on": observed_on, "entry": entry, "state": state}
+        if lane:
+            event["lane"] = lane      # 手工运行的观察事件带编号：当天常规运行的观察计数与统计不被它改变
         for field in ("inspectionDate", "productEvidence", "awaitingProduct"):
             if item.get(field) not in (None, ""):
                 event[field] = item[field]

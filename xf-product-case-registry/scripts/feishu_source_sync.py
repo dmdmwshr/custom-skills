@@ -2621,30 +2621,43 @@ def build_basic_specs(*, capture_path: Path, capture_sha: str, waterline_path: P
             blocked.append({"projectNo": project, "rwid": rwid, "reasons": [f"{kind} 意图未决({st['reason']})：{st.get('detail', '')}；按目标局部阻断，独立项目继续" for kind, st in held],
                             "intentIds": [st["intentId"] for _, st in held]})
             continue
-        date, date_reason = _initial_date(waterline.get(project), waterline_path.parent, project, rwid)
-        if date is None:  # 总账没有可证的页面检查日时，取本案已核验清单里的初查日(本案监督检查记录文书所载)，仍优于受理日期后备
-            manifest_day, _why = _manifest_initial_date(waterline_path.parent, project, waterline.get(project))
-            if manifest_day is not None:
-                date, date_reason = manifest_day, None
-        record_state: dict[str, Any] | None = None
-        if date is None:      # 页面与已核验清单都没有可证日：看整理前从原包读出并核对过的电子监督检查记录（日期与产品判定、文书归类分开）
-            record_state = record_dates.state_for(record_evidence, waterline_path.parent, project, waterline.get(project))
-            if record_state["state"] == record_dates.VERIFIED:
-                ref = (f"{record_dates_path.name}#cases.{project} | 包内电子监督检查记录 {record_state['member']} memberSha256=sha256:{record_state['memberSha256']} | "
-                       f"packageSha256=sha256:{record_state['packageSha256']} | 整理前读取 | projectNo={project}")
-                date, date_reason = (record_state["date"], ref, record_state["observedAt"] or evidence["capturedAt"]), None
+        page_date, page_reason = _initial_date(waterline.get(project), waterline_path.parent, project, rwid)
+        # 同案电子原件（本地已核验清单、整理前从原包读出并核对的电子监督检查记录）优先于任务页检查日；页面值与来源在有差异时保留
+        electronic: list[tuple[str, str, str]] = []
+        manifest_day, _why = _manifest_initial_date(waterline_path.parent, project, waterline.get(project))
+        if manifest_day is not None:
+            electronic.append(manifest_day)
+        record_state = record_dates.state_for(record_evidence, waterline_path.parent, project, waterline.get(project))
+        if record_state["state"] == record_dates.VERIFIED:
+            ref = (f"{record_dates_path.name}#cases.{project} | 包内电子监督检查记录 {record_state['member']} memberSha256=sha256:{record_state['memberSha256']} | "
+                   f"packageSha256=sha256:{record_state['packageSha256']} | 整理前读取 | projectNo={project}")
+            electronic.append((record_state["date"], ref, record_state["observedAt"] or evidence["capturedAt"]))
+        date, date_reason, electronic_conflict = None, None, False
+        if len({e[0] for e in electronic}) > 1:      # 两份可信电子证据日期不一致：保留待核，不取任何一方，也不用页面或受理日顶替
+            electronic_conflict = True
+            dates_omitted.append({"projectNo": project, "rwid": rwid, "recordState": "ELECTRONIC_CONFLICT", "electronic": [{"day": e[0], "source": e[1]} for e in electronic],
+                                  "reason": "初查日期待核实：已核验清单与原包电子记录日期不一致，保留待核，不取任何一方"})
+        elif electronic:
+            date = electronic[0]
+            if page_date is not None and page_date[0] != date[0]:
+                date_conflicts.append({"projectNo": project, "rwid": rwid, "electronic": date[0], "electronicSource": date[1], "page": page_date[0], "pageSource": page_date[1],
+                                       "handling": "以电子原件为准，保留任务页原值与来源"})
+        elif page_date is not None:      # 电子原件尚不能判断，任务页独立明确有效：用页面证明
+            date = page_date
+        else:
+            date_reason = page_reason
         if date_reason:
             dates_omitted.append({"projectNo": project, "rwid": rwid, "reason": date_reason})
         resolved = fv.resolve_initial_date(date[0] if date else None, evidence["acceptance"])
-        if date is None and resolved["value"] and record_state is not None and record_state["state"] == record_dates.ABSENT:
+        if date is None and resolved["value"] and not electronic_conflict and record_state["state"] == record_dates.ABSENT:
             # 只有经原包核查确认“没有电子监督检查记录”才用受理日期后备：内部留痕，外显统一监督系统
             reason = f"电子监督检查记录经原包核查确认不存在：{record_state['reason']}"
             date = (resolved["value"], f"{evidence['ref']('受理日期')} | 后备原因：{reason} | 受理日期原值={evidence['acceptance']}", evidence["capturedAt"])
             date_fallbacks.append({"projectNo": project, "rwid": rwid, "value": resolved["value"], "reason": reason, "recordState": record_state["state"]})
-        elif date is None and resolved["value"]:      # 记录存在但没核实/没有核查证据：不填关键字段、不用受理日顶替，保留待核实并带原因，不重复同一笼统错误
-            state = (record_state or {}).get("state", record_dates.UNKNOWN)
+        elif date is None and resolved["value"] and not electronic_conflict:      # 记录存在但没核实/没有核查证据：不填关键字段、不用受理日顶替，保留待核实并带原因，不重复同一笼统错误
+            state = record_state["state"]
             dates_omitted.append({"projectNo": project, "rwid": rwid, "recordState": state, "acceptanceDateNotUsed": resolved["value"],
-                                  "reason": f"初查日期待核实：电子监督检查记录状态 {state}（{(record_state or {}).get('reason', '')}）；受理日期不能顶替"})
+                                  "reason": f"初查日期待核实：电子监督检查记录状态 {state}（{record_state.get('reason', '')}）；受理日期不能顶替"})
         elif date is not None and resolved.get("conflict"):
             date_conflicts.append({"projectNo": project, "rwid": rwid, "electronic": resolved["value"], "acceptance": resolved["acceptanceDate"], "handling": "以电子监督检查记录为准，保留差异"})
         classification = _proven_classification(waterline.get(project), waterline_path.parent)

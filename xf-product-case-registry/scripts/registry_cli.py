@@ -2700,6 +2700,7 @@ def build_parser() -> argparse.ArgumentParser:
     nightly.add_argument("--items", help="observe：本次来源观察到的任务 JSON 文件")
     nightly.add_argument("--entry", help="checkpoint：同一阶段内的入口（如“日常监督任务/创建时间”）；observe：来源入口名称")
     nightly.add_argument("--runner-alive", choices=["yes", "no"], help="progress：监督者在 WSL 里看到的派发进程是否存活（Windows 副本读不到 /proc 时必传）")
+    nightly.add_argument("--manual-run", help="同日额外一轮的手工运行编号（1–12 位字母数字）：begin/checkpoint/bind/finish… 都落在 夜间运行/手工/<日>@<编号>，不改当天常规运行；--date 也可直接写 YYYY-MM-DD@编号")
     nightly.add_argument("--refresh-stats", action="store_true", help="finish：已收尾的运行按证据重算变更数与分项并留下修订记录（状态、收尾时间、检查点不变）")
     nightly.add_argument("--issue", action="store_true", help="checkpoint：该项记为显式保留事项（已证实的来源问题），随 finish 带出")
     nightly.add_argument("--evidence-dir", default="", help="begin/finish/status：当晚回执目录（缺省取环境变量 NIGHT_RUN）")
@@ -2776,6 +2777,7 @@ def build_parser() -> argparse.ArgumentParser:
     mirror.add_argument("--tag", default="day", choices=["day", "pre", "post"],
                         help="day=当日快照(原行为)；pre/post=本次执行独立的写前/写后快照，不覆盖、同键复用，需 --run-key；post 以本次写前快照为基线")
     mirror.add_argument("--run-key", default="", help="pre/post 的运行键（本次执行的稳定标识，如 a27-20261117）")
+    mirror.add_argument("--manual-run", help="同日手工运行编号：前后快照记入该手工运行的 run.json，不写当天常规运行")
     mirror.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     mirror.set_defaults(func=feishu_mirror_command)
     recount = sub.add_parser(
@@ -3176,39 +3178,46 @@ def nightly_command(args: argparse.Namespace) -> None:
         _config, layout = workspace.resolve_workspace(**workspace_kwargs(args), create_layout=False)
         root = module.runtime_root(layout.root)
         today = module.now_shanghai().date().isoformat()
+        manual = args.manual_run or ""
+        day = module.lane_key(args.date, manual) if args.date else (module.lane_key(today, manual) if manual else None)
         if args.action == "begin":
-            result = module.begin(root, trigger=args.trigger, actor=args.actor, evidence_dir=_evidence_dir(args, today))
+            if manual:      # 同日额外一轮：业务日取 --date（缺省今天），记录与证据目录与当天常规运行分开
+                result = module.begin(root, trigger=args.trigger, actor=args.actor, evidence_dir=_evidence_dir(args, module.split_run_key(day)[0]),
+                                      manual=manual, day=module.split_run_key(day)[0])
+            else:
+                result = module.begin(root, trigger=args.trigger, actor=args.actor, evidence_dir=_evidence_dir(args, today))
             result["observationQueue"] = module.queue_summary(root, today=today)
         elif args.action == "checkpoint":
-            result = module.checkpoint(root, args.date or today, stage=args.stage, status=args.status, case=args.case,
+            result = module.checkpoint(root, day or today, stage=args.stage, status=args.status, case=args.case,
                                        detail=args.detail, ref=args.ref, changed=args.changed, entry=args.entry or "", issue=args.issue)
         elif args.action == "finish":
-            result = module.finish(root, args.date or today, summary=args.summary, evidence_dir=_evidence_dir(args, args.date or today),
+            result = module.finish(root, day or today, summary=args.summary, evidence_dir=_evidence_dir(args, module.split_run_key(day or today)[0]),
                                    refresh_stats=args.refresh_stats)
         elif args.action == "status":
-            result = module.status(root, args.date, evidence_dir=_evidence_dir(args, args.date or today))
+            result = module.status(root, day, evidence_dir=_evidence_dir(args, module.split_run_key(day or today)[0]))
             result["observationQueue"] = module.queue_summary(root, today=today)
         elif args.action == "progress":
             seen = {"yes": True, "no": False}.get(args.runner_alive)
-            result = module.progress_info(root, args.date or today, alive=(lambda pid, runner: seen) if seen is not None else module._pid_alive)
+            result = module.progress_info(root, day or today, alive=(lambda pid, runner: seen) if seen is not None else module._pid_alive)
         elif args.action == "observe":
             if not args.items or not args.entry:
                 raise RegistryError("observe 需要 --items 与 --entry")
             items = json.loads(Path(args.items).read_text(encoding="utf-8"))
-            result = module.observe(root, items, observed_on=args.date or today, entry=args.entry)
+            lane_day, lane_id = module.split_run_key(day or today)
+            result = module.observe(root, items, observed_on=lane_day, entry=args.entry, lane=lane_id)
         elif args.action == "coverage":
             if not args.report:
                 raise RegistryError("coverage 需要 --report")
-            result = module.coverage(root, json.loads(Path(args.report).read_text(encoding="utf-8")), day=args.date or today)
+            result = module.coverage(root, json.loads(Path(args.report).read_text(encoding="utf-8")), day=day or today)
         elif args.action == "bind":
             if not (args.session_id and args.receipt and args.runner_pid):
                 raise RegistryError("bind 需要 --session-id、--receipt、--runner-pid")
-            result = module.bind(root, args.date or today, session_id=args.session_id, receipt=args.receipt,
+            result = module.bind(root, day or today, session_id=args.session_id, receipt=args.receipt,
                                  runner_pid=args.runner_pid, runner=args.runner, note=args.note)
         elif args.action == "bind-end":
             if not (args.receipt and args.state and args.date):
                 raise RegistryError("bind-end 需要 --date、--receipt、--state")
-            result = module.bind_end(root, args.date, receipt=args.receipt, state=args.state, detail=args.detail)
+            result = module.bind_end(root, day, receipt=args.receipt, state=args.state, detail=args.detail)
         elif args.action == "executions":
             result = {"today": today, "openExecutions": module.open_executions(root)}
         elif args.action == "timeline":
@@ -3216,9 +3225,9 @@ def nightly_command(args: argparse.Namespace) -> None:
         elif args.action == "delay-cause":
             if not (args.date and args.detail and args.ref):
                 raise RegistryError("delay-cause 需要 --date、--detail（已证实的原因）、--ref（证据位置）")
-            result = module.delay_cause(root, args.date, cause=args.detail, evidence=args.ref)
+            result = module.delay_cause(root, day, cause=args.detail, evidence=args.ref)
         else:
-            result = {"today": today, "observationsDue": module.due(root, today=args.date or today)}
+            result = {"today": today, "observationsDue": module.due(root, today=module.split_run_key(args.date)[0] if args.date else today)}
     except (module.NightlyError, workspace.WorkspaceStateError, OSError, ValueError) as error:
         raise RegistryError(f"夜间运行：{error}") from error
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -3259,7 +3268,7 @@ def feishu_mirror_command(args: argparse.Namespace) -> None:
         business_root=Path(args.business_root), ledger_dir=Path(args.ledger_dir), day=_run_day(args), tag=args.tag, run_key=args.run_key))
     if args.tag != "day":
         nightly = importlib.import_module(f"{__package__}.nightly" if __package__ else "nightly")
-        report["runRecord"] = nightly.record_snapshot(Path(args.business_root) / nightly.RUNTIME_DIR, _run_day(args), tag=args.tag,
+        report["runRecord"] = nightly.record_snapshot(Path(args.business_root) / nightly.RUNTIME_DIR, nightly.lane_key(_run_day(args), args.manual_run or ""), tag=args.tag,
                                                       run_key=args.run_key, files={t["table"]: {"file": t["snapshotFile"], "sha256": t["snapshotSha256"]}
                                                                                     for t in report["tables"]})
     print(json.dumps(report, ensure_ascii=False, indent=2))

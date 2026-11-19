@@ -5,9 +5,11 @@
 
 四种状态，缺一不可混用：
 - ``PRESENT_VERIFIED``：恰有一份标准命名的电子记录，文字层读出合法的监督检查时间，且记录里的单位名称与总账本案一致 → 取该日。
-- ``ABSENT_CONFIRMED``：整包没有标准命名的电子记录，也没有任何像检查记录的成员（扫描件/异名）→ 才允许用详情受理日期作后备。
-- ``PRESENT_UNVERIFIED``：记录存在但读不出、日期缺失/非法、单位对不上、有多份，或只有疑似的扫描件/异名成员 →
-  不填关键字段、不用受理日期顶替，保留待核实并带原因，等目视或来源核对。
+- ``ABSENT_CONFIRMED``：整包成员（至少一个）**每一个都明确属于已认可的其他文书**（通知书、送达回证、审批表、营业执照、照片等，见
+  ``KNOWN_OTHER``），且没有任何成员的名字不明、含检查记录字样或是合并件 → 才允许用详情受理日期作后备。不凭“不像标准题名”推出没有电子记录。
+- ``PRESENT_UNVERIFIED``：记录存在但读不出、日期缺失/非法、单位对不上、有多份；或包里有名字不明/混合/泛名成员（“扫描件”“初查”
+  “通知书与监督检查记录”之类）；或空包、CRC 错、加密、打不开 → 不填关键字段、不用受理日期顶替，保留待核实并带原因，等目视或来源核对。
+  读取格式问题只影响这一案；共享工具（pdfplumber）缺失仍明确报错（``ToolMissing``）。
 - ``UNKNOWN``：没有本案的核查证据（包不在、没扫描、包已变化）→ 同样不顶替。
 
 ``scan`` 只读本地原包（受管文档环境，需要 pdfplumber）；同一份包摘要已有结果时直接复用。构建时用 ``state_for`` 逐案重核包与成员摘要，
@@ -21,16 +23,24 @@ import io
 import json
 import re
 import zipfile
+import zlib
 from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
 EVIDENCE_SCHEMA = "ElectronicRecordDateEvidenceV1"
-PARSER = "record-date-text-v1"
+PARSER = "record-date-text-v2"      # v1 把泛名/合并名成员误确认为“没有电子记录”：旧证据不再复用，也不能用于构建
 VERIFIED, ABSENT, UNVERIFIED, UNKNOWN = "PRESENT_VERIFIED", "ABSENT_CONFIRMED", "PRESENT_UNVERIFIED", "UNKNOWN"
 ELECTRONIC_NAME = re.compile(r"^消防产品监督检查记录\(编号：〔\d{4}〕第\d+号\)\.pdf$")   # 与整理程序同一标准文件名
-RECORD_LIKE = re.compile(r"检查记录|监督记录|检查表|记录表|监督检查")                            # 任何像检查记录的成员：存在就不能说“确认没有”
-NOT_A_RECORD = re.compile(r"卷内备考表|通知书|审批表|送达回证|责令|照片|营业执照|购买|发票|证书|报告")   # 这些文书名里带“检查/监督”字样但不是检查记录本身
+# 已认可的其他文书（成员名去掉扩展名、序号前缀、重复后缀后的整体匹配；合并件按 及/和/与/、 拆开后每一段都要匹配）。
+# 名字里没有出现在这里的一律不是“已认可”：泛名（扫描件、初查、产品监督）、含检查记录字样的名字、不清楚的合并件都保持未知。
+_NUMBERED = r"锡?[\u4e00-\u9fa5]{0,2}消(?:送证|限|产函|产判|产验|即|函)字(?:〔\d{4}〕第?\d+号)?"
+KNOWN_OTHER = tuple(re.compile(f"^(?:{p})$") for p in (
+    r"卷内备考表", r"营业执照(?:复印件)?", r"(?:现场)?照片(?:（[^）]*）)?", r"(?:\d+、)?[\u4e00-\u9fa5]{0,8}照片", r"图纸\d*", r"(?:\d+、)?检验报告(?:书)?", r"认证证书", r"购买(?:记录|凭证)", r"授权委托书",
+    r"送达回证", r"(?:责令限期改正)?通知书", r"责令限期改正通知书", r"责令", r"通报函", r"(?:现场)?(?:检查)?判定不合格通知书", r"不合格通知书",
+    r"消防产品现场检查判定不合格通知书", r"呈请[\u4e00-\u9fa5]{0,16}审批表", r"审批表", r"证据(?:保全|保留)决定书", r"证据(?:保全)?清单", r"清单", r"先行登记保存清单",
+    r"行政处罚告知笔录(?:（单位）)?", r"呈请行政处罚审批表", r"结案报告", r"消防产品质量监督抽查抽样单(?:（\d+）|\(\d+\))?", _NUMBERED))
+COMPONENT_SPLIT = re.compile(r"[及和与、，,+]")
 DATE_RX = re.compile(r"监督检查时间：\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
 UNIT_RX = re.compile(r"名\s*称\s*：(.*?)(?=[]\s*(?:非)?消防安全重点单位)", re.S)
 DOC_NO_RX = re.compile(r"编号：\s*〔(\d{4})〕第\s*(\d+)\s*号")
@@ -57,16 +67,6 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", "", (text or "").replace("(", "（").replace(")", "）"))
 
 
-def read_first_page(data: bytes) -> str:
-    """电子记录第 1 页文字层（受管文档环境的 pdfplumber）。"""
-    try:
-        import pdfplumber
-    except ImportError as error:
-        raise RuntimeError("读取电子检查记录需要 pdfplumber：请在受管文档环境中运行本步骤") from error
-    with pdfplumber.open(io.BytesIO(data)) as pdf:
-        return pdf.pages[0].extract_text() or ""
-
-
 def parse_record_text(text: str, unit_name: str) -> tuple[dict[str, Any] | None, str | None]:
     """(日期、文号、记录单位) 或 (None, 原因)。日期必须是真实日历日；单位须与总账本案一致。"""
     flat = text.replace("\n", " ")
@@ -88,37 +88,77 @@ def parse_record_text(text: str, unit_name: str) -> tuple[dict[str, Any] | None,
     return {"date": day.isoformat(), "docNo": f"〔{number.group(1)}〕第{int(number.group(2)):04d}号" if number else None, "recordUnit": _norm(unit.group(1))}, None
 
 
+class ToolMissing(RuntimeError):
+    """共享工具（如 pdfplumber）缺失：不是某一案的问题，明确报出，不降成案卷状态。"""
+
+
+def read_first_page(data: bytes) -> str:
+    """电子记录第 1 页文字层（受管文档环境的 pdfplumber）。"""
+    try:
+        import pdfplumber
+    except ImportError as error:
+        raise ToolMissing("读取电子检查记录需要 pdfplumber：请在受管文档环境中运行本步骤") from error
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        return pdf.pages[0].extract_text() or ""
+
+
+def known_other(name: str) -> bool:
+    """成员名整体属于已认可的其他文书（合并件的每一段都认可）；否则 False。"""
+    stem = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", name.rsplit("/", 1)[-1].strip())
+    stem = re.sub(r"[（(]\d+[）)]$|[_-]\d+$", "", stem)
+    stem = re.sub(r"^\d+、", "", stem)
+    parts = [re.sub(r"^\d+、", "", x.strip()) for x in COMPONENT_SPLIT.split(stem)] if COMPONENT_SPLIT.search(stem) else [stem]
+    parts = [x for x in parts if x] or [""]
+    return all(any(rx.match(part) for rx in KNOWN_OTHER) for part in parts)
+
+
 def classify_package(zip_path: Path, unit_name: str, *, reader: Callable[[bytes], str] = read_first_page) -> dict[str, Any]:
-    """一个原包的电子记录状态与来源；只读包，不解压到磁盘。"""
+    """一个原包的电子记录状态与来源；只读包，不解压到磁盘。读取格式问题只影响这一案（UNVERIFIED），``ToolMissing`` 向上报出。"""
     try:
         archive = zipfile.ZipFile(zip_path)
     except (OSError, zipfile.BadZipFile) as error:
         return {"state": UNVERIFIED, "reason": f"原包打不开：{type(error).__name__}"}
     with archive:
-        members = [(_member_name(i), i) for i in archive.infolist() if not i.is_dir()]
-        names = [n for n, _ in members]
-        electronic = [(n, i) for n, i in members if ELECTRONIC_NAME.match(n.rsplit("/", 1)[-1])]
-        suspects = [n for n, _ in members if RECORD_LIKE.search(n) and not NOT_A_RECORD.search(n) and not ELECTRONIC_NAME.match(n.rsplit("/", 1)[-1])]
+        infos = [i for i in archive.infolist() if not i.is_dir()]
+        names = [_member_name(i) for i in infos]
         base = {"memberCount": len(names)}
+        if not infos:
+            return {**base, "state": UNVERIFIED, "reason": "空包：没有任何成员，不能当作没有电子记录"}
+        encrypted = [n for n, i in zip(names, infos) if i.flag_bits & 0x1]
+        if encrypted:
+            return {**base, "state": UNVERIFIED, "reason": "包内成员加密，读不了", "members": sorted(encrypted)}
+        try:
+            bad = archive.testzip()
+        except (zipfile.BadZipFile, OSError, EOFError, NotImplementedError, RuntimeError, ValueError) as error:
+            return {**base, "state": UNVERIFIED, "reason": f"包损坏，无法逐件校验：{type(error).__name__}"}
+        if bad is not None:
+            return {**base, "state": UNVERIFIED, "reason": "包内成员 CRC 校验不通过（损坏）", "members": [bad]}
+        electronic = [(n, i) for n, i in zip(names, infos) if ELECTRONIC_NAME.match(n.rsplit("/", 1)[-1])]
+        others = [n for n, _ in zip(names, infos) if not ELECTRONIC_NAME.match(n.rsplit("/", 1)[-1])]
+        unknown = sorted(n for n in others if not known_other(n))
         if len(electronic) > 1:
             return {**base, "state": UNVERIFIED, "reason": "包内有多份标准命名的电子检查记录", "members": sorted(n for n, _ in electronic)}
         if not electronic:
-            if suspects:
-                return {**base, "state": UNVERIFIED, "reason": "没有标准命名的电子记录，但有疑似检查记录的成员（扫描件/异名），须目视确认", "members": sorted(suspects)}
-            return {**base, "state": ABSENT, "reason": "整包没有标准命名的电子检查记录，也没有疑似检查记录的成员"}
+            if unknown:
+                return {**base, "state": UNVERIFIED, "reason": "没有标准命名的电子记录，但有名字不明/泛名/合并或含检查记录字样的成员，不能确认没有电子记录，须目视确认", "members": unknown}
+            return {**base, "state": ABSENT, "reason": "全包成员都明确属于已认可的其他文书（通知书、送达回证、审批表、照片等），没有电子检查记录", "members": sorted(others)}
         name, info = electronic[0]
-        data = archive.read(info)
+        try:
+            data = archive.read(info)
+        except (zipfile.BadZipFile, OSError, EOFError, NotImplementedError, RuntimeError, ValueError, zlib.error) as error:
+            return {**base, "state": UNVERIFIED, "reason": f"电子记录读不出：{type(error).__name__}", "members": [name]}
         member = {"member": name, "memberSha256": hashlib.sha256(data).hexdigest(), "memberBytes": len(data)}
         try:
             text = reader(data)
-        except RuntimeError:
+        except ToolMissing:
             raise
-        except Exception as error:      # 损坏或加密的 PDF：存在但读不出
+        except Exception as error:      # 损坏的 PDF、读不出文字层：存在但读不出
             return {**base, **member, "state": UNVERIFIED, "reason": f"电子记录读不出：{type(error).__name__}"}
         parsed, why = parse_record_text(text, unit_name)
         if parsed is None:
             return {**base, **member, "state": UNVERIFIED, "reason": why}
-        return {**base, **member, "state": VERIFIED, "date": parsed["date"], "docNo": parsed["docNo"], "recordUnit": parsed["recordUnit"]}
+        extra = {"otherUnrecognizedMembers": unknown} if unknown else {}
+        return {**base, **member, **extra, "state": VERIFIED, "date": parsed["date"], "docNo": parsed["docNo"], "recordUnit": parsed["recordUnit"]}
 
 
 def _package_of(case: Any) -> tuple[str, str]:
@@ -148,12 +188,24 @@ def scan(business_root: Path, out_path: Path, observed_at: str, *, reader: Calla
         if not path.is_file():
             cases[project] = {"state": UNKNOWN, "reason": "总账登记的原包文件不存在", "packageRelativePath": relative}
             continue
-        actual = file_sha(path)
+        try:
+            actual = file_sha(path)
+        except OSError as error:
+            cases[project] = {"state": UNKNOWN, "reason": f"原包读不出：{type(error).__name__}", "packageRelativePath": relative}
+            continue
         if recorded and recorded != actual:
             cases[project] = {"state": UNKNOWN, "reason": "原包实际摘要与总账登记不符", "packageRelativePath": relative, "packageSha256": actual}
             continue
         previous = reuse.get((project, actual))
-        entry = {**previous, "reused": True} if previous is not None else classify_package(path, str(case.get("unitName") or ""), reader=reader)
+        if previous is not None:
+            entry = {**previous, "reused": True}
+        else:
+            try:
+                entry = classify_package(path, str(case.get("unitName") or ""), reader=reader)
+            except ToolMissing:
+                raise      # 共享工具缺失不是某一案的问题：整次扫描明确失败，不写任何案的状态
+            except Exception as error:      # 其余读取问题只影响这一案，后续案照常
+                entry = {"state": UNVERIFIED, "reason": f"这一案的原包读取出错：{type(error).__name__}"}
         cases[project] = {**entry, "packageRelativePath": relative, "packageSha256": actual}
     counts: dict[str, int] = {}
     for entry in cases.values():
@@ -173,6 +225,8 @@ def load_evidence(path: Path, expected_sha: str) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if value.get("schemaVersion") != EVIDENCE_SCHEMA or not isinstance(value.get("cases"), dict):
         raise ValueError("电子记录日期证据格式无效")
+    if value.get("parser") != PARSER:      # 旧读法的确认（尤其是误把泛名成员判成“没有电子记录”）不得再用于构建
+        raise ValueError(f"电子记录日期证据由旧读法 {value.get('parser')} 生成，须用 {PARSER} 重扫")
     return value
 
 

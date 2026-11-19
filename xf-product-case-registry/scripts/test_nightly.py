@@ -1006,3 +1006,107 @@ def test_late_proof_for_one_of_several_targets_of_the_same_receipt_removes_only_
     assert "s-2" in keys
     carried = [i["stableKey"] for issue in nightly.carry_issues(root, "2026-11-15") if issue["kind"] == "cloud-unknown" for i in issue["items"]]
     assert "s-2" in carried
+
+
+# ------------------------------------------------------------------ a39：同日手工运行（额外一轮，与当天常规运行分开）
+
+def _lane_done(root, key):
+    for stage in nightly.STAGES:
+        if stage == "discover":
+            _entries(root, key)
+        nightly.checkpoint(root, key, stage=stage, status="done")
+
+
+def _bytes(root, day):
+    folder = nightly._run_dir(root, day)
+    return {p.name: p.read_bytes() for p in folder.iterdir() if p.is_file()}
+
+
+def test_a_finished_regular_night_gets_an_extra_manual_run_in_its_own_record_and_the_regular_files_stay_byte_identical(tmp_path):
+    root, day, key = tmp_path / "运行记录", "2026-11-19", "2026-11-19@m1"
+    _night(root, day)
+    regular = _bytes(root, day)
+    stats_before = nightly.run_stats(root, day, evidence_dir="")
+    assert nightly.begin(root, now=T("2026-11-19T10:00:00"), trigger="manual")["status"] == "ALREADY_FINISHED"      # 默认入口不变：同日续办/已结束
+    started = nightly.begin(root, now=T("2026-11-19T10:00:00"), trigger="manual", manual="m1", evidence_dir=str(tmp_path / "手工证据"))
+    assert started["status"] == "STARTED" and started["date"] == key and started["lane"]["regularRun"] == day
+    assert nightly._run_dir(root, key) == root / nightly.RUNS_DIR / "手工" / key and nightly._run_days(root) == [day]      # 常规日列表不混入手工运行
+    assert nightly._run_days(root, lanes=True) == [day, key]
+    assert (nightly._load(nightly._run_dir(root, key) / "run.json", {})["schedule"].get("manualStart")) is True
+    nightly.bind(root, key, session_id="s-m1", receipt="r-m1.json", runner_pid=11)
+    assert [e["date"] for e in nightly.open_executions(root)] == [key]                      # 默认 supervisor 的 openExecutions 看得见手工运行
+    _lane_done(root, key)                                                                    # 没有重做当日已验的每周覆盖，也能收尾
+    nightly.bind_end(root, key, receipt="r-m1.json", state="ENDED")
+    finished = nightly.finish(root, key, evidence_dir=str(tmp_path / "手工证据"))
+    assert finished["status"] == "FINISHED" and nightly.open_executions(root) == []
+    assert _bytes(root, day) == regular                                                      # 原日 run.json、checkpoints 字节不变
+    assert nightly.run_stats(root, day, evidence_dir="") == stats_before                      # 常规历史统计不受手工写入影响
+    again = nightly.begin(root, now=T("2026-11-19T11:00:00"), manual="m1")
+    assert again["status"] == "ALREADY_FINISHED" and again["wrote"] is False                 # 同编号重复触发幂等
+    assert nightly.timeline(root, since=day)[-1]["date"] == key
+
+
+def test_a_manual_run_is_serialized_against_unfinished_runs_open_executions_and_a_taken_id(tmp_path):
+    root, day = tmp_path / "运行记录", "2026-11-19"
+    nightly.begin(root, now=T(day + "T02:00:00"), trigger="scheduled")
+    with pytest.raises(nightly.NightlyError, match="还没结束"):
+        nightly.begin(root, now=T(day + "T03:00:00"), manual="m1")                               # 常规运行进行中：不叠加
+    _all_done(root, day)
+    nightly.bind(root, day, session_id="s", receipt="r.json", runner_pid=5)
+    nightly.finish(root, day)
+    with pytest.raises(nightly.NightlyError, match="未记终态的绑定执行"):
+        nightly.begin(root, now=T(day + "T10:00:00"), manual="m1")                               # 常规执行没记终态：不交叉
+    nightly.bind_end(root, day, receipt="r.json", state="ENDED")
+    nightly.begin(root, now=T(day + "T10:00:00"), manual="m1")
+    with pytest.raises(nightly.NightlyError, match="已有未结束的手工运行"):
+        nightly.begin(root, now=T(day + "T10:05:00"), manual="m2")                               # 另一条手工运行未结束
+    with pytest.raises(nightly.NightlyError, match="编号"):
+        nightly.begin(root, now=T(day + "T10:05:00"), manual="bad/id")
+    resumed = nightly.begin(root, now=T(day + "T10:10:00"), manual="m1")
+    assert resumed["status"] == "RESUME"
+    (nightly._run_dir(root, day + "@m3")).mkdir(parents=True)                                    # 编号被另一次启动占住
+    with pytest.raises(nightly.NightlyError, match="占用|未结束"):
+        nightly.begin(root, now=T(day + "T10:20:00"), manual="m3")
+    with pytest.raises(nightly.NightlyError, match="没有常规运行"):
+        nightly.begin(root, now=T("2026-11-20T10:00:00"), manual="m1")
+
+
+def test_manual_unknowns_and_observations_are_carried_to_the_next_night_but_never_counted_into_the_regular_night(tmp_path):
+    root, day, key = tmp_path / "运行记录", "2026-11-19", "2026-11-19@m1"
+    _night(root, day)
+    nightly.observe(root, [{"rwid": "1", "state": "NOT_INSPECTED"}], observed_on=day, entry="日常监督任务")        # 常规运行的观察
+    regular_obs = nightly._observation_today(root, day)
+    evidence = tmp_path / "手工证据"
+    nightly.begin(root, now=T(day + "T10:00:00"), manual="m1", evidence_dir=str(evidence))
+    nightly.observe(root, [{"rwid": "2", "state": "NOT_INSPECTED"}], observed_on=day, entry="日常监督任务", lane="m1")
+    assert nightly._observation_today(root, key)["added"] == 1 and nightly._observation_today(root, day) == regular_obs
+    _unreadable(evidence, "main-x", "exec-main", "exec-fill-01.json", "Traceback")                  # 手工运行里留下一个读不出的回执：未知
+    _lane_done(root, key)
+    closed = nightly.finish(root, key, evidence_dir=str(evidence))
+    assert closed["status"] == "FINISHED" and closed["finishedWithIssues"] and any(i["kind"] == "cloud-unknown" for i in closed["issues"])
+    nxt = nightly.begin(root, now=T("2026-11-20T02:00:00"))
+    carried = [i for issue in nxt["carryIssues"] if issue["kind"] == "cloud-unknown" for i in issue["items"]]
+    assert carried and carried[0]["originDate"] == key                                              # 手工未知沿到期核对进入下一轮，带手工运行键
+
+
+def test_manual_coverage_is_recorded_once_in_the_shared_log_with_its_lane_and_old_records_without_lanes_still_read(tmp_path):
+    root, day = tmp_path / "运行记录", "2026-11-19"
+    old = nightly._run_dir(root, "2026-11-18")
+    old.mkdir(parents=True)
+    (old / "run.json").write_text(json.dumps({"schemaVersion": "NightlyRunV1", "date": "2026-11-18", "status": "FINISHED", "startedAt": "2026-11-18T02:00:00+08:00",
+                                              "finishedAt": "2026-11-18T03:00:00+08:00", "entryKeyed": True}), encoding="utf-8")      # 没有 lane 字段、没有手工目录的旧记录
+    assert nightly._run_days(root, lanes=True) == ["2026-11-18"] and nightly.timeline(root)[0]["derivedStatus"] == "FINISHED"
+    _night(root, day)
+    nightly.begin(root, now=T(day + "T10:00:00"), manual="m1")
+    result = nightly.coverage(root, _full(day), day=day + "@m1")
+    assert result["lane"] == day + "@m1" and result["date"] == day and nightly.coverage_state(root, today=day)["lastCompleteOn"] == day
+
+
+def test_an_old_unfinished_day_without_unknown_writes_does_not_block_a_manual_run_but_an_unknown_write_does(tmp_path):
+    root, day = tmp_path / "运行记录", "2026-11-19"
+    nightly.begin(root, now=T("2026-11-13T02:00:00"), trigger="scheduled")                   # 更早一夜没收尾（历史遗留，没有未知写入）
+    _night(root, day)
+    assert nightly.begin(root, now=T(day + "T10:00:00"), manual="m1")["status"] == "STARTED"
+    nightly.checkpoint(root, "2026-11-13", stage="sync", status="started")                    # 写阶段停在 started＝效果未知
+    with pytest.raises(nightly.NightlyError, match="效果未知的写入"):
+        nightly.begin(root, now=T(day + "T11:00:00"), manual="m2")
