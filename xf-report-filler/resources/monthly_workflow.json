@@ -424,6 +424,9 @@
       "G04": "references/monthly/output_G04_case_scores.md",
       "G05": "references/monthly/output_G05_monthly_report.md",
       "G06": "references/monthly/output_G06_legacy_score_office.md"
+    },
+    "optional_branches": {
+      "R01_online_sheet": "references/monthly/output_R01_online_sheet.md"
     }
   },
   "legacy_template_names": {
@@ -494,5 +497,28 @@
     "pending_business_inputs_are_not_final": true,
     "backup_status_separate_from_primary_completion": true,
     "cleanup_policy_denial_blocks_business_delivery": false
+  },
+  "online_sheet_rules": {
+    "brigades": [
+      "梁溪大队",
+      "锡山大队",
+      "惠山大队",
+      "滨湖大队",
+      "新吴大队",
+      "江阴大队",
+      "宜兴大队",
+      "经开大队"
+    ],
+    "items": [
+      "产品案卷核查",
+      "产品工作实效",
+      "联网系统核查"
+    ],
+    "sheet_name_pattern": "{month}月情况",
+    "title_year_markers": [
+      "{year}年",
+      "{yy}年"
+    ],
+    "note": "R01 在线维护分支：只同步这 8 个大队 × 3 个项目共 24 格；在线表链接是本机执行输入，不写在此。"
   }
 }

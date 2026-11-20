@@ -27,6 +27,7 @@ metadata:
 - 用户问整体流程：读本文件、`references/monthly_workflow.md`、`references/monthly/00_workflow_router.md`、`references/monthly/01_directory_model.md`。
 - 用户要整理目录：再读 `01_directory_model.md`、`02_template_strategy.md`。
 - 用户要处理当月根层两张表：读 `output_R01_office_record.md`、`output_R02_product_stats.md`，以及它们依赖的数据源对象。
+- 用户要把月考核表同步到金山文档在线表：另读 `output_R01_online_sheet.md`，用 `scripts/monthly_online_sheet.py`（默认只读 plan；官方 kdocs-cli 优先，未登录时按该文档走 Ego fallback）。
 - 用户要生成 `（X-1）月巡查` 成绩：读 `source_product_register.md`、联网源表对象、`output_G01_product_archives.md` 到 `output_G05_monthly_report.md`。
 - 用户要生成年度产品问题汇总：读 `references/annual_problem_summary/00_workflow_router.md`、`source_product_register.md`、`output_annual_problem_summary.md`、`validation_and_audit.md`。
 - 用户要生成或修正 Word 公文类格式：读 `references/document_style.md`；年度汇总还要读年度输出对象文档。
