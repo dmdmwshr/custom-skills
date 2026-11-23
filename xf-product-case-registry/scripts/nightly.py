@@ -640,20 +640,21 @@ def discover_starts(root: Path, day: str) -> dict[str, Any]:
         entry = item["entry"]
         run_day = date.fromisoformat(split_run_key(key)[0])
         if item["status"] != "done":
-            if entry not in through:
-                first = date.fromisoformat(item["window"][0]) if item.get("window") else run_day - timedelta(days=DISCOVER_BOOTSTRAP_DAYS)
+            if entry not in through:      # 没读完整：该运行本该从 min(窗口起点, 运行日前 14 天) 读起，这段至今没被证实读过
+                first = min(date.fromisoformat(item["window"][0]) if item.get("window") else run_day, run_day - timedelta(days=DISCOVER_BOOTSTRAP_DAYS))
                 unread[entry] = min(unread.get(entry, first), max(floor, first))
             continue
         if item.get("window"):
             start, end = (date.fromisoformat(value) for value in item["window"])
             if entry in through:
                 reaches = start <= through[entry] + timedelta(days=1)
-            elif entry in unread:      # 第一次完整覆盖，而此前已有证实没读完整的窗口：必须从最早未读起点读起；显式缩窄的窗口留下检查点，但不替代未读跨度
-                reaches = start <= unread[entry]
-            else:      # 没有任何历史：常规运行的窗口自己就是起点；同日手工运行的窄窗不能凭空建立水位，除非它本身就读满了常规起点
-                reaches = "@" not in key or start <= max(floor, run_day - timedelta(days=DISCOVER_BOOTSTRAP_DAYS))
+            else:      # 第一次完整覆盖：窗口必须从常规起点（运行日前 14 天）或该入口已证实未读的最早起点（取更早者）读起；手工或常规的显式窄窗留下检查点，但不替代未读跨度
+                reaches = start <= max(floor, min(unread.get(entry, run_day), run_day - timedelta(days=DISCOVER_BOOTSTRAP_DAYS)))
             if not reaches:
                 gaps[entry].append([start.isoformat(), end.isoformat()])      # 与应覆盖的范围之间有未读缺口：这次读取不推进水位
+                if entry not in through:      # 没有任何覆盖的入口：缩窄的这次读取也证明其本该读的起点至今未读
+                    first = max(floor, min(start, run_day - timedelta(days=DISCOVER_BOOTSTRAP_DAYS)))
+                    unread[entry] = min(unread.get(entry, first), first)
                 continue
             if end > through.get(entry, date.min):
                 through[entry], basis[entry] = end, "checkpoint-window"
@@ -1039,6 +1040,8 @@ def execution_status(run: dict[str, Any] | None, lane: str, run_key: str) -> dic
     elif ("@" in lane) != bool(run_lane) or (run_lane and run_lane != lane):
         reasons.append("运行记录的运行通道与本次不一致")
     latest = executions[-1] if executions else None
+    if run is not None and run.get("status") in ("FINISHED", "PAUSED_QUOTA"):      # 运行已收尾或因额度暂停：哪怕执行没记退出，也不再发出云写入
+        reasons.append(f"运行状态已是 {run.get('status')}，不再发出云写入")
     if run is not None and latest is None:
         reasons.append("该运行没有绑定的执行")
     if latest is not None:
@@ -1133,7 +1136,9 @@ def recount_status(business_root: Path, night_run: Path, *, run_key: str, contra
                 reasons.append("最近一次复算有差异或状态不是 OK")
             if meta.get("runKey") != run_key or meta.get("contractSha256") != contract_sha or meta.get("exit") != 0:
                 reasons.append("最近一次复算不是本次执行、当前合同或未以 0 差异结束")
-            since = max((latest / name).stat().st_mtime for name in ("recount.json", "recount.meta.json"))
+            started = meta.get("startedAtEpoch")      # 复算开始时刻：读取期间（开始之后）出现的任何写入也使它失效，不只看它结束之后
+            finished = max((latest / name).stat().st_mtime for name in ("recount.json", "recount.meta.json"))
+            since = min(float(started), finished) if isinstance(started, (int, float)) else finished
             reasons += [f"复算之后：{item}" for item in writes_after(business_root, night_run, since)]
     return {"recount": latest.name if latest else None, "ok": not reasons, "reasons": reasons}
 

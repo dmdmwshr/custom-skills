@@ -1269,7 +1269,8 @@ def test_each_discover_entry_starts_from_its_own_last_complete_read_and_failed_e
 
 def test_a_long_interruption_keeps_the_start_at_the_last_success_and_recovery_rolls_it_forward(tmp_path):
     root = tmp_path / "运行记录"
-    _discover(root, "2026-11-10", DAILY_I, window=("2026-11-01", "2026-11-10"))
+    _discover(root, "2026-11-10", DAILY_I, window=("2026-10-27", "2026-11-10"))                     # 第一次完整覆盖要从常规起点（前 14 天）读起
+    _discover(root, "2026-11-10", DAILY_C, window=("2026-10-27", "2026-11-10"))
     for day in ("2026-11-11", "2026-11-12", "2026-11-13", "2026-11-14", "2026-11-15"):                 # 连续 5 夜 502
         _discover(root, day, DAILY_I, status="failed")
         _discover(root, day, DAILY_C, window=("2026-11-05", day))                                      # 同夜别的入口照常滚动
@@ -1282,7 +1283,7 @@ def test_a_long_interruption_keeps_the_start_at_the_last_success_and_recovery_ro
 
 def test_a_narrow_manual_window_across_an_unread_gap_never_advances_but_a_contiguous_one_does(tmp_path):
     root = tmp_path / "运行记录"
-    _discover(root, "2026-11-10", DAILY_C, window=("2026-11-01", "2026-11-10"))
+    _discover(root, "2026-11-10", DAILY_C, window=("2026-10-27", "2026-11-10"))
     _discover(root, "2026-11-10", DAILY_C, window=("2026-11-18", "2026-11-19"), lane="m1", hour="10")   # 窄跑：与已覆盖范围之间有缺口
     entries = nightly.discover_starts(root, "2026-11-20")["entries"]
     assert entries[DAILY_C]["coveredThrough"] == "2026-11-10" and entries[DAILY_C]["gapWindows"] == [["2026-11-18", "2026-11-19"]]
@@ -1352,6 +1353,10 @@ def test_an_old_explicit_run_key_an_ended_execution_or_another_lane_is_refused_b
     assert nightly.execution_status(manual, "2026-11-23", new)["ok"] is False                         # 常规通道不认手工运行的执行
     assert nightly.execution_status(run, "2026-11-23@s1", new)["ok"] is False                         # 手工通道不认常规运行
     assert nightly.execution_status(None, "2026-11-23", new)["ok"] is False
+    live = {"date": "2026-11-23", "status": "RUNNING", "executions": [{k: v for k, v in second.items() if k != "endedAt"}]}
+    assert nightly.execution_status(live, "2026-11-23", new)["ok"] is True
+    for terminal in ("FINISHED", "PAUSED_QUOTA"):                                                      # 运行已收尾/额度暂停：执行没记退出也不再发出云写入
+        assert "不再发出云写入" in nightly.execution_status(dict(live, status=terminal), "2026-11-23", new)["reasons"][0]
 
 
 def _recount(night, name, key, sha, *, exit_code=0, diffs=None, status="OK"):
@@ -1493,6 +1498,8 @@ def test_a_manual_same_day_narrow_window_cannot_start_an_entry_but_a_full_manual
     assert nightly.discover_starts(root, "2026-11-10")["entries"][DAILY_C]["coveredThrough"] is None
     _discover(root, "2026-11-09", DAILY_I, window=("2026-10-26", "2026-11-09"), lane="m3")                           # 本身就读满常规 14 天起点
     assert nightly.discover_starts(root, "2026-11-10")["entries"][DAILY_I]["coveredThrough"] == "2026-11-09"
+    _discover(root, "2026-11-05", OPEN_C, window=("2026-11-05", "2026-11-05"))                                       # 无历史的常规显式窄窗同样不建立水位
+    assert nightly.discover_starts(root, "2026-11-10")["entries"][OPEN_C]["coveredThrough"] is None
 
 
 def test_pending_cases_are_numbered_like_the_others_counted_apart_and_never_echo_checkpoint_text(tmp_path, monkeypatch):
@@ -1518,3 +1525,21 @@ def test_pending_cases_are_numbered_like_the_others_counted_apart_and_never_echo
     for secret in ("原件样例", "材料 明细", "C:", "张某", "320000"):
         assert secret not in text
     assert "来源材料暂缺或待核，待补齐后办理" in text and "待核案 2 案" in text
+
+
+def test_a_write_that_lands_while_the_recount_is_still_reading_also_invalidates_it(tmp_path):
+    business, night = tmp_path / "业务根", tmp_path / "晚"
+    (business / nightly.RUNTIME_DIR).mkdir(parents=True)
+    key, sha = "e20261123020305-aabbccdd", "f" * 64
+    recount = _recount(night, "recount-020000", key, sha)
+    finished = (recount / "recount.json").stat().st_mtime
+    period = night / "sync" / "period-overlapped"
+    period.mkdir()
+    (period / "period.json").write_text(json.dumps({"status": "OK", "updated": 1}), encoding="utf-8")
+    os.utime(period / "period.json", (finished - 20, finished - 20))                  # 复算读取期间落下的写入回执，早于复算结束
+    assert nightly.recount_status(business, night, run_key=key, contract_sha=sha)["ok"] is True      # 旧格式没有开始时刻：只能按结束时刻判断
+    meta = json.loads((recount / "recount.meta.json").read_text(encoding="utf-8"))
+    (recount / "recount.meta.json").write_text(json.dumps(dict(meta, startedAtEpoch=finished - 60)), encoding="utf-8")
+    os.utime(recount / "recount.meta.json", (finished, finished))
+    status = nightly.recount_status(business, night, run_key=key, contract_sha=sha)
+    assert status["ok"] is False and "period" in status["reasons"][0]                                 # 记了开始时刻：读取期间的写入使它失效
