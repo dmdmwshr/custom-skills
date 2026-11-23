@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -1263,7 +1264,7 @@ def test_each_discover_entry_starts_from_its_own_last_complete_read_and_failed_e
     _discover(root, "2026-11-20", OPEN_C, status="failed")                                           # 502：不推进
     on_21 = nightly.discover_starts(root, "2026-11-21")["entries"]
     assert on_21[DAILY_C]["start"] == "2026-11-17" and on_21[DAILY_C]["coveredThrough"] == "2026-11-20" and on_21[DAILY_C]["basis"] == "checkpoint-window"
-    assert on_21[OPEN_C]["basis"] == "bootstrap" and on_21[OPEN_C]["start"] == "2026-11-07"          # 没成功过：原来的 14 天
+    assert on_21[OPEN_C]["basis"] == "uncovered-failure" and on_21[OPEN_C]["start"] == "2026-11-06"   # 没成功过：从首次未读窗口起点补回，不从次日截断
 
 
 def test_a_long_interruption_keeps_the_start_at_the_last_success_and_recovery_rolls_it_forward(tmp_path):
@@ -1322,8 +1323,198 @@ def test_the_structured_report_states_the_case_count_first_numbers_every_case_ev
     assert one["caseCount"] == 1 and one["text"].splitlines()[0] == "运行 2026-11-23：RUNNING。本轮新建或更新 1 案。"
     assert one["cases"][0]["text"] == "第 1 案 新吴区消防救援局｜甲公司（项目编号 32002205C202600117）"
     assert "案数 1；云端新建行 2；更新操作 3；唯一字段格 5" in one["text"]
-    assert "D:/" not in one["text"] and "/mnt/" not in one["text"] and "<路径>" in one["text"]
+    assert "D:/" not in one["text"] and "/mnt/" not in one["text"] and "写前镜像被截断" not in one["text"] and "处理失败，原因见运行检查点" in one["text"]   # 检查点原文不进正文，只给受控的业务原因
     assert one["problems"][0]["text"].startswith("第 1 案 新吴区消防救援局｜甲公司")
     stats.update(collectedCases=[], cloud={"cases": [], "unknown": []})
     none = nightly.report(root, day)
     assert none["caseCount"] == 0 and "0 案" in none["text"].splitlines()[0]
+
+
+# ---------------------------------------------------------------------------------------------
+# a43 返工：写前门禁的执行身份、复算失效、到期案分阶段终标、首次未读窗口、待核案汇报
+# ---------------------------------------------------------------------------------------------
+
+
+def _execution(sid, bound, **extra):
+    return {"sessionId": sid, "receipt": f"{sid}.json", "runnerPid": 5, "boundAt": bound, **extra}
+
+
+def test_an_old_explicit_run_key_an_ended_execution_or_another_lane_is_refused_before_any_planning():
+    first, second = _execution("aabbccdd-1", "2026-11-23T02:03:05+08:00", endedAt="2026-11-23T03:00:00+08:00"), _execution("bbccddee-2", "2026-11-23T03:07:09+08:00")
+    run = {"date": "2026-11-23", "executions": [first, second]}
+    old, new = nightly.execution_key(first), nightly.execution_key(second)
+    assert nightly.execution_status(run, "2026-11-23", new)["ok"] is True
+    assert "最近绑定" in nightly.execution_status(run, "2026-11-23", old)["reasons"][0]               # 新执行已接管：旧显式键不能再进计划
+    run["executions"][1]["endedAt"] = "2026-11-23T04:00:00+08:00"
+    assert "终态" in nightly.execution_status(run, "2026-11-23", new)["reasons"][0]                  # 已结束的执行不再写
+    manual = {"date": "2026-11-23", "lane": {"kind": "manual", "id": "s1", "businessDate": "2026-11-23"}, "executions": [{k: v for k, v in second.items() if k != "endedAt"}]}
+    assert nightly.execution_status(manual, "2026-11-23@s1", new)["ok"] is True                       # 真实手工记录里的 lane 是字典
+    assert nightly.execution_status(manual, "2026-11-23", new)["ok"] is False                         # 常规通道不认手工运行的执行
+    assert nightly.execution_status(run, "2026-11-23@s1", new)["ok"] is False                         # 手工通道不认常规运行
+    assert nightly.execution_status(None, "2026-11-23", new)["ok"] is False
+
+
+def _recount(night, name, key, sha, *, exit_code=0, diffs=None, status="OK"):
+    folder = night / "sync" / name
+    folder.mkdir(parents=True)
+    (folder / "recount.json").write_text(json.dumps({"status": status, "diffs": diffs or []}), encoding="utf-8")
+    (folder / "recount.meta.json").write_text(json.dumps({"runKey": key, "contractSha256": sha, "exit": exit_code}), encoding="utf-8")
+    return folder
+
+
+def _later(path, seconds=5):
+    stamp = path.stat().st_mtime + seconds
+    os.utime(path, (stamp, stamp))
+
+
+def test_a_recount_is_only_valid_until_any_later_cloud_write_period_exceptions_ordinary_or_unclear(tmp_path):
+    business, night = tmp_path / "业务根", tmp_path / "晚"
+    (business / nightly.RUNTIME_DIR).mkdir(parents=True)
+    key, sha = "e20261123020305-aabbccdd", "f" * 64
+    recount = _recount(night, "recount-020000", key, sha)
+    for name in ("recount.json", "recount.meta.json"):
+        _later(recount / name, -60)
+    ok = lambda: nightly.recount_status(business, night, run_key=key, contract_sha=sha)
+    assert ok()["ok"] is True
+    assert nightly.recount_status(business, night, run_key="other", contract_sha=sha)["ok"] is False        # 别的执行
+    assert nightly.recount_status(business, night, run_key=key, contract_sha="0" * 64)["ok"] is False      # 别的合同
+    period = night / "sync" / "period-030000"
+    period.mkdir()
+    (period / "period.json").write_text(json.dumps({"executed": True, "status": "OK", "plan": {"creates": [], "updates": []}}), encoding="utf-8")
+    assert ok()["ok"] is True                                                                                # 执行了但没有任何要写的行：不是写入
+    (period / "period.json").write_text(json.dumps({"executed": True, "status": "OK", "plan": {"creates": [], "updates": [{"k": 1}]}}), encoding="utf-8")
+    assert ok()["ok"] is False and "period" in ok()["reasons"][0]                                             # 期行写入使旧复算失效
+    (period / "plan-only").write_text("", encoding="utf-8")
+    assert ok()["ok"] is True                                                                                # 只看计划不算写入
+    (period / "plan-only").unlink()
+    (period / "period.json").write_text("{", encoding="utf-8")
+    assert ok()["ok"] is False                                                                               # 结果不明同样失效
+    (period / "period.json").unlink()
+    exceptions = night / "sync" / "exceptions-031000"
+    exceptions.mkdir()
+    (exceptions / "exceptions.json").write_text(json.dumps({"executed": True, "status": "OK", "plan": {"creates": [{"k": 1}], "updates": []}}), encoding="utf-8")
+    assert "exceptions" in ok()["reasons"][0]
+    (exceptions / "exceptions.json").unlink()
+    assert ok()["ok"] is True
+    ordinary = night / "sync" / "label-032000" / "exec-label"
+    ordinary.mkdir(parents=True)
+    (ordinary / "exec-li-1.err").write_text("", encoding="utf-8")
+    assert "普通写入" in ok()["reasons"][0]
+    (ordinary / "exec-li-1.err").unlink()
+    newer = _recount(night, "recount-040000", key, sha)
+    for name in ("recount.json", "recount.meta.json"):
+        _later(newer / name, 30)
+    assert nightly.recount_status(business, night, run_key=key, contract_sha=sha)["ok"] is True              # 之后的新复算恢复有效
+    (newer / "recount.json").write_text(json.dumps({"status": "DIFF", "diffs": [{"x": 1}]}), encoding="utf-8")
+    assert nightly.recount_status(business, night, run_key=key, contract_sha=sha)["ok"] is False             # 有差异不盖戳
+
+
+def test_ledgers_written_after_the_recount_also_invalidate_it(tmp_path):
+    business, night = tmp_path / "业务根", tmp_path / "晚"
+    runtime = business / nightly.RUNTIME_DIR
+    key, sha = "e20261123020305-aabbccdd", "f" * 64
+    recount = _recount(night, "recount-020000", key, sha)
+    since = max((recount / name).stat().st_mtime for name in ("recount.json", "recount.meta.json"))
+    ledger = runtime / nightly.MONTHLY_LEDGER / "2026-11-23.jsonl"
+    ledger.parent.mkdir(parents=True)
+    before = datetime.fromtimestamp(since - 600, nightly.SHANGHAI).isoformat(timespec="seconds")
+    ledger.write_text(json.dumps({"at": before, "event": "intent", "intentId": "i1"}) + "\n", encoding="utf-8")
+    assert nightly.recount_status(business, night, run_key=key, contract_sha=sha)["ok"] is True              # 复算之前的写入不影响
+    after = datetime.fromtimestamp(since + 60, nightly.SHANGHAI).isoformat(timespec="seconds")
+    with ledger.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"at": after, "event": "intent", "intentId": "i2"}) + "\n")
+    _later(ledger, 120)
+    status = nightly.recount_status(business, night, run_key=key, contract_sha=sha)
+    assert status["ok"] is False and nightly.MONTHLY_LEDGER in status["reasons"][0]
+
+
+def _plan(evidence, pending=(), acquire=()):
+    evidence.mkdir(exist_ok=True)
+    (evidence / "scan-plan.json").write_text(json.dumps({"pending": [{"projectNo": p, "action": a} for p, a in pending],
+                                                         "packageAcquireFirst": [{"projectNo": p, "action": "ACQUIRE_FIRST"} for p in acquire]}), encoding="utf-8")
+
+
+def test_a_due_case_is_closed_by_the_stages_it_actually_still_needed_not_by_discover_done(tmp_path):
+    root, day, project, other = tmp_path / "运行记录", "2026-11-23", "32002221C202600098", "32002208C202600131"
+    evidence = tmp_path / "证据"
+    _plan(evidence, pending=[(project, "CLASSIFY"), (other, "LOCAL_VERIFY")], acquire=[project])
+    nightly.begin(root, now=T(day + "T02:00:00"), trigger="scheduled", evidence_dir=str(evidence))
+    nightly.checkpoint(root, day, stage="discover", status="done", case=project, detail="确认身份")
+    due = nightly.due_cases(root, day, evidence_dir=str(evidence))
+    row = next(r for r in due["states"] if r["case"] == project)
+    assert due["unmarked"] == [other, project] and row["queues"] == ["packageAcquireFirst/ACQUIRE_FIRST", "pending/CLASSIFY"]   # 两处待办合成一案，发现 done 不算
+    assert row["required"] == ["acquire", "organize"] and row["kind"] == "open"
+    nightly.checkpoint(root, day, stage="acquire", status="done", case=project)
+    assert nightly.due_cases(root, day, evidence_dir=str(evidence))["states"][1]["open"] == ["organize"]            # 取包完成但整理还没走完
+    nightly.checkpoint(root, day, stage="organize", status="done", case=project)
+    nightly.checkpoint(root, day, stage="validate", status="skipped", case=other, issue=True, detail="受 107 批次保护，不放行")
+    done = nightly.due_cases(root, day, evidence_dir=str(evidence))
+    kinds = {r["case"]: r["kind"] for r in done["states"]}
+    assert done["unmarked"] == [] and kinds == {project: "completed", other: "protected"}
+    # 更早阶段的缺据会同时关闭它之后的阶段；更晚阶段的缺据不关闭前面没做的阶段
+    late = tmp_path / "晚证据"
+    _plan(late, pending=[(project, "COLLECT")])
+    root2 = tmp_path / "运行记录2"
+    nightly.begin(root2, now=T(day + "T02:00:00"), trigger="scheduled", evidence_dir=str(late))
+    nightly.checkpoint(root2, day, stage="validate", status="skipped", case=project, issue=True, detail="缺材料")
+    assert nightly.due_cases(root2, day, evidence_dir=str(late))["unmarked"] == [project]
+    nightly.checkpoint(root2, day, stage="acquire", status="skipped", case=project, issue=True, detail="监督系统尚未提供原包")
+    closed = nightly.due_cases(root2, day, evidence_dir=str(late))["states"][0]
+    assert closed["closed"] and closed["kind"] == "needs-evidence" and "原包" in closed["detail"]
+
+
+def test_a_due_case_with_an_unknown_effect_is_never_closed_here(tmp_path):
+    root, day, project = tmp_path / "运行记录", "2026-11-23", "32002221C202600098"
+    evidence = tmp_path / "证据"
+    _plan(evidence, acquire=[project])
+    nightly.begin(root, now=T(day + "T02:00:00"), trigger="scheduled", evidence_dir=str(evidence))
+    nightly.checkpoint(root, day, stage="acquire", status="started", case=project)
+    state = nightly.due_cases(root, day, evidence_dir=str(evidence))["states"][0]
+    assert state["kind"] == "unknown" and not state["closed"]                                                       # 效果未知先回读，不当作终标
+
+
+def test_a_never_succeeded_entry_keeps_its_earliest_unread_start_and_narrow_runs_do_not_replace_it(tmp_path):
+    root = tmp_path / "运行记录"
+    _discover(root, "2026-10-01", OPEN_C, status="failed", window=("2026-09-17", "2026-10-01"))
+    _discover(root, "2026-11-05", OPEN_C, status="failed", window=("2026-10-22", "2026-11-05"))
+    plan = nightly.discover_starts(root, "2026-11-25")["entries"][OPEN_C]
+    assert plan["start"] == "2026-09-17" and plan["coveredThrough"] is None and plan["basis"] == "uncovered-failure"   # 首次失败逾 14 天仍补回
+    _discover(root, "2026-11-20", OPEN_C, window=("2026-11-18", "2026-11-20"), lane="m1")                              # 手工窄窗：留检查点，不替代未读跨度
+    _discover(root, "2026-11-21", OPEN_C, window=("2026-11-19", "2026-11-21"))                                        # 常规但被显式缩窄
+    plan = nightly.discover_starts(root, "2026-11-25")["entries"][OPEN_C]
+    assert plan["coveredThrough"] is None and plan["start"] == "2026-09-17" and len(plan["gapWindows"]) == 2
+    _discover(root, "2026-11-22", OPEN_C, window=("2026-09-17", "2026-11-22"))                                        # 读满最早未读起点：才建立水位
+    assert nightly.discover_starts(root, "2026-11-25")["entries"][OPEN_C]["coveredThrough"] == "2026-11-22"
+
+
+def test_a_manual_same_day_narrow_window_cannot_start_an_entry_but_a_full_manual_read_can(tmp_path):
+    root = tmp_path / "运行记录"
+    _discover(root, "2026-11-09", DAILY_C, window=("2026-11-09", "2026-11-09"), lane="m2")
+    assert nightly.discover_starts(root, "2026-11-10")["entries"][DAILY_C]["coveredThrough"] is None
+    _discover(root, "2026-11-09", DAILY_I, window=("2026-10-26", "2026-11-09"), lane="m3")                           # 本身就读满常规 14 天起点
+    assert nightly.discover_starts(root, "2026-11-10")["entries"][DAILY_I]["coveredThrough"] == "2026-11-09"
+
+
+def test_pending_cases_are_numbered_like_the_others_counted_apart_and_never_echo_checkpoint_text(tmp_path, monkeypatch):
+    root, day = tmp_path / "业务根" / "运行记录", "2026-11-23"
+    root.mkdir(parents=True)
+    changed, held, same_unit = "32002205C202600117", "32002221C202600098", "32002221C202600099"
+    (tmp_path / "业务根" / "案卷水位记录.json").write_text(json.dumps({"cases": {
+        changed: {"unitName": "甲公司", "brigadeName": "新吴区消防救援局"},
+        held: {"unitName": "乙公司", "brigadeName": "江阴大队"}, same_unit: {"unitName": "乙公司", "brigadeName": "江阴大队"}}}), encoding="utf-8")
+    evidence = tmp_path / "证据"
+    _plan(evidence, pending=[(same_unit, "CLASSIFY")])
+    nightly.begin(root, now=T(day + "T02:00:00"), trigger="scheduled", evidence_dir=str(evidence))
+    nightly.checkpoint(root, day, stage="acquire", status="skipped", case=held, issue=True, detail=r"材料待核，原件样例.xlsx，C:\temp\材料 明细.pdf，张某 身份证 320000")
+    stats = {"changed": 1, "reportedChanged": 0, "collectedCases": [changed], "archivedCases": [], "coverage": "x",
+             "breakdown": {"cloudCreatedRows": 2, "cloudUpdatedOperations": 3, "cloudUniqueFields": 5, "cloudUnknown": 0, "unknownWriteCheckpoints": 0, "observation": {}},
+             "cloud": {"cases": [changed], "unknown": []}}
+    monkeypatch.setattr(nightly, "run_stats", lambda *a, **k: stats)
+    result = nightly.report(root, day, evidence_dir=str(evidence))
+    assert result["caseCount"] == 1 and result["counts"]["pendingCases"] == 2 and "本轮新建或更新 1 案" in result["text"].splitlines()[0]
+    assert [row["n"] for row in result["pendingCases"]] == [2, 3]                                                     # 同单位两案仍各一条，按项目编号
+    assert result["pendingCases"][0]["text"].startswith("第 2 案 江阴大队｜乙公司（项目编号 " + held + "）——待核：")
+    text = result["text"]
+    for secret in ("原件样例", "材料 明细", "C:", "张某", "320000"):
+        assert secret not in text
+    assert "来源材料暂缺或待核，待补齐后办理" in text and "待核案 2 案" in text

@@ -2790,6 +2790,8 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--maintenance-base-token", help="维修企业台账 Base；与 feishu-mirror 同一组目标")
     gate.add_argument("--date", help="运行日期 YYYY-MM-DD；省略取当前上海日期")
     gate.add_argument("--manual-run", help="同日手工运行编号")
+    gate.add_argument("--execution-only", action="store_true", help="发出真实写入之前的轻量复核：只核真实资料根与同一执行仍是本通道最近未结的执行，不重读快照")
+    gate.add_argument("--stamp-recount", help="本晚运行目录；另核最近一次复算对本次执行/合同零差异，且其后没有任何云端写入（期行、异常登记、普通写入，含结果不明）")
     gate.set_defaults(func=feishu_pre_gate_command)
     recount = sub.add_parser(
         "feishu-recount",
@@ -3317,7 +3319,10 @@ def _refuse_pre_after_writes(args: argparse.Namespace, module: Any, nightly: Any
 
 
 def feishu_pre_gate_command(args: argparse.Namespace) -> None:
-    """Read-only: may this execution change Feishu now? Needs its complete, confirmed write-before snapshot of the current contract."""
+    """Read-only: may this execution change Feishu now? Needs the real data root, this lane's latest unfinished execution (an old explicit
+    run key or an ended / taken-over execution is refused) and its complete, confirmed write-before snapshot of the current contract.
+    ``--execution-only`` is the light re-check right before an actual execute is sent; ``--stamp-recount`` also asks whether the newest
+    recount of this night is still valid for the monthly stamp (no cloud write of any kind after it)."""
     module = importlib.import_module(f"{__package__}.feishu_mirror" if __package__ else "feishu_mirror")
     nightly = importlib.import_module(f"{__package__}.nightly" if __package__ else "nightly")
     sync = importlib.import_module(f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync")
@@ -3325,21 +3330,37 @@ def feishu_pre_gate_command(args: argparse.Namespace) -> None:
     if args.maintenance_base_token:
         targets["maintenanceBase"] = {"baseToken": args.maintenance_base_token}
     lane = nightly.lane_key(_run_day(args), args.manual_run or "")
-    run = nightly._load(nightly._run_dir(Path(args.business_root) / nightly.RUNTIME_DIR, lane) / "run.json", None)
-    registered = (((run or {}).get("mirrorSnapshots") or {}).get("pre") or {}).get(args.run_key)
+    root = Path(args.business_root)
+    run = nightly._load(nightly._run_dir(root / nightly.RUNTIME_DIR, lane) / "run.json", None)
+    reasons: list[str] = []
     try:
-        report = module.pre_gate(contract_path=Path(args.contract), contract_sha=args.contract_sha, sections=list(targets), targets=targets,
-                                 business_root=Path(args.business_root), day=_run_day(args), run_key=args.run_key, registered=registered)
-    except (sync.SyncError, ValueError, OSError) as error:
-        raise RegistryError(f"写前快照检查已拒绝：{error}") from error
-    if run is None:
-        report = {**report, "status": "INCOMPLETE", "reasons": ["没有该日期/手工运行的运行记录", *report["reasons"]]}
-    incomplete = ((((run or {}).get("mirrorSnapshots") or {}).get("preIncomplete")) or {}).get(args.run_key)
-    if incomplete:
-        report = {**report, "status": "INCOMPLETE", "reasons": [*report["reasons"], "运行记录已保存本执行写前快照不完整的原证据，需安全接管（新绑定执行取新运行键）"]}
+        inside = Path(args.contract).resolve().is_relative_to((root / nightly.RUNTIME_DIR / "字段合同").resolve())
+    except (OSError, ValueError):
+        inside = False
+    if not inside:
+        reasons.append("字段合同不在本次业务根的 运行记录/字段合同 下（不是真实资料根）")
+    execution = nightly.execution_status(run, lane, args.run_key)
+    reasons += execution["reasons"]
+    report: dict[str, Any] = {"schema": "FeishuPreSnapshotGateV1", "day": _run_day(args), "runKey": args.run_key, "lane": lane, "execution": execution,
+                              "externalCalls": "none", "reasons": reasons, "status": "OK" if not reasons else "INCOMPLETE"}
+    if not args.execution_only and not reasons:
+        registered = (((run or {}).get("mirrorSnapshots") or {}).get("pre") or {}).get(args.run_key)
+        try:
+            report = {**module.pre_gate(contract_path=Path(args.contract), contract_sha=args.contract_sha, sections=list(targets), targets=targets,
+                                        business_root=root, day=_run_day(args), run_key=args.run_key, registered=registered), "lane": lane, "execution": execution}
+        except (sync.SyncError, ValueError, OSError) as error:
+            raise RegistryError(f"写前快照检查已拒绝：{error}") from error
+        incomplete = ((((run or {}).get("mirrorSnapshots") or {}).get("preIncomplete")) or {}).get(args.run_key)
+        if incomplete:
+            report = {**report, "status": "INCOMPLETE", "reasons": [*report["reasons"], "运行记录已保存本执行写前快照不完整的原证据，需安全接管（新绑定执行取新运行键）"]}
+    if args.stamp_recount and report["status"] == "OK":
+        recount = nightly.recount_status(root, Path(args.stamp_recount), run_key=args.run_key, contract_sha=args.contract_sha)
+        report = {**report, "recount": recount}
+        if not recount["ok"]:
+            report = {**report, "status": "INCOMPLETE", "reasons": [*report["reasons"], *recount["reasons"]]}
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["status"] != "OK":
-        print("ERROR: 本次执行没有完整的写前快照：不得写飞书；本地归档和只读对账可继续", file=sys.stderr)
+        print("ERROR: 本次执行现在不得写飞书（写前快照不完整、运行键不是本通道最近未结的执行，或复算已失效）：本地归档和只读对账可继续", file=sys.stderr)
         raise SystemExit(2)
 
 

@@ -357,5 +357,47 @@ def test_a_cut_short_pre_is_finished_before_any_write_but_never_completed_after_
     blocked = registry_cli.feishu_pre_gate_command
     with pytest.raises(SystemExit) as stop:
         blocked(argparse.Namespace(contract=str(contract), contract_sha=_sha(contract), base_token=BASE, maintenance_base_token=MBASE,
-                                   business_root=str(tmp_path / "root"), date=DAY, run_key=key, manual_run=None))
+                                   business_root=str(tmp_path / "root"), date=DAY, run_key=key, manual_run=None,
+                                   execution_only=False, stamp_recount=None))
     assert stop.value.code == 2
+
+
+def test_the_gate_command_refuses_a_stale_run_key_a_taken_over_execution_and_a_contract_outside_the_real_root(tmp_path, contract, capsys):
+    cloud, ledger = Cloud(_rows()), _ledger(tmp_path)
+    runtime, key = _gate_setup(tmp_path, contract)
+    pre = _run(contract, cloud, tmp_path, DAY, ledger, tag="pre", run_key=key)
+    _register(runtime, key, pre, contract)
+    real = runtime / "字段合同" / contract.name
+    real.parent.mkdir(parents=True, exist_ok=True)
+    real.write_bytes(contract.read_bytes())
+
+    def command(**more):
+        args = _args(tmp_path, real, more.pop("key", key))
+        for name, value in {"maintenance_base_token": MBASE, "base_token": BASE, "execution_only": False, "stamp_recount": None, **more}.items():
+            setattr(args, name, value)
+        try:
+            registry_cli.feishu_pre_gate_command(args)
+            return 0
+        except SystemExit as stop:
+            return stop.code
+
+    assert command() == 0 and command(execution_only=True) == 0
+    run_path = nightly._run_dir(runtime, DAY) / "run.json"
+    run = nightly._load(run_path, None)
+    run["executions"].append({"sessionId": "ccddeeff-9", "receipt": "r9.json", "runnerPid": 9, "boundAt": "2026-11-23T03:30:00+08:00"})
+    nightly._atomic(run_path, run)
+    assert command() == 2 and command(execution_only=True) == 2                                  # 新执行接管：旧的显式运行键拒绝进入计划
+    run["executions"][0]["endedAt"] = "2026-11-23T03:00:00+08:00"
+    run["executions"].pop()
+    nightly._atomic(run_path, run)
+    assert command() == 2                                                                         # 已结束的执行拒绝
+    del run["executions"][0]["endedAt"]
+    nightly._atomic(run_path, run)
+    assert command() == 0
+    outside = tmp_path / "别处合同.json"
+    outside.write_bytes(contract.read_bytes())
+    args = _args(tmp_path, outside, key)
+    args.maintenance_base_token, args.base_token, args.execution_only, args.stamp_recount = MBASE, BASE, True, None
+    with pytest.raises(SystemExit) as stop:
+        registry_cli.feishu_pre_gate_command(args)                                                # 合同不在本业务根下：不是真实资料根
+    assert stop.value.code == 2 and "真实资料根" in capsys.readouterr().out
