@@ -641,3 +641,122 @@ def test_real_nested_zip_still_rejected_even_when_named_as_embedded_font():
     parts = _with_font(font=_archive({"inside.txt": b"nested"}))
     with pytest.raises(guard.OfficePackageError):
         guard.inspect_docx_package(io.BytesIO(_archive(parts)), filename="fixture.docx")
+
+
+# ---------------------------------------------------------------------------------------------
+# 常规 XLSX 工作簿（2026-11-23）：与 DOCX 同一套限制，只认被动的工作簿结构
+# ---------------------------------------------------------------------------------------------
+
+SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+SHEET_PREFIX = "application/vnd.openxmlformats-officedocument.spreadsheetml."
+
+
+def _xlsx_parts() -> dict[str, bytes]:
+    """The shape of a normal WPS/Excel workbook: three sheets, shared strings, styles, theme, document properties; no drawings."""
+    content = ET.Element(f"{{{guard.CONTENT_NS}}}Types")
+    for extension, content_type in (("rels", guard.REL_CONTENT_TYPE), ("xml", "application/xml")):
+        ET.SubElement(content, f"{{{guard.CONTENT_NS}}}Default", Extension=extension, ContentType=content_type)
+    types = {
+        "docProps/app.xml": "application/vnd.openxmlformats-officedocument.extended-properties+xml",
+        "docProps/core.xml": "application/vnd.openxmlformats-package.core-properties+xml",
+        "docProps/custom.xml": "application/vnd.openxmlformats-officedocument.custom-properties+xml",
+        "xl/sharedStrings.xml": SHEET_PREFIX + "sharedStrings+xml",
+        "xl/styles.xml": SHEET_PREFIX + "styles+xml",
+        "xl/theme/theme1.xml": "application/vnd.openxmlformats-officedocument.theme+xml",
+        "xl/workbook.xml": guard.SHEET_MAIN_CONTENT_TYPE,
+        **{f"xl/worksheets/sheet{n}.xml": SHEET_PREFIX + "worksheet+xml" for n in (1, 2, 3)},
+    }
+    for name, content_type in types.items():
+        ET.SubElement(content, f"{{{guard.CONTENT_NS}}}Override", PartName="/" + name, ContentType=content_type)
+    core = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties"
+    office = guard.OFFICE_REL_PREFIXES[0]
+    package_rels = ET.Element(f"{{{guard.REL_NS}}}Relationships")
+    for number, (target, relation_type) in enumerate((("xl/workbook.xml", office + "officeDocument"), ("docProps/core.xml", core),
+                                                       ("docProps/app.xml", office + "extended-properties"),
+                                                       ("docProps/custom.xml", office + "custom-properties")), 1):
+        ET.SubElement(package_rels, f"{{{guard.REL_NS}}}Relationship", Id=f"rId{number}", Type=relation_type, Target=target)
+    book_rels = ET.Element(f"{{{guard.REL_NS}}}Relationships")
+    for number, (target, relation_type) in enumerate((("worksheets/sheet1.xml", "worksheet"), ("worksheets/sheet2.xml", "worksheet"),
+                                                       ("worksheets/sheet3.xml", "worksheet"), ("sharedStrings.xml", "sharedStrings"),
+                                                       ("styles.xml", "styles"), ("theme/theme1.xml", "theme")), 1):
+        ET.SubElement(book_rels, f"{{{guard.REL_NS}}}Relationship", Id=f"rId{number}", Type=office + relation_type, Target=target)
+    rel_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    sheets = "".join(f'<sheet name="Sheet{n}" sheetId="{n}" r:id="rId{n}"/>' for n in (1, 2, 3))
+    return {
+        "[Content_Types].xml": _xml(content),
+        "_rels/.rels": _xml(package_rels),
+        "xl/_rels/workbook.xml.rels": _xml(book_rels),
+        "xl/workbook.xml": f'<workbook xmlns="{SHEET_NS}" xmlns:r="{rel_ns}"><sheets>{sheets}</sheets></workbook>'.encode(),
+        **{f"xl/worksheets/sheet{n}.xml": f'<worksheet xmlns="{SHEET_NS}"><sheetData/></worksheet>'.encode() for n in (1, 2, 3)},
+        "xl/sharedStrings.xml": f'<sst xmlns="{SHEET_NS}" count="1" uniqueCount="1"><si><t>现场照片</t></si></sst>'.encode(),
+        "xl/styles.xml": f'<styleSheet xmlns="{SHEET_NS}"/>'.encode(),
+        "xl/theme/theme1.xml": b'<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>',
+        "docProps/core.xml": b'<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"/>',
+        "docProps/app.xml": b'<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"/>',
+        "docProps/custom.xml": b'<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties"/>',
+    }
+
+
+def _xcheck(parts: dict[str, bytes], filename: str = "fixture.xlsx", **limits: object) -> bool:
+    return guard.is_safe_office_package(io.BytesIO(_archive(parts)), filename=filename, **limits)
+
+
+def test_a_normal_nonmacro_xlsx_workbook_is_accepted_and_the_stream_is_restored():
+    stream = io.BytesIO(_archive(_xlsx_parts()))
+    stream.seek(7)
+    summary = guard.inspect_xlsx_package(stream, filename="现场照片.xlsx")
+    assert summary["documentType"] == "XLSX" and summary["mainPart"] == "xl/workbook.xml" and stream.tell() == 7
+    assert guard.is_safe_office_package(stream, filename="现场照片.xlsx")
+
+
+@pytest.mark.parametrize("filename", ["fixture.zip", "fixture.docx", "fixture", "fixture.xlsm"])
+def test_an_xlsx_package_must_carry_the_xlsx_name_and_a_docx_name_never_passes_an_xlsx_package(filename):
+    assert _xcheck(_xlsx_parts(), filename) is False
+    assert guard.is_safe_office_package(io.BytesIO(_archive(_parts())), filename="fixture.xlsx") is False   # Word 包不能借 .xlsx 名通过
+
+
+def test_xlsx_macros_external_links_ole_controls_charts_and_unknown_binary_parts_are_rejected():
+    def with_override(name, content_type, data=b"<x/>"):
+        parts = _xlsx_parts()
+        root = ET.fromstring(parts["[Content_Types].xml"])
+        ET.SubElement(root, f"{{{guard.CONTENT_NS}}}Override", PartName="/" + name, ContentType=content_type)
+        parts["[Content_Types].xml"] = _xml(root)
+        parts[name] = data
+        return parts
+    assert _xcheck(with_override("xl/vbaProject.bin", "application/vnd.ms-office.vbaProject", b"\x00")) is False
+    assert _xcheck(with_override("xl/charts/chart1.xml", SHEET_PREFIX.replace("spreadsheetml.", "drawingml.") + "chart+xml")) is False
+    assert _xcheck(with_override("xl/externalLinks/externalLink1.xml", SHEET_PREFIX + "externalLink+xml")) is False
+    assert _xcheck(with_override("xl/embeddings/oleObject1.bin", "application/vnd.openxmlformats-officedocument.oleObject", b"\x00")) is False
+    macro = _xlsx_parts()
+    macro["[Content_Types].xml"] = macro["[Content_Types].xml"].replace(guard.SHEET_MAIN_CONTENT_TYPE.encode(),
+                                                                         b"application/vnd.ms-excel.sheet.macroEnabled.main+xml")
+    assert _xcheck(macro) is False
+    for tag in ("oleObjects", "controls", "externalReferences"):
+        parts = _xlsx_parts()
+        parts["xl/worksheets/sheet1.xml"] = f'<worksheet xmlns="{SHEET_NS}"><sheetData/><{tag}/></worksheet>'.encode()
+        assert _xcheck(parts) is False
+
+
+def test_xlsx_keeps_the_zip_limits_nested_zip_encryption_external_loading_and_the_workbook_structure_checks():
+    nested = _xlsx_parts()
+    nested["xl/worksheets/sheet2.xml"] = _archive({"inside.txt": b"nested"})
+    assert _xcheck(nested) is False
+    no_book = _xlsx_parts()
+    no_book["xl/workbook.xml"] = f'<workbook xmlns="{SHEET_NS}"><sheets/></workbook>'.encode()
+    assert _xcheck(no_book) is False
+    external = _xlsx_parts()
+    rels = ET.fromstring(external["xl/_rels/workbook.xml.rels"])
+    ET.SubElement(rels, f"{{{guard.REL_NS}}}Relationship", Id="rId99", Type=guard.OFFICE_REL_PREFIXES[0] + "image",
+                  Target="http://example.invalid/x.png", TargetMode="External")
+    external["xl/_rels/workbook.xml.rels"] = _xml(rels)
+    assert _xcheck(external) is False                                          # 外部图片加载不是被动超链接
+    assert _xcheck(_xlsx_parts(), max_entries=3) is False                      # 调用方可收紧限制
+    assert guard.is_safe_office_package(io.BytesIO(_archive(_xlsx_parts())), filename="a.xlsx", max_entries=500)
+    bomb = _xlsx_parts()
+    bomb["xl/sharedStrings.xml"] = f'<sst xmlns="{SHEET_NS}">'.encode() + b"<si><t>" + b"0" * 6_000_000 + b"</t></si></sst>"
+    assert _xcheck(bomb, max_ratio=20) is False
+    raw = bytearray(_archive(_xlsx_parts(), compression=zipfile.ZIP_STORED))
+    struct.pack_into("<H", raw, 6, struct.unpack_from("<H", raw, 6)[0] | 1)         # 本地头与中央目录都标加密位
+    central = raw.index(b"PK\x01\x02")
+    struct.pack_into("<H", raw, central + 8, struct.unpack_from("<H", raw, central + 8)[0] | 1)
+    assert guard.is_safe_office_package(io.BytesIO(bytes(raw)), filename="a.xlsx") is False

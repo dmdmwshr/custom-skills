@@ -1,12 +1,15 @@
-"""只读识别可作为案卷原件保留的非宏 DOCX；不展开或执行内部部件。
+"""只读识别可作为案卷原件保留的非宏 DOCX 和常规 XLSX 工作簿；不展开或执行内部部件。
 
 扩展名、OPC 内容类型和关系、Word 主文档必须共同成立。识别范围为常见
 Word XML 部件及实际图片；宏、嵌入包/OLE/控件、外部加载和未知二进制均拒绝。
 路径和流接口共用同一检查，流检查结束后恢复原读指针。
+XLSX 沿用同一套包结构、路径、压缩比、加密/链接、宏与嵌入对象、外部加载、嵌套 ZIP 限制，只认工作簿主部件、常见工作表/样式/共享字符串/
+主题/文档属性/批注/表/绘图部件和实际图片；其余（宏、外部链接、图表、数据透视、OLE、控件、未知二进制）一律拒绝。
 """
 
 from __future__ import annotations
 
+import contextvars
 import io
 import math
 import re
@@ -126,12 +129,55 @@ DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL"} | {
 
 
 class OfficePackageError(ValueError):
-    """文档不属于当前允许的安全 DOCX 结构。"""
+    """文档不属于当前允许的安全 DOCX/XLSX 结构。"""
+
+
+_LABEL: contextvars.ContextVar[str] = contextvars.ContextVar("office_package_label", default="DOCX")
 
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
-        raise OfficePackageError(message)
+        raise OfficePackageError(message.replace("DOCX", _LABEL.get()))
+
+
+SHEET_MAIN_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
+SHEET_NAMESPACES = {
+    "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    "http://purl.oclc.org/ooxml/spreadsheetml/main",
+}
+XLSX_XML_CONTENT_TYPES = {
+    "application/xml",
+    "text/xml",
+    SHEET_MAIN_CONTENT_TYPE,
+    REL_CONTENT_TYPE,
+    "application/vnd.openxmlformats-package.core-properties+xml",
+    "application/vnd.openxmlformats-officedocument.extended-properties+xml",
+    "application/vnd.openxmlformats-officedocument.custom-properties+xml",
+    "application/vnd.openxmlformats-officedocument.theme+xml",
+    "application/vnd.openxmlformats-officedocument.drawing+xml",
+    *(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml." + part + "+xml"
+        for part in ("worksheet", "sharedStrings", "styles", "calcChain", "comments", "table")
+    ),
+}
+XLSX_PASSIVE_REL_NAMES = {
+    "officeDocument", "extended-properties", "custom-properties", "image", "theme", "styles", "sharedStrings", "worksheet",
+    "calcChain", "comments", "table", "drawing", "hyperlink",
+}
+XLSX_PASSIVE_REL_TYPES = {prefix + name for prefix in OFFICE_REL_PREFIXES for name in XLSX_PASSIVE_REL_NAMES} | {
+    "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties",
+    "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail",
+}
+# 工作簿/工作表里的活动内容：外部引用、OLE、控件、网页发布、数据连接
+XLSX_ACTIVE_TAGS = {"externalReferences", "externalReference", "oleObjects", "oleObject", "controls", "control", "webPublishItems",
+                    "connections", "dataConsolidate"}
+
+_KINDS = {
+    "DOCX": {"suffix": ".docx", "main_type": MAIN_CONTENT_TYPE, "xml_types": XML_CONTENT_TYPES, "passive": PASSIVE_REL_TYPES,
+             "namespaces": WORD_NAMESPACES, "active": {"altChunk", "object", "control", "subDoc"}, "fonts": True},
+    "XLSX": {"suffix": ".xlsx", "main_type": SHEET_MAIN_CONTENT_TYPE, "xml_types": XLSX_XML_CONTENT_TYPES, "passive": XLSX_PASSIVE_REL_TYPES,
+             "namespaces": SHEET_NAMESPACES, "active": XLSX_ACTIVE_TAGS, "fonts": False},
+}
 
 
 def _safe_name(name: str, *, directory: bool = False) -> tuple[str, str]:
@@ -155,20 +201,20 @@ def _safe_name(name: str, *, directory: bool = False) -> tuple[str, str]:
 
 
 @contextmanager
-def _reader(source: str | Path | BinaryIO, filename: str | None) -> Iterator[BinaryIO]:
+def _reader(source: str | Path | BinaryIO, filename: str | None, suffix: str = ".docx") -> Iterator[BinaryIO]:
     if isinstance(source, (str, Path)):
         path = Path(source)
-        _require(path.suffix.casefold() == ".docx", "仅允许 .docx 文档")
+        _require(path.suffix.casefold() == suffix, f"仅允许 {suffix} 文档")
         _require(
-            filename is None or PurePosixPath(filename).suffix.casefold() == ".docx",
+            filename is None or PurePosixPath(filename).suffix.casefold() == suffix,
             "文档扩展名不匹配",
         )
         with path.open("rb") as stream:
             yield stream
     else:
         _require(
-            filename is not None and PurePosixPath(filename).suffix.casefold() == ".docx",
-            "流识别必须提供 .docx 文件名",
+            filename is not None and PurePosixPath(filename).suffix.casefold() == suffix,
+            f"流识别必须提供 {suffix} 文件名",
         )
         position = source.tell()
         try:
@@ -200,19 +246,18 @@ class _SafeXmlBuilder(ET.TreeBuilder):
         return result
 
 
-def _xml(data: bytes) -> ET.Element:
+def _xml(data: bytes, kind: dict[str, Any] | None = None) -> ET.Element:
+    kind = kind or _KINDS["DOCX"]
     _require(len(data) <= MAX_XML_BYTES, "DOCX XML 部件超过安全上限")
     root = ET.fromstring(data, parser=ET.XMLParser(target=_SafeXmlBuilder()))
     for item in root.iter():
-        for namespace in WORD_NAMESPACES:
-            if item.tag in {
-                f"{{{namespace}}}{name}" for name in ("altChunk", "object", "control", "subDoc")
-            }:
+        for namespace in kind["namespaces"]:
+            if item.tag in {f"{{{namespace}}}{name}" for name in kind["active"]}:
                 raise OfficePackageError("DOCX 包含嵌入对象或外部内容")
     return root
 
 
-def _content_types(root: ET.Element, files: dict[str, zipfile.ZipInfo]) -> dict[str, str]:
+def _content_types(root: ET.Element, files: dict[str, zipfile.ZipInfo], main_type: str = MAIN_CONTENT_TYPE) -> dict[str, str]:
     _require(root.tag == f"{{{CONTENT_NS}}}Types", "DOCX 缺少真实内容类型表")
     defaults: dict[str, str] = {}
     overrides: dict[str, str] = {}
@@ -257,7 +302,7 @@ def _content_types(root: ET.Element, files: dict[str, zipfile.ZipInfo]) -> dict[
         content_type = overrides.get(name, defaults.get(extension, ""))
         _require(bool(content_type), "DOCX 部件缺少内容类型")
         result[name] = content_type
-    _require(list(result.values()).count(MAIN_CONTENT_TYPE) == 1, "DOCX 必须包含唯一非宏主文档")
+    _require(list(result.values()).count(main_type) == 1, "DOCX 必须包含唯一非宏主文档")
     return result
 
 
@@ -386,7 +431,21 @@ def _validate_embedded_fonts(
         _require(not zipfile.is_zipfile(io.BytesIO(restored)), "DOCX 内部仍包含嵌套 ZIP")
 
 
-def inspect_docx_package(
+def inspect_docx_package(source: str | Path | BinaryIO, *, filename: str | None = None, **limits: Any) -> dict[str, Any]:
+    """返回部件数量和大小摘要；未知或不安全结构抛出 OfficePackageError。
+
+    调用方可收紧限制，不能放大本模块的 DOCX 上限；不返回正文或内部二进制。
+    """
+    return _inspect_package("DOCX", source, filename=filename, **limits)
+
+
+def inspect_xlsx_package(source: str | Path | BinaryIO, *, filename: str | None = None, **limits: Any) -> dict[str, Any]:
+    """常规 XLSX 工作簿：与 DOCX 同一套包结构与资源限制，只认工作簿主部件、被动的工作表/样式/共享字符串/主题/属性/批注/表/绘图/图片部件。"""
+    return _inspect_package("XLSX", source, filename=filename, **limits)
+
+
+def _inspect_package(
+    kind_name: str,
     source: str | Path | BinaryIO,
     *,
     filename: str | None = None,
@@ -395,10 +454,26 @@ def inspect_docx_package(
     max_total_bytes: int = MAX_DOCX_TOTAL_BYTES,
     max_ratio: float = MAX_DOCX_RATIO,
 ) -> dict[str, Any]:
-    """返回部件数量和大小摘要；未知或不安全结构抛出 OfficePackageError。
+    token = _LABEL.set(kind_name)
+    try:
+        return _inspect_package_checked(
+            kind_name, source, filename=filename, max_entries=max_entries, max_member_bytes=max_member_bytes,
+            max_total_bytes=max_total_bytes, max_ratio=max_ratio)
+    finally:
+        _LABEL.reset(token)
 
-    调用方可收紧限制，不能放大本模块的 DOCX 上限；不返回正文或内部二进制。
-    """
+
+def _inspect_package_checked(
+    kind_name: str,
+    source: str | Path | BinaryIO,
+    *,
+    filename: str | None,
+    max_entries: int,
+    max_member_bytes: int,
+    max_total_bytes: int,
+    max_ratio: float,
+) -> dict[str, Any]:
+    spec = _KINDS[kind_name]
     limits = (max_entries, max_member_bytes, max_total_bytes)
     _require(
         all(
@@ -415,7 +490,7 @@ def inspect_docx_package(
     max_total_bytes = min(max_total_bytes, MAX_DOCX_TOTAL_BYTES)
     max_ratio = min(max_ratio, MAX_DOCX_RATIO)
     try:
-        with _reader(source, filename) as stream:
+        with _reader(source, filename, spec["suffix"]) as stream:
             _require(stream.read(4) == b"PK\x03\x04", "DOCX 不允许自解压或前置数据")
             stream.seek(0)
             with zipfile.ZipFile(stream) as archive:
@@ -494,14 +569,14 @@ def inspect_docx_package(
                     "DOCX XML 部件超过安全上限",
                 )
                 content_data = archive.read(files["[Content_Types].xml"])
-                types = _content_types(_xml(content_data), files)
+                types = _content_types(_xml(content_data, spec), files, spec["main_type"])
                 for name, content_type in types.items():
                     suffix = (
                         ".rels" if name.endswith(".rels") else PurePosixPath(name).suffix.casefold()
                     )
                     if suffix in {".xml", ".rels"}:
                         _require(
-                            content_type in XML_CONTENT_TYPES, "DOCX 包含不允许的 XML 部件类型"
+                            content_type in spec["xml_types"], "DOCX 包含不允许的 XML 部件类型"
                         )
                         _require(
                             suffix != ".rels" or content_type == REL_CONTENT_TYPE,
@@ -510,7 +585,7 @@ def inspect_docx_package(
                         _require(
                             files[name].file_size <= MAX_XML_BYTES, "DOCX XML 部件超过安全上限"
                         )
-                    elif suffix == ".odttf":
+                    elif spec["fonts"] and suffix == ".odttf":
                         _require(
                             content_type == OBFUSCATED_FONT_TYPE
                             and PurePosixPath(name).parent.as_posix() == FONT_PART_DIR,
@@ -524,8 +599,8 @@ def inspect_docx_package(
                     _require(len(data) == files[name].file_size, "DOCX 部件实际大小与目录不一致")
                     _require(not zipfile.is_zipfile(io.BytesIO(data)), "DOCX 内部仍包含嵌套 ZIP")
                     if suffix in {".xml", ".rels"}:
-                        xml_parts[name] = _xml(data)
-                    elif suffix == ".odttf":
+                        xml_parts[name] = _xml(data, spec)
+                    elif spec["fonts"] and suffix == ".odttf":
                         font_data[name] = data
                     else:
                         _require(_image_matches(data, content_type), "DOCX 图片内容与类型不匹配")
@@ -547,8 +622,8 @@ def inspect_docx_package(
                             and bool(relation_id)
                             and relation_id not in ids
                             and (
-                                relation_type in PASSIVE_REL_TYPES
-                                or (relation_type in FONT_REL_TYPES and owner == FONT_TABLE_PART)
+                                relation_type in spec["passive"]
+                                or (spec["fonts"] and relation_type in FONT_REL_TYPES and owner == FONT_TABLE_PART)
                             ),
                             "DOCX 关系重复、未知或包含活动对象",
                         )
@@ -582,21 +657,31 @@ def inspect_docx_package(
                             main_parts.append(resolved)
                 _validate_embedded_fonts(font_data, font_relationships, xml_parts, types)
                 _require(
-                    len(main_parts) == 1 and types[main_parts[0]] == MAIN_CONTENT_TYPE,
-                    "DOCX 包关系必须指向唯一非宏 Word 主文档",
+                    len(main_parts) == 1 and types[main_parts[0]] == spec["main_type"],
+                    "DOCX 包关系必须指向唯一非宏 Word 主文档" if kind_name == "DOCX" else "XLSX 包关系必须指向唯一非宏工作簿主部件",
                 )
                 document = xml_parts.get(main_parts[0])
                 _require(document is not None, "DOCX 主文档不是 XML")
-                valid_roots = {
-                    f"{{{namespace}}}document": namespace for namespace in WORD_NAMESPACES
-                }
-                _require(document.tag in valid_roots, "DOCX 主文档缺少 Word 结构")
-                _require(
-                    len(document.findall(f"{{{valid_roots[document.tag]}}}body")) == 1,
-                    "DOCX 主文档必须包含唯一正文容器",
-                )
+                if kind_name == "XLSX":
+                    valid = {f"{{{namespace}}}workbook": namespace for namespace in SHEET_NAMESPACES}
+                    _require(document.tag in valid, "XLSX 主部件缺少工作簿结构")
+                    sheets = document.findall(f"{{{valid[document.tag]}}}sheets/{{{valid[document.tag]}}}sheet")
+                    _require(len(sheets) >= 1, "XLSX 工作簿没有工作表")
+                    sheet_types = {f"{{{namespace}}}worksheet" for namespace in SHEET_NAMESPACES}
+                    for name, content_type in types.items():
+                        if content_type.endswith("spreadsheetml.worksheet+xml"):
+                            _require(name in xml_parts and xml_parts[name].tag in sheet_types, "XLSX 工作表部件缺少工作表结构")
+                else:
+                    valid_roots = {
+                        f"{{{namespace}}}document": namespace for namespace in WORD_NAMESPACES
+                    }
+                    _require(document.tag in valid_roots, "DOCX 主文档缺少 Word 结构")
+                    _require(
+                        len(document.findall(f"{{{valid_roots[document.tag]}}}body")) == 1,
+                        "DOCX 主文档必须包含唯一正文容器",
+                    )
                 return {
-                    "documentType": "DOCX",
+                    "documentType": kind_name,
                     "entryCount": len(infos),
                     "partCount": len(types),
                     "totalSizeBytes": total,
@@ -610,7 +695,7 @@ def inspect_docx_package(
         NotImplementedError,
         RuntimeError,
     ) as error:
-        raise OfficePackageError("DOCX 结构无法安全读取") from error
+        raise OfficePackageError(f"{kind_name} 结构无法安全读取") from error
 
 
 def is_safe_docx_package(
@@ -624,4 +709,20 @@ def is_safe_docx_package(
         return False
 
 
-__all__ = ["OfficePackageError", "inspect_docx_package", "is_safe_docx_package"]
+def is_safe_office_package(
+    source: str | Path | BinaryIO, *, filename: str | None = None, **limits: Any
+) -> bool:
+    """外层嵌套 ZIP 判定：按文件名扩展名（.docx/.xlsx）走对应的现有安全结构检查；其他扩展名、任何未认可结构都返回 False，保留原拦截行为。"""
+    named = filename or (str(source) if isinstance(source, (str, Path)) else "")
+    suffix = PurePosixPath(named).suffix.casefold() if named else ""
+    kind = {".docx": "DOCX", ".xlsx": "XLSX"}.get(suffix)
+    if kind is None:
+        return False
+    try:
+        _inspect_package(kind, source, filename=filename, **limits)
+        return True
+    except (OfficePackageError, ValueError, TypeError):
+        return False
+
+
+__all__ = ["OfficePackageError", "inspect_docx_package", "inspect_xlsx_package", "is_safe_docx_package", "is_safe_office_package"]

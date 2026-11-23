@@ -2419,3 +2419,27 @@ def test_a_capture_package_always_wins_over_the_archive_fallback(case):
     record = _register_completion(case, info, folder)
     facts = views.package_facts(case.layout, views._package_capture_index(case.layout), PROJECT, {"initialResult": "UNKNOWN"}, record)
     assert facts["packageOrigin"] == "CAPTURE"
+
+
+def test_a_legal_xlsx_workbook_is_retained_and_safely_extracted_as_an_original_and_other_nested_archives_stay_refused(tmp_path):
+    from scripts.test_office_package_guard import _archive, _xlsx_parts
+
+    workbook = _archive(_xlsx_parts())
+    archive = tmp_path / "synthetic-case.zip"
+    with zipfile.ZipFile(archive, "w") as outer:
+        outer.writestr("现场照片.xlsx", workbook)
+        outer.writestr("检验报告.pdf", b"%PDF-1.4 synthetic")
+    before = archive.read_bytes()
+    assert source.inspect_zip_package(archive)["fileCount"] == 2
+    target = tmp_path / "extracted"
+    assert source.safe_extract_package(archive, target)["fileCount"] == 2
+    assert (target / "现场照片.xlsx").read_bytes() == workbook and archive.read_bytes() == before
+    macro = tmp_path / "macro.zip"
+    broken = _xlsx_parts()
+    broken["xl/vbaProject.bin"] = b"\x00"
+    with zipfile.ZipFile(macro, "w") as outer:
+        outer.writestr("带宏.xlsx", _archive(broken))
+    with pytest.raises(source.SourceIntakeError, match="嵌套 ZIP"):
+        source.inspect_zip_package(macro)
+    with pytest.raises(source.SourceIntakeError, match="嵌套 ZIP"):
+        source.safe_extract_package(macro, tmp_path / "rejected-macro")

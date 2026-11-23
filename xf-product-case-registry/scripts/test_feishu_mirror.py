@@ -251,3 +251,111 @@ def test_a_violated_relation_or_overlapping_roster_assignment_makes_the_recount_
     monkeypatch.setattr(mirror.feishu_stats, "recount_periods", lambda **_k: {"diffs": [], "administrativeDiffs": [], "relations": [overlap]})
     report = mirror.recount(contract_path=contract, contract_sha=_sha(contract), target={"baseToken": BASE}, transport=Cloud(_stat_rows(right)))
     assert report["status"] == "DIFF" and [d["scope"] for d in report["diffs"]] == ["relation"] and report["diffs"][0]["id"] == "P3"
+
+
+# ---------------------------------------------------------------------------------------------
+# 写入前检查：本次执行必须有完整、已确认、合同身份一致的写前快照
+# ---------------------------------------------------------------------------------------------
+
+import argparse
+from datetime import datetime, timedelta
+
+import scripts.nightly as nightly
+import scripts.registry_cli as registry_cli
+
+DAY = "2026-11-23"
+
+
+def _gate_setup(tmp_path, contract):
+    runtime = tmp_path / "root" / nightly.RUNTIME_DIR
+    nightly.begin(runtime, now=datetime(2026, 11, 23, 2, 0, tzinfo=nightly.SHANGHAI), trigger="scheduled")
+    bound = nightly.bind(runtime, DAY, session_id="bb79e9dc-1925", receipt="r.json", runner_pid=9, now=datetime(2026, 11, 23, 2, 1, tzinfo=nightly.SHANGHAI))
+    return runtime, nightly.execution_key(bound["execution"])
+
+
+def _register(runtime, key, report, contract):
+    return nightly.record_snapshot(runtime, DAY, tag="pre", run_key=key, contract_sha=_sha(contract),
+                                   files={t["table"]: {"file": t["snapshotFile"], "sha256": t["snapshotSha256"]} for t in report["tables"]})
+
+
+def _gate(tmp_path, contract, runtime, key):
+    run = nightly._load(nightly._run_dir(runtime, DAY) / "run.json", None)
+    return mirror.pre_gate(contract_path=contract, contract_sha=_sha(contract), sections=[None, "maintenanceBase"], targets=TARGETS,
+                           business_root=tmp_path / "root", day=DAY, run_key=key, registered=((run.get("mirrorSnapshots") or {}).get("pre") or {}).get(key))
+
+
+def test_the_write_gate_needs_this_executions_complete_confirmed_pre_snapshot_of_the_current_contract(tmp_path, contract):
+    cloud, ledger = Cloud(_rows()), _ledger(tmp_path)
+    runtime, key = _gate_setup(tmp_path, contract)
+    first = _gate(tmp_path, contract, runtime, key)                                                  # 初次：还没有任何写前快照
+    assert first["status"] == "INCOMPLETE" and len(first["missing"]) == len(first["expected"]) >= 2 and first["externalCalls"] == "none"
+    pre = _run(contract, cloud, tmp_path, DAY, ledger, tag="pre", run_key=key)
+    assert _gate(tmp_path, contract, runtime, key)["status"] == "INCOMPLETE"                       # 文件在但还没登记进运行记录
+    _register(runtime, key, pre, contract)
+    assert _gate(tmp_path, contract, runtime, key)["status"] == "OK"                               # 正常流程
+    again = _run(contract, cloud, tmp_path, DAY, ledger, tag="pre", run_key=key)                     # 无变化重入：复用、不重读、仍然完整
+    assert again["reusedAll"] is True and _gate(tmp_path, contract, runtime, key)["status"] == "OK"
+    assert _gate(tmp_path, contract, runtime, "e20261123020100-other")["status"] == "INCOMPLETE"    # 其他执行键
+
+
+def test_the_write_gate_refuses_a_missing_table_an_unconfirmed_read_and_another_contract_identity(tmp_path, contract):
+    cloud, ledger = Cloud(_rows()), _ledger(tmp_path)
+    runtime, key = _gate_setup(tmp_path, contract)
+    pre = _run(contract, cloud, tmp_path, DAY, ledger, tag="pre", run_key=key)
+    _register(runtime, key, pre, contract)
+    day_dir = tmp_path / "root" / "运行记录" / "飞书镜像" / "每日快照" / DAY
+    files = sorted(day_dir.glob("*-写前-*.json"))
+    detail = next(f for f in files if "维修企业" in f.name)
+    kept = detail.read_bytes()
+    detail.unlink()                                                                                  # 缺表（如读到第一张就被截断）
+    broken = _gate(tmp_path, contract, runtime, key)
+    assert broken["status"] == "INCOMPLETE" and broken["missing"] == ["维修库-维修企业"]
+    detail.write_bytes(kept)
+    snapshot = json.loads(detail.read_text(encoding="utf-8"))
+    snapshot["contractSha256"] = "0" * 64
+    detail.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")                  # 合同身份不同；同时登记的摘要也不符
+    other = _gate(tmp_path, contract, runtime, key)
+    assert other["status"] == "INCOMPLETE" and any("合同身份" in r for r in other["reasons"]) and any("摘要" in r for r in other["reasons"])
+    detail.write_bytes(kept)
+    snapshot = json.loads(kept.decode("utf-8"))
+    snapshot["checks"]["confirmed"] = False
+    detail.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+    assert any("已确认读回" in r for r in _gate(tmp_path, contract, runtime, key)["reasons"])
+
+
+def _args(tmp_path, contract, key):
+    return argparse.Namespace(contract=str(contract), contract_sha=_sha(contract), business_root=str(tmp_path / "root"), date=DAY, run_key=key, manual_run=None)
+
+
+def _write_ledger_event(runtime, at):
+    path = runtime / nightly.LEDGER_DIR / "targets" / "t.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"event": "intent", "at": at, "intentId": "i-1", "runId": "r"}) + "\n", encoding="utf-8")
+
+
+def test_a_cut_short_pre_is_finished_before_any_write_but_never_completed_after_writes_and_its_evidence_is_kept(tmp_path, contract):
+    cloud, ledger = Cloud(_rows()), _ledger(tmp_path)
+    runtime, key = _gate_setup(tmp_path, contract)
+    day_dir = tmp_path / "root" / "运行记录" / "飞书镜像" / "每日快照" / DAY
+    pre = _run(contract, cloud, tmp_path, DAY, ledger, tag="pre", run_key=key)
+    for f in sorted(day_dir.glob("*-写前-*.json"))[1:]:
+        f.unlink()                                                                                   # 只剩第一张：像被 110 秒超时截断
+    targets = {None: {"baseToken": BASE}, "maintenanceBase": {"baseToken": MBASE}}
+    registry_cli._refuse_pre_after_writes(_args(tmp_path, contract, key), mirror, nightly, targets)       # 没有写入证据：允许补完（只补缺的表）
+    kept_first = sorted(day_dir.glob("*-写前-*.json"))[0].read_bytes()
+    done = _run(contract, cloud, tmp_path, DAY, ledger, tag="pre", run_key=key)
+    assert sorted(day_dir.glob("*-写前-*.json"))[0].read_bytes() == kept_first and [t.get("reused") for t in done["tables"]].count(True) == 1
+    for f in sorted(day_dir.glob("*-写前-*.json"))[1:]:
+        f.unlink()                                                                                   # 再次被截断；这次账本已有绑定后的写入
+    _write_ledger_event(runtime, (datetime(2026, 11, 23, 2, 30, tzinfo=nightly.SHANGHAI)).isoformat())
+    with pytest.raises(registry_cli.RegistryError, match="不能事后补取"):
+        registry_cli._refuse_pre_after_writes(_args(tmp_path, contract, key), mirror, nightly, targets)
+    run = nightly._load(nightly._run_dir(runtime, DAY) / "run.json", None)
+    record = run["mirrorSnapshots"]["preIncomplete"][key]
+    assert record["writeEvidence"]["events"] == 1 and len(record["files"]) == 1                   # 原证据保存，不覆盖
+    assert len(list(day_dir.glob("*-写前-*.json"))) == 1                                            # 没有事后补出别的表
+    blocked = registry_cli.feishu_pre_gate_command
+    with pytest.raises(SystemExit) as stop:
+        blocked(argparse.Namespace(contract=str(contract), contract_sha=_sha(contract), base_token=BASE, maintenance_base_token=MBASE,
+                                   business_root=str(tmp_path / "root"), date=DAY, run_key=key, manual_run=None))
+    assert stop.value.code == 2

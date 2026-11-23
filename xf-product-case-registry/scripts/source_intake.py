@@ -36,9 +36,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 if __package__:
-    from .office_package_guard import is_safe_docx_package
+    from .office_package_guard import is_safe_office_package
 else:
-    from office_package_guard import is_safe_docx_package
+    from office_package_guard import is_safe_office_package
 
 if __package__:
     from . import local_validity
@@ -4127,7 +4127,7 @@ def inspect_zip_package(
                     if ratio > max_ratio:
                         raise SourceIntakeError("ZIP 压缩比超过 200，疑似压缩炸弹")
                     with source.open(info, "r") as member:
-                        if zipfile.is_zipfile(member) and not is_safe_docx_package(
+                        if zipfile.is_zipfile(member) and not is_safe_office_package(
                             member, filename=normalized, max_entries=max_entries,
                             max_member_bytes=max_member_bytes, max_total_bytes=max_total_bytes,
                             max_ratio=max_ratio,
@@ -4207,7 +4207,7 @@ def safe_extract_package(
         for extracted_file in temporary.rglob("*"):
             if (
                 extracted_file.is_file() and zipfile.is_zipfile(extracted_file)
-                and not is_safe_docx_package(
+                and not is_safe_office_package(
                     extracted_file, max_entries=max_entries, max_member_bytes=max_member_bytes,
                     max_total_bytes=max_total_bytes, max_ratio=max_ratio,
                 )

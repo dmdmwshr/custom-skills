@@ -455,7 +455,12 @@ def timeline(root: Path, *, since: str | None = None) -> list[dict[str, Any]]:
 
 
 def checkpoint(root: Path, day: str, *, stage: str, status: str, case: str | None = None, detail: str = "",
-               ref: str = "", changed: int = 0, entry: str = "", issue: bool = False, now: datetime | None = None) -> dict[str, Any]:
+               ref: str = "", changed: int = 0, entry: str = "", issue: bool = False, now: datetime | None = None,
+               window: tuple[str, str] | None = None) -> dict[str, Any]:
+    if window is not None:
+        window = (split_run_key(window[0])[0], split_run_key(window[1])[0])
+        if window[0] > window[1]:
+            raise NightlyError("--window 的起日不能晚于止日")
     if stage not in STAGES or status not in STATUSES:
         raise NightlyError(f"stage 必须是 {'/'.join(STAGES)}；status 必须是 {'/'.join(sorted(STATUSES))}")
     path = _run_dir(root, day) / "run.json"
@@ -506,6 +511,8 @@ def checkpoint(root: Path, day: str, *, stage: str, status: str, case: str | Non
         item["reportedChanged"] = changed
     if issue:
         item["issue"] = True
+    if window is not None:
+        item["window"] = list(window)      # 发现入口本次实际读取的日期窗口：入口水位只按完整成功的窗口推进
     with (_run_dir(root, day) / "checkpoints.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
         stream.flush()
@@ -519,6 +526,92 @@ def checkpoint(root: Path, day: str, *, stage: str, status: str, case: str | Non
     if dirty:
         _atomic(path, run)
     return item
+
+
+def due_cases(root: Path, day: str, *, evidence_dir: str = "") -> dict[str, Any]:
+    """The cases tonight's own ``source scan-plan`` (``<证据目录>/scan-plan.json``) listed as to-do (``pending`` and ``packageAcquireFirst``)
+    and which of them have no terminal checkpoint (done/skipped/reconciled/failed) in this run. No scan-plan file (a narrow manual run, a
+    night that never planned) means nothing is due here; no new ledger is created, the checkpoints are the traceable end marks."""
+    run = _load(_run_dir(root, day) / "run.json", {}) or {}
+    folder = Path(_native(evidence_dir or run.get("evidenceDir", "") or ""))
+    plan_path = folder / "scan-plan.json"
+    if not str(folder) or not plan_path.is_file():
+        return {"planned": False, "cases": [], "unmarked": []}
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"planned": False, "cases": [], "unmarked": [], "unreadable": str(plan_path)}
+    cases = sorted({str(item.get("projectNo")) for key in ("pending", "packageAcquireFirst") for item in plan.get(key, []) if isinstance(item, dict) and item.get("projectNo")})
+    marked = {key[1] for key, item in _latest(checkpoints(root, day)).items() if key[1] and item["status"] in TERMINAL}
+    return {"planned": True, "cases": cases, "unmarked": [c for c in cases if c not in marked]}
+
+
+DISCOVER_FLOOR = "2026-01-01"           # 既有真实初查范围起点：发现窗口不早于它
+DISCOVER_OVERLAP_DAYS = 3               # 每次从最近一次完整覆盖往前多读 3 天
+DISCOVER_BOOTSTRAP_DAYS = 14            # 从没有任何完整成功记录的入口：往前读 14 天（原行为）
+DISCOVER_LEGACY_LAG_DAYS = 3            # 没有记窗口的旧完整检查点：保守按“只覆盖到运行日前 3 天”处理
+
+
+def discover_starts(root: Path, day: str) -> dict[str, Any]:
+    """Per entry (five task lists x 创建时间/检查日期) the start of the window to read on run ``day``.
+
+    The basis is the entry's own most recent COMPLETE read: a ``discover`` checkpoint with status ``done`` (the read reached the last page and
+    matched the page total; zero rows with a fully read page counts). A failed, skipped (502, source unavailable) or incomplete entry never
+    advances; successes roll on. Windows are chained in time order: a window only extends the covered range when it starts at or before the day
+    after the range already covered, so a narrow manual run with its own start cannot move the mark across an unread gap. Checkpoints written before
+    windows were recorded count as covering through three days before their run day (a conservative lookback). A COMPLETE weekly full-range
+    check (inspection-date entries) covers its whole range. The start is the covered-through day minus the overlap, never before 2026-01-01; the
+    unread span can be any length, the next window simply reaches back to it. Nothing is written."""
+    base_day = split_run_key(day)[0]
+    current = date.fromisoformat(base_day)
+    floor = date.fromisoformat(DISCOVER_FLOOR)
+    runs = [key for key in _run_days(root, lanes=True) if key <= day]
+    through: dict[str, date] = {}
+    basis: dict[str, str] = {}
+    gaps: dict[str, list[list[str]]] = {entry: [] for entry in DISCOVER_ENTRIES}
+    checks = sorted(coverage_checks(root), key=lambda c: c.get("at", ""))
+    events: list[tuple[str, str, str, dict[str, Any]]] = []
+    for key in runs:
+        for item in _latest(checkpoints(root, key)).values():
+            if item["stage"] == "discover" and not item.get("case") and item.get("entry") in DISCOVER_ENTRIES:
+                events.append((item["at"], "checkpoint", key, item))
+    for check in checks:
+        if check.get("dateField") == "检查日期" and str(check.get("scopeFrom", "")) <= DISCOVER_FLOOR:
+            events.append((check.get("at", ""), "weekly", check.get("date", ""), check))
+    for at, kind, key, item in sorted(events, key=lambda e: (e[0], e[1])):
+        if kind == "weekly":
+            for name, entry_state in (item.get("entries") or {}).items():
+                entry = f"{name}/检查日期"
+                if entry in gaps and entry_state.get("complete"):
+                    end = min(date.fromisoformat(item["scopeTo"]), date.fromisoformat(key))
+                    if end > through.get(entry, date.min):
+                        through[entry], basis[entry] = end, "weekly-coverage"
+            continue
+        entry = item["entry"]
+        if item["status"] != "done":
+            continue
+        run_day = date.fromisoformat(split_run_key(key)[0])
+        if item.get("window"):
+            start, end = (date.fromisoformat(value) for value in item["window"])
+            if entry in through and start > through[entry] + timedelta(days=1):
+                gaps[entry].append([start.isoformat(), end.isoformat()])      # 与已覆盖范围之间有未读缺口：这次读取不推进水位
+                continue
+            if end > through.get(entry, date.min):
+                through[entry], basis[entry] = end, "checkpoint-window"
+        else:
+            end = run_day - timedelta(days=DISCOVER_LEGACY_LAG_DAYS)
+            if end > through.get(entry, date.min):
+                through[entry], basis[entry] = end, "legacy-checkpoint"
+    starts: dict[str, Any] = {}
+    for entry in DISCOVER_ENTRIES:
+        if entry in through:
+            start = max(floor, through[entry] - timedelta(days=DISCOVER_OVERLAP_DAYS))
+            starts[entry] = {"start": start.isoformat(), "end": base_day, "coveredThrough": through[entry].isoformat(), "basis": basis[entry],
+                             "unreadDays": max(0, (current - through[entry]).days), "gapWindows": gaps[entry]}
+        else:
+            start = max(floor, current - timedelta(days=DISCOVER_BOOTSTRAP_DAYS))
+            starts[entry] = {"start": start.isoformat(), "end": base_day, "coveredThrough": None, "basis": "bootstrap", "unreadDays": None, "gapWindows": gaps[entry]}
+    return {"date": day, "entries": starts}
 
 
 def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", refresh_stats: bool = False,
@@ -544,6 +637,10 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", r
     weekly_due = weekly["due"] and not manual      # 手工运行是额外一轮：每周全范围核对由常规运行负责，不因手工运行重复，也不因它到期而拦住收尾
     if state["unknown"] or state["quota"] or state["resumable"] or state["nextStage"] is not None:
         return {"status": "NOT_FINISHED", "date": day, "wrote": False, **with_stats(root, day, state, evidence_dir=evidence_dir)}
+    due = due_cases(root, day, evidence_dir=evidence_dir)
+    if due["unmarked"]:
+        return {"status": "NOT_FINISHED", "date": day, "wrote": False, **with_stats(root, day, state, evidence_dir=evidence_dir), "dueCasesUnmarked": due["unmarked"],
+                "rule": "今晚 scan-plan 列出的到期案没有逐案终标：能办的继续办并记 done；缺据、已保护或来源未出的记 skipped --issue --detail（写原因与依据）；效果未知的先回读记 reconciled"}
     if weekly_due and not weekly["attemptedToday"]:
         return {"status": "NOT_FINISHED", "date": day, "wrote": False, **with_stats(root, day, state, evidence_dir=evidence_dir), "coverageDue": weekly,
                 "rule": "全范围检查日期核对已到期且今晚未做：先做并用 nightly coverage 登记（来源不可用也要登记这次尝试）"}
@@ -811,7 +908,7 @@ def bind_end(root: Path, day: str, *, receipt: str, state: str, detail: str = ""
 
 @_under_begin_lock
 def record_snapshot(root: Path, day: str, *, tag: str, run_key: str, files: dict[str, dict[str, str]],
-                    now: datetime | None = None) -> dict[str, Any]:
+                    now: datetime | None = None, contract_sha: str = "") -> dict[str, Any]:
     """Record where this execution's independent ``pre`` / ``post`` mirror snapshots are (file and sha per table).
     The first record for a (tag, run key) stays; a later call only reports it."""
     if tag not in ("pre", "post"):
@@ -824,8 +921,45 @@ def record_snapshot(root: Path, day: str, *, tag: str, run_key: str, files: dict
     if run_key in recorded:
         return {"status": "ALREADY_RECORDED", "date": day, "wrote": False, "snapshot": recorded[run_key]}
     recorded[run_key] = {"at": (now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds"), "tables": files}
+    if contract_sha:
+        recorded[run_key]["contractSha256"] = contract_sha      # 写前登记带合同身份：写入前检查据此核对
     _atomic(path, run)
     return {"status": "RECORDED", "date": day, "snapshot": recorded[run_key]}
+
+
+def execution_key(item: dict[str, Any]) -> str:
+    """The run key of one bound execution, as sync.sh derives it: ``e<绑定时刻>-<会话前 8 位>``."""
+    return "e" + str(item["boundAt"]).replace("-", "").replace(":", "").replace("T", "")[:14] + "-" + str(item["sessionId"])[:8]
+
+
+def write_evidence(root: Path, day: str, run_key: str) -> dict[str, Any]:
+    """Cloud write evidence of this execution since it was bound: ledger intents/finals (and the durable pending area) at or after the
+    bind time. Used to refuse taking a write-before snapshot after writes may already have started."""
+    run = _load(_run_dir(root, day) / "run.json", {}) or {}
+    bound = [item for item in run.get("executions", []) if execution_key(item) == run_key]
+    since = _parse_time(bound[-1]["boundAt"]) if bound else _parse_time(run["startedAt"]) if run.get("startedAt") else None
+    if since is None:
+        return {"since": None, "events": 0, "known": False, "intents": []}
+    events = _ledger_events(root, since=since, kinds=("intent", "final"))
+    return {"since": since.isoformat(timespec="seconds"), "events": len(events), "known": bool(bound),
+            "intents": sorted({str(e.get("intentId")) for e in events})[:10]}
+
+
+def record_pre_incomplete(root: Path, day: str, *, run_key: str, files: dict[str, str], reason: str, evidence: dict[str, Any],
+                          now: datetime | None = None) -> dict[str, Any]:
+    """Keep the evidence that this execution has an incomplete write-before snapshot it can no longer complete safely (writes already
+    evidenced). The first record per run key stays; a new execution key is the existing safe takeover."""
+    path = _run_dir(root, day) / "run.json"
+    with _begin_lock(root):
+        run = _load(path, None)
+        if run is None:
+            return {"status": "NO_RUN_RECORD", "date": day, "wrote": False}
+        recorded = run.setdefault("mirrorSnapshots", {}).setdefault("preIncomplete", {})
+        if run_key in recorded:
+            return {"status": "ALREADY_RECORDED", "date": day, "wrote": False, "record": recorded[run_key]}
+        recorded[run_key] = {"at": (now or now_shanghai()).astimezone(SHANGHAI).isoformat(timespec="seconds"), "files": files, "reason": reason, "writeEvidence": evidence}
+        _atomic(path, run)
+        return {"status": "RECORDED", "date": day, "record": recorded[run_key]}
 
 
 def open_executions(root: Path) -> list[dict[str, Any]]:
@@ -1229,6 +1363,70 @@ def run_stats(root: Path, day: str, *, evidence_dir: str = "", now: datetime | N
             "collectedCases": sorted(collected), "archivedCases": sorted(archived),
             "coverage": f"采集：{collected_basis}；归档：{archived_basis}；云写入：" + ("回执+唯一账逐意图" if cloud.get("source") == "receipts+ledger" else "无回执目录")
                         + "；观察：队列当日历史"}
+
+
+# ---------------------------------------------------------------------------------------------
+# Structured report of one run (one receipt, counted once)
+# ---------------------------------------------------------------------------------------------
+
+_PATH_LIKE = re.compile(r"(?:[A-Za-z]:[\\/]|/mnt/|/srv/|/home/|\\\\)[^\s，。；、）)\]\"']*")
+CASE_NO = re.compile(r"\d{8}C\d{9}")
+
+
+def _clean(text: Any, limit: int = 200) -> str:
+    """One line of detail with file paths removed (the report never carries original material, local paths or file names)."""
+    line = _PATH_LIKE.sub("<路径>", str(text or "")).replace("\n", " ")
+    return line if len(line) <= limit else line[:limit] + "…"
+
+
+def _case_label(index: int, project: str, names: dict[str, dict[str, str]]) -> str:
+    info = names.get(project) or {}
+    who = "｜".join(part for part in (info.get("brigade"), info.get("unit")) if part) or "大队/单位待核"
+    return f"第 {index} 案 {who}（项目编号 {project}）"
+
+
+def report(root: Path, day: str, *, evidence_dir: str = "", waterline: Path | None = None) -> dict[str, Any]:
+    """Reusable structured report body of one run, computed from the run's own receipt and evidence (``run_stats``): the number of cases first,
+    then every case as ``第 N 案 大队｜单位（项目编号 …）`` (N is the position in this report, never the project number), then the separate
+    counts (cases, new cloud rows, update operations, unique field cells, unknown items, observation) and the open problems.
+    Old records are left as they are; no original material, file name or local path appears in the output."""
+    run = _load(_run_dir(root, day) / "run.json", None)
+    if run is None:
+        raise NightlyError("该日期没有运行记录")
+    stats = run_stats(root, day, evidence_dir=evidence_dir or run.get("evidenceDir", ""))
+    cloud_cases = set(stats["cloud"].get("cases", []))
+    cases = sorted(project for project in {*stats["collectedCases"], *stats["archivedCases"], *cloud_cases} if CASE_NO.fullmatch(str(project)))
+    names: dict[str, dict[str, str]] = {}
+    water = waterline if waterline is not None else root.parent / "案卷水位记录.json"
+    if water.is_file():
+        try:
+            for project, record in (json.loads(water.read_text(encoding="utf-8")).get("cases") or {}).items():
+                names[project] = {"brigade": str(record.get("brigadeName") or ""), "unit": str(record.get("unitName") or "")}
+        except (OSError, ValueError):
+            pass
+    numbered = [{"n": index, "projectNo": project, "text": _case_label(index, project, names),
+                 "collected": project in stats["collectedCases"], "archived": project in stats["archivedCases"], "cloudWritten": project in cloud_cases}
+                for index, project in enumerate(cases, 1)]
+    breakdown = stats["breakdown"]
+    issues = run.get("issues") if run.get("status") == "FINISHED" else issues_of(root, day)
+    problems = []
+    for index, issue in enumerate(issues or [], 1):
+        project = issue.get("case") or ""
+        where = _case_label(cases.index(project) + 1, project, names) if project in cases else (f"项目编号 {project}" if project else "")
+        problems.append({"n": index, "kind": issue.get("kind"), "stage": issue.get("stage"), "case": project, "status": issue.get("status"),
+                         "text": "；".join(part for part in (where, f"{issue.get('stage') or ''}阶段 {issue.get('kind') or ''}", _clean(issue.get("detail"))) if part)})
+    counts = {"cases": len(cases), "cloudCreatedRows": breakdown.get("cloudCreatedRows"), "cloudUpdatedOperations": breakdown.get("cloudUpdatedOperations"),
+              "cloudUniqueFields": breakdown.get("cloudUniqueFields"), "cloudUnknown": breakdown.get("cloudUnknown"),
+              "unknownWriteCheckpoints": breakdown.get("unknownWriteCheckpoints"), "observation": breakdown.get("observation"),
+              "changedCasesAndTasks": stats["changed"]}
+    lines = [f"运行 {day}：{run.get('status')}。本轮新建或更新 {len(cases)} 案。" if cases else f"运行 {day}：{run.get('status')}。本轮没有新建或更新的案卷（0 案）。",
+             *[item["text"] for item in numbered]]
+    lines.append("分项（各是各的计数，不互相代替）：案数 %s；云端新建行 %s；更新操作 %s；唯一字段格 %s；未决（云写入未知）%s；效果未知的写入检查点 %s；观察队列 %s。" % (
+        len(cases), counts["cloudCreatedRows"], counts["cloudUpdatedOperations"], counts["cloudUniqueFields"], counts["cloudUnknown"],
+        counts["unknownWriteCheckpoints"], json.dumps(counts["observation"], ensure_ascii=False)))
+    lines += [f"问题 {p['n']}：{p['text']}" for p in problems] or ["问题：无。"]
+    return {"schema": "NightReportV1", "date": day, "runStatus": run.get("status"), "caseCount": len(cases), "cases": numbered, "counts": counts,
+            "problems": problems, "text": "\n".join(lines), "coverage": stats["coverage"], "namesFrom": "案卷水位记录" if names else "无"}
 
 
 # ---------------------------------------------------------------------------------------------

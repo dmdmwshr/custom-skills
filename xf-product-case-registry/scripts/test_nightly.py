@@ -1207,3 +1207,123 @@ def test_a_regular_night_keeps_binding_a_resumed_session_with_a_new_receipt(tmp_
     nightly.begin(root, now=T(day + "T02:00:00"), trigger="scheduled")
     nightly.bind(root, day, session_id="s", receipt="r1.json", runner_pid=5)
     assert nightly.bind(root, day, session_id="s", receipt="r2.json", runner_pid=6)["status"] == "BOUND"
+
+
+def test_a_night_cannot_finish_while_a_case_from_its_own_scan_plan_has_no_terminal_end_mark(tmp_path):
+    root, day = tmp_path / "运行记录", "2026-11-23"
+    evidence = tmp_path / "证据"
+    evidence.mkdir()
+    (evidence / "scan-plan.json").write_text(json.dumps({"pending": [{"projectNo": "32002208C202600131"}, {"projectNo": "32002221C202600098"}],
+                                                         "packageAcquireFirst": [{"projectNo": "32002221C202600098"}]}), encoding="utf-8")
+    nightly.begin(root, now=T(day + "T02:00:00"), trigger="scheduled", evidence_dir=str(evidence))
+    _all_done(root, day)
+    held = nightly.finish(root, day, evidence_dir=str(evidence))
+    assert held["status"] == "NOT_FINISHED" and held["dueCasesUnmarked"] == ["32002208C202600131", "32002221C202600098"]
+    nightly.checkpoint(root, day, stage="acquire", status="skipped", case="32002208C202600131", issue=True, detail="受 107 批次保护，不放行")      # 已保护：终标
+    nightly.checkpoint(root, day, stage="organize", status="started", case="32002221C202600098")
+    assert nightly.finish(root, day, evidence_dir=str(evidence))["status"] == "NOT_FINISHED"                                    # 只是开始，不是终标
+    nightly.checkpoint(root, day, stage="organize", status="done", case="32002221C202600098", detail="续办完成")
+    done = nightly.finish(root, day, evidence_dir=str(evidence))
+    assert done["status"] == "FINISHED" and any(i["case"] == "32002208C202600131" for i in done["issues"])                    # 保护原因随收尾带出
+
+
+def test_without_a_scan_plan_in_the_evidence_a_narrow_run_has_no_due_cases_and_finishes_as_before(tmp_path):
+    root, day = tmp_path / "运行记录", "2026-11-23"
+    nightly.begin(root, now=T(day + "T02:00:00"), trigger="scheduled", evidence_dir=str(tmp_path / "没有计划"))
+    _all_done(root, day)
+    assert nightly.due_cases(root, day, evidence_dir=str(tmp_path / "没有计划"))["planned"] is False
+    assert nightly.finish(root, day, evidence_dir=str(tmp_path / "没有计划"))["status"] == "FINISHED"
+
+
+# ---------------------------------------------------------------------------------------------
+# 发现入口按入口水位推进（十个入口各自最近一次完整成功覆盖）
+# ---------------------------------------------------------------------------------------------
+
+DAILY_C, DAILY_I, OPEN_C = "日常监督任务/创建时间", "日常监督任务/检查日期", "开业前检查任务/创建时间"
+
+
+def _discover(root, day, entry, status="done", window=None, lane=None, hour="02"):
+    key = day if lane is None else f"{day}@{lane}"
+    if nightly._load(nightly._run_dir(root, key) / "run.json", None) is None:
+        if lane is None:
+            nightly.begin(root, now=T(f"{day}T{hour}:00:00"), trigger="scheduled")
+        else:       # 手工运行的记录直接落盘：这里只验证水位推导，不走手工 begin 的串行检查
+            nightly._run_dir(root, key).mkdir(parents=True, exist_ok=True)
+            (nightly._run_dir(root, key) / "run.json").write_text(json.dumps({"schemaVersion": "NightlyRunV1", "date": day, "status": "RUNNING", "entryKeyed": True,
+                                                                              "startedAt": f"{day}T{hour}:00:00+08:00", "lane": {"kind": "manual", "id": lane}}), encoding="utf-8")
+    nightly.checkpoint(root, key, stage="discover", status=status, entry=entry, window=window, detail="共 0 条，读到 0 行" if status == "done" else "502",
+                       now=T(f"{day}T{hour}:30:00"))
+
+
+def test_each_discover_entry_starts_from_its_own_last_complete_read_and_failed_entries_do_not_advance(tmp_path):
+    root = tmp_path / "运行记录"
+    assert nightly.discover_starts(root, "2026-11-20")["entries"][DAILY_C] == {
+        "start": "2026-11-06", "end": "2026-11-20", "coveredThrough": None, "basis": "bootstrap", "unreadDays": None, "gapWindows": []}
+    _discover(root, "2026-11-20", DAILY_C, window=("2026-11-06", "2026-11-20"))                       # 零条但页面读全也是 done
+    _discover(root, "2026-11-20", OPEN_C, status="failed")                                           # 502：不推进
+    on_21 = nightly.discover_starts(root, "2026-11-21")["entries"]
+    assert on_21[DAILY_C]["start"] == "2026-11-17" and on_21[DAILY_C]["coveredThrough"] == "2026-11-20" and on_21[DAILY_C]["basis"] == "checkpoint-window"
+    assert on_21[OPEN_C]["basis"] == "bootstrap" and on_21[OPEN_C]["start"] == "2026-11-07"          # 没成功过：原来的 14 天
+
+
+def test_a_long_interruption_keeps_the_start_at_the_last_success_and_recovery_rolls_it_forward(tmp_path):
+    root = tmp_path / "运行记录"
+    _discover(root, "2026-11-10", DAILY_I, window=("2026-11-01", "2026-11-10"))
+    for day in ("2026-11-11", "2026-11-12", "2026-11-13", "2026-11-14", "2026-11-15"):                 # 连续 5 夜 502
+        _discover(root, day, DAILY_I, status="failed")
+        _discover(root, day, DAILY_C, window=("2026-11-05", day))                                      # 同夜别的入口照常滚动
+    entries = nightly.discover_starts(root, "2026-11-16")["entries"]
+    assert entries[DAILY_I]["start"] == "2026-11-07" and entries[DAILY_I]["unreadDays"] == 6          # 未读跨度 > 3 天也补回
+    assert entries[DAILY_C]["start"] == "2026-11-12"
+    _discover(root, "2026-11-16", DAILY_I, window=("2026-11-07", "2026-11-16"))
+    assert nightly.discover_starts(root, "2026-11-17")["entries"][DAILY_I]["start"] == "2026-11-13"   # 恢复后继续滚动
+
+
+def test_a_narrow_manual_window_across_an_unread_gap_never_advances_but_a_contiguous_one_does(tmp_path):
+    root = tmp_path / "运行记录"
+    _discover(root, "2026-11-10", DAILY_C, window=("2026-11-01", "2026-11-10"))
+    _discover(root, "2026-11-10", DAILY_C, window=("2026-11-18", "2026-11-19"), lane="m1", hour="10")   # 窄跑：与已覆盖范围之间有缺口
+    entries = nightly.discover_starts(root, "2026-11-20")["entries"]
+    assert entries[DAILY_C]["coveredThrough"] == "2026-11-10" and entries[DAILY_C]["gapWindows"] == [["2026-11-18", "2026-11-19"]]
+    assert entries[DAILY_C]["start"] == "2026-11-07"
+    _discover(root, "2026-11-10", DAILY_C, window=("2026-11-09", "2026-11-14"), lane="m2", hour="11")   # 连续、重叠：推进
+    assert nightly.discover_starts(root, "2026-11-20")["entries"][DAILY_C]["coveredThrough"] == "2026-11-14"
+
+
+def test_old_checkpoints_without_a_window_are_read_conservatively_and_the_floor_and_weekly_coverage_apply(tmp_path):
+    root = tmp_path / "运行记录"
+    _discover(root, "2026-11-10", DAILY_C)                                                          # 旧记录：没有窗口
+    old = nightly.discover_starts(root, "2026-11-11")["entries"][DAILY_C]
+    assert old["basis"] == "legacy-checkpoint" and old["coveredThrough"] == "2026-11-07" and old["start"] == "2026-11-04"
+    early = tmp_path / "早期" / "运行记录"
+    _discover(early, "2026-01-02", DAILY_C, window=("2025-12-20", "2026-01-02"))
+    assert nightly.discover_starts(early, "2026-01-03")["entries"][DAILY_C]["start"] == "2026-01-01"    # 不早于既有真实初查范围
+    log = root / nightly.RUNS_DIR / nightly.COVERAGE_LOG
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(json.dumps({"at": "2026-11-11T05:00:00+08:00", "date": "2026-11-11", "dateField": "检查日期", "scopeFrom": "2026-01-01",
+                               "scopeTo": "2026-11-11", "outcome": "COMPLETE", "entries": {"日常监督任务": {"complete": True}, "开业前检查任务": {"complete": False}}}) + "\n", encoding="utf-8")
+    weekly = nightly.discover_starts(root, "2026-11-12")["entries"]
+    assert weekly[DAILY_I]["basis"] == "weekly-coverage" and weekly[DAILY_I]["coveredThrough"] == "2026-11-11"
+    assert weekly["开业前检查任务/检查日期"]["basis"] == "bootstrap" and weekly[DAILY_C]["basis"] == "legacy-checkpoint"   # 创建时间入口不吃每周检查日期核对
+
+
+def test_the_structured_report_states_the_case_count_first_numbers_every_case_even_one_and_keeps_counts_apart_without_paths(tmp_path, monkeypatch):
+    root, day = tmp_path / "业务根" / "运行记录", "2026-11-23"
+    root.mkdir(parents=True)
+    (tmp_path / "业务根" / "案卷水位记录.json").write_text(json.dumps({"cases": {
+        "32002205C202600117": {"unitName": "甲公司", "brigadeName": "新吴区消防救援局"}}}), encoding="utf-8")
+    nightly.begin(root, now=T(day + "T02:00:00"), trigger="scheduled")
+    nightly.checkpoint(root, day, stage="mirror", status="failed", issue=True, detail="写前镜像被截断，见 D:/ws/05-temp/x/sync/mirror.err 和 /mnt/d/a.json", case="32002205C202600117")
+    stats = {"changed": 1, "reportedChanged": 0, "collectedCases": ["32002205C202600117"], "archivedCases": [], "coverage": "x",
+             "breakdown": {"cloudCreatedRows": 2, "cloudUpdatedOperations": 3, "cloudUniqueFields": 5, "cloudUnknown": 0, "unknownWriteCheckpoints": 0, "observation": {"added": 1}},
+             "cloud": {"cases": ["32002205C202600117"], "unknown": []}}
+    monkeypatch.setattr(nightly, "run_stats", lambda *a, **k: stats)
+    one = nightly.report(root, day)
+    assert one["caseCount"] == 1 and one["text"].splitlines()[0] == "运行 2026-11-23：RUNNING。本轮新建或更新 1 案。"
+    assert one["cases"][0]["text"] == "第 1 案 新吴区消防救援局｜甲公司（项目编号 32002205C202600117）"
+    assert "案数 1；云端新建行 2；更新操作 3；唯一字段格 5" in one["text"]
+    assert "D:/" not in one["text"] and "/mnt/" not in one["text"] and "<路径>" in one["text"]
+    assert one["problems"][0]["text"].startswith("第 1 案 新吴区消防救援局｜甲公司")
+    stats.update(collectedCases=[], cloud={"cases": [], "unknown": []})
+    none = nightly.report(root, day)
+    assert none["caseCount"] == 0 and "0 案" in none["text"].splitlines()[0]

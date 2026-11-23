@@ -2686,7 +2686,7 @@ def build_parser() -> argparse.ArgumentParser:
     child_build.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     child_build.set_defaults(func=feishu_child_build_command)
     nightly = sub.add_parser("nightly", help="夜间运行记录与检查点、观察队列（定时与人工触发共用；只写业务根“运行记录”，不联网）")
-    nightly.add_argument("action", choices=["begin", "checkpoint", "finish", "status", "progress", "observe", "due", "coverage", "bind", "bind-end", "executions", "timeline", "delay-cause"])
+    nightly.add_argument("action", choices=["begin", "checkpoint", "finish", "status", "progress", "observe", "due", "coverage", "bind", "bind-end", "executions", "timeline", "delay-cause", "discover-window", "report"])
     nightly.add_argument("--date", help="运行日期 YYYY-MM-DD；begin 取当前上海日期")
     nightly.add_argument("--trigger", default="manual", choices=["scheduled", "manual"])
     nightly.add_argument("--actor", default="")
@@ -2698,6 +2698,7 @@ def build_parser() -> argparse.ArgumentParser:
     nightly.add_argument("--changed", type=int, default=0)
     nightly.add_argument("--summary", default="")
     nightly.add_argument("--items", help="observe：本次来源观察到的任务 JSON 文件")
+    nightly.add_argument("--window", nargs=2, metavar=("START", "END"), help="checkpoint（discover 入口）：本次实际读取的日期窗口；入口水位只按完整成功（done）且连续的窗口推进")
     nightly.add_argument("--entry", help="checkpoint：同一阶段内的入口（如“日常监督任务/创建时间”）；observe：来源入口名称")
     nightly.add_argument("--runner-alive", choices=["yes", "no"], help="progress：监督者在 WSL 里看到的派发进程是否存活（Windows 副本读不到 /proc 时必传）")
     nightly.add_argument("--manual-run", help="同日额外一轮的手工运行编号（1–12 位字母数字）：begin/checkpoint/bind/finish… 都落在 夜间运行/手工/<日>@<编号>，不改当天常规运行；--date 也可直接写 YYYY-MM-DD@编号")
@@ -2780,6 +2781,16 @@ def build_parser() -> argparse.ArgumentParser:
     mirror.add_argument("--manual-run", help="同日手工运行编号：前后快照记入该手工运行的 run.json，不写当天常规运行")
     mirror.add_argument("--cli", help="官方 lark-cli 路径；省略用模块默认")
     mirror.set_defaults(func=feishu_mirror_command)
+    gate = sub.add_parser(
+        "feishu-pre-gate",
+        help="写入前检查（只读本地）：本次执行在运行记录里登记了完整、已确认、合同身份一致的写前快照；不满足退出 2，任何飞书变更入口都在其前",
+    )
+    for flag in ("--contract", "--contract-sha", "--base-token", "--business-root", "--run-key"):
+        gate.add_argument(flag, required=True)
+    gate.add_argument("--maintenance-base-token", help="维修企业台账 Base；与 feishu-mirror 同一组目标")
+    gate.add_argument("--date", help="运行日期 YYYY-MM-DD；省略取当前上海日期")
+    gate.add_argument("--manual-run", help="同日手工运行编号")
+    gate.set_defaults(func=feishu_pre_gate_command)
     recount = sub.add_parser(
         "feishu-recount",
         help="统计对账：由检查明细/产品明细/案卷主表独立重算月度各列，与飞书公式列逐格比较；只读云；有差异退出码 4",
@@ -3189,7 +3200,8 @@ def nightly_command(args: argparse.Namespace) -> None:
             result["observationQueue"] = module.queue_summary(root, today=today)
         elif args.action == "checkpoint":
             result = module.checkpoint(root, day or today, stage=args.stage, status=args.status, case=args.case,
-                                       detail=args.detail, ref=args.ref, changed=args.changed, entry=args.entry or "", issue=args.issue)
+                                       detail=args.detail, ref=args.ref, changed=args.changed, entry=args.entry or "", issue=args.issue,
+                                       window=tuple(args.window) if args.window else None)
         elif args.action == "finish":
             result = module.finish(root, day or today, summary=args.summary, evidence_dir=_evidence_dir(args, module.split_run_key(day or today)[0]),
                                    refresh_stats=args.refresh_stats)
@@ -3222,6 +3234,10 @@ def nightly_command(args: argparse.Namespace) -> None:
             result = {"today": today, "openExecutions": module.open_executions(root)}
         elif args.action == "timeline":
             result = {"today": today, "runs": module.timeline(root, since=args.date)}
+        elif args.action == "report":      # 只读：由本轮自己的回执与证据算出可直接使用的结构化汇报正文（先案数，各案“第 N 案”）
+            result = module.report(root, day or today, evidence_dir=_evidence_dir(args, module.split_run_key(day or today)[0]))
+        elif args.action == "discover-window":      # 只读：十个发现入口各自今晚应从哪天读起
+            result = module.discover_starts(root, day or today)
         elif args.action == "delay-cause":
             if not (args.date and args.detail and args.ref):
                 raise RegistryError("delay-cause 需要 --date、--detail（已证实的原因）、--ref（证据位置）")
@@ -3263,6 +3279,9 @@ def feishu_mirror_command(args: argparse.Namespace) -> None:
     targets: dict[str | None, dict[str, str]] = {None: {"baseToken": args.base_token, "profile": args.profile, "identity": args.identity}}
     if args.maintenance_base_token:
         targets["maintenanceBase"] = {"baseToken": args.maintenance_base_token, "profile": args.profile, "identity": args.identity}
+    nightly = importlib.import_module(f"{__package__}.nightly" if __package__ else "nightly")
+    if args.tag == "pre":
+        _refuse_pre_after_writes(args, module, nightly, targets)
     report = _feishu_read(args, "飞书镜像", lambda sync, transport: module.mirror(
         contract_path=Path(args.contract), contract_sha=args.contract_sha, sections=list(targets), targets=targets, transport=transport,
         business_root=Path(args.business_root), ledger_dir=Path(args.ledger_dir), day=_run_day(args), tag=args.tag, run_key=args.run_key))
@@ -3270,11 +3289,58 @@ def feishu_mirror_command(args: argparse.Namespace) -> None:
         nightly = importlib.import_module(f"{__package__}.nightly" if __package__ else "nightly")
         report["runRecord"] = nightly.record_snapshot(Path(args.business_root) / nightly.RUNTIME_DIR, nightly.lane_key(_run_day(args), args.manual_run or ""), tag=args.tag,
                                                       run_key=args.run_key, files={t["table"]: {"file": t["snapshotFile"], "sha256": t["snapshotSha256"]}
-                                                                                    for t in report["tables"]})
+                                                                                    for t in report["tables"]}, contract_sha=args.contract_sha if args.tag == "pre" else "")
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["status"] != "OK":
         print("WARNING: 来源事实被改动或有读不清的行(ATTENTION)；退出码 4", file=sys.stderr)
         raise SystemExit(4)
+
+
+def _refuse_pre_after_writes(args: argparse.Namespace, module: Any, nightly: Any, targets: dict[str | None, dict[str, str]]) -> None:
+    """A write-before snapshot is only valid if taken before this execution wrote anything. Finishing a cut-short ``pre`` (tables already
+    kept are reused untouched) is fine until writes are evidenced; after that the missing tables must not be taken now: the original
+    evidence is kept in the run record and the run key is not completed (the existing takeover is a new bound execution, a new key)."""
+    names = module.expected_tables(Path(args.contract), args.contract_sha, list(targets), targets)
+    have = module.pre_files(Path(args.business_root), _run_day(args), args.run_key, names)
+    if all(have.values()):
+        return
+    runtime = Path(args.business_root) / nightly.RUNTIME_DIR
+    lane = nightly.lane_key(_run_day(args), args.manual_run or "")
+    evidence = nightly.write_evidence(runtime, lane, args.run_key)
+    if not evidence["events"]:
+        return
+    kept = {name: str(module._run_snapshot(Path(args.business_root) / "运行记录" / module.MIRROR_DIR, _run_day(args), name, "pre", args.run_key)) for name, ok in have.items() if ok}
+    nightly.record_pre_incomplete(runtime, lane, run_key=args.run_key, files=kept, reason="本次执行的写前快照不完整，而账本已有本次执行绑定后的写入证据，不能事后补取", evidence=evidence)
+    missing = [name for name, ok in have.items() if not ok]
+    raise RegistryError(f"飞书镜像已拒绝：运行键 {args.run_key} 的写前快照缺 {missing}，且账本已有该执行绑定后的写入证据（{evidence['events']} 条），不能事后补取；"
+                        "原快照与证据已记入运行记录，不覆盖；需要安全接管（新绑定执行取新运行键）")
+
+
+def feishu_pre_gate_command(args: argparse.Namespace) -> None:
+    """Read-only: may this execution change Feishu now? Needs its complete, confirmed write-before snapshot of the current contract."""
+    module = importlib.import_module(f"{__package__}.feishu_mirror" if __package__ else "feishu_mirror")
+    nightly = importlib.import_module(f"{__package__}.nightly" if __package__ else "nightly")
+    sync = importlib.import_module(f"{__package__}.feishu_source_sync" if __package__ else "feishu_source_sync")
+    targets: dict[str | None, dict[str, str]] = {None: {"baseToken": args.base_token}}
+    if args.maintenance_base_token:
+        targets["maintenanceBase"] = {"baseToken": args.maintenance_base_token}
+    lane = nightly.lane_key(_run_day(args), args.manual_run or "")
+    run = nightly._load(nightly._run_dir(Path(args.business_root) / nightly.RUNTIME_DIR, lane) / "run.json", None)
+    registered = (((run or {}).get("mirrorSnapshots") or {}).get("pre") or {}).get(args.run_key)
+    try:
+        report = module.pre_gate(contract_path=Path(args.contract), contract_sha=args.contract_sha, sections=list(targets), targets=targets,
+                                 business_root=Path(args.business_root), day=_run_day(args), run_key=args.run_key, registered=registered)
+    except (sync.SyncError, ValueError, OSError) as error:
+        raise RegistryError(f"写前快照检查已拒绝：{error}") from error
+    if run is None:
+        report = {**report, "status": "INCOMPLETE", "reasons": ["没有该日期/手工运行的运行记录", *report["reasons"]]}
+    incomplete = ((((run or {}).get("mirrorSnapshots") or {}).get("preIncomplete")) or {}).get(args.run_key)
+    if incomplete:
+        report = {**report, "status": "INCOMPLETE", "reasons": [*report["reasons"], "运行记录已保存本执行写前快照不完整的原证据，需安全接管（新绑定执行取新运行键）"]}
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["status"] != "OK":
+        print("ERROR: 本次执行没有完整的写前快照：不得写飞书；本地归档和只读对账可继续", file=sys.stderr)
+        raise SystemExit(2)
 
 
 def feishu_recount_command(args: argparse.Namespace) -> None:

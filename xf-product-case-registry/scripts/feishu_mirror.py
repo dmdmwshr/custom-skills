@@ -89,7 +89,7 @@ def _run_snapshot(root: Path, day: str, name: str, tag: str, run_key: str) -> Pa
 
 def mirror_table(*, base: str, table_name: str, table_id: str, fields: dict[str, dict[str, Any]], facts: dict[str, dict[str, Any]],
                  transport: Any, ledger: sync.Ledger | None, root: Path, label: str, day: str, observed_at: str,
-                 tag: str = "day", run_key: str = "") -> dict[str, Any]:
+                 tag: str = "day", run_key: str = "", contract_sha: str = "") -> dict[str, Any]:
     """Mirror one table; returns its part of the report. Reads Feishu once; writes only under ``root``.
 
     ``tag`` ``pre`` / ``post`` write an independent snapshot for this execution (``run_key``) that is never overwritten: a
@@ -165,6 +165,8 @@ def mirror_table(*, base: str, table_name: str, table_id: str, fields: dict[str,
                     drift.append({"table": name, "stableKey": key, "field": meta["name"], "assistantLastWrote": wrote, "feishuNow": now_value})
     snapshot = {"table": name, "tableId": table_id, "readAt": observed_at, "fields": [m["name"] for m in fields.values()], "rows": current}
     if run_file is not None:
+        snapshot["contractSha256"] = contract_sha      # 写前快照的合同身份：写入前检查据此确认快照与当前合同同一份
+    if run_file is not None:
         snapshot["checks"] = {"changes": len(changes), "changesByUser": sum(1 for c in changes if c.get("by") == "feishu-user"),
                               "changeSample": changes[:20], "factDrift": drift, "problems": problems, "confirmed": not problems}
     day_dir = root / "每日快照" / day
@@ -191,21 +193,8 @@ def mirror_table(*, base: str, table_name: str, table_id: str, fields: dict[str,
             "snapshotFile": str(run_file) if run_file is not None else str(day_dir / f"{name}.json")}
 
 
-def mirror(*, contract_path: Path, contract_sha: str, sections: list[str | None], targets: dict[str | None, dict[str, str]], transport: Any,
-           business_root: Path, ledger_dir: Path | None, day: str, isolated_test_ledger: bool = False,
-           tag: str = "day", run_key: str = "") -> dict[str, Any]:
-    """Mirror every table that has a stable key and brigade-maintained fields, in each listed contract section.
-
-    ``tag`` is ``day`` (the legacy daily snapshot), ``pre`` or ``post`` (one immutable snapshot per execution, ``run_key`` required)."""
-    sync._require(tag in TAGS, "tag 必须是 day/pre/post")
-    sync._require(tag == "day" or bool(re.fullmatch(r"[0-9A-Za-z._-]{3,60}", run_key or "")), "写前/写后快照需要运行键（3–60 位字母数字或 ._-）")
-    ledger = None
-    if ledger_dir is not None:
-        ledger = sync.Ledger(ledger_dir, isolated_test=isolated_test_ledger)
-        ledger.validate_root()
-    root = Path(business_root) / "运行记录" / MIRROR_DIR
-    observed_at = sync.now()
-    tables: list[dict[str, Any]] = []
+def _mirror_plan(contract_path: Path, contract_sha: str, sections: list[str | None], targets: dict[str | None, dict[str, str]]):
+    """The tables a mirror covers, in order: (section, table name, table id, brigade fields, supervision facts, base token)."""
     for section in sections:
         contract = sync.load_contract(contract_path, contract_sha, section)
         target = targets[section]
@@ -218,11 +207,76 @@ def mirror(*, contract_path: Path, contract_sha: str, sections: list[str | None]
             fields = {fid: meta for fid, meta in index[table_id].items() if meta["class"] in BRIGADE_CLASSES and meta["type"] not in sync.DERIVED_TYPES}
             facts = {fid: meta for fid, meta in index[table_id].items()
                      if meta["class"] == sync.WHITELIST and meta["type"] in sync.SCALAR_TYPES and fid != sync.STABLE_KEYS[table_name]}
-            if not fields:
-                continue
-            tables.append(mirror_table(base=target["baseToken"], table_name=table_name, table_id=table_id, fields=fields, facts=facts,
-                                       transport=transport, ledger=ledger, root=root, label=SECTION_NAMES.get(section, section or MAIN),
-                                       day=day, observed_at=observed_at, tag=tag, run_key=run_key))
+            if fields:
+                yield section, table_name, table_id, fields, facts, target["baseToken"]
+
+
+def expected_tables(contract_path: Path, contract_sha: str, sections: list[str | None], targets: dict[str | None, dict[str, str]]) -> list[str]:
+    """Snapshot names (``<库>-<表>``) a complete write-before snapshot of this contract must have."""
+    return [f"{SECTION_NAMES.get(section, section or MAIN)}-{name}" for section, name, *_ in _mirror_plan(contract_path, contract_sha, sections, targets)]
+
+
+def pre_files(business_root: Path, day: str, run_key: str, names: list[str]) -> dict[str, bool]:
+    root = Path(business_root) / "运行记录" / MIRROR_DIR
+    return {name: _run_snapshot(root, day, name, "pre", run_key).is_file() for name in names}
+
+
+def pre_gate(*, contract_path: Path, contract_sha: str, sections: list[str | None], targets: dict[str | None, dict[str, str]],
+             business_root: Path, day: str, run_key: str, registered: dict[str, Any] | None) -> dict[str, Any]:
+    """Read-only check before any cloud change: this execution has a COMPLETE, confirmed write-before snapshot of the current contract.
+
+    Every expected table has its own file for ``run_key`` (confirmed read, same contract sha), and the run record's mirror registry
+    lists exactly those files with their digests. Nothing is read from or written to Feishu."""
+    sync._require(bool(re.fullmatch(r"[0-9A-Za-z._-]{3,60}", run_key or "")), "写前快照检查需要本次执行的运行键")
+    names = expected_tables(contract_path, contract_sha, sections, targets)
+    root = Path(business_root) / "运行记录" / MIRROR_DIR
+    reasons: list[str] = []
+    missing: list[str] = []
+    entry = (registered or {}).get("tables") or {}
+    if not registered:
+        reasons.append("运行记录里没有本次执行的写前快照登记")
+    elif registered.get("contractSha256") != contract_sha:
+        reasons.append("登记的合同身份与当前合同不同或缺失")
+    for name in names:
+        path = _run_snapshot(root, day, name, "pre", run_key)
+        snapshot = _load(path) if path.is_file() else None
+        if snapshot is None:
+            missing.append(name)
+            continue
+        if not (snapshot.get("checks") or {}).get("confirmed", False):
+            reasons.append(f"{name}：写前快照不是已确认读回")
+        if snapshot.get("contractSha256") != contract_sha:
+            reasons.append(f"{name}：写前快照的合同身份与当前合同不同或缺失")
+        listed = entry.get(name)
+        if registered and (not listed or listed.get("sha256") != sync.digest(path.read_text(encoding="utf-8"))):
+            reasons.append(f"{name}：登记的摘要与快照文件不符或没有登记")
+    if missing:
+        reasons.append("缺少写前快照的表：" + "、".join(missing))
+    return {"schema": "FeishuPreSnapshotGateV1", "day": day, "runKey": run_key, "expected": names, "missing": missing, "reasons": reasons,
+            "status": "OK" if not reasons else "INCOMPLETE", "externalCalls": "none"}
+
+
+def mirror(*, contract_path: Path, contract_sha: str, sections: list[str | None], targets: dict[str | None, dict[str, str]], transport: Any,
+           business_root: Path, ledger_dir: Path | None, day: str, isolated_test_ledger: bool = False,
+           tag: str = "day", run_key: str = "") -> dict[str, Any]:
+    """Mirror every table that has a stable key and brigade-maintained fields, in each listed contract section.
+
+    ``tag`` is ``day`` (the legacy daily snapshot), ``pre`` or ``post`` (one immutable snapshot per execution, ``run_key`` required).
+    A ``pre`` run that was cut short is simply finished by calling it again before any write: tables already kept are reused untouched
+    and only the missing ones are read."""
+    sync._require(tag in TAGS, "tag 必须是 day/pre/post")
+    sync._require(tag == "day" or bool(re.fullmatch(r"[0-9A-Za-z._-]{3,60}", run_key or "")), "写前/写后快照需要运行键（3–60 位字母数字或 ._-）")
+    ledger = None
+    if ledger_dir is not None:
+        ledger = sync.Ledger(ledger_dir, isolated_test=isolated_test_ledger)
+        ledger.validate_root()
+    root = Path(business_root) / "运行记录" / MIRROR_DIR
+    observed_at = sync.now()
+    tables: list[dict[str, Any]] = []
+    for section, table_name, table_id, fields, facts, base in _mirror_plan(contract_path, contract_sha, sections, targets):
+        tables.append(mirror_table(base=base, table_name=table_name, table_id=table_id, fields=fields, facts=facts,
+                                   transport=transport, ledger=ledger, root=root, label=SECTION_NAMES.get(section, section or MAIN),
+                                   day=day, observed_at=observed_at, tag=tag, run_key=run_key, contract_sha=contract_sha))
     quiet = not any(t["changes"] or t["factDrift"] or t["problems"] for t in tables)
     return {"schema": MIRROR_SCHEMA, "day": day, "tag": tag, "runKey": run_key, "readAt": observed_at, "externalCalls": "read-only",
             "mirrorRoot": str(root), "reusedAll": bool(tables) and all(t.get("reused") for t in tables), "tables": tables, "quiet": quiet, "status": "OK" if not any(t["factDrift"] or t["problems"] for t in tables) else "ATTENTION"}
