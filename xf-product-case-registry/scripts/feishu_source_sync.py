@@ -144,6 +144,10 @@ class SyncError(Exception):
 class RuntimeSyncError(Exception):
     """A failure while talking to Feishu or while verifying (exit code 3)."""
 
+    def __init__(self, message: str, *, report: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.report = report
+
 
 class Ambiguous(Exception):
     """A cell has a shape this version does not interpret; comparisons fail closed."""
@@ -1228,7 +1232,8 @@ def _execute_locked(spec, checked, transport, ledger, keys, log_dir, run_id, ind
             final = "OK"
         ledger.append_durable(keys[(item["tableId"], item["recordId"])], {"event": "final", "intentId": intent_id, "runId": run_id, "status": final, "detail": entry.get("error", "")})
     if report["status"] != "OK":
-        raise RuntimeSyncError(report.get("reason") or "; ".join(violations) or "写入失败/结果未知，已保留回读证据，未重试，目标已在账本中封锁")
+        reason = report.get("reason") or "; ".join(violations) or "写入失败/结果未知，已保留回读证据，未重试，目标已在账本中封锁"
+        raise RuntimeSyncError(reason, report=report)
     return report
 
 
@@ -1700,7 +1705,8 @@ def execute_creates(spec: dict[str, Any], checked: dict[str, Any], transport: Tr
                     created[key_value] = matches[0]
                 continue
             wire = _create_wire(item, parent_record)
-            intent_id = digest({"base": base, "table": item["tableId"], "stableKey": item["stableKey"], "wire": wire})
+            # 同一内容经严格对账后可能有新请求。按本次运行区分意图，使新旧请求各自对账。
+            intent_id = digest({"base": base, "table": item["tableId"], "stableKey": item["stableKey"], "wire": wire, "runId": run_id})
             ledger_key = _create_key(spec, item)
             try:
                 ledger.append(ledger_key, {"event": "intent", "kind": "create", "intentId": intent_id, "runId": run_id, "operator": operator(),
@@ -1749,7 +1755,9 @@ def execute_creates(spec: dict[str, Any], checked: dict[str, Any], transport: Tr
     report["status"] = "FAILED" if bad else ("PARTIAL" if held else "OK")
     _write(log_dir, "report.json", report)
     if bad:
-        raise RuntimeSyncError("创建失败/结果未知/违规，已停止且未重试，目标已在账本中封锁：" + json.dumps([{k: e.get(k) for k in ("stableKey", "status", "error", "violations")} for e in bad], ensure_ascii=False))
+        details = [{k: e.get(k) for k in ("stableKey", "status", "error", "violations")} for e in bad]
+        raise RuntimeSyncError("创建失败/结果未知/违规，已停止且未重试，目标已在账本中封锁：" +
+                               json.dumps(details, ensure_ascii=False), report=report)
     return report
 
 
@@ -3206,13 +3214,28 @@ def product_results(products: list[dict[str, Any]], unified: dict[str, Any] | No
     return out
 
 
+def _missing_product_create_proven_absent(ledger: Ledger, base: str, table: str, stable_key: str) -> bool:
+    """Allow a missing product for an existing inspection only with ledger proof of no prior creation."""
+    key = Ledger.target_key(base, table, "create:" + stable_key)
+    events = ledger.events(key)
+    if not events:
+        return True
+    if any(event["event"] in {"bound", "human_release"} for event in events):
+        return False
+    intents = {event.get("intentId") for event in events if event["event"] == "intent"}
+    recovered = {event.get("intentId") for event in events
+                 if event["event"] == "reconciled" and event.get("outcome") == "NOT_APPLIED_PROVEN"
+                 and (event.get("recovery") or {}).get("kind") == "create-quiet-zero-match"}
+    return bool(intents) and all(intents) and intents == recovered and ledger.state(key)["state"] == "CLEAR"
+
+
 def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, target: dict[str, str], transport: Any, out_dir: Path, log_root: Path,
                       ledger_dir: Path | None, batch_size: int = HARD_CAP_RECORDS, scope_from: str = "2026-01-01",
                       only_projects: frozenset[str] | None = None, isolated_test_ledger: bool = False) -> dict[str, Any]:
     """由本案已核验清单生成 检查明细/产品明细 的 V3 创建说明(先检查后产品，同一案的子行放在同一份说明里)。
 
     按检查键增量补行：清单里有而云端没有的那次检查(连同它的产品行)才创建，已有同键子行一律不动，所以初查早已在云端、
-    复查后来才归档的案卷也能补上复查行；云端已有该次检查但产品行不全的不自动补(列出，交核对)。每个案卷要同时满足：总账完成且清单摘要相符、初查日等于云端主行初查日、
+    复查后来才归档的案卷也能补上复查行；检查行已有时按清单补缺产品。整组产品全缺时，须由账本证明各产品键从未创建或原请求已严格证明未应用。每个案卷要同时满足：总账完成且清单摘要相符、初查日等于云端主行初查日、
     大队与清单管辖一致、主行无未获用户接受的历史 human_release、不在范围外保留；否则只保留该案并列出原因。
     稳定键 `项目编号|阶段(|序号)` 由本地按清单位置生成，来源未提供原生检查/产品标识，原生标识留空并写入每个字段的 sourceRef。
     """
@@ -3241,7 +3264,10 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
     by_project: dict[str, list[str]] = {}
     for record_id, row in main_rows.items():
         by_project.setdefault(_cell_text(row.get(BASIC_FIELDS["key"])), []).append(record_id)
-    inspect_keys = {_cell_text(r.get(INSPECT_F["key"])): rid for rid, r in inspect_rows.items()}
+    inspection_matches: dict[str, list[str]] = {}
+    for record_id, row in inspect_rows.items():
+        inspection_matches.setdefault(_cell_text(row.get(INSPECT_F["key"])), []).append(record_id)
+    inspect_keys = {key: ids[0] for key, ids in inspection_matches.items() if len(ids) == 1}
     product_keys = {_cell_text(r.get(PRODUCT_F["key"])) for r in product_rows.values()}
     date_type = index[case_table][BASIC_FIELDS["date"]]["type"]
     blocked: list[dict[str, Any]] = []
@@ -3279,15 +3305,19 @@ def build_child_specs(*, waterline_path: Path, v3_path: Path, v3_sha: str, targe
         wanted, unpaired = [], []
         missing_products: dict[str, list[str]] = {}   # 检查行和部分产品行已有、清单里还有云端没有的产品键：只补缺的产品行
         for inspection in inspections:
-            has_products = any(k.startswith(inspection["key"] + "|") for k in product_keys)
-            if inspection["key"] not in inspect_keys and not has_products:
-                wanted.append(inspection["key"])
-            elif inspection["key"] not in inspect_keys or not has_products:
-                # 检查行已建、产品行一个都没有：若账本里这些产品键从来没有发起过创建(没有任何 intent，例如上一轮在建行中途被终止)，
-                # 不存在“请求可能迟到”的未知风险，只补产品行；只要有过 intent(含未知结果)就仍不自动补
-                never_attempted = (inspection["key"] in inspect_keys and ledger is not None and bool(inspection["products"])
-                                   and all(not ledger.events(Ledger.target_key(base, product_table, "create:" + p["key"])) for p in inspection["products"]))
-                if never_attempted:
+            inspection_key = inspection["key"]
+            if len(inspection_matches.get(inspection_key, [])) > 1:
+                unpaired.append(f"{inspection_key} 云端检查键不唯一，无法确认产品父行")
+                continue
+            has_products = any(k.startswith(inspection_key + "|") for k in product_keys)
+            if inspection_key not in inspect_keys and not has_products:
+                wanted.append(inspection_key)
+            elif inspection_key not in inspect_keys or not has_products:
+                # 已有检查行、产品全缺：完全未发起或每次原请求均有严格未应用证明，才补产品。
+                creation_absent = (inspection_key in inspect_keys and bool(inspection["products"])
+                                   and all(_missing_product_create_proven_absent(ledger, base, product_table, product["key"])
+                                           for product in inspection["products"]))
+                if creation_absent:
                     missing_products[inspection["key"]] = [p["key"] for p in inspection["products"]]
                 else:
                     unpaired.append(f"{inspection['key']} 云端检查行与产品行不成套(只有其一)：不自动补，交核对")
@@ -3514,7 +3544,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "REFUSED", "externalCalls": 0, "reason": str(error)}, ensure_ascii=False))
         return 2
     except RuntimeSyncError as error:
-        print(json.dumps({"status": "FAILED_OR_UNKNOWN", "reason": str(error)}, ensure_ascii=False))
+        result = error.report or {"status": "FAILED_OR_UNKNOWN", "reason": str(error)}
+        print(json.dumps(result, ensure_ascii=False))
         return 3
     print(json.dumps(result, ensure_ascii=False))
     return 4 if result.get("status") == "PARTIAL" else 0  # PARTIAL 有被挡实体：不得以 exit 0 当作整体完成

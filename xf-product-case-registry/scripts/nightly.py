@@ -709,6 +709,10 @@ def finish(root: Path, day: str, *, summary: str = "", evidence_dir: str = "", r
                 "rule": "全范围检查日期核对已到期且今晚未做：先做并用 nightly coverage 登记（来源不可用也要登记这次尝试）"}
     stats = run_stats(root, day, evidence_dir=evidence_dir or run.get("evidenceDir", ""), now=now)
     issues = issues_of(root, day)
+    not_attempted = stats["cloud"].get("openNotAttempted", [])
+    if not_attempted:
+        issues.append({"kind": "cloud-not-attempted", "stage": "sync", "case": "", "entry": "", "status": "skipped",
+                       "detail": "原批停止后尚未发送的目标，按稳定键核对并生成新计划", "items": not_attempted})
     finished_before = [d for d in _run_days(root, lanes=True) if d < day and _load(_run_dir(root, d) / "run.json", {}).get("status") == "FINISHED"]
     own = [_carry_item(u, day) for u in stats["cloud"].get("unknown", [])]
     carried_open = [i for issue in (carry_issues(root, finished_before[-1]) if finished_before else []) if issue["kind"] == "cloud-unknown" for i in issue.get("items", [])]
@@ -1158,6 +1162,7 @@ def open_executions(root: Path) -> list[dict[str, Any]]:
 
 CLOUD_WRITE = {"CREATED_VERIFIED": "create", "WRITTEN": "update"}
 CLOUD_UNKNOWN = frozenset({"UNKNOWN", "UNKNOWN_SCAN", "FAILED_OR_UNKNOWN", "RUNNING", "PARTIAL"})
+CLOUD_NOT_ATTEMPTED = frozenset({"NOT_ATTEMPTED", "NOT_ATTEMPTED_AFTER_STOP", "LEDGER_UNAVAILABLE_NOT_SENT"})
 LEDGER_DIR = "飞书写入账本"
 
 
@@ -1323,6 +1328,36 @@ def _classify_unreadable_receipt(path: Path, ledger: dict[str, dict[str, dict[st
             "ledgerStates": sorted({(state or {}).get("label", "NO_FINAL") for state in states.values()}) or ["NO_INTENT"]}
 
 
+def _durable_create_report(path: Path, ledger: dict[str, dict[str, dict[str, Any]]]) -> dict[str, Any] | None:
+    """Match a V3 writer's saved report to its own spec, run and ledger when the command output was interrupted."""
+    folder = path.parents[1]
+    name = path.stem.removeprefix("exec-")
+    specs = list(folder.glob(f"specs*/{name}.json"))
+    reports = list(folder.glob(f"logs*/{name}/report.json"))
+    if len(specs) != 1 or len(reports) != 1:
+        return None
+    try:
+        spec = json.loads(specs[0].read_text(encoding="utf-8"))
+        report = json.loads(reports[0].read_text(encoding="utf-8"))
+        if spec["schemaVersion"] != "FeishuSourceSyncSpecV3" or report["schema"] != "FeishuSourceSyncReportV3":
+            return None
+        log_dir = _same_path_key(str(reports[0].parent))
+        if _same_path_key(spec["logDir"]) != log_dir or spec["contract"]["sha256"] != report["contractSha256"]:
+            return None
+        if report["mode"] != "execute" or not report["finishedAt"] or report["status"] not in {"OK", "FAILED", "PARTIAL"}:
+            return None
+        intents = ledger.get(report["runId"], {})
+        if not any(_same_path_key(item.get("logDir") or "") == log_dir for item in intents.values()):
+            return None
+        planned = {(item["tableId"], item["stableKey"]["value"]) for item in spec["creates"]}
+        recorded = {(row["tableId"], row["stableKey"]["value"]) for row in report["records"]}
+        if recorded != planned or len(recorded) != len(report["records"]):
+            return None
+        return report
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def _reconciled_receipt_record(run_ledger: dict[str, dict[str, Any]] | None, resolutions: dict[str, dict[str, Any]],
                                record: dict[str, Any], stable: str) -> tuple[str, str, str] | None:
     """One receipt record that the writer could not close (unknown/failed): if the SAME run's ledger holds exactly one intent for that
@@ -1359,13 +1394,20 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime, until: dateti
     duplicates = unconfirmed = receipts_ok = 0
     held: dict[str, int] = {}
     held_keys: list[dict[str, Any]] = []
+    not_attempted: dict[tuple[str, str, str], dict[str, Any]] = {}
+    durable_receipts = 0
     cases: set[str] = set()
     for path in files:
         try:
             report = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(report, dict) or not isinstance(report.get("records"), list):
+                raise ValueError("回执缺少记录清单")
         except (OSError, ValueError):
-            unreadable.append(_classify_unreadable_receipt(path, ledger, resolutions))
-            continue
+            report = _durable_create_report(path, ledger)
+            if report is None:
+                unreadable.append(_classify_unreadable_receipt(path, ledger, resolutions))
+                continue
+            durable_receipts += 1
         run_id = str(report.get("runId") or "")
         run_ids.add(run_id)
         run_ledger = ledger.get(run_id)
@@ -1399,6 +1441,8 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime, until: dateti
                                     "intentIds": sorted(iid for iid, i in (run_ledger or {}).items() if i.get("stable") == str(stable) or i["record"] == record.get("recordId"))})
                 else:      # 被挡、未改变、已存在等：没有写入，也不是未知；分别留存，不并入成功
                     held[str(state)] = held.get(str(state), 0) + 1
+                    if state in CLOUD_NOT_ATTEMPTED:
+                        not_attempted[(run_id, table, str(stable))] = {"receipt": path.name, "table": table, "stableKey": stable, "status": state}
                     if len(held_keys) < 20:
                         held_keys.append({"receipt": path.name, "table": table, "stableKey": stable, "status": state})
                 continue
@@ -1460,6 +1504,10 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime, until: dateti
                             "intentIds": item.get("intentIds", []), "ledgerFinal": item["ledgerStates"]})
     created = {(k[1], k[2]) for k in seen if k[3] == "create"}
     updates = [k for k in seen if k[3] == "update"]
+    created_with_ledger = {(table, str(stable)) for (_, table, stable, action), evidence in seen.items()
+                           if action == "create" and evidence["verdict"] != "receipt-only"}
+    open_not_attempted = [item for item in not_attempted.values()
+                          if (item["table"], str(item["stableKey"])) not in created_with_ledger]
     ok_runs = {r for r, intents in ledger.items() if any(i["final"] == "OK" for i in intents.values())}
     run_ids.discard("")
     cross = {"ledgerFinalOk": sum(1 for intents in ledger.values() for i in intents.values() if i["final"] == "OK"),
@@ -1468,7 +1516,8 @@ def cloud_stats(root: Path, evidence_dir: str, *, since: datetime, until: dateti
     cross["result"] = "MATCH" if not cross["receiptRunsWithoutLedgerOk"] and not cross["ledgerOkRunsWithoutReceipt"] else "MISMATCH"
     return {"source": "receipts+ledger", "receiptFiles": len(files), "receiptsOk": receipts_ok, "createdRows": len(created),
             "updatedOperations": len(updates), "uniqueFields": len(fields), "duplicatesIgnored": duplicates, "unknown": unknown,
-            "unreadable": unreadable, "receiptsRefusedNoCall": sum(i["class"] == "REFUSED_NO_CALL" for i in unreadable),
+            "unreadable": unreadable, "receiptsRecoveredFromReport": durable_receipts,
+            "notAttempted": list(not_attempted.values()), "openNotAttempted": open_not_attempted, "receiptsRefusedNoCall": sum(i["class"] == "REFUSED_NO_CALL" for i in unreadable),
             "receiptsResolvedByLedger": sum(i["class"] == "RESOLVED_BY_LEDGER" for i in unreadable),
             "updatesWithoutFieldProof": sum(len(i.get("updatesWithoutFieldProof", [])) for i in unreadable),
             "receiptsClosedNoWrite": sum(i["class"] == "CLOSED_NO_WRITE" for i in unreadable), "receiptOnlyUnconfirmed": unconfirmed, "heldOrNotWritten": held, "heldSample": held_keys, "ledgerCrossCheck": cross, "cases": sorted(cases),
@@ -1535,7 +1584,9 @@ def run_stats(root: Path, day: str, *, evidence_dir: str = "", now: datetime | N
                  "cloudCreatedRows": cloud.get("createdRows"), "cloudUpdatedOperations": cloud.get("updatedOperations"),
                  "cloudUniqueFields": cloud.get("uniqueFields"),
                  "cloudUnknown": len(cloud.get("unknown", [])) if cloud.get("source") == "receipts+ledger" else 0,
-                 "cloudReceiptsUnreadable": len(cloud.get("unreadable", [])),
+                 "cloudNotAttempted": len(cloud.get("notAttempted", [])),
+                 "cloudReceiptsRecoveredFromReport": cloud.get("receiptsRecoveredFromReport", 0),
+                 "cloudReceiptsUnreadable": len(cloud.get("unreadable", [])) + cloud.get("receiptsRecoveredFromReport", 0),
                  "cloudRefusedNoCall": cloud.get("receiptsRefusedNoCall", 0),
                  "cloudResolvedByLedger": cloud.get("receiptsResolvedByLedger", 0),
                  "ledgerCrossCheck": (cloud.get("ledgerCrossCheck") or {}).get("result", "NOT_CHECKED"),
@@ -1555,7 +1606,7 @@ CASE_NO = re.compile(r"\d{8}C\d{9}")
 
 
 STAGE_NAMES = {"discover": "发现", "acquire": "取包接件", "organize": "整理", "validate": "核验", "sync": "飞书同步", "mirror": "镜像", "reconcile": "对账", "report": "汇报"}
-KIND_NAMES = {"failed": "失败", "retained-issue": "保留事项", "entry-incomplete": "发现入口未完成", "cloud-unknown": "云写入效果未知"}
+KIND_NAMES = {"failed": "失败", "retained-issue": "保留事项", "entry-incomplete": "发现入口未完成", "cloud-unknown": "云写入效果未知", "cloud-not-attempted": "有未发送目标"}
 # 汇报只用受控的业务原因：检查点原文（可能含原材料名、本地路径、个人信息）只用来归类，绝不原样进入正文
 SAFE_REASONS = (
     (("保护", "锁", "批次", "待整理标记", "放行"), "受保护事项，不清锁、不人工放行"),
@@ -1609,7 +1660,7 @@ def report(root: Path, day: str, *, evidence_dir: str = "", waterline: Path | No
                 names[project] = {"brigade": str(record.get("brigadeName") or ""), "unit": str(record.get("unitName") or "")}
         except (OSError, ValueError):
             pass
-    issues = run.get("issues") if run.get("status") == "FINISHED" else issues_of(root, day)
+    issues = carry_issues(root, day) if run.get("status") == "FINISHED" else issues_of(root, day)
     waiting: dict[str, list[str]] = {}
     for issue in issues or []:
         project = str(issue.get("case") or "")
@@ -1633,6 +1684,8 @@ def report(root: Path, day: str, *, evidence_dir: str = "", waterline: Path | No
         where = _case_label(labelled[project], project, names) if project in labelled else (f"项目编号 {project}" if project else "")
         if issue.get("kind") == "cloud-unknown":
             reason = f"云写入有 {len(issue.get('items') or [])} 项没有回执与账本共同证明，先回读对账，不重放"
+        elif issue.get("kind") == "cloud-not-attempted":
+            reason = f"原批有 {len(issue.get('items') or [])} 项未发出请求，按稳定键回读后生成新计划"
         elif issue.get("kind") == "entry-incomplete":
             reason = f"{issue.get('entry') or '入口'}没有终态检查点，下一轮补读"
         else:
@@ -1642,15 +1695,16 @@ def report(root: Path, day: str, *, evidence_dir: str = "", waterline: Path | No
                          "text": "；".join(part for part in (where, f"{stage}阶段{KIND_NAMES.get(str(issue.get('kind')), str(issue.get('kind') or ''))}", reason) if part)})
     counts = {"cases": len(cases), "pendingCases": len(pending), "cloudCreatedRows": breakdown.get("cloudCreatedRows"), "cloudUpdatedOperations": breakdown.get("cloudUpdatedOperations"),
               "cloudUniqueFields": breakdown.get("cloudUniqueFields"), "cloudUnknown": breakdown.get("cloudUnknown"),
+              "cloudNotAttempted": breakdown.get("cloudNotAttempted"),
               "unknownWriteCheckpoints": breakdown.get("unknownWriteCheckpoints"), "observation": breakdown.get("observation"),
               "changedCasesAndTasks": stats["changed"]}
     lines = [f"运行 {day}：{run.get('status')}。本轮新建或更新 {len(cases)} 案。" if cases else f"运行 {day}：{run.get('status')}。本轮没有新建或更新的案卷（0 案）。",
              *[item["text"] for item in numbered]]
     if waiting_rows:
         lines += [f"另有待核案 {len(waiting_rows)} 案（不计入上面的新建或更新案数）：", *[item["text"] for item in waiting_rows]]
-    lines.append("分项（各是各的计数，不互相代替）：案数 %s；云端新建行 %s；更新操作 %s；唯一字段格 %s；未决（云写入未知）%s；效果未知的写入检查点 %s；观察队列 %s。" % (
+    lines.append("分项（各是各的计数，不互相代替）：案数 %s；云端新建行 %s；更新操作 %s；唯一字段格 %s；云写入结果未知 %s；本轮未发出请求 %s；效果未知的写入检查点 %s；观察队列 %s。" % (
         len(cases), counts["cloudCreatedRows"], counts["cloudUpdatedOperations"], counts["cloudUniqueFields"], counts["cloudUnknown"],
-        counts["unknownWriteCheckpoints"], json.dumps(counts["observation"], ensure_ascii=False)))
+        counts["cloudNotAttempted"], counts["unknownWriteCheckpoints"], json.dumps(counts["observation"], ensure_ascii=False)))
     lines += [f"问题 {p['n']}：{p['text']}" for p in problems] or ["问题：无。"]
     return {"schema": "NightReportV1", "date": day, "runStatus": run.get("status"), "caseCount": len(cases), "cases": numbered, "pendingCases": waiting_rows, "counts": counts,
             "problems": problems, "text": "\n".join(lines), "coverage": stats["coverage"], "namesFrom": "案卷水位记录" if names else "无"}

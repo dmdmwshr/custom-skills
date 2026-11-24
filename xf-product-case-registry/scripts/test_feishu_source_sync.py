@@ -1193,8 +1193,12 @@ def test_v3_duplicate_existing_keys_stop_without_creating(tmp_path):
 def test_v3_unknown_create_blocks_the_target_and_zero_match_never_authorizes_a_retry(tmp_path):
     contract, ledger = make_v3_contract(tmp_path), tmp_path / "ledger"
     transport = MemoryTransport(timeout_lost=True)
-    with pytest.raises(sync.RuntimeSyncError, match="创建失败/结果未知"):
-        _run_v3(v3_spec(tmp_path, contract, [_wire_case()]), transport, ledger, execute=True)
+    rows = [_wire_case(), _wire_case("32002299C202600002")]
+    with pytest.raises(sync.RuntimeSyncError, match="创建失败/结果未知") as failed:
+        _run_v3(v3_spec(tmp_path, contract, rows), transport, ledger, execute=True)
+    saved = json.loads((tmp_path / "log1" / "report.json").read_text(encoding="utf-8"))
+    assert failed.value.report == saved
+    assert [row["status"] for row in saved["records"]] == ["UNKNOWN", "NOT_ATTEMPTED_AFTER_STOP"]
     with pytest.raises(sync.SyncError, match="未对账的早先创建"):
         _run_v3(v3_spec(tmp_path, contract, [_wire_case()], log="again"), transport, ledger, execute=True)
     assert len(transport.creates) == 1
@@ -1203,6 +1207,23 @@ def test_v3_unknown_create_blocks_the_target_and_zero_match_never_authorizes_a_r
     with pytest.raises(sync.SyncError, match="未对账的早先创建"):
         _run_v3(v3_spec(tmp_path, contract, [_wire_case()], log="after-zero"), transport, ledger, execute=True)
     assert len(transport.creates) == 1                                                            # 仍封锁，没有换ID/重放
+
+
+def test_source_sync_cli_keeps_nonzero_exit_and_emits_a_saved_partial_report(tmp_path, monkeypatch, capsys):
+    import scripts.registry_cli as registry_cli
+
+    partial = {"status": "FAILED", "runId": "synthetic-run", "records": [{"status": "CREATED_VERIFIED"}, {"status": "UNKNOWN"}]}
+
+    def fail_after_saving(*args, **kwargs):
+        raise sync.RuntimeSyncError("写入未知", report=partial)
+
+    monkeypatch.setattr(sync, "run", fail_after_saving)
+    with pytest.raises(SystemExit) as stopped:
+        registry_cli.main(["feishu-source-sync", "--spec", str(tmp_path / "spec.json"), "--execute"])
+    assert stopped.value.code == 3
+    output = capsys.readouterr()
+    assert json.loads(output.out) == partial
+    assert "写入未知" in output.err
 
 
 def _proof_for(log_dir: Path, ledger: Path, key_value="32002299C202600001", **override):
@@ -3120,6 +3141,34 @@ def test_child_build_adds_only_the_product_rows_the_cloud_lacks_under_an_existin
     assert done["status"] == "OK" and done["counts"]["cases"] == 0 and done["fresh"]["casesAlreadyWithChildren"] == 1 and not done["specs"]
 
 
+@pytest.mark.parametrize("recovery, duplicate_parent, expected", [
+    (None, False, False), ("ordinary-zero-match", False, False),
+    ("create-quiet-zero-match", True, False), ("create-quiet-zero-match", False, True),
+])
+def test_child_build_requires_exact_proof_before_replanning_a_missing_product(tmp_path, recovery, duplicate_parent, expected):
+    contract, water, transport = _child_setup(tmp_path, initial=[{"clientRef": "p1", "name": "洒水喷头", "result": "QUALIFIED"}])
+    check_key, prod_key = f"{CP}|初查", f"{CP}|初查|1"
+    transport.rows[(CHECK, "recCHK00000001")] = {sync.INSPECT_F["key"]: check_key}
+    if duplicate_parent:
+        transport.rows[(CHECK, "recCHK00000002")] = {sync.INSPECT_F["key"]: check_key}
+    ledger_dir = tmp_path / "child-ledger"
+    ledger = sync.Ledger(ledger_dir, isolated_test=True)
+    ledger.initialize()
+    target = sync.Ledger.target_key(BASE, PRODUCT, "create:" + prod_key)
+    iid = "old-product-intent"
+    ledger.append(target, {"event": "intent", "kind": "create", "intentId": iid})
+    ledger.append(target, {"event": "final", "status": "UNKNOWN", "intentId": iid})
+    if recovery:
+        ledger.append(target, {"event": "reconciled", "intentId": iid, "outcome": "NOT_APPLIED_PROVEN", "recovery": {"kind": recovery}})
+    plan = _child_build(tmp_path, contract, water, transport, ledger_dir=ledger_dir)
+    assert bool(plan["specs"]) is expected
+    if expected:
+        assert plan["counts"]["inspections"] == 0 and plan["counts"]["products"] == 1
+        spec = json.loads(Path(plan["specs"][0]["path"]).read_text(encoding="utf-8"))
+        row, = spec["creates"]
+        assert row["stableKey"]["value"] == prod_key and row["parent"]["recordId"] == "recCHK00000001"
+
+
 def test_child_build_leaves_unaccepted_release_targets_alone(tmp_path):
     sub = tmp_path / "held"
     sub.mkdir()
@@ -3325,6 +3374,9 @@ def test_create_zero_match_recovers_only_after_the_quiet_period_and_then_allows_
     transport.b.pop("timeout_lost")
     report = _run_v3(v3_spec(tmp_path, contract, [_wire_case()], log="again"), transport, ledger, execute=True)
     assert report["records"][0]["status"] == "CREATED_VERIFIED" and len(transport.creates) == 2
+    attempts = [e for e in sync.Ledger(ledger).events(key) if e["event"] == "intent"]
+    assert len(attempts) == 2 and attempts[0]["intentId"] == intent_id and attempts[1]["intentId"] != intent_id
+    assert attempts[1]["runId"] == report["runId"]
 
 
 def test_create_recovery_is_refused_when_a_row_or_an_equivalent_twin_exists_or_the_intent_differs(tmp_path, monkeypatch):

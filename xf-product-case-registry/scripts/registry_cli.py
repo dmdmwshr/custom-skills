@@ -2676,7 +2676,7 @@ def build_parser() -> argparse.ArgumentParser:
     field_plan.set_defaults(func=feishu_field_plan_build_command)
     child_build = sub.add_parser(
         "feishu-child-build",
-        help="由本案已核验清单生成检查明细/产品明细的 V3 创建说明(先检查后产品，同案同份)；只读云，不写；已有任一同案子行的案卷不动",
+        help="由本案已核验清单生成 V3 创建说明；只读云，不写；按稳定键补缺，已有行保留",
     )
     for flag in ("--waterline", "--contract-v3", "--contract-v3-sha", "--base-token", "--profile", "--out-dir", "--log-root", "--ledger-dir"):
         child_build.add_argument(flag, required=True)
@@ -3053,6 +3053,8 @@ def feishu_source_sync_command(args: argparse.Namespace) -> None:
         raise RegistryError(f"飞书来源同步已拒绝：{error}") from error
     except module.RuntimeSyncError as error:
         # 3 = 已发起外部调用后失败或结果未知；与 2(外部调用之前即拒绝)分开，便于调用方对账而不是重放
+        if error.report is not None:
+            print(json.dumps(error.report, ensure_ascii=False, indent=2))
         print(f"ERROR: 飞书来源同步失败或结果未知，已保留证据并封锁目标，未重试：{error}", file=sys.stderr)
         raise SystemExit(3) from error
     print(json.dumps(report, ensure_ascii=False, indent=2))

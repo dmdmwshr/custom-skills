@@ -730,6 +730,51 @@ def test_a_receipt_that_cannot_be_read_is_classified_from_its_folder_evidence_an
     assert [i["kind"] for i in finished["issues"] if i["kind"] == "cloud-unknown"] == ["cloud-unknown"]
 
 
+def test_empty_stdout_uses_only_its_matching_durable_v3_report(tmp_path):
+    day = _run(tmp_path)
+    evidence = tmp_path / "evidence"
+    step = evidence / "sync" / "child-1"
+    name = "child-001"
+    log = step / "logs-child" / name
+    _unreadable(evidence, "child-1", "exec-child", f"exec-{name}.json")
+    (step / "specs-child").mkdir()
+    log.mkdir(parents=True)
+    plan = [{"tableId": "tP", "stableKey": {"value": k}} for k in ("P-1", "P-2", "P-3")]
+    spec_path = step / "specs-child" / f"{name}.json"
+    spec = {"schemaVersion": "FeishuSourceSyncSpecV3", "logDir": str(log), "contract": {"sha256": "contract-sha"}, "creates": plan}
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    report_path = log / "report.json"
+    report = {"schema": "FeishuSourceSyncReportV3", "mode": "execute", "status": "FAILED", "finishedAt": "2026-11-16T18:41:00Z",
+              "contractSha256": "contract-sha", "runId": "our-run", "records": [
+                  {**plan[0], "status": "CREATED_VERIFIED", "recordId": "r1"}, {**plan[1], "status": "UNKNOWN"},
+                  {**plan[2], "status": "NOT_ATTEMPTED_AFTER_STOP"}]}
+    for key, ident, value in (("P-1", "i-ok", "OK"), ("P-2", "i-timeout", "UNKNOWN")):
+        events = [{"event": "intent", "runId": "our-run", "kind": "create", "logDir": str(log),
+                   "target": {"table": "tP"}, "stableKey": {"value": key}}]
+        if value == "OK":
+            events.append({"event": "bound", "runId": "our-run", "recordId": "r1"})
+        _ledger_line(tmp_path, ident, [*events, {"event": "final", "runId": "our-run", "status": value}])
+    report_path.write_text(json.dumps({**report, "runId": "different-run"}), encoding="utf-8")
+    totals = nightly.run_stats(tmp_path, day, evidence_dir=str(evidence))["breakdown"]
+    assert (totals["cloudReceiptsRecoveredFromReport"], totals["cloudNotAttempted"]) == (0, 0)
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    stats = nightly.run_stats(tmp_path, day, evidence_dir=str(evidence))
+    totals = stats["breakdown"]
+    assert (totals["cloudCreatedRows"], totals["cloudUnknown"], totals["cloudNotAttempted"], totals["cloudReceiptsRecoveredFromReport"]) == (1, 1, 1, 1)
+    assert [item["stableKey"] for item in stats["cloud"]["unknown"]] == ["P-2"]
+    assert [item["stableKey"] for item in stats["cloud"]["notAttempted"]] == ["P-3"]
+    _all_done(tmp_path, day)
+    closed = nightly.finish(tmp_path, day, evidence_dir=str(evidence))
+    assert {i["kind"] for i in closed["issues"]} == {"cloud-unknown", "cloud-not-attempted"}
+    assert nightly.report(tmp_path, day, evidence_dir=str(evidence))["counts"]["cloudNotAttempted"] == 1
+    _receipt(evidence, "child-2", "exec-child", "exec-child-001.json",
+             [{**plan[2], "status": "CREATED_VERIFIED", "recordId": "r3"}], run_id="run-later")
+    _ledger(tmp_path, "run-later", "r3", kind="create", table="tP")
+    updated = nightly.run_stats(tmp_path, day, evidence_dir=str(evidence))["cloud"]
+    assert updated["createdRows"] == 2 and len(updated["notAttempted"]) == 1
+    assert updated["openNotAttempted"] == []
+
+
 def test_a_late_scheduled_start_needs_a_proven_cause_and_a_manual_start_has_no_expected_time(tmp_path):
     nightly.begin(tmp_path, now=T("2026-11-18T08:12:17"), trigger="scheduled")
     nightly.begin(tmp_path, now=T("2026-11-19T19:00:00"), trigger="manual")

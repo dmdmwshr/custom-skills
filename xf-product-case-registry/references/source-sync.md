@@ -188,7 +188,7 @@ python scripts/registry_cli.py feishu-source-build --capture 采集批次.json -
   写调用(upsert/create)从不重试，网络层失败仍按 UNKNOWN 记账并封锁，之后只能对账。
 - **创建意图 UNKNOWN 且 0 匹配的严格技术恢复**：V3 对账 spec 带 `technicalRecovery{kind:"create-quiet-zero-match", intentId, minQuietSeconds>=3600}`(与 humanRelease 互斥)。
   只有该意图恰有一条 UNKNOWN 终态、静默期已过、fresh 全页稳定键扫描 0 匹配、且整表没有“内容与意图完全相同(含父关联)而键不同”的行，才记 `NOT_APPLIED_PROVEN` 并清除封锁；
-  有 1 匹配仍需 `requestTerminalProof`，不在此路径清除。原事件保留，不构造 humanRelease；清除后同一说明可原样重跑，只会产生一个新的创建意图。
+  有 1 匹配仍需 `requestTerminalProof`。原事件保留；严格对账证明未生效后，重新按云端稳定键规划。已存在且通过核对的父检查行直接复用，只创建仍缺的产品行。每次正式尝试有独立意图标识，稳定键与原证据保持可追溯。运行中途停止时，命令保持失败退出，同时输出已保存的详细回执，明确区分成功、未知与未发出的目标。
 
 ## 字段归属与四种写入依据（2026-11-12）
 
