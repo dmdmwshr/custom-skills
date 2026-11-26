@@ -1,4 +1,4 @@
 interface:
   display_name: "视频收存与笔记"
-  short_description: "下载/提取公开视频，经 BiliNote 生成笔记，含状态、恢复与来源哈希去重"
-  default_prompt: "使用 $video-intake 下载这个视频，或把 B站/抖音视频整理为 Obsidian 笔记并核对状态。"
+  short_description: "调用本机 VideoIntake.exe 收存视频、生成笔记和查询任务"
+  default_prompt: "使用 $video-intake 调用本机视频收存应用，下载这条公开链接并核对成果。需要笔记时，同时生成正文和附件。"

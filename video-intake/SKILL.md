@@ -1,39 +1,50 @@
 ---
 name: video-intake
-description: 公开视频的下载、音频/字幕提取、BiliNote 知识笔记（B站、抖音写入 Obsidian）、任务状态与断点恢复，以及来源/哈希去重索引。用户要保存视频、提取音频字幕、把 B站或抖音视频转成笔记、核对或恢复视频处理任务时使用；普通网页、PDF、Office 不使用本 Skill。
+description: 在 Windows 用已安装的 VideoIntake.exe 收存公开视频、提取音频或字幕、生成和导出视频笔记，以及查询、恢复任务或核对成果去重。用于 B站、抖音等视频和本机媒体；普通网页、PDF、Office 走对应工具。
 metadata:
   x-custom-skill: true
   x-source-repo: dmdmwshr/custom-skills
 ---
 
-# 视频收存与笔记（video-intake）
+# 视频收存与笔记
 
-执行平台：Windows（yt-dlp、ffmpeg、BiliNote 后端均在 Windows）。核心 CLI 为仓库内唯一实现 `scripts/video_intake.py`（仅 Python 标准库）；WSL 经 SSH 调用同一 Windows 副本，不另装一份。旧入口 `video-download`、`bilinote-video-note` 只是兼容桩，不再有独立逻辑。
+## 查找本机程序
 
-## 子命令（`python scripts/video_intake.py <子命令>`）
+采集、转写、笔记和进度由同一个 `VideoIntake.exe` 提供。Windows PowerShell 从当前用户的持久安装绑定读取路径，确保老终端也能找到当前应用。
 
-| 子命令 | 用途 | 要点 |
-| --- | --- | --- |
-| `download --url U --out-dir D [--work-root W]` | 单条公开视频下载 | `--no-playlist`；沿 `.part` 续传；核验存在/非空/时长/音视频轨；SHA-256；写回执并追加索引；同 URL 或同来源已有核验通过的成品则离线复用；不同来源同内容标记 `duplicate_of` 但保留两份 |
-| `download --adopt F --url U --source-id ID` | 登记已用其他方式（如机器人浏览器回退）下载的文件 | 同样核验并生成可供 `note` 使用的回执 |
-| `extract --receipt R --audio` / `--subs --url U` | 提取音频或字幕 | 回执摘要不符则拒绝；不覆盖已有输出 |
-| `note --video-url U [--platform --provider-id --model-name --verified-download-receipt --progress-receipt --resume-progress-receipt]` | 经本机 BiliNote 生成笔记并写入 Obsidian | 参数、JSON 输出与旧 `save-video-note.ps1` 一致；失败 exit 1 |
-| `status [--receipt --progress-receipt --source-key --work-root --query-backend]` | 只读状态 | 不改任何文件 |
-| `resume --progress-receipt OLD --new-progress-receipt NEW --receipt R --url U` | 恢复笔记；对下载回执则只回读 | 原失败回执与缓存哈希保留，恢复基线已存在则拒绝 |
-| `index list|check --work-root W [--source-key K|--sha256 H]` | 追加式索引查询 | `video-intake-index.jsonl` 仅追加 |
+```powershell
+$app = [Environment]::GetEnvironmentVariable('VIDEO_INTAKE_EXE', 'User')
+if ([string]::IsNullOrWhiteSpace($app)) { $app = $env:VIDEO_INTAKE_EXE }
+if ([string]::IsNullOrWhiteSpace($app)) {
+    $app = (Get-Command VideoIntake.exe -CommandType Application -ErrorAction SilentlyContinue).Source
+}
+if ([string]::IsNullOrWhiteSpace($app) -or -not (Test-Path -LiteralPath $app -PathType Leaf)) {
+    throw '找不到已安装的 VideoIntake.exe，请检查本机安装路径或 VIDEO_INTAKE_EXE。'
+}
+& $app --json capabilities
+```
 
-退出码：0 成功；1 明确失败；2 参数错误；3 结果未知（超时、遗留锁）。未知结果先查原回执、`.part`、索引与后端状态，不重放；陈旧锁 `locks/*.lock` 不自动清除。下载超时会保留带 `unknown` 标记的锁，确认旧进程已结束后用 `download --clear-unknown-lock` 才能续传。笔记提交 POST 的连接中断/超时/回包丢失/5xx，以及 HTTP 成功但确认为空或缺任务编号，都记为 unknown（进度回执状态 `unknown`，不重发）；仅连接被拒、域名解析失败、4xx 和 `code≠0` 的应用层拒绝是明确失败。`--progress-receipt` 指向的回执若已是 submitting/unknown/处理中，直接返回 unknown，不覆盖、不重发（先 `status --query-backend` 对账，确认未提交再换新路径）；终态回执先复制 `.prev-*` 再写。BiliNote 任务明确 FAILED 立即返回失败并保留原 task_id。
+实际调用使用 `& $app --json <命令> <参数>`，从任意工作目录运行。日常任务省略 `--runtime-root`，让命令和桌面应用共用任务、成果和设置。隔离测试使用单独的数据目录。同一台 Windows 的 WSL 可通过 Windows 互操作运行该 exe：从 Windows 用户环境读取路径，用 `wslpath -u` 转换程序路径，传给程序的文件路径用 `wslpath -w` 转成 Windows 路径。
 
-## 工具与配置
+## 执行任务
 
-yt-dlp / ffmpeg / ffprobe 优先级：命令行参数 > 环境变量 `VIDEO_INTAKE_YT_DLP|FFMPEG|FFPROBE` > `references/local-config.json` 的 `tools` > PATH。配置文件也含 BiliNote 后端（`127.0.0.1:8483`）、结果目录、Obsidian 正文/附件根、默认模型角色（本机 `AI_MODEL_STRONG` / `AI_MODEL_LIGHT` 环境变量；Windows每次读取持久用户环境，旧 `ai-models.json` 仅兼容，显式 `--model-name` 优先）。测试或迁移用 `--config` 或 `VIDEO_INTAKE_CONFIG` 指向临时配置。不要修改端口和归档根，除非用户明确要求。
+| 命令 | 用途 |
+| --- | --- |
+| `collect '<公开内容链接>'` | 收存视频或受支持的文章，复用已有成果；仅采集，不访问总结模型 |
+| `collect-note '<公开内容链接>' --screenshots` | 收存后生成笔记，附首帧；不需要图片时省略 `--screenshots` |
+| `note-file --file '<本机音视频>'` 或 `note-file --artifact '<成果编号>'` | 用本机文件或已采集成果生成笔记预览 |
+| `collected list` / `collected get '<成果编号>'` | 查询来源、文件路径、长度和 SHA-256 校验值 |
+| `collected import --file '<本机视频>' --source-url '<原链接>'` | 登记本机已保存的视频并保留来源，适合无预览参数的视频号链接 |
+| `jobs list` / `jobs get '<任务编号>'` | 查询任务、状态和产物 |
+| `jobs resume '<任务编号>'` | 只恢复已确认失败、可恢复的任务 |
+| `jobs export '<任务编号>' --out '<目标.zip>'` | 导出已完成笔记的正文和附件，保留 Markdown 相对链接 |
+| `extract --file '<本机视频>' --audio --out-dir '<目录>'` | 提取音频；提取站点字幕使用 `extract --subs --url '<链接>' --out-dir '<目录>'` |
+| `doctor` / `resolve '<链接>'` | 只读核对运行条件或来源编号 |
 
-## 边界
+`collect`、`collect-note` 和 `note-file` 可加 `--dry-run` 校验输入，测试时不会建任务或访问内容平台、模型接口。笔记使用应用模型设置，用户明确指定型号时用 `--model '<型号>'`。使用应用设置里已授权的登录资料，诊断只回报是否存在。用户要求确定下载目录或旧回执时，可用同一 exe 的 `download --url '<链接>' --out-dir '<目录>' --work-root '<任务目录>'`，参数和收据按既有调用契约核对。
 
-- 笔记平台只支持 `bilibili`、`douyin`；已核验媒体上传入口目前只支持抖音，且只发往本机回环的 BiliNote；回执的来源、编号、大小、SHA-256 必须与文件一致。
-- 站点登录资料、Cookie、令牌不入参数、日志、回执或源码；抖音解析不兼容时的受管浏览器回退属于调用方（01-08 / 03-05 机器人），完成后用 `download --adopt` 登记。
-- 一视频一笔记、一视频一附件目录；`source_id` 按前文元数据精确匹配。同一请求（来源、媒体摘要、模型、模板、参数）且当前附件束逐文件摘要仍与生成记录一致、笔记未被后续生成替换时才直接复用、不再调用云模型（笔记被人工改过则按现状复用并标 modified）；A→B→A 这类旧记录已被替换的不命中。有真实差异才重新生成：本工具生成且未改动的旧笔记及未改动的附件束归档（`history/`）后原地更新；人工/已修改/来源不明的笔记或附件一律原路径原字节不动，新结果写入带追溯标记的候选笔记，并使用独立附件束 `附件/<id>/candidates/<时间>/`。转写全文和任务 JSON 放附件，不入正文；视频正文不写入个人事实记忆。
-- 已登记成品摘要变化（人工或异常改动）时 `download` 拒绝并保留原件/回执/索引；`--no-overwrites` 返回本次未写入的既有文件不签成功回执，除非索引有本工具对同一路径同摘要的 `fetched` 传输记录（探测因无音轨等被拒后，显式 `--allow-silent` 可直接接续，不重下；其余确认来源后用 `--adopt`）；内容不同的既有回执改名为 `.prev-*` 保留。`resume --receipt` 对 completed 回执核对文件、字节数与摘要，不符则 exit 1，不自动重下。
-- 真实原视频、笔记、Obsidian、业务台账、失败/未知回执只读保留；验证只用合成媒体、本地站点和 BiliNote 桩（见 `tests/`）。
-- 日常调用方：01-08 视频链接收存与 03-05 `slack-12070-agent`（旧路径 `…/bilinote-video-note/scripts/save-video-note.ps1` 兼容入口保持参数与退出行为）。
-- 官方依据：[yt-dlp](https://github.com/yt-dlp/yt-dlp)。
+## 核对与交付
+
+- 解析 UTF-8 JSON。新任务命令先看 `success`、`data.status`、`data.id`；退出值 0 表示命令成功，1 明确失败，2 参数有误，3 结果未知。完成时用新进程执行 `jobs get` 核对 `outputs_intact`，并按 `outputs` 或 `collected get` 读取实际文件。只读列表支持 `--limit` 和 `--cursor`，以返回的 `next_cursor` 翻页。
+- `UNKNOWN` 或中断后先按任务编号只读核对，保留回执和成果。没有终态或归属证据时保持待核对，避免重新提交、重新下载或重复调用模型。
+- 新笔记先保存在应用任务内。需要在 Obsidian 使用正文和附件时，从应用导出 ZIP，按目标仓库已授权的目录和管理规范保存并检查相对链接。原有固定业务、旧回执及原 BiliNote 入口的说明见 [旧版调用与恢复](references/legacy-cli.md)。

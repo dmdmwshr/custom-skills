@@ -634,11 +634,11 @@
       ],
       "managed_wsl": false,
       "validation": {
-        "wsl": "not_supported_by_current_workflow",
+        "wsl": "same_host_windows_exe_via_interop",
         "linux": "runtime_unverified",
-        "windows": "source_and_isolated_tests_only_require_publication_acceptance"
+        "windows": "installed_exe_public_bilibili_collection_and_note_export"
       },
-      "dependencies": "Windows: yt-dlp, ffmpeg/ffprobe, local BiliNote backend 127.0.0.1:8483, Python 3 (stdlib only). Isolated tests use synthetic media, a local HTTP site and a BiliNote stub; real platforms and real BiliNote not exercised by source tests."
+      "dependencies": "Installed VideoIntake.exe. Windows desktop uses WebView2. Local media processing uses FFmpeg/ffprobe and Whisper weights; note summarization uses the configured model endpoint."
     },
     "cloud-docs": {
       "category": "platform_specific",
