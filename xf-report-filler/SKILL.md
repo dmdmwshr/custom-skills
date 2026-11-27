@@ -1,6 +1,6 @@
 ---
 name: "xf-report-filler"
-description: "根据消防产品底册、联网监测源表和月度模板整理通报目录，生成产品或联网成绩登记材料、年度问题汇总及旧版 .doc 档案。用于月度通报、成绩登记和年度汇总；案卷来源整理、本地核验与归档使用 xf-product-case-registry。"
+description: "根据消防产品底册、联网监测源表和月度模板整理通报目录，生成产品或联网成绩登记材料、年度问题汇总及旧版 .doc 档案。用于网上巡查底册登记、月度通报、成绩登记和年度汇总；案卷来源整理、本地核验与归档使用 xf-product-case-registry。"
 metadata:
   x-custom-skill: true
   x-source-repo: dmdmwshr/custom-skills
@@ -24,6 +24,7 @@ metadata:
 
 ## 渐进加载规则
 
+- 已有人工确认的网上巡查底册，要登记或完善成果时，先读[产品巡查底册](references/monthly/source_product_register.md)及目标文件对象。需按授权核对原卷或草拟问题时，加载 `xf-product-case-registry` 的[网上案卷检查与问题写法](../xf-product-case-registry/references/case-review-wording.md)。
 - 用户问整体流程：读本文件、`references/monthly_workflow.md`、`references/monthly/00_workflow_router.md`、`references/monthly/01_directory_model.md`。
 - 用户要整理目录：再读 `01_directory_model.md`、`02_template_strategy.md`。
 - 用户要处理当月根层两张表：读 `output_R01_office_record.md`、`output_R02_product_stats.md`，以及它们依赖的数据源对象。
